@@ -506,8 +506,10 @@ impl Ledger {
                     base: r.get(1)?,
                     path: r.get(2)?,
                     hashes: blob
-                        .chunks_exact(8)
-                        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|c| u64::from_le_bytes(*c))
                         .collect(),
                 })
             })?
