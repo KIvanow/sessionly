@@ -11,7 +11,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 pub fn run(raw_dir: &Path) -> Result<()> {
-    fs::create_dir_all(raw_dir)?;
+    crate::paths::create_private_dir(raw_dir)?;
     // Only show events that arrive from now on.
     let mut offsets: HashMap<PathBuf, u64> = session_files(raw_dir)?
         .into_iter()

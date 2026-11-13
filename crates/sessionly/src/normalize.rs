@@ -4,49 +4,53 @@
 //! the transcript gives tokens, cost, models and the git branch.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::session::*;
-use crate::transcript::{self, TranscriptSummary};
+use crate::transcript::{self, Facts};
 
 const PREVIEW_CHARS: usize = 200;
 
-/// A session built from a raw capture file, plus where its transcript is.
+/// A session built from a raw capture file.
 pub struct Built {
     pub session: Session,
+    /// Where the hooks said the transcript is, whether or not it still exists.
     pub transcript_path: Option<PathBuf>,
 }
 
-/// Read a raw capture file, parse its transcript if present, and normalize.
+/// Read a raw capture file, add what the transcript says, and normalize.
 /// Returns `None` if the file holds no usable events.
-pub fn build_from_raw(raw_path: &Path) -> Result<Option<Built>> {
-    let file =
-        fs::File::open(raw_path).with_context(|| format!("opening {}", raw_path.display()))?;
-    let events: Vec<Value> = BufReader::new(file)
-        .lines()
-        .map_while(Result::ok)
-        .filter_map(|line| serde_json::from_str(&line).ok())
-        .collect();
+///
+/// The transcript's facts are saved in `facts_dir` after each successful read
+/// and loaded from there when the transcript itself is gone.
+pub fn build_from_raw(raw_path: &Path, facts_dir: &Path) -> Result<Option<Built>> {
+    let mut events: Vec<Value> = Vec::new();
+    crate::jsonl::for_each(raw_path, |record| events.push(record))?;
     let transcript_path = events
         .iter()
-        .filter_map(|e| e["payload"]["transcript_path"].as_str())
-        .map(PathBuf::from)
-        .find(|p| p.is_file());
-    let transcript = match &transcript_path {
-        Some(path) => Some(transcript::parse(path)?),
-        None => None,
+        .find_map(|e| e["payload"]["transcript_path"].as_str())
+        .map(PathBuf::from);
+    let saved = facts_dir.join(format!(
+        "{}.json",
+        raw_path.file_stem().unwrap_or_default().to_string_lossy()
+    ));
+    let facts = match transcript_path.as_deref().filter(|p| p.is_file()) {
+        Some(path) => {
+            let facts = transcript::parse(path)?.facts();
+            facts.save(&saved)?;
+            Some(facts)
+        }
+        None => Facts::load(&saved),
     };
-    let Some(mut session) = from_events(&events, transcript.as_ref()) else {
+    let Some(mut session) = from_events(&events, facts.as_ref()) else {
         return Ok(None);
     };
-    add_local_context(&mut session, transcript.as_ref());
+    add_local_context(&mut session, facts.as_ref());
     Ok(Some(Built {
         session,
         transcript_path,
@@ -54,14 +58,14 @@ pub fn build_from_raw(raw_path: &Path) -> Result<Option<Built>> {
 }
 
 /// Repository and user details read from the local machine.
-fn add_local_context(session: &mut Session, transcript: Option<&TranscriptSummary>) {
+fn add_local_context(session: &mut Session, facts: Option<&Facts>) {
     let Some(cwd) = session.cwd.as_deref().map(Path::new) else {
         return;
     };
     if let Some(root) = crate::git::repo_root(cwd) {
         session.repo = Some(Repo {
             remote: crate::git::origin_remote(&root),
-            branch: transcript.and_then(|t| t.git_branch.clone()),
+            branch: facts.and_then(|f| f.git_branch.clone()),
             root: root.to_string_lossy().into_owned(),
         });
     }
@@ -72,10 +76,11 @@ fn add_local_context(session: &mut Session, transcript: Option<&TranscriptSummar
 }
 
 /// Normalize raw capture records (the envelopes written by `sessionly capture`).
-pub fn from_events(events: &[Value], transcript: Option<&TranscriptSummary>) -> Option<Session> {
+pub fn from_events(events: &[Value], facts: Option<&Facts>) -> Option<Session> {
     let mut s = Session {
         schema_version: SCHEMA_VERSION,
         source: "claude-code".into(),
+        collector_version: env!("CARGO_PKG_VERSION").into(),
         ..Default::default()
     };
     let mut tool_ix: HashMap<String, usize> = HashMap::new();
@@ -120,7 +125,15 @@ pub fn from_events(events: &[Value], transcript: Option<&TranscriptSummary>) -> 
         }
 
         match record["hook"].as_str().unwrap_or_default() {
-            "SessionStart" => start_model = text("model").or(start_model),
+            "SessionStart" => {
+                start_model = text("model").or(start_model);
+                // A session that starts again is open again.
+                s.end_reason = None;
+                // Any other source (resume, compact) means it began earlier.
+                if matches!(p["source"].as_str(), Some("startup" | "clear" | "fork")) {
+                    s.captured_from_start = true;
+                }
+            }
             "SessionEnd" => s.end_reason = text("reason"),
             "UserPromptSubmit" => s.prompts.push(Prompt {
                 prompt_id: text("prompt_id"),
@@ -130,12 +143,9 @@ pub fn from_events(events: &[Value], transcript: Option<&TranscriptSummary>) -> 
             }),
             hook @ ("Stop" | "StopFailure") => {
                 let id = text("prompt_id");
-                if let Some(prompt) = s
-                    .prompts
-                    .iter_mut()
-                    .rev()
-                    .find(|pr| pr.prompt_id == id && pr.ended_at.is_none())
-                {
+                // A turn can stop more than once (a stop hook can make the agent
+                // continue); the latest stop is when it really ended.
+                if let Some(prompt) = s.prompts.iter_mut().rev().find(|pr| pr.prompt_id == id) {
                     prompt.ended_at = at;
                     if hook == "Stop" {
                         prompt.outcome = Some("completed".into());
@@ -181,7 +191,8 @@ pub fn from_events(events: &[Value], transcript: Option<&TranscriptSummary>) -> 
                 }
             }
             "SubagentStart" => {
-                if let Some(id) = text("agent_id") {
+                // Also fires when a subagent is resumed: keep the first start.
+                if let Some(id) = text("agent_id").filter(|id| !sub_ix.contains_key(id)) {
                     sub_ix.insert(id.clone(), s.subagents.len());
                     s.subagents.push(Subagent {
                         agent_id: id,
@@ -192,7 +203,8 @@ pub fn from_events(events: &[Value], transcript: Option<&TranscriptSummary>) -> 
                 }
             }
             // Internal agents (prompt suggestions and the like) also fire
-            // SubagentStop, without a SubagentStart: those are not recorded.
+            // SubagentStop without a SubagentStart: a stop alone doesn't make
+            // a subagent. One with its own transcript is added from there.
             "SubagentStop" => {
                 if let Some(&i) = text("agent_id").and_then(|id| sub_ix.get(&id)) {
                     s.subagents[i].ended_at = at;
@@ -227,10 +239,10 @@ pub fn from_events(events: &[Value], transcript: Option<&TranscriptSummary>) -> 
             .count() as u64;
     }
 
-    if let Some(t) = transcript {
-        apply_transcript(&mut s, t, &mut sub_ix);
-        first = first.into_iter().chain(t.first_at).min();
-        last = last.into_iter().chain(t.last_at).max();
+    if let Some(facts) = facts {
+        apply_facts(&mut s, facts, &mut sub_ix);
+        first = first.into_iter().chain(facts.first_at).min();
+        last = last.into_iter().chain(facts.last_at).max();
     }
     if s.models.is_empty() {
         s.models.extend(start_model);
@@ -359,36 +371,13 @@ fn files_touched(calls: &[ToolCall], created: &HashSet<String>) -> Vec<FileTouch
     files
 }
 
-fn apply_transcript(s: &mut Session, t: &TranscriptSummary, sub_ix: &mut HashMap<String, usize>) {
-    s.agent_version = t.version.clone();
-    s.entrypoint = t.entrypoint.clone();
-    let cost = t.cost();
-    s.cost = Some(Cost {
-        total_usd: cost.total_usd,
-        source: cost.source.as_str().into(),
-        transcript_estimate_usd: cost.transcript_estimate_usd,
-        untracked_usd: cost.untracked_usd,
-    });
-    let mut usage: Vec<ModelUsage> = t
-        .usage_by_model()
-        .iter()
-        .filter(|(model, u)| u.requests > 0 && model.as_str() != "<synthetic>")
-        .map(|(model, u)| ModelUsage {
-            model: model.clone(),
-            requests: u.requests,
-            input_tokens: u.input,
-            output_tokens: u.output,
-            thinking_tokens: u.thinking,
-            cache_read_tokens: u.cache_read,
-            cache_write_tokens: u.cache_write_5m + u.cache_write_1h,
-            estimated_cost_usd: (u.unpriced_requests < u.requests).then_some(u.cost_usd),
-        })
-        .collect();
-    usage.sort_by(|a, b| b.requests.cmp(&a.requests).then(a.model.cmp(&b.model)));
-    s.models = usage.iter().map(|u| u.model.clone()).collect();
-    s.usage = usage;
-
-    for sub in &t.subagents {
+fn apply_facts(s: &mut Session, facts: &Facts, sub_ix: &mut HashMap<String, usize>) {
+    s.agent_version = facts.version.clone();
+    s.entrypoint = facts.entrypoint.clone();
+    s.cost = Some(facts.cost.clone());
+    s.models = facts.usage.iter().map(|u| u.model.clone()).collect();
+    s.usage = facts.usage.clone();
+    for sub in &facts.subagents {
         let i = *sub_ix.entry(sub.agent_id.clone()).or_insert_with(|| {
             s.subagents.push(Subagent {
                 agent_id: sub.agent_id.clone(),
@@ -399,16 +388,10 @@ fn apply_transcript(s: &mut Session, t: &TranscriptSummary, sub_ix: &mut HashMap
         let record = &mut s.subagents[i];
         record.agent_type = record.agent_type.take().or(sub.agent_type.clone());
         record.description = sub.description.clone();
-        let mut priced = false;
-        let mut cost = 0.0;
-        for u in sub.usage.values() {
-            record.requests += u.requests;
-            record.input_tokens += u.input;
-            record.output_tokens += u.output;
-            priced |= u.unpriced_requests < u.requests;
-            cost += u.cost_usd;
-        }
-        record.estimated_cost_usd = priced.then_some(cost);
+        record.requests = sub.requests;
+        record.input_tokens = sub.input_tokens;
+        record.output_tokens = sub.output_tokens;
+        record.estimated_cost_usd = sub.estimated_cost_usd;
     }
 }
 
@@ -605,6 +588,8 @@ mod tests {
         assert_eq!(s.session_id, "s1");
         assert_eq!(s.cwd.as_deref(), Some("/work/repo"));
         assert_eq!(s.end_reason.as_deref(), Some("other"));
+        assert!(s.captured_from_start);
+        assert_eq!(s.collector_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(s.models, ["claude-opus-5-5"]);
         assert_eq!(s.permission_modes, ["default"]);
         assert_eq!(s.instruction_files, ["/home/u/.claude/CLAUDE.md"]);
@@ -706,6 +691,116 @@ mod tests {
         assert_eq!(s.counts.api_errors, 1);
         assert_eq!(s.prompts[0].outcome.as_deref(), Some("api_error"));
         assert_eq!(s.prompts[0].error.as_deref(), Some("rate_limit"));
+    }
+
+    #[test]
+    fn resumed_session_is_open_again_and_marked_partial() {
+        let events = vec![
+            event(1, "SessionStart", json!({ "source": "resume" })),
+            event(2, "SessionEnd", json!({ "reason": "other" })),
+            event(3, "SessionStart", json!({ "source": "resume" })),
+        ];
+        let s = from_events(&events, None).unwrap();
+        assert_eq!(s.end_reason, None);
+        assert!(!s.captured_from_start);
+    }
+
+    #[test]
+    fn resumed_subagent_is_one_subagent() {
+        let start = || json!({ "agent_id": "a1", "agent_type": "Explore" });
+        let events = vec![
+            event(1, "SubagentStart", start()),
+            event(2, "SubagentStop", start()),
+            event(3, "SubagentStart", start()),
+            event(4, "SubagentStop", start()),
+        ];
+        let s = from_events(&events, None).unwrap();
+        assert_eq!(s.counts.subagents, 1);
+        assert_eq!(s.subagents[0].started_at.unwrap().timestamp() % 60, 1);
+        assert_eq!(s.subagents[0].ended_at.unwrap().timestamp() % 60, 4);
+    }
+
+    #[test]
+    fn a_turn_that_stops_twice_ends_at_the_last_stop() {
+        let events = vec![
+            event(
+                1,
+                "UserPromptSubmit",
+                json!({ "prompt_id": "p1", "prompt": "go" }),
+            ),
+            event(5, "Stop", json!({ "prompt_id": "p1" })),
+            event(9, "Stop", json!({ "prompt_id": "p1" })),
+        ];
+        assert_eq!(from_events(&events, None).unwrap().active_ms, 8_000);
+    }
+
+    #[test]
+    fn transcript_facts_supply_cost_and_subagent_usage() {
+        let facts = Facts {
+            version: Some("2.1.302".into()),
+            cost: Cost {
+                total_usd: 3.5,
+                source: "recorded".into(),
+                ..Default::default()
+            },
+            usage: vec![ModelUsage {
+                model: "claude-opus-5-5".into(),
+                requests: 4,
+                ..Default::default()
+            }],
+            subagents: vec![
+                transcript::SubagentFacts {
+                    agent_id: "a1".into(),
+                    description: Some("look".into()),
+                    output_tokens: 9,
+                    ..Default::default()
+                },
+                transcript::SubagentFacts {
+                    agent_id: "only-in-transcript".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let s = from_events(&sample(), Some(&facts)).unwrap();
+        assert_eq!(s.cost.as_ref().unwrap().total_usd, 3.5);
+        assert_eq!(s.models, ["claude-opus-5-5"]);
+        assert_eq!(s.agent_version.as_deref(), Some("2.1.302"));
+        assert_eq!(s.subagents.len(), 2);
+        assert_eq!(s.subagents[0].agent_type.as_deref(), Some("Explore"));
+        assert_eq!(s.subagents[0].description.as_deref(), Some("look"));
+        assert_eq!(s.subagents[0].output_tokens, 9);
+    }
+
+    #[test]
+    fn cost_survives_a_deleted_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("t/s1.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            json!({ "type": "assistant", "timestamp": "2026-11-13T10:00:00Z",
+                    "message": { "id": "m1", "model": "claude-opus-5-5",
+                                 "usage": { "output_tokens": 1_000_000 } } })
+            .to_string(),
+        )
+        .unwrap();
+        let raw = dir.path().join("raw/s1.jsonl");
+        std::fs::create_dir_all(raw.parent().unwrap()).unwrap();
+        let mut start = event(0, "SessionStart", json!({ "source": "startup" }));
+        start["payload"]["transcript_path"] = json!(transcript);
+        start["payload"]["cwd"] = json!(dir.path().join("gone"));
+        std::fs::write(&raw, format!("{start}\n\u{ff}not json\n")).unwrap();
+        let facts_dir = dir.path().join("facts");
+
+        let cost_of = || {
+            let built = build_from_raw(&raw, &facts_dir).unwrap().unwrap();
+            assert_eq!(built.transcript_path.as_deref(), Some(transcript.as_path()));
+            built.session.cost.map(|c| c.total_usd)
+        };
+        assert_eq!(cost_of(), Some(20.0));
+        std::fs::remove_file(&transcript).unwrap();
+        assert_eq!(cost_of(), Some(20.0), "kept from the saved facts");
     }
 
     #[test]

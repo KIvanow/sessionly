@@ -29,6 +29,9 @@ impl Price {
     }
 }
 
+/// Changes whenever the table below does, so stored estimates can be rebuilt.
+pub const PRICING_VERSION: &str = "2026-10";
+
 /// Prices as of 2026-10 (Anthropic API, first party). Bedrock and Vertex differ.
 const PRICES: &[(&str, Price)] = &[
     ("claude-fable-5-1", Price::new(10.0, 50.0, 0.25)),
@@ -45,6 +48,14 @@ const PRICES: &[(&str, Price)] = &[
     ("claude-sonnet-4-6", Price::new(3.0, 15.0, 0.30)),
     ("claude-haiku-5-5", Price::new(0.10, 0.50, 0.01)),
     ("claude-haiku-4-5", Price::new(1.0, 5.0, 0.10)),
+    // Older models that still show up in long-lived transcripts.
+    ("claude-opus-4-5", Price::new(5.0, 25.0, 0.50)),
+    ("claude-sonnet-4-5", Price::new(3.0, 15.0, 0.30)),
+    ("claude-opus-4-1", Price::new(15.0, 75.0, 1.50)),
+    ("claude-opus-4-0", Price::new(15.0, 75.0, 1.50)),
+    ("claude-opus-4", Price::new(15.0, 75.0, 1.50)),
+    ("claude-sonnet-4-0", Price::new(3.0, 15.0, 0.30)),
+    ("claude-sonnet-4", Price::new(3.0, 15.0, 0.30)),
 ];
 
 /// Claude Haiku 5.5 costs more for prompts over 100K tokens ($0.50 / $2.50). The
@@ -52,13 +63,21 @@ const PRICES: &[(&str, Price)] = &[
 const HAIKU_5_5_LONG: Price = Price::new(0.50, 2.50, 0.05);
 const HAIKU_5_5_LONG_THRESHOLD: u64 = 100_000;
 
-/// Drop suffixes that don't change the price: `[1m]`, a `-YYYYMMDD` date
-/// snapshot, and an `anthropic.` platform prefix.
+/// Reduce a model id to the name used in the price table. Drops a platform
+/// prefix (`anthropic.`, `us.anthropic.`), a `[1m]` marker, a Bedrock version
+/// suffix (`-v1:0`), and a date snapshot (`-20251001` or `@20251001`).
 pub fn canonical_model(model: &str) -> &str {
     let mut m = model.trim();
-    m = m.strip_prefix("anthropic.").unwrap_or(m);
-    if let Some(i) = m.find('[') {
+    if let Some(i) = m.rfind("anthropic.") {
+        m = &m[i + "anthropic.".len()..];
+    }
+    if let Some(i) = m.find(['[', '@']) {
         m = &m[..i];
+    }
+    if let Some((head, tail)) = m.rsplit_once("-v") {
+        if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit() || b == b':') {
+            m = head;
+        }
     }
     if let Some((head, tail)) = m.rsplit_once('-') {
         if tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()) {
@@ -98,6 +117,14 @@ mod tests {
         );
         // a version digit is not a date
         assert_eq!(canonical_model("claude-opus-5"), "claude-opus-5");
+        for id in [
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "claude-sonnet-4-5@20250929",
+            "claude-sonnet-4-5-20250929",
+        ] {
+            assert_eq!(canonical_model(id), "claude-sonnet-4-5", "{id}");
+            assert!(price_for(id, 0).is_some());
+        }
     }
 
     #[test]

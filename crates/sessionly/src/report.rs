@@ -49,7 +49,7 @@ pub fn transcript(s: &TranscriptSummary) -> String {
         match cost.source {
             CostSource::Recorded => format!("{} (recorded by Claude Code)", usd(cost.total_usd)),
             CostSource::RecordedAndEstimated => format!(
-                "{} (latest run recorded by Claude Code, earlier runs estimated)",
+                "{} (one run recorded by Claude Code, the rest estimated)",
                 usd(cost.total_usd)
             ),
             CostSource::Estimated => format!(
@@ -63,6 +63,16 @@ pub fn transcript(s: &TranscriptSummary) -> String {
             ),
         },
     );
+    if cost.unpriced_requests > 0 && cost.source != CostSource::Partial {
+        field(
+            &mut out,
+            "",
+            format!(
+                "leaves out {} requests to models without a known price",
+                cost.unpriced_requests
+            ),
+        );
+    }
     if let Some(untracked) = cost.untracked_usd.filter(|u| *u >= 0.005) {
         field(
             &mut out,
@@ -161,7 +171,10 @@ fn duration(ms: i64) -> String {
 }
 
 fn short(id: &str) -> &str {
-    &id[..id.len().min(8)]
+    match id.char_indices().nth(8) {
+        Some((end, _)) => &id[..end],
+        None => id,
+    }
 }
 
 /// `sessionly show`: one normalized session.
@@ -222,6 +235,26 @@ pub fn session(s: &Session) -> String {
             field(&mut out, "Cost", text);
         }
         None => field(&mut out, "Cost", "unknown (no transcript found)".into()),
+    }
+    if let Some(n) = s
+        .cost
+        .as_ref()
+        .map(|c| c.unpriced_requests)
+        .filter(|n| *n > 0)
+    {
+        field(
+            &mut out,
+            "",
+            format!("leaves out {n} requests to models without a known price"),
+        );
+    }
+    if !s.captured_from_start {
+        field(
+            &mut out,
+            "Note",
+            "capture began partway through; prompts, tools and files cover the captured part only"
+                .into(),
+        );
     }
     let c = &s.counts;
     field(

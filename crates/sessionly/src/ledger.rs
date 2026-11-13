@@ -12,13 +12,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::session::Session;
 
 /// Bump to change the table layout; older ledgers are rebuilt on open.
-const DB_VERSION: i64 = 1;
+const DB_VERSION: i64 = 2;
 
 const TABLES: &str = "
 CREATE TABLE sessions (
     session_id       TEXT PRIMARY KEY,
     source           TEXT NOT NULL,
     schema_version   INTEGER NOT NULL,
+    built_with       TEXT NOT NULL,
     started_at       TEXT,
     ended_at         TEXT,
     duration_ms      INTEGER,
@@ -65,7 +66,8 @@ CREATE INDEX session_files_path ON session_files(path);
 /// What a stored session was built from, used to skip unchanged sessions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fingerprint {
-    pub schema_version: u32,
+    /// Collector and price-table version that built the record.
+    pub built_with: String,
     pub raw_bytes: u64,
     pub transcript_path: Option<String>,
     pub transcript_bytes: u64,
@@ -78,24 +80,29 @@ pub struct Ledger {
 impl Ledger {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            crate::paths::create_private_dir(dir)?;
         }
-        let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let mut conn =
+            Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
         }
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.pragma_update(None, "foreign_keys", true)?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        // Create or rebuild the tables in one transaction, so two processes
+        // opening a new ledger at the same time don't trip over each other.
+        // The ledger is derived data: a layout change drops it and the next
+        // sync rebuilds it from the raw capture and the saved transcript facts.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version != DB_VERSION {
-            // Derived data: drop and let the next sync rebuild it.
-            conn.execute_batch(
-                "DROP TABLE IF EXISTS session_files; DROP TABLE IF EXISTS sessions;",
-            )?;
-            conn.execute_batch(TABLES)?;
-            conn.pragma_update(None, "user_version", DB_VERSION)?;
+            tx.execute_batch("DROP TABLE IF EXISTS session_files; DROP TABLE IF EXISTS sessions;")?;
+            tx.execute_batch(TABLES)?;
+            tx.pragma_update(None, "user_version", DB_VERSION)?;
         }
+        tx.commit()?;
         Ok(Ledger { conn })
     }
 
@@ -103,12 +110,12 @@ impl Ledger {
         Ok(self
             .conn
             .query_row(
-                "SELECT schema_version, raw_bytes, transcript_path, transcript_bytes
+                "SELECT built_with, raw_bytes, transcript_path, transcript_bytes
                  FROM sessions WHERE session_id = ?1",
                 [session_id],
                 |r| {
                     Ok(Fingerprint {
-                        schema_version: r.get(0)?,
+                        built_with: r.get(0)?,
                         raw_bytes: r.get(1)?,
                         transcript_path: r.get(2)?,
                         transcript_bytes: r.get(3)?,
@@ -129,11 +136,12 @@ impl Ledger {
         let user = s.user.as_ref();
         tx.execute(
             "INSERT INTO sessions VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-             ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
+             ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31)",
             params![
                 s.session_id,
                 s.source,
                 s.schema_version,
+                built_from.built_with,
                 s.started_at.map(|t| t.to_rfc3339()),
                 s.ended_at.map(|t| t.to_rfc3339()),
                 s.duration_ms,
@@ -237,7 +245,7 @@ mod tests {
 
     fn fingerprint(raw_bytes: u64) -> Fingerprint {
         Fingerprint {
-            schema_version: SCHEMA_VERSION,
+            built_with: "test".into(),
             raw_bytes,
             transcript_path: None,
             transcript_bytes: 0,

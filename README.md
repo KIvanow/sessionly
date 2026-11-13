@@ -33,9 +33,18 @@ sessionly status
 ```
 
 `sessionly install --project DIR` writes to `DIR/.claude/settings.json` instead, so you can try
-it on one project first. Install only changes Sessionly's own hook entries. Your other hooks and
-settings stay as they are, and the previous file is kept as `settings.json.sessionly-bak`.
-`sessionly uninstall` removes them again.
+it on one project first. The hook command contains the absolute path of the binary, so don't
+commit a settings file that has it.
+
+What install does to the settings file:
+
+- It adds or removes only hook entries whose command is exactly `<path>/sessionly capture`.
+  Other hooks and settings, key order, file permissions and a symlinked location are kept.
+- The file is rewritten as JSON with two-space indentation. Comments are not supported; a file
+  that isn't valid JSON is left untouched and install stops with an error.
+- The file as it was before Sessionly's first change is saved next to it as
+  `settings.json.sessionly-bak` and never overwritten.
+- `sessionly uninstall` removes the entries again. Running either command twice changes nothing.
 
 ## Use
 
@@ -83,23 +92,40 @@ A repository with an `origin` remote is shown as `host/owner/repo`.
 
 `sessionly sync` builds one record per session from two sources: the captured hook events
 (prompts, tool calls, files, subagents, errors) and the transcript (tokens, cost, models, git
-branch). Records are stored in `~/.sessionly/ledger.db` (SQLite). The ledger is derived data:
-delete it and `sessionly sync --force` rebuilds it from the raw capture.
+branch). Records are stored in `~/.sessionly/ledger.db` (SQLite).
+
+Claude Code deletes old transcripts, so after each read Sessionly saves what it needs from one
+(cost, usage, models, branch) under `~/.sessionly/transcript-facts/`. The ledger itself is
+derived data: delete it and `sessionly sync --force` rebuilds it from the raw capture and those
+saved facts. A session is rebuilt when its capture, its transcript or a subagent transcript
+grows, or when Sessionly or its price table changes.
 
 The record is the contract between this binary and any server it later uploads to. Its JSON
 Schema is [schema/session.schema.json](schema/session.schema.json), generated from the Rust
 types by `sessionly schema`; a test fails if the checked-in file is stale.
 
-The record holds metadata, not content:
+The record holds metadata and short previews, not full content:
 
 - **Prompts:** SHA-256, length and the first 200 characters.
 - **Tool calls:** tool, status, duration, file path, SHA-256 of the input, size of the output,
   and a one-line summary (the shell command, search pattern or URL, cut to 200 characters).
-- **Files:** path, read and write counts, lines added and removed.
-- Full prompts, file contents and command output stay in the raw capture.
+  A failed call also keeps the first 200 characters of its error, which for a shell command is
+  the start of its output.
+- **Files:** absolute path, read and write counts, lines added and removed.
+- Full prompts, file contents and successful command output stay in the raw capture.
 
-Only sessions captured by the hooks are in the ledger. File changes made by shell commands
-(`sed`, `git apply`, generators) are not attributed to files; only the agent's file tools are.
+The previews and paths are still sensitive: a command can contain a token, a path contains a
+user name. Nothing is uploaded today. Redaction has to exist before any upload does.
+
+Limits to know about:
+
+- Only sessions captured by the hooks are in the ledger.
+- If the hooks were installed partway through a session, its record says so
+  (`captured_from_start: false`): prompts, tools and files cover the captured part, cost covers
+  the whole session.
+- File changes made by shell commands (`sed`, `git apply`, generators) are not attributed to
+  files; only the agent's file tools are.
+- User name and email come from git config at sync time. They are a label, not verified identity.
 
 ### Transcripts
 
@@ -124,18 +150,25 @@ Subagent aab436e5 (general-purpose): Echo hello from subagent
 
 ### How cost is calculated
 
-Claude Code records its own cost total in the transcript, but only for the latest run of a
-session, and transcripts miss some background API calls. Sessionly combines the two:
+Claude Code records its own cost total in the transcript, but only for one run of a session
+(from the last start or resume until the total was last written). Sessionly combines that with
+its own estimate from the token counts:
 
-- **Earlier runs** (before the last resume): priced from the token counts in the transcript.
-- **Latest run**: Claude Code's recorded total, or our estimate if that is higher.
-- **No recorded total** (session still running or crashed): estimate only, labelled as such.
+- **Inside the recorded run:** Claude Code's total, or our estimate if that is higher.
+- **Before or after it** (earlier runs of a resumed session, or activity since the total was
+  written): our estimate.
+- **No recorded total** (session still running, or it crashed): estimate only, labelled as such.
 
 Estimates use Anthropic's published API prices in
-[`pricing.rs`](crates/sessionly/src/pricing.rs). A model that isn't in the table is left
-unpriced and the estimate is labelled partial. They matched Claude Code's own figure to the
-cent wherever the transcript was complete. Spend Claude Code recorded but the transcript doesn't
-show is reported separately as background calls. Details in
+[`pricing.rs`](crates/sessionly/src/pricing.rs). Each API response is counted once, with its
+final token counts. Requests to a model that isn't in the price table are left out and counted
+in `unpriced_requests`, so an incomplete total is visible as such.
+
+How close is it? On one machine with 97 transcripts, the estimate for a recorded run equalled
+Claude Code's total to the cent in about a third of the sessions and was lower in most of the
+rest: 23% of recorded spend ($536 of $2,359) does not appear in any transcript. We report that
+share as `untracked_usd` and have not yet identified what it is. An estimate without a recorded
+total is therefore a lower bound. Details in
 [docs/hook-data.md](docs/hook-data.md#8-the-transcript-transcript_path-observed).
 
 ### Raw capture
@@ -148,8 +181,10 @@ Every hook event is appended to `~/.sessionly/raw/claude-code/<session_id>.jsonl
  "session_id":"c4c90c8f-…","payload":{ …the raw payload Claude Code sent… }}
 ```
 
-Payloads are stored exactly as received. They include full prompts, file contents and command
-output, so the files are created readable only by you (0600). Nothing leaves your machine.
+The payload is stored as Claude Code sent it, re-serialized onto one line. A payload that isn't
+valid JSON is kept as text. Payloads include full prompts, file contents and command output, so
+files and directories are created readable only by you (0600 / 0700). Nothing leaves your
+machine. There is no retention limit yet: the raw capture grows until you delete it.
 
 ### Captured events
 
@@ -167,8 +202,10 @@ event, its payload, and why it is or isn't useful.
 
 The capture hook runs on every event, and tool calls fire two or three events each, so it has to
 be fast. `sessionly capture` is a native binary that appends one line under a file lock: about
-2–4 ms per call, measured including process spawn. It never prints and always exits 0, so a
-capture failure can't block or change your session. Errors go to `_errors.log` next to the data.
+2–4 ms per call, measured including process spawn (about 20 ms for a 2 MB payload). It never
+prints and always exits 0, whatever its input or arguments, so a capture failure can't block or
+change your session. If another capture holds the file for more than 1.5 seconds it writes
+anyway instead of waiting. Errors go to `_errors.log` next to the data.
 
 ## Develop
 

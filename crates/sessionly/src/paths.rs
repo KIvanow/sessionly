@@ -1,26 +1,54 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+
+/// The user's home directory. `None` if it can't be determined: we never fall
+/// back to the current directory, which could put captured prompts and file
+/// contents inside a project.
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
 
 /// Root of all local Sessionly data: `$SESSIONLY_HOME`, or `~/.sessionly`.
-pub fn data_dir() -> PathBuf {
+pub fn data_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("SESSIONLY_HOME").filter(|v| !v.is_empty()) {
-        return PathBuf::from(dir);
+        return Ok(PathBuf::from(dir));
     }
-    home_dir().join(".sessionly")
+    Ok(home_dir()
+        .context("cannot find the home directory (HOME is not set); set SESSIONLY_HOME")?
+        .join(".sessionly"))
 }
 
 /// Raw hook payloads captured from Claude Code, one JSONL file per session.
-pub fn claude_raw_dir() -> PathBuf {
-    data_dir().join("raw").join("claude-code")
+pub fn claude_raw_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("raw").join("claude-code"))
+}
+
+/// What we last read from each session's transcript, kept so cost survives
+/// the transcript being deleted.
+pub fn claude_facts_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("transcript-facts").join("claude-code"))
 }
 
 /// Normalized sessions.
-pub fn ledger_path() -> PathBuf {
-    data_dir().join("ledger.db")
+pub fn ledger_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("ledger.db"))
 }
 
-pub fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+/// Create a directory (and its parents) readable only by the owner.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(dir)
 }

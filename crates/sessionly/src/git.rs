@@ -11,12 +11,16 @@ pub fn repo_root(dir: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// Read a git config value as seen from `dir`. If `dir` no longer exists only
+/// the global config is consulted, never the directory we happen to run in.
 fn config(dir: &Path, key: &str) -> Option<String> {
     let mut cmd = Command::new("git");
     if dir.is_dir() {
-        cmd.arg("-C").arg(dir);
+        cmd.arg("-C").arg(dir).args(["config", "--get", key]);
+    } else {
+        cmd.args(["config", "--global", "--get", key]);
     }
-    let out = cmd.args(["config", "--get", key]).output().ok()?;
+    let out = cmd.output().ok()?;
     let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !value.is_empty()).then_some(value)
 }
@@ -44,7 +48,7 @@ pub fn normalize_remote(url: &str) -> Option<String> {
         // scp-like syntax: [user@]host:path
         None => match url.split_once(':') {
             Some((host, path)) if !host.contains('/') => format!("{host}/{path}"),
-            _ => return Some(url.trim_end_matches(".git").to_string()), // local path
+            _ => return None, // a local path is not a shareable remote
         },
     };
     let (authority, path) = rest.split_once('/').unwrap_or((rest.as_str(), ""));
@@ -77,6 +81,8 @@ mod tests {
             );
         }
         assert_eq!(normalize_remote(""), None);
+        assert_eq!(normalize_remote("/home/me/repos/thing.git"), None);
+        assert_eq!(normalize_remote("../thing"), None);
     }
 
     #[test]
