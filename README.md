@@ -5,7 +5,7 @@ changed, and what it cost. Claude Code first, other agents later.
 
 **Status: early.** Steps 1 and 2 of the MVP work: capturing every Claude Code hook event into a
 local ledger, and reading tokens, cost, models and timing from session transcripts. Normalized
-sessions, search and team roll-ups come next. See [CHANGELOG.md](CHANGELOG.md).
+sessions, search and team roll-ups come next.
 
 ## How it fits together
 
