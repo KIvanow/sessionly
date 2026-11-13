@@ -184,7 +184,7 @@ pub fn usage(turns: &[Turn], prompts: u64) -> (Vec<ModelUsage>, Option<Cost>) {
             None => unpriced += 1,
         }
     }
-    by_model.sort_by(|a, b| b.requests.cmp(&a.requests));
+    by_model.sort_by_key(|u| std::cmp::Reverse(u.requests));
     // Tokens alone, all on models without a known price, give no figure.
     let cost = (covered > unpriced).then_some(Cost {
         total_usd: total,
