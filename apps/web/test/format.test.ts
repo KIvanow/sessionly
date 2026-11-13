@@ -1,0 +1,75 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import * as f from "../src/format.ts";
+
+test("numbers and money", () => {
+  assert.equal(f.count(1284.4), "1,284");
+  assert.equal(f.compact(9_999), "9,999");
+  assert.equal(f.compact(12_940), "12.9K");
+  assert.equal(f.compact(40_386), "40.4K");
+  assert.equal(f.compact(250_000), "250K");
+  assert.equal(f.compact(4_200_000), "4.2M");
+  assert.equal(f.usd(0.0042), "$0.0042");
+  assert.equal(f.usd(0), "$0.00");
+  assert.equal(f.usd(5099.957), "$5,099.96");
+  assert.equal(f.usdCompact(4.2), "$4.20");
+  assert.equal(f.usdCompact(1284), "$1,284");
+  assert.equal(f.usdCompact(12_940), "$12.9K");
+  assert.equal(f.cost(null, null), "–");
+  assert.equal(f.cost(2, "recorded"), "$2.00");
+  assert.equal(f.cost(2, "partial_estimate"), "~$2.00");
+});
+
+test("time and shares", () => {
+  assert.equal(f.duration(7_000), "7s");
+  assert.equal(f.duration(843_000), "14m 3s");
+  assert.equal(f.duration(203_760_000), "56h 36m");
+  assert.equal(f.duration(-5), "0s");
+  assert.equal(f.percent(0.4183), "42%");
+  assert.equal(f.percent(null), "–");
+  assert.equal(f.share(1, 0), null);
+  const r = { files_measured: 4, files_rewritten: 1, lines_added: 40, lines_surviving: 30 };
+  assert.equal(f.rewriteRate(r), 0.25);
+  assert.equal(f.linesKept(r), 0.75);
+  assert.equal(f.rewriteRate(null), null);
+  assert.equal(f.linesKept({ ...r, lines_added: 0 }), null);
+  assert.equal(f.dayLabel("2026-11-13"), "Nov 13");
+  assert.equal(f.dayLabel("(unknown)"), "(unknown)");
+  assert.equal(f.dateTime(null), "–");
+  assert.equal(f.dateTime("not a date"), "–");
+});
+
+test("repository names", () => {
+  assert.equal(f.repoName("github.com/acme/web"), "acme/web");
+  assert.equal(f.repoName("~/src/thing"), "src/thing");
+  assert.equal(f.repoName("solo"), "solo");
+  assert.equal(f.repoName("~"), "home directory");
+  assert.equal(f.repoName(null), "–");
+});
+
+test("the cost series is continuous and switches to weeks for long ranges", () => {
+  const day = (key: string, cost_usd: number) => ({ key, cost_usd, sessions: 1 });
+  const days = f.costSeries([day("2026-11-03", 2), day("2026-11-01", 1), day("(unknown)", 9)]);
+  assert.deepEqual(
+    days.map((b) => [b.start, b.cost_usd, b.sessions, b.span]),
+    [["2026-11-01", 1, 1, "day"], ["2026-11-02", 0, 0, "day"], ["2026-11-03", 2, 1, "day"]],
+  );
+  assert.deepEqual(f.costSeries([]), []);
+
+  // 2026-06-03 is a Wednesday; its week starts Monday 2026-06-01.
+  const weeks = f.costSeries([day("2026-06-03", 1), day("2026-06-07", 2), day("2026-06-08", 4), day("2026-11-13", 8)]);
+  assert.equal(weeks[0]!.span, "week");
+  assert.deepEqual([weeks[0]!.start, weeks[0]!.cost_usd, weeks[0]!.sessions], ["2026-06-01", 3, 2]);
+  assert.deepEqual([weeks[1]!.start, weeks[1]!.cost_usd], ["2026-06-08", 4]);
+  assert.equal(weeks[weeks.length - 1]!.cost_usd, 8);
+  assert.ok(weeks.length <= 26);
+  assert.equal(weeks.reduce((sum, b) => sum + b.cost_usd, 0), 15);
+});
+
+test("axis ticks are round and cover the maximum", () => {
+  assert.deepEqual(f.ticks(140), [0, 50, 100, 150]);
+  assert.deepEqual(f.ticks(1), [0, 0.25, 0.5, 0.75, 1]);
+  assert.deepEqual(f.ticks(0), [0, 1]);
+  const t = f.ticks(2059.68);
+  assert.ok(t[t.length - 1]! >= 2059.68 && t.length <= 6, String(t));
+});

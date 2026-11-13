@@ -1,0 +1,32 @@
+# Self-hosting: the server with the dashboard, and Postgres.
+#   SESSIONLY_ADMIN_TOKEN=choose-a-long-secret docker compose up -d
+# then open http://localhost:8080 and sign in with that token.
+services:
+  server:
+    build: .
+    ports:
+      - "${SESSIONLY_PORT:-8080}:8080"
+    environment:
+      DATABASE_URL: postgres://sessionly:sessionly@db:5432/sessionly
+      SESSIONLY_ADMIN_TOKEN: ${SESSIONLY_ADMIN_TOKEN:?set SESSIONLY_ADMIN_TOKEN to a long secret}
+      SESSIONLY_ADMIN_EMAIL: ${SESSIONLY_ADMIN_EMAIL:-admin@localhost}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: sessionly
+      POSTGRES_PASSWORD: sessionly
+      POSTGRES_DB: sessionly
+    volumes:
+      - sessionly-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sessionly"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+volumes:
+  sessionly-db:

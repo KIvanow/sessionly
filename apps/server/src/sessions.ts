@@ -1,5 +1,5 @@
 // Storing uploaded sessions and answering the dashboard's questions about them.
-import type { Session, Upload } from "@sessionly/schema";
+import type { GroupBy, Session, SessionRow, Totals, Upload } from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
 import type { Db } from "./db.ts";
 
@@ -77,6 +77,8 @@ export async function storeUpload(db: Db, upload: Upload, owner: Principal): Pro
   );
 }
 
+export type { GroupBy };
+
 export interface Filters {
   /** Substring of the uploader's email. */
   user?: string;
@@ -112,33 +114,6 @@ function where(viewer: Principal, filters: Filters): { sql: string; params: unkn
   if (filters.until) conditions.push(`started_at < ${bind(filters.until)}::timestamptz`);
   return { sql: conditions.length ? `WHERE ${conditions.join(" AND ")}` : "", params };
 }
-
-export interface Totals {
-  key: string;
-  sessions: number;
-  cost_usd: number;
-  /** Sessions with no cost figure; `cost_usd` leaves them out. */
-  sessions_without_cost: number;
-  /** Sessions whose cost is an estimate, or includes one. */
-  sessions_with_estimated_cost: number;
-  active_ms: number;
-  prompts: number;
-  tool_calls: number;
-  tool_failures: number;
-  files_changed: number;
-  lines_added: number;
-  lines_removed: number;
-  input_tokens: number;
-  output_tokens: number;
-  rewrite: {
-    files_measured: number;
-    files_rewritten: number;
-    lines_added: number;
-    lines_surviving: number;
-  };
-}
-
-export type GroupBy = "user" | "repo" | "model" | "day";
 
 const GROUP_KEY: Record<GroupBy, string> = {
   user: `owner_email`,
@@ -199,33 +174,6 @@ export async function summarize(
   );
   const [total] = await db.query(`SELECT 'total' AS key, ${TOTAL_COLUMNS} FROM sessions ${sql}`, params);
   return { groups: groups.map(totals), total: totals(total ?? { key: "total" }) };
-}
-
-export interface SessionRow {
-  machine_id: string;
-  source: string;
-  session_id: string;
-  owner_email: string;
-  repo: string | null;
-  branch: string | null;
-  title: string | null;
-  first_prompt: string | null;
-  started_at: string | null;
-  duration_ms: number | null;
-  active_ms: number;
-  cost_usd: number | null;
-  cost_source: string | null;
-  primary_model: string | null;
-  prompts: number;
-  tool_calls: number;
-  tool_failures: number;
-  files_changed: number;
-  lines_added: number;
-  lines_removed: number;
-  content: string;
-  captured_by: string | null;
-  rewrite: { files_measured: number; files_rewritten: number; lines_added: number; lines_surviving: number } | null;
-  updated_at: string;
 }
 
 const iso = (value: unknown): string | null =>

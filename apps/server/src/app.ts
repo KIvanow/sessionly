@@ -1,5 +1,6 @@
 // The HTTP API: uploads from the `sessionly` binary, and the questions the
 // dashboard asks. Everything under /api/v1 needs a bearer token.
+import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import {
@@ -56,7 +57,13 @@ function wholeNumber(value: string | undefined, fallback: number, max: number, n
   return Math.min(n, max);
 }
 
-export function createApp(db: Db, options: { bootstrap?: Bootstrap } = {}): Hono<Env> {
+export interface Options {
+  bootstrap?: Bootstrap;
+  /** Folder with the built dashboard, served at the root if given. */
+  webRoot?: string;
+}
+
+export function createApp(db: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
 
   api.use("*", async (c, next) => {
@@ -171,5 +178,8 @@ export function createApp(db: Db, options: { bootstrap?: Bootstrap } = {}): Hono
   const app = new Hono<Env>();
   app.route("/api/v1", api);
   app.all("/api/*", (c) => c.json({ error: "not found" }, 404));
+  if (options.webRoot) {
+    app.use("/*", serveStatic({ root: options.webRoot }));
+  }
   return app;
 }

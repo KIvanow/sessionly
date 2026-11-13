@@ -4,22 +4,14 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Db } from "./db.ts";
 
-export type Role = "admin" | "member";
+import type { Role, TokenInfo } from "@sessionly/schema";
+
+export type { Role, TokenInfo };
 
 export interface Principal {
   email: string;
   name: string | null;
   role: Role;
-}
-
-export interface TokenInfo {
-  id: string;
-  email: string;
-  name: string | null;
-  role: Role;
-  created_at: string;
-  last_used_at: string | null;
-  revoked_at: string | null;
 }
 
 /** An admin token set in the environment, for first use before any token exists. */

@@ -2,5 +2,6 @@
 // Both come from the Rust types in crates/sessionly/src/session.rs.
 import uploadSchema from "../../../schema/upload.schema.json" with { type: "json" };
 
+export type * from "./api.ts";
 export type * from "./upload.ts";
 export { uploadSchema };

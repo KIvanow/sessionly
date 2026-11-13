@@ -3,25 +3,28 @@
 A searchable ledger of AI coding agent sessions: what was asked, which tools ran, which files
 changed, and what it cost. Claude Code first, other agents later.
 
-**Status: early.** The local half of the MVP works: capturing every Claude Code hook event,
-reading tokens and cost from transcripts, normalizing both into one session record in a local
-SQLite ledger, measuring how much of each session's changes survive, and listing, searching and
-summarizing sessions from the command line. The server and team dashboard come next.
+**Status: early, but working end to end.** The local binary captures every Claude Code hook
+event, reads tokens and cost from transcripts, normalizes both into one session record in a
+local SQLite ledger, measures how much of each session's changes survive, and lists, searches
+and summarizes sessions from the command line. It can upload to a server, which shows the same
+figures for a whole team in a web dashboard. Not done yet: packaged releases, sign-in other than
+tokens, and agents other than Claude Code.
 
 ## How it fits together
 
 ```
 Claude Code ──hooks──▶ sessionly (local Rust binary) ──▶ ~/.sessionly/   (raw + normalized sessions)
                                      │
-                                     └──upload (later)──▶ Sessionly cloud or self-hosted server (TypeScript)
+                                     └──upload──▶ Sessionly server, hosted or self-hosted (TypeScript)
                                                            └─ team dashboard
 ```
 
 - **Local binary (Rust, `crates/sessionly`).** Captures hook events, parses transcripts,
   normalizes sessions, keeps the local ledger and, later, uploads to a server. All parsing and
   redaction happens on the developer's machine.
-- **Server and dashboard (TypeScript, planned).** Receives normalized sessions, aggregates them
-  per team, and serves the manager view. The same code runs as the hosted service or self-hosted.
+- **Server and dashboard (TypeScript, `apps/server` and `apps/web`).** Receives normalized
+  sessions, aggregates them per team, and serves the manager view. The same code runs hosted or
+  self-hosted.
 
 ## Install
 
@@ -383,22 +386,32 @@ anyway instead of waiting. Errors go to `_errors.log` next to the data.
 
 ## Server
 
-The server receives uploads and answers the dashboard's questions. It is TypeScript
-(`apps/server`, Hono) and speaks Postgres. The dashboard itself is not built yet.
+The server receives uploads and serves the dashboard. Both are TypeScript: `apps/server` (Hono,
+Postgres) and `apps/web` (React).
 
 ```sh
 pnpm install
+pnpm build      # builds the dashboard; the server then serves it
 SESSIONLY_ADMIN_TOKEN=choose-a-long-secret SESSIONLY_ADMIN_EMAIL=you@example.com pnpm server
 ```
 
 That starts it on `http://127.0.0.1:8080` with an embedded database in `apps/server/data`, which
-is enough to try it or for a small team. Set `DATABASE_URL=postgres://…` to use a Postgres
+is enough to try it or for a small team. Open that address and sign in with the token. Set `DATABASE_URL=postgres://…` to use a Postgres
 server. Then, on a developer's machine:
 
 ```sh
 sessionly connect http://127.0.0.1:8080   # paste the token
 sessionly upload
 ```
+
+With Docker, the server and Postgres together:
+
+```sh
+SESSIONLY_ADMIN_TOKEN=choose-a-long-secret docker compose up -d
+```
+
+Put it behind HTTPS before anyone outside the machine uses it: the binary refuses plain `http://`
+for anything but localhost.
 
 | Setting | Meaning |
 |---|---|
@@ -414,15 +427,36 @@ own sessions; an admin sees everyone's. An admin creates and revokes tokens thro
 line with `pnpm token create --email ann@example.com` (with the embedded database, stop the
 server first). Only a hash of each token is stored.
 
-**For the dashboard:** `GET /api/v1/summary?by=user|repo|model|day`, `GET /api/v1/sessions`
+### Dashboard
+
+Sign in with a token. An admin sees the whole team; a member sees their own sessions.
+
+- **Overview:** total cost, sessions, active time, prompts, tool calls and failure rate, files
+  changed, the share of files rewritten since and of agent lines still there; cost per day (per
+  week for long ranges, with a table view); and the same totals by person, repository and model.
+- **Sessions:** a searchable, paged list. Period, person and repository filters apply to both
+  pages.
+- **One session:** cost and tokens per model, prompts with how long each took and how it ended,
+  files changed with how much of each survives, tools, and subagents.
+- **Team** (admins): create a token for someone and revoke tokens.
+
+What it shows depends on what was uploaded. With the default `metadata` level there is no text:
+sessions are listed by id and prompts show only their length. Sessions uploaded with `previews`
+show titles and the first 200 characters of each prompt.
+
+While working on the dashboard, `pnpm dev` runs it with live reload and passes API calls to a
+server on port 8080.
+
+**API behind it:** `GET /api/v1/summary?by=user|repo|model|day`, `GET /api/v1/sessions`
 (filters `user`, `repo`, `model`, `q`, `since`, `until`, paging `limit`, `offset`),
 `GET /api/v1/sessions/{machine_id}/{source}/{session_id}` and `GET /api/v1/filters`.
 
 The payload types in `packages/schema` are generated from `schema/upload.schema.json`, which is
 generated from the Rust types. `pnpm gen` regenerates them and a test fails if they are stale.
 
-Checked with the real binary and one machine's history: 100 sessions uploaded in under three
-seconds, and the server's totals equal the local `sessionly summary` exactly.
+Checked with the real binary and one machine's history, against both the embedded database and
+Postgres in Docker: 100 sessions uploaded in under three seconds, a repeat upload sent nothing,
+and the server's totals equal the local `sessionly summary` exactly.
 
 ## Develop
 
@@ -440,5 +474,5 @@ scripts/dummy-session.sh   # runs a short real Claude Code session that exercise
 3. ✅ Normalized session schema and local storage
 4. ✅ Rewrite rate (how much of what the agent wrote survived)
 5. ✅ CLI: list, show, search
-6. ✅ Aggregation on one machine (`summary`), upload, and the server; next: the dashboard
+6. ✅ Aggregation on one machine (`summary`), upload, server and team dashboard
 7. Polish, docs, example data
