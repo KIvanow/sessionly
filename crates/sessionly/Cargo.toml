@@ -1,0 +1,17 @@
+[package]
+name = "sessionly"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Local collector and ledger for AI coding agent sessions"
+homepage = "https://sessionly.dev"
+repository = "https://github.com/KIvanow/sessionly"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]
+tempfile = "3"

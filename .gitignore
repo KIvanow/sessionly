@@ -1,0 +1,5 @@
+/target/
+node_modules/
+# local captures: full prompts and file contents, never commit
+/sessions/
+.sessionly/
