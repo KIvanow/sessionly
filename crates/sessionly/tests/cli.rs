@@ -848,7 +848,16 @@ fn a_session_ending_uploads_in_the_background() {
         "no upload arrived after the session ended"
     );
     assert!(server.puts()[0].path.ends_with("/claude-code/bg-1"));
-    let log = fs::read_to_string(home.path().join("data/auto.log")).unwrap();
+    // The run writes its log line after the upload has been answered.
+    let log_path = home.path().join("data/auto.log");
+    let mut log = String::new();
+    for _ in 0..100 {
+        log = fs::read_to_string(&log_path).unwrap_or_default();
+        if log.contains("uploaded") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     assert!(
         log.contains("synced 1") && log.contains("uploaded 1"),
         "{log}"
