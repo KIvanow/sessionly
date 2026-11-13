@@ -193,6 +193,7 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
         let _ = writeln!(out, "{name:<10} {value}");
     };
     field(&mut out, "Session", s.session_id.clone());
+    field(&mut out, "Tool", tool_name(&s.source).to_string());
     if let Some(title) = &s.title {
         field(&mut out, "Title", title.clone());
     }
@@ -243,6 +244,11 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
             }
             field(&mut out, "Cost", text);
         }
+        None if s.source == crate::paths::CURSOR => field(
+            &mut out,
+            "Cost",
+            "unknown (Cursor's transcripts record no usage)".into(),
+        ),
         None => field(&mut out, "Cost", "unknown (no transcript found)".into()),
     }
     if let Some(n) = s
@@ -326,6 +332,8 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
             let outcome = match p.outcome {
                 Some(Outcome::Completed) => String::new(),
                 Some(_) => format!("  [{}]", p.error.as_deref().unwrap_or("api error")),
+                // Cursor records the end of only some turns: its absence says nothing.
+                None if s.source == crate::paths::CURSOR => String::new(),
                 None => "  [no end recorded]".into(),
             };
             let preview: String = p
@@ -466,6 +474,26 @@ fn repo_name(repo: &str) -> String {
     }
 }
 
+/// Active time, or a dash where none was recorded (Cursor records no times
+/// a turn's length could be taken from).
+fn active(ms: i64) -> String {
+    if ms <= 0 {
+        "-".into()
+    } else {
+        duration(ms)
+    }
+}
+
+/// An agent's name as people write it.
+pub fn tool_name(source: &str) -> &str {
+    match source {
+        "claude-code" => "Claude Code",
+        "cursor" => "Cursor",
+        "grok" => "Grok",
+        other => other,
+    }
+}
+
 /// `sessionly list`.
 pub fn list(rows: &[Listed], limit: u64) -> String {
     if rows.is_empty() {
@@ -474,8 +502,8 @@ pub fn list(rows: &[Listed], limit: u64) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{:<8}  {:<16}  {:>7}  {:>8}  {:>5}  {:>12}  {:>9}  {:<22}  PROMPT",
-        "ID", "STARTED (UTC)", "ACTIVE", "COST", "FILES", "LINES", "REWRITTEN", "REPO"
+        "{:<8}  {:<11}  {:<16}  {:>7}  {:>8}  {:>5}  {:>12}  {:>9}  {:<22}  PROMPT",
+        "ID", "TOOL", "STARTED (UTC)", "ACTIVE", "COST", "FILES", "LINES", "REWRITTEN", "REPO"
     );
     for r in rows {
         let cost = match (r.cost_usd, r.cost_source.as_deref()) {
@@ -497,10 +525,11 @@ pub fn list(rows: &[Listed], limit: u64) -> String {
         let prompt: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
         let _ = writeln!(
             out,
-            "{:<8}  {:<16}  {:>7}  {:>8}  {:>5}  {:>12}  {:>9}  {:<22}  {}",
+            "{:<8}  {:<11}  {:<16}  {:>7}  {:>8}  {:>5}  {:>12}  {:>9}  {:<22}  {}",
             short(&r.session_id),
+            tool_name(&r.source),
             r.started_at.as_deref().map(minute).unwrap_or_default(),
-            duration(r.active_ms),
+            active(r.active_ms),
             cost,
             r.files_changed,
             format!("+{} -{}", r.lines_added, r.lines_removed),
@@ -521,6 +550,7 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
         return "No sessions match.\n".into();
     }
     let heading = match by {
+        GroupBy::Tool => "TOOL",
         GroupBy::User => "USER",
         GroupBy::Repo => "REPO",
         GroupBy::Model => "MODEL",
@@ -528,6 +558,7 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
     };
     let label = |g: &Group| match by {
         GroupBy::Repo if g.key != "total" => repo_name(&g.key),
+        GroupBy::Tool => tool_name(&g.key).to_string(),
         _ => g.key.clone(),
     };
     let width = groups
@@ -571,8 +602,12 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
             "{:<width$}  {:>8}  {:>9}  {:>8}  {:>7}  {:>14}  {:>5}  {:>14}  {:>13}  {:>10}",
             fit(&label(g), width),
             g.sessions,
-            usd(g.cost_usd),
-            duration(g.active_ms),
+            if g.sessions_without_cost == g.sessions && g.sessions > 0 {
+                "-".into()
+            } else {
+                usd(g.cost_usd)
+            },
+            active(g.active_ms),
             g.prompts,
             format!("{} ({})", g.tool_calls, g.tool_failures),
             g.files_changed,

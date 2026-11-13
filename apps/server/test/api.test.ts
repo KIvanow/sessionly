@@ -247,6 +247,59 @@ test("files agents changed, per repository", async () => {
   assert.equal(api.body.files[0].path, "src/app.ts");
 });
 
+test("sessions from several agents are told apart", async () => {
+  const before = (await get(tokens.admin, "/summary?by=tool")).body;
+  assert.deepEqual(before.groups.map((g: any) => g.key), ["claude-code"]);
+  assert.deepEqual(before.total.tools, ["claude-code"]);
+
+  const files = [{ path: "src/app.ts", writes: 1, lines_added: 3, lines_removed: 1 }];
+  // Cursor records no cost and no model
+  await put(tokens.ann, upload("cur-1", { source: "cursor", captured_by: "transcript", models: [], cost: null, usage: [], files }));
+  await put(tokens.ann, upload("grok-1", {
+    source: "grok",
+    captured_by: "transcript",
+    models: ["grok-4.7-build"],
+    cost: { total_usd: 1, source: "recorded" },
+    usage: [],
+    files,
+  }));
+
+  const byTool = (await get(tokens.admin, "/summary?by=tool")).body;
+  const tool = (key: string) => byTool.groups.find((g: any) => g.key === key);
+  assert.deepEqual(byTool.groups.map((g: any) => g.key).sort(), ["claude-code", "cursor", "grok"]);
+  assert.deepEqual(
+    [tool("cursor").sessions, tool("cursor").cost_usd, tool("cursor").sessions_without_cost, tool("cursor").models],
+    [1, 0, 1, []],
+  );
+  assert.deepEqual([tool("grok").cost_usd, tool("grok").models, tool("grok").tools], [1, ["grok-4.7-build"], ["grok"]]);
+  assert.equal(tool("claude-code").sessions, before.total.sessions);
+  assert.deepEqual(byTool.total.tools, ["claude-code", "cursor", "grok"]);
+
+  // which agents and models worked in a repository, and on a file
+  const byRepo = (await get(tokens.admin, "/summary?by=repo")).body;
+  const web = byRepo.groups.find((g: any) => g.key === "github.com/acme/web");
+  assert.deepEqual(web.tools, ["claude-code", "cursor", "grok"]);
+  assert.deepEqual(web.models, ["claude-opus-5-5", "grok-4.7-build"]);
+  assert.deepEqual(byRepo.groups.find((g: any) => g.key === "github.com/acme/api").tools, ["claude-code"]);
+  const changed = (await get(tokens.admin, "/files?repo_is=github.com/acme/web")).body.files;
+  assert.deepEqual(changed.find((f: any) => f.path === "src/app.ts").tools, ["claude-code", "cursor", "grok"]);
+  assert.deepEqual(changed.find((f: any) => f.path === "src/gone.ts").tools, ["claude-code"]);
+
+  // one agent at a time
+  const ids = (r: any) => r.body.sessions.map((s: any) => s.session_id);
+  assert.deepEqual(ids(await get(tokens.admin, "/sessions?tool=cursor")), ["cur-1"]);
+  assert.equal((await get(tokens.admin, "/sessions?tool=cursor")).body.sessions[0].source, "cursor");
+  assert.deepEqual(ids(await get(tokens.admin, "/sessions?tool=curs")), []);
+  assert.equal((await get(tokens.admin, "/summary?by=repo&tool=grok")).body.total.sessions, 1);
+  assert.deepEqual(
+    (await get(tokens.admin, "/files?tool=grok")).body.files.map((f: any) => [f.path, f.sessions]),
+    [["src/app.ts", 1]],
+  );
+  assert.deepEqual((await get(tokens.admin, "/filters")).body.tools, ["claude-code", "cursor", "grok"]);
+  assert.deepEqual((await get(tokens.bob, "/filters")).body.tools, ["claude-code"]);
+  assert.equal((await get(tokens.admin, "/sessions/machine-1/cursor/cur-1")).status, 200);
+});
+
 test("the embedded database creates its folder", async () => {
   const { mkdtempSync, existsSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");

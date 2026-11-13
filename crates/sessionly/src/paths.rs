@@ -23,21 +23,20 @@ pub fn data_dir() -> Result<PathBuf> {
         .join(".sessionly"))
 }
 
-/// Raw hook payloads captured from Claude Code, one JSONL file per session.
-pub fn claude_raw_dir() -> Result<PathBuf> {
-    Ok(data_dir()?.join("raw").join("claude-code"))
+/// The agents sessions can come from. Each has its own folders.
+pub const CLAUDE_CODE: &str = "claude-code";
+pub const CURSOR: &str = "cursor";
+pub const GROK: &str = "grok";
+pub const SOURCES: &[&str] = &[CLAUDE_CODE, CURSOR, GROK];
+
+/// Folder holding every agent's raw hook payloads.
+pub fn raw_root() -> Result<PathBuf> {
+    Ok(data_dir()?.join("raw"))
 }
 
-/// Sessions rebuilt from transcripts by `sessionly import`, in the same
-/// format as the raw capture.
-pub fn claude_imported_dir() -> Result<PathBuf> {
-    Ok(data_dir()?.join("imported").join("claude-code"))
-}
-
-/// What we last read from each session's transcript, kept so cost survives
-/// the transcript being deleted.
-pub fn claude_facts_dir() -> Result<PathBuf> {
-    Ok(data_dir()?.join("transcript-facts").join("claude-code"))
+/// Raw hook payloads captured from one agent, one JSONL file per session.
+pub fn raw_dir(source: &str) -> Result<PathBuf> {
+    Ok(raw_root()?.join(source))
 }
 
 /// Local settings: machine id, server, upload policy.

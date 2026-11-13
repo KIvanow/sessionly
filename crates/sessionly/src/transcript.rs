@@ -314,13 +314,13 @@ impl TranscriptSummary {
             git_branch: self.git_branch.clone(),
             version: self.version.clone(),
             entrypoint: self.entrypoint.clone(),
-            cost: session::Cost {
+            cost: Some(session::Cost {
                 total_usd: cost.total_usd,
                 source: cost.source,
                 transcript_estimate_usd: cost.transcript_estimate_usd,
                 unpriced_requests: cost.unpriced_requests,
                 untracked_usd: cost.untracked_usd,
-            },
+            }),
             usage,
             subagents: self
                 .subagents
@@ -389,9 +389,10 @@ impl TranscriptSummary {
     }
 }
 
-/// What a session record needs from the transcript. Saved next to the raw
-/// capture after every successful parse, so cost and usage survive the
-/// transcript being deleted (Claude Code cleans old transcripts up).
+/// What a session record needs beyond its events: cost, usage and timing as
+/// the agent's own files give them. Saved after every successful read, so
+/// they survive those files being deleted (Claude Code cleans old
+/// transcripts up).
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Facts {
@@ -400,7 +401,8 @@ pub struct Facts {
     pub git_branch: Option<String>,
     pub version: Option<String>,
     pub entrypoint: Option<String>,
-    pub cost: session::Cost,
+    /// Null when the agent's files say nothing about cost.
+    pub cost: Option<session::Cost>,
     pub usage: Vec<session::ModelUsage>,
     pub subagents: Vec<SubagentFacts>,
 }

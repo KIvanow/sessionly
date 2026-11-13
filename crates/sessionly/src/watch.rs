@@ -10,8 +10,12 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::Value;
 
-pub fn run(raw_dir: &Path) -> Result<()> {
-    crate::paths::create_private_dir(raw_dir)?;
+/// Watch every agent's folder under `raw_root`.
+pub fn run(raw_root: &Path) -> Result<()> {
+    for source in crate::paths::SOURCES {
+        crate::paths::create_private_dir(&raw_root.join(source))?;
+    }
+    let raw_dir = raw_root;
     // Only show events that arrive from now on.
     let mut offsets: HashMap<PathBuf, u64> = session_files(raw_dir)?
         .into_iter()
@@ -30,8 +34,11 @@ pub fn run(raw_dir: &Path) -> Result<()> {
     }
 }
 
-fn session_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut files: Vec<PathBuf> = fs::read_dir(dir)?
+fn session_files(raw_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files: Vec<PathBuf> = crate::paths::SOURCES
+        .iter()
+        .filter_map(|source| fs::read_dir(raw_root.join(source)).ok())
+        .flatten()
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
         .collect();

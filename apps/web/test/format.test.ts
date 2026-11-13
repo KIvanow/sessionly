@@ -20,6 +20,19 @@ test("numbers and money", () => {
   assert.equal(f.cost(2, "partial_estimate"), "~$2.00");
 });
 
+test("agents and models", () => {
+  assert.equal(f.toolName("claude-code"), "Claude Code");
+  assert.equal(f.toolName("grok"), "Grok");
+  assert.equal(f.toolName("some-new-agent"), "some-new-agent");
+  assert.equal(f.modelName("claude-opus-5-5"), "opus-5-5");
+  assert.equal(f.modelName("grok-4.7-build"), "grok-4.7-build");
+  assert.equal(f.activeTime(0), "–");
+  assert.equal(f.activeTime(7_000), "7s");
+  assert.equal(f.groupCost({ cost_usd: 0, sessions: 3, sessions_without_cost: 3 }), "–");
+  assert.equal(f.groupCost({ cost_usd: 2, sessions: 3, sessions_without_cost: 1 }), "$2.00");
+  assert.equal(f.groupCost({ cost_usd: 0, sessions: 0, sessions_without_cost: 0 }), "$0.00");
+});
+
 test("time and shares", () => {
   assert.equal(f.duration(7_000), "7s");
   assert.equal(f.duration(843_000), "14m 3s");

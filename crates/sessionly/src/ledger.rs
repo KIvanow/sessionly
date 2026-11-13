@@ -164,6 +164,8 @@ impl Rewrite {
 /// ignoring case.
 #[derive(Debug, Default, Clone)]
 pub struct Filter {
+    /// The agent: claude-code, cursor or grok.
+    pub tool: Option<String>,
     pub repo: Option<String>,
     pub user: Option<String>,
     pub model: Option<String>,
@@ -180,6 +182,8 @@ pub struct Filter {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Listed {
     pub session_id: String,
+    /// The agent the session ran in.
+    pub source: String,
     pub started_at: Option<String>,
     pub duration_ms: Option<i64>,
     pub active_ms: i64,
@@ -203,6 +207,8 @@ pub struct Listed {
 
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum GroupBy {
+    /// The agent: Claude Code, Cursor, Grok
+    Tool,
     User,
     Repo,
     Model,
@@ -258,6 +264,10 @@ impl Filter {
             values.push(value);
             format!("?{}", values.len())
         };
+        if let Some(tool) = &self.tool {
+            let p = bind(like(tool));
+            conditions.push(format!("lower(s.source) LIKE {p} ESCAPE '\\'"));
+        }
         if let Some(repo) = &self.repo {
             let p = bind(like(repo));
             conditions.push(format!(
@@ -629,7 +639,7 @@ impl Ledger {
         let (clause, mut values) = filter.sql();
         values.push(Sql::Integer(limit.map_or(-1, |l| l as i64)));
         let sql = format!(
-            "SELECT s.session_id, s.started_at, s.duration_ms, s.active_ms, s.cost_usd,
+            "SELECT s.session_id, s.source, s.started_at, s.duration_ms, s.active_ms, s.cost_usd,
                     s.cost_source, s.models, s.prompts, s.tool_calls, s.tool_failures,
                     s.files_changed, s.lines_added, s.lines_removed,
                     coalesce(s.repo_remote, s.repo_root, s.cwd), s.branch,
@@ -644,25 +654,26 @@ impl Ledger {
             .query_map(params_from_iter(values), |r| {
                 Ok(Listed {
                     session_id: r.get(0)?,
-                    started_at: r.get(1)?,
-                    duration_ms: r.get(2)?,
-                    active_ms: r.get(3)?,
-                    cost_usd: r.get(4)?,
-                    cost_source: r.get(5)?,
-                    models: r.get(6)?,
-                    prompts: r.get(7)?,
-                    tool_calls: r.get(8)?,
-                    tool_failures: r.get(9)?,
-                    files_changed: r.get(10)?,
-                    lines_added: r.get(11)?,
-                    lines_removed: r.get(12)?,
-                    repo: r.get(13)?,
-                    branch: r.get(14)?,
-                    user: r.get(15)?,
-                    title: r.get(16)?,
-                    first_prompt: r.get(17)?,
-                    rewrite_measured_at: r.get(18)?,
-                    rewrite: rewrite_from(r, 19)?,
+                    source: r.get(1)?,
+                    started_at: r.get(2)?,
+                    duration_ms: r.get(3)?,
+                    active_ms: r.get(4)?,
+                    cost_usd: r.get(5)?,
+                    cost_source: r.get(6)?,
+                    models: r.get(7)?,
+                    prompts: r.get(8)?,
+                    tool_calls: r.get(9)?,
+                    tool_failures: r.get(10)?,
+                    files_changed: r.get(11)?,
+                    lines_added: r.get(12)?,
+                    lines_removed: r.get(13)?,
+                    repo: r.get(14)?,
+                    branch: r.get(15)?,
+                    user: r.get(16)?,
+                    title: r.get(17)?,
+                    first_prompt: r.get(18)?,
+                    rewrite_measured_at: r.get(19)?,
+                    rewrite: rewrite_from(r, 20)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -674,6 +685,7 @@ impl Ledger {
     pub fn summary(&self, filter: &Filter, by: GroupBy) -> Result<Vec<Group>> {
         let (clause, values) = filter.sql();
         let (key, order) = match by {
+            GroupBy::Tool => ("s.source", "3 DESC, 1"),
             GroupBy::User => (
                 "coalesce(s.user_email, s.user_name, '(unknown)')",
                 "3 DESC, 1",
@@ -987,6 +999,23 @@ mod tests {
             ..Default::default()
         })[0];
         assert_eq!(row.user.as_deref(), Some("bob@example.com"));
+        assert_eq!(row.source, "claude-code");
+        assert_eq!(
+            ids(&list(Filter {
+                tool: Some("Claude".into()),
+                ..Default::default()
+            }))
+            .len(),
+            3
+        );
+        assert_eq!(
+            ids(&list(Filter {
+                tool: Some("grok".into()),
+                ..Default::default()
+            }))
+            .len(),
+            0
+        );
         assert_eq!(row.repo.as_deref(), Some("github.com/acme/api"));
         assert_eq!(row.cost_usd, None);
     }

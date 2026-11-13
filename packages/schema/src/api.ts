@@ -37,10 +37,14 @@ export interface Totals {
   lines_removed: number;
   input_tokens: number;
   output_tokens: number;
+  /** The agents the sessions ran in (`claude-code`, `cursor`, `grok`), in name order. */
+  tools: string[];
+  /** The main model of each session, in name order. Agents that record none add nothing. */
+  models: string[];
   rewrite: RewriteTotals;
 }
 
-export type GroupBy = "user" | "repo" | "model" | "day";
+export type GroupBy = "user" | "repo" | "model" | "tool" | "day";
 
 export interface Summary {
   /** Largest cost first; days oldest first. */
@@ -50,6 +54,7 @@ export interface Summary {
 
 export interface SessionRow {
   machine_id: string;
+  /** The agent the session ran in: `claude-code`, `cursor` or `grok`. */
   source: string;
   session_id: string;
   /** Who uploaded it: the owner of the token. */
@@ -101,6 +106,8 @@ export interface FileRow {
   created: boolean;
   /** When a session that changed it last started. */
   last_changed: string | null;
+  /** The agents whose sessions changed it, in name order. */
+  tools: string[];
   /** Null if no session's changes to this file were measured. */
   rewrite: {
     /** Lines agents added that are tracked (not blank or punctuation-only). */
@@ -122,6 +129,7 @@ export interface FilterOptions {
   users: string[];
   repos: string[];
   models: string[];
+  tools: string[];
 }
 
 export interface TokenInfo {

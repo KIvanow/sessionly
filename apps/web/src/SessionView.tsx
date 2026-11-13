@@ -1,5 +1,5 @@
 import type { SessionDetail } from "@sessionly/schema";
-import { compact, cost, count, dateTime, duration, percent, repoName, share, usd } from "./format.ts";
+import { compact, cost, count, dateTime, duration, percent, repoName, share, toolName, usd } from "./format.ts";
 import { useApi } from "./useApi.ts";
 
 /** One session, as it was uploaded. */
@@ -11,6 +11,8 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
   const rewrite = found.data.upload.rewrite ?? null;
   const counts = s.counts ?? {};
   const hasText = s.content === "previews";
+  // Cursor records the end of only some turns: its absence says nothing.
+  const noEnd = s.source === "cursor" ? "–" : "no end recorded";
 
   const tools = new Map<string, { calls: number; notOk: number; ms: number }>();
   for (const call of s.tool_calls ?? []) {
@@ -30,15 +32,22 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
         <a href="#/sessions">← Sessions</a>
       </p>
       <section className="card">
-        <h2>{s.title || `Session ${s.session_id?.slice(0, 8)}`}</h2>
+        <h2>{s.title || (hasText && s.prompts?.[0]?.text?.preview) || `Session ${s.session_id?.slice(0, 8)}`}</h2>
         <dl className="facts">
           <Fact label="Person" value={found.data.owner_email} />
+          <Fact label="Tool" value={toolName(s.source ?? "")} />
           <Fact label="Repository" value={`${repoName(s.repo?.remote ?? s.repo?.root ?? s.cwd ?? null)}${s.repo?.branch ? ` (${s.repo.branch})` : ""}`} />
           <Fact label="Started" value={dateTime(s.started_at)} />
-          <Fact label="Time" value={`${duration(s.active_ms ?? 0)} active, ${duration(s.duration_ms ?? 0)} from first to last activity`} />
+          <Fact label="Time" value={`${(s.active_ms ?? 0) > 0 ? `${duration(s.active_ms ?? 0)} active, ` : ""}${duration(s.duration_ms ?? 0)} from first to last activity`} />
           <Fact
             label="Cost"
-            value={s.cost ? `${cost(s.cost.total_usd ?? 0, s.cost.source ?? null)} (${(s.cost.source ?? "").replaceAll("_", " ")})` : "unknown"}
+            value={
+              s.cost
+                ? `${cost(s.cost.total_usd ?? 0, s.cost.source ?? null)} (${(s.cost.source ?? "").replaceAll("_", " ")})`
+                : s.source === "cursor"
+                  ? "unknown: Cursor's transcripts record no usage"
+                  : "unknown"
+            }
           />
           <Fact label="Models" value={(s.models ?? []).join(", ") || "–"} />
           <Fact
@@ -119,7 +128,7 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
                     <td className="nowrap">{dateTime(p.at)}</td>
                     <td className="title">{hasText && p.text?.preview ? p.text.preview : `${count(p.text?.chars ?? 0)} characters`}</td>
                     <td className="num">{p.at && p.ended_at ? duration(Date.parse(p.ended_at) - Date.parse(p.at)) : "–"}</td>
-                    <td>{p.outcome === "completed" ? "completed" : p.outcome === "api_error" ? `API error${p.error ? `: ${p.error}` : ""}` : "no end recorded"}</td>
+                    <td>{p.outcome === "completed" ? "completed" : p.outcome === "api_error" ? `API error${p.error ? `: ${p.error}` : ""}` : noEnd}</td>
                   </tr>
                 ))}
               </tbody>

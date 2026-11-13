@@ -21,26 +21,48 @@ pub const RECORD_VERSION: u64 = 1;
 /// How long to wait for another capture to release the file before writing anyway.
 const LOCK_WAIT: Duration = Duration::from_millis(1500);
 
+/// Which agent sent a hook payload. Cursor and Grok both run hooks written
+/// for Claude Code (they read `~/.claude/settings.json`), so one capture
+/// command hears from all three and has to tell them apart by the payload.
+pub fn detect_source(payload: &Value) -> &'static str {
+    let has = |key: &str| payload.get(key).is_some();
+    let transcript = payload["transcript_path"].as_str().unwrap_or_default();
+    if has("cursor_version") || has("conversation_id") || transcript.contains("/.cursor/") {
+        crate::paths::CURSOR
+    } else if has("workspaceRoot") || has("hookEventName") || transcript.contains("/.grok/") {
+        crate::paths::GROK
+    } else {
+        crate::paths::CLAUDE_CODE
+    }
+}
+
 /// Wrap a raw hook payload in the envelope stored on disk. A payload that
 /// isn't a JSON object is kept as text under `_unparsed`, still filed under
 /// its session when the id can be found.
 pub fn build_record(raw: &str, received_at: &str) -> Value {
-    let (payload, hook, session_id) = match serde_json::from_str::<Value>(raw) {
+    let (payload, hook, session_id, source) = match serde_json::from_str::<Value>(raw) {
         Ok(v @ Value::Object(_)) => {
-            let hook = v.get("hook_event_name").and_then(Value::as_str);
+            let text = |key: &str| v.get(key).and_then(Value::as_str);
+            let hook = text("hook_event_name").or(text("hookEventName"));
             let hook = hook.unwrap_or("?").to_string();
-            let session_id = v.get("session_id").cloned().unwrap_or(Value::Null);
-            (v, hook, session_id)
+            let session_id = ["session_id", "conversation_id", "sessionId"]
+                .iter()
+                .find_map(|key| v.get(*key).filter(|id| id.is_string()))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let source = detect_source(&v);
+            (v, hook, session_id, source)
         }
         _ => (
             json!({ "_unparsed": raw }),
             find_string_field(raw, "hook_event_name").unwrap_or_else(|| "?".into()),
             find_string_field(raw, "session_id").map_or(Value::Null, Value::String),
+            crate::paths::CLAUDE_CODE,
         ),
     };
     json!({
         "v": RECORD_VERSION,
-        "source": "claude-code",
+        "source": source,
         "received_at": received_at,
         "hook": hook,
         "session_id": session_id,
@@ -72,10 +94,11 @@ pub fn file_stem(session_id: Option<&str>) -> String {
     }
 }
 
-/// Read one payload from `input` and append it to `raw_dir/<session_id>.jsonl`.
-/// Returns the file written and the hook event's name.
+/// Read one payload from `input` and append it to
+/// `raw_root/<agent>/<session_id>.jsonl`. Returns the file written and the
+/// hook event's name.
 pub fn capture(
-    raw_dir: &Path,
+    raw_root: &Path,
     input: &mut impl Read,
     received_at: &str,
 ) -> Result<(PathBuf, String)> {
@@ -83,7 +106,10 @@ pub fn capture(
     input.read_to_end(&mut bytes)?;
     let record = build_record(&String::from_utf8_lossy(&bytes), received_at);
     let stem = file_stem(record["session_id"].as_str());
-    let path = raw_dir.join(format!("{stem}.jsonl"));
+    let source = record["source"]
+        .as_str()
+        .unwrap_or(crate::paths::CLAUDE_CODE);
+    let path = raw_root.join(source).join(format!("{stem}.jsonl"));
     let mut line = serde_json::to_string(&record)?;
     line.push('\n');
     append(&path, line.as_bytes())?;
@@ -96,7 +122,7 @@ pub fn run() -> i32 {
     let received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
     // No home directory: nowhere safe to write. Still read the payload, so
     // the process feeding it to us doesn't hit a closed pipe.
-    let Ok(raw_dir) = crate::paths::claude_raw_dir() else {
+    let Ok(raw_dir) = crate::paths::raw_root() else {
         let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
         return 0;
     };
@@ -199,10 +225,41 @@ mod tests {
     }
 
     #[test]
+    fn files_each_agent_under_its_own_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: [(&str, &str, &str); 3] = [
+            (
+                r#"{"session_id":"c1","hook_event_name":"Stop","transcript_path":"/home/u/.claude/projects/p/c1.jsonl"}"#,
+                "claude-code",
+                "c1",
+            ),
+            // Grok sends Claude's field names and its own camel-case twins.
+            (
+                r#"{"session_id":"g1","sessionId":"g1","hook_event_name":"Stop","hookEventName":"Stop","workspaceRoot":"/w"}"#,
+                "grok",
+                "g1",
+            ),
+            (
+                r#"{"conversation_id":"k1","hook_event_name":"stop","cursor_version":"2.0"}"#,
+                "cursor",
+                "k1",
+            ),
+        ];
+        for (payload, source, id) in cases {
+            let (path, _) = capture(dir.path(), &mut payload.as_bytes(), "t").unwrap();
+            assert_eq!(path, dir.path().join(source).join(format!("{id}.jsonl")));
+            let record: Value =
+                serde_json::from_str(fs::read_to_string(path).unwrap().trim()).unwrap();
+            assert_eq!(record["source"], source);
+            assert_eq!(record["session_id"], id);
+        }
+    }
+
+    #[test]
     fn non_utf8_input_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let (path, _) = capture(dir.path(), &mut &b"\xff\xfe{"[..], "t").unwrap();
-        assert!(path.ends_with("_unknown.jsonl"));
+        assert!(path.ends_with("claude-code/_unknown.jsonl"));
         assert_eq!(fs::read_to_string(path).unwrap().lines().count(), 1);
     }
 

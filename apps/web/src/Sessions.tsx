@@ -2,7 +2,7 @@ import type { SessionList, SessionRow } from "@sessionly/schema";
 import { useEffect, useState } from "react";
 import { query } from "./api.ts";
 import { scopeParams, type Scope } from "./App.tsx";
-import { cost, count, dateTime, duration, repoName } from "./format.ts";
+import { activeTime, cost, count, dateTime, modelName, repoName, toolName } from "./format.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -55,6 +55,7 @@ export function Sessions({ token, scope, onSignOut }: { token: string; scope: Sc
                   <th scope="col">Person</th>
                   <th scope="col">Repository</th>
                   <th scope="col">Session</th>
+                  <th scope="col">Tool</th>
                   <th scope="col">Model</th>
                   <th scope="col" className="num">Active</th>
                   <th scope="col" className="num">Cost</th>
@@ -94,8 +95,9 @@ function Row({ s }: { s: SessionRow }) {
       <td className="title">
         <a href={sessionHref(s)}>{name}</a>
       </td>
-      <td className="nowrap">{s.primary_model?.replace(/^claude-/, "") ?? "–"}</td>
-      <td className="num">{duration(s.active_ms)}</td>
+      <td className="nowrap">{toolName(s.source)}</td>
+      <td className="nowrap">{s.primary_model ? modelName(s.primary_model) : "–"}</td>
+      <td className="num">{activeTime(s.active_ms)}</td>
       <td className="num" title={s.cost_source === "recorded" ? undefined : "An estimate, or includes one"}>
         {cost(s.cost_usd, s.cost_source)}
       </td>

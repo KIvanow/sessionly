@@ -46,6 +46,28 @@ export function duration(ms: number): string {
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
 
+/** Active time, or a dash where none was recorded: Cursor records no turn lengths. */
+export function activeTime(ms: number): string {
+  return ms > 0 ? duration(ms) : "–";
+}
+
+/** A group's cost, or a dash if none of its sessions has a cost figure. */
+export function groupCost(g: { cost_usd: number; sessions: number; sessions_without_cost: number }): string {
+  return g.sessions > 0 && g.sessions_without_cost === g.sessions ? "–" : usd(g.cost_usd);
+}
+
+const TOOL_NAMES: Record<string, string> = { "claude-code": "Claude Code", cursor: "Cursor", grok: "Grok" };
+
+/** "claude-code" -> "Claude Code"; an agent this dashboard doesn't know keeps its id. */
+export function toolName(source: string): string {
+  return TOOL_NAMES[source] ?? source;
+}
+
+/** "claude-opus-5-5" -> "opus-5-5" */
+export function modelName(model: string): string {
+  return model.replace(/^claude-/, "");
+}
+
 /** 0.4183 -> "42%"; null -> "–" */
 export function percent(share: number | null): string {
   return share == null || Number.isNaN(share) ? "–" : `${Math.round(share * 100)}%`;

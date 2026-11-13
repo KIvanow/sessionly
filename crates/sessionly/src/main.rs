@@ -11,6 +11,8 @@ mod config;
 mod git;
 mod hooks;
 mod import;
+mod import_cursor;
+mod import_grok;
 mod jsonl;
 mod ledger;
 mod normalize;
@@ -51,10 +53,13 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Bring in past sessions from Claude Code's transcripts
+    /// Bring in past sessions from the files Claude Code, Cursor and Grok keep
     Import {
-        /// Session ids (or the start of one) to import [default: every transcript]
+        /// Session ids (or the start of one) to import [default: every session]
         sessions: Vec<String>,
+        /// Only this tool's sessions: claude-code, cursor or grok (repeatable)
+        #[arg(long = "tool", value_name = "TOOL")]
+        tools: Vec<String>,
     },
     /// List sessions, newest first
     List {
@@ -180,6 +185,9 @@ struct Target {
 /// Which sessions to include. Text filters match substrings, ignoring case.
 #[derive(Args)]
 struct FilterArgs {
+    /// Tool: claude-code, cursor or grok
+    #[arg(long)]
+    tool: Option<String>,
     /// Repository: part of its remote (owner/name) or its path
     #[arg(long)]
     repo: Option<String>,
@@ -209,6 +217,7 @@ struct FilterArgs {
 impl From<FilterArgs> for ledger::Filter {
     fn from(a: FilterArgs) -> Self {
         ledger::Filter {
+            tool: a.tool,
             repo: a.repo,
             user: a.user,
             model: a.model,
@@ -326,7 +335,7 @@ fn run(command: Command) -> Result<()> {
             );
             println!(
                 "Raw payloads will be written to {}",
-                paths::claude_raw_dir()?.display()
+                paths::raw_root()?.display()
             );
             println!("The hooks run {}", exe.display());
             if target.project.is_some() {
@@ -345,7 +354,7 @@ fn run(command: Command) -> Result<()> {
             }
         }
         Command::Status(target) => status(&target)?,
-        Command::Watch => watch::run(&paths::claude_raw_dir()?)?,
+        Command::Watch => watch::run(&paths::raw_root()?)?,
         Command::Sync { force } => {
             let mut ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
             let (report, rewrite) = sync_ledger(&mut ledger, force)?;
@@ -369,15 +378,22 @@ fn run(command: Command) -> Result<()> {
                 paths::ledger_path()?.display()
             );
         }
-        Command::Import { sessions } => {
-            let projects = transcript::claude_config_dir()
-                .context("cannot find Claude Code's directory")?
-                .join("projects");
-            let report = import::import_all(&projects, &paths::claude_imported_dir()?, &sessions)?;
+        Command::Import { sessions, tools } => {
+            if let Some(unknown) = tools.iter().find(|t| !paths::SOURCES.contains(&t.as_str())) {
+                bail!(
+                    "unknown tool \"{unknown}\"; use one of: {}",
+                    paths::SOURCES.join(", ")
+                );
+            }
+            let homes = import::AgentHomes::detect();
+            let report = import::import_all(&homes, &paths::data_dir()?, &tools, &sessions);
             println!(
-                "Imported: {} sessions from transcripts, {} already up to date, {} with nothing to import",
+                "Imported: {} sessions, {} already up to date, {} with nothing to import",
                 report.imported, report.up_to_date, report.empty
             );
+            for (source, count) in &report.by_source {
+                println!("  {:<12} {count}", report::tool_name(source));
+            }
             for (path, err) in &report.failed {
                 eprintln!("warning: could not import {}: {err}", path.display());
             }
@@ -438,7 +454,7 @@ fn run(command: Command) -> Result<()> {
             let path = if path.is_file() {
                 path
             } else {
-                transcript::find(&session, paths::claude_raw_dir().ok().as_deref())
+                transcript::find(&session, paths::raw_dir(paths::CLAUDE_CODE).ok().as_deref())
                     .with_context(|| format!("no transcript found for session {session}"))?
             };
             let summary = transcript::parse(&path)?;
@@ -646,16 +662,20 @@ fn status(target: &Target) -> Result<()> {
     if !installed.is_empty() && !missing.is_empty() {
         println!("Missing:    {}", missing.join(", "));
     }
-    let raw = paths::claude_raw_dir()?;
-    let (sessions, bytes) = match std::fs::read_dir(&raw) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
-            .fold((0, 0), |(n, b), e| {
-                (n + 1, b + e.metadata().map(|m| m.len()).unwrap_or(0))
-            }),
-        Err(_) => (0, 0),
-    };
+    let raw = paths::raw_root()?;
+    let (mut sessions, mut bytes) = (0u64, 0u64);
+    for source in paths::SOURCES {
+        for entry in std::fs::read_dir(raw.join(source))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if entry.path().extension().is_some_and(|x| x == "jsonl") {
+                sessions += 1;
+                bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
     println!(
         "Raw data:   {} ({} sessions, {:.1} MB)",
         raw.display(),

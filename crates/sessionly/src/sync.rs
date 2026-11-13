@@ -33,24 +33,44 @@ pub fn built_with(machine_id: &str) -> String {
     )
 }
 
-/// Bring the ledger up to date with everything captured on this machine, then
-/// re-measure how much of each session's changes is still in the files.
+/// Where one agent's sessions are kept under the data directory.
+pub struct SourceDirs {
+    pub source: String,
+    /// Hook payloads as captured.
+    pub raw: PathBuf,
+    /// Sessions rebuilt by `sessionly import`.
+    pub imported: PathBuf,
+    /// Cost, usage and timing last read for each session.
+    pub facts: PathBuf,
+}
+
+impl SourceDirs {
+    pub fn in_data_dir(data_dir: &Path, source: &str) -> SourceDirs {
+        SourceDirs {
+            source: source.to_string(),
+            raw: data_dir.join("raw").join(source),
+            imported: data_dir.join("imported").join(source),
+            facts: data_dir.join("transcript-facts").join(source),
+        }
+    }
+}
+
+/// Bring the ledger up to date with everything captured or imported on this
+/// machine, then re-measure how much of each session's changes is still in
+/// the files.
 pub fn sync_all(
     ledger: &mut Ledger,
     config: &crate::config::Config,
     force: bool,
 ) -> Result<(Report, crate::rewrite::Report)> {
-    // Sessions imported from transcripts follow their transcript.
-    let imported_dir = crate::paths::claude_imported_dir()?;
-    crate::import::refresh(&imported_dir);
-    let report = run(
-        &crate::paths::claude_raw_dir()?,
-        &imported_dir,
-        &crate::paths::claude_facts_dir()?,
-        ledger,
-        &config.machine_id,
-        force,
-    )?;
+    let data_dir = crate::paths::data_dir()?;
+    // Imported sessions follow the files they were imported from.
+    crate::import::refresh(&crate::import::AgentHomes::detect(), &data_dir);
+    let sources: Vec<SourceDirs> = crate::paths::SOURCES
+        .iter()
+        .map(|source| SourceDirs::in_data_dir(&data_dir, source))
+        .collect();
+    let report = run(&sources, ledger, &config.machine_id, force)?;
     let rewrite = crate::rewrite::measure(ledger, chrono::Utc::now())?;
     Ok((report, rewrite))
 }
@@ -70,100 +90,108 @@ fn size(path: Option<&PathBuf>) -> u64 {
         .map_or(0, |m| m.len())
 }
 
-/// Build a session from its hook capture, its import, or both. A capture
-/// that saw the session from its start is the better source. One that began
+/// Build a session from its hook capture, its import, or both.
+///
+/// For Claude Code a capture that saw the session from its start is the
+/// better source (it has permission prompts and exact timing); one that began
 /// partway covers less than the transcript does, so an import wins over it.
+/// For other agents the hooks only say that a session happened: their own
+/// session files hold more, so an import always wins.
 fn build(
+    dirs: &SourceDirs,
     raw: Option<&PathBuf>,
     imported: Option<&PathBuf>,
-    facts_dir: &Path,
 ) -> Result<Option<normalize::Built>> {
-    let from_raw = match raw {
-        Some(path) => normalize::build_from_raw(path, facts_dir)?,
-        None => None,
+    let from = |path: Option<&PathBuf>| match path {
+        Some(path) => normalize::build_from_raw(path, &dirs.facts, &dirs.source),
+        None => Ok(None),
     };
+    if dirs.source != crate::paths::CLAUDE_CODE {
+        if let Some(built) = from(imported)? {
+            return Ok(Some(built));
+        }
+        return from(raw);
+    }
+    let from_raw = from(raw)?;
     if from_raw
         .as_ref()
         .is_some_and(|b| b.session.captured_from_start)
     {
         return Ok(from_raw);
     }
-    let from_import = match imported {
-        Some(path) => normalize::build_from_raw(path, facts_dir)?,
-        None => None,
-    };
-    Ok(from_import.or(from_raw))
+    Ok(from(imported)?.or(from_raw))
 }
 
 /// Normalize every session whose capture, import or transcript changed since
 /// it was last stored (or all of them with `force`).
 pub fn run(
-    raw_dir: &Path,
-    imported_dir: &Path,
-    facts_dir: &Path,
+    sources: &[SourceDirs],
     ledger: &mut Ledger,
     machine_id: &str,
     force: bool,
 ) -> Result<Report> {
     let mut report = Report::default();
-    let raw = jsonl_files(raw_dir);
-    let imported = jsonl_files(imported_dir);
-    let stems: BTreeSet<&String> = raw.keys().chain(imported.keys()).collect();
     let built_with = built_with(machine_id);
     let mut present: Vec<String> = Vec::new();
 
-    for stem in stems {
-        let (raw, imported) = (raw.get(stem), imported.get(stem));
-        let source_bytes = size(raw) + size(imported);
-        if !force {
-            if let Some(stored) = ledger.fingerprint(stem)? {
-                let transcript_bytes = stored
-                    .transcript_path
-                    .as_deref()
-                    .map_or(0, |p| transcript::tree_size(Path::new(p)));
-                if stored.built_with == built_with
-                    && stored.raw_bytes == source_bytes
-                    && stored.transcript_bytes == transcript_bytes
-                {
-                    report.unchanged += 1;
-                    present.push(stem.clone());
-                    continue;
-                }
-            }
-        }
-        let source = raw.or(imported).cloned().unwrap_or_default();
-        match build(raw, imported, facts_dir) {
-            Ok(Some(mut built)) => {
-                built.session.machine_id = machine_id.to_string();
-                // Files are named after their session. Anything else (a copy,
-                // a renamed file) must not overwrite the real session.
-                let expected = crate::capture::file_stem(Some(&built.session.session_id));
-                if expected != *stem {
-                    let reason = format!("file name does not match its session id ({expected})");
-                    report.failed.push((source, reason));
-                    continue;
-                }
-                let fingerprint = Fingerprint {
-                    built_with: built_with.clone(),
-                    raw_bytes: source_bytes,
-                    transcript_bytes: built
+    for dirs in sources {
+        let raw = jsonl_files(&dirs.raw);
+        let imported = jsonl_files(&dirs.imported);
+        let stems: BTreeSet<&String> = raw.keys().chain(imported.keys()).collect();
+        for stem in stems {
+            let (raw, imported) = (raw.get(stem), imported.get(stem));
+            let source_bytes = size(raw) + size(imported);
+            if !force {
+                if let Some(stored) = ledger.fingerprint(stem)? {
+                    let transcript_bytes = stored
                         .transcript_path
                         .as_deref()
-                        .map_or(0, transcript::tree_size),
-                    transcript_path: built
-                        .transcript_path
-                        .map(|p| p.to_string_lossy().into_owned()),
-                };
-                ledger.upsert(&built.session, &fingerprint, &built.added_lines)?;
-                present.push(built.session.session_id);
-                report.synced += 1;
+                        .map_or(0, |p| transcript::tree_size(Path::new(p)));
+                    if stored.built_with == built_with
+                        && stored.raw_bytes == source_bytes
+                        && stored.transcript_bytes == transcript_bytes
+                    {
+                        report.unchanged += 1;
+                        present.push(stem.clone());
+                        continue;
+                    }
+                }
             }
-            Ok(None) => report.empty += 1,
-            Err(err) => report.failed.push((source, format!("{err:#}"))),
+            let source = raw.or(imported).cloned().unwrap_or_default();
+            match build(dirs, raw, imported) {
+                Ok(Some(mut built)) => {
+                    built.session.machine_id = machine_id.to_string();
+                    // Files are named after their session. Anything else (a copy,
+                    // a renamed file) must not overwrite the real session.
+                    let expected = crate::capture::file_stem(Some(&built.session.session_id));
+                    if expected != *stem {
+                        let reason =
+                            format!("file name does not match its session id ({expected})");
+                        report.failed.push((source, reason));
+                        continue;
+                    }
+                    let fingerprint = Fingerprint {
+                        built_with: built_with.clone(),
+                        raw_bytes: source_bytes,
+                        transcript_bytes: built
+                            .transcript_path
+                            .as_deref()
+                            .map_or(0, transcript::tree_size),
+                        transcript_path: built
+                            .transcript_path
+                            .map(|p| p.to_string_lossy().into_owned()),
+                    };
+                    ledger.upsert(&built.session, &fingerprint, &built.added_lines)?;
+                    present.push(built.session.session_id);
+                    report.synced += 1;
+                }
+                Ok(None) => report.empty += 1,
+                Err(err) => report.failed.push((source, format!("{err:#}"))),
+            }
         }
     }
-    // A full rebuild makes the ledger match the capture exactly. A normal
-    // sync never removes anything.
+    // A full rebuild makes the ledger match the captures and imports exactly.
+    // A normal sync never removes anything.
     if force {
         report.removed = ledger.retain(&present)?;
     }
@@ -199,16 +227,13 @@ mod tests {
 
     impl Env {
         fn sync(&mut self, force: bool) -> Report {
-            let imported = self.raw.with_file_name("imported");
-            run(
-                &self.raw,
-                &imported,
-                &self.facts,
-                &mut self.ledger,
-                "machine-1",
-                force,
-            )
-            .unwrap()
+            let dirs = SourceDirs {
+                source: "claude-code".into(),
+                raw: self.raw.clone(),
+                imported: self.raw.with_file_name("imported"),
+                facts: self.facts.clone(),
+            };
+            run(&[dirs], &mut self.ledger, "machine-1", force).unwrap()
         }
 
         fn capture(&self, session: &str, prompts: usize) {
@@ -401,6 +426,47 @@ mod tests {
             env.ledger.get("s2").unwrap().unwrap().captured_by,
             Transcript
         );
+    }
+
+    #[test]
+    fn other_agents_prefer_their_import_and_keep_their_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = SourceDirs::in_data_dir(dir.path(), "grok");
+        fs::create_dir_all(&dirs.raw).unwrap();
+        fs::create_dir_all(&dirs.imported).unwrap();
+        let line = |origin: Option<&str>, prompt: u32| {
+            let mut record = json!({ "hook": "UserPromptSubmit", "received_at": "2026-11-13T10:00:00Z",
+                "payload": { "session_id": "g1", "prompt_id": format!("p{prompt}"), "prompt": "x" } });
+            if let Some(origin) = origin {
+                record["origin"] = json!(origin);
+            }
+            record.to_string() + "\n"
+        };
+        // The hooks saw the session start, but Grok's own files hold more.
+        let start = json!({ "hook": "SessionStart", "payload": { "session_id": "g1", "source": "startup" } });
+        fs::write(
+            dirs.raw.join("g1.jsonl"),
+            start.to_string() + "\n" + &line(None, 1),
+        )
+        .unwrap();
+        let mut ledger = Ledger::open(&dir.path().join("l.db")).unwrap();
+        run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
+        let hooks_only = ledger.get("g1").unwrap().unwrap();
+        assert_eq!(
+            (hooks_only.source.as_str(), hooks_only.counts.prompts),
+            ("grok", 1)
+        );
+
+        fs::write(
+            dirs.imported.join("g1.jsonl"),
+            line(Some("transcript"), 1) + &line(Some("transcript"), 2),
+        )
+        .unwrap();
+        run(&[dirs], &mut ledger, "m", false).unwrap();
+        let imported = ledger.get("g1").unwrap().unwrap();
+        assert_eq!(imported.counts.prompts, 2);
+        assert_eq!(imported.captured_by, crate::session::CapturedBy::Transcript);
+        assert_eq!(imported.source, "grok");
     }
 
     #[test]

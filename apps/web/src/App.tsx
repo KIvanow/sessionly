@@ -6,6 +6,7 @@ import { Overview } from "./Overview.tsx";
 import { SessionView } from "./SessionView.tsx";
 import { Sessions } from "./Sessions.tsx";
 import { Team } from "./Team.tsx";
+import { toolName } from "./format.ts";
 import { useApi } from "./useApi.ts";
 
 export interface Scope {
@@ -13,6 +14,8 @@ export interface Scope {
   period: string;
   user: string;
   repo: string;
+  /** An agent (`claude-code`, `cursor`, `grok`), or "" for all. */
+  tool: string;
 }
 
 /** The scope as query parameters for the API. */
@@ -22,7 +25,7 @@ export function scopeParams(scope: Scope): Record<string, string | undefined> {
   const since = Number.isFinite(days)
     ? new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000 - days * 86_400_000).toISOString()
     : undefined;
-  return { since, user: scope.user || undefined, repo: scope.repo || undefined };
+  return { since, user: scope.user || undefined, repo: scope.repo || undefined, tool: scope.tool || undefined };
 }
 
 function useHash(): string {
@@ -95,7 +98,7 @@ export function App() {
 
 function Shell({ token, me, onSignOut }: { token: string; me: Me; onSignOut: () => void }) {
   const route = useHash();
-  const [scope, setScope] = useState<Scope>({ period: "30", user: "", repo: "" });
+  const [scope, setScope] = useState<Scope>({ period: "30", user: "", repo: "", tool: "" });
   const options = useApi<FilterOptions>(token, "/filters", onSignOut);
   const [page, ...rest] = route.split("/");
   const isAdmin = me.role === "admin";
@@ -160,6 +163,19 @@ function Shell({ token, me, onSignOut }: { token: string; me: Me; onSignOut: () 
                 {options.data?.repos.map((r) => <option key={r}>{r}</option>)}
               </select>
             </label>
+            {(options.data?.tools.length ?? 0) > 1 && (
+              <label>
+                Tool
+                <select value={scope.tool} onChange={(e) => setScope({ ...scope, tool: e.target.value })}>
+                  <option value="">All tools</option>
+                  {options.data?.tools.map((t) => (
+                    <option key={t} value={t}>
+                      {toolName(t)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </form>
         )}
         {view}

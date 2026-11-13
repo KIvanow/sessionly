@@ -9,6 +9,11 @@ export class Conflict extends Error {}
 
 const num = (value: unknown): number => (value == null ? 0 : Number(value));
 const numOrNull = (value: unknown): number | null => (value == null ? null : Number(value));
+/** A jsonb array of strings, which a driver may hand over parsed or as text. */
+const strings = (value: unknown): string[] => {
+  const list = typeof value === "string" ? JSON.parse(value) : value;
+  return Array.isArray(list) ? list.map(String) : [];
+};
 
 /** Store one session, replacing an earlier upload of the same session. */
 export async function storeUpload(db: Db, upload: Upload, owner: Principal): Promise<void> {
@@ -88,6 +93,8 @@ export interface Filters {
   repo_is?: string;
   /** Substring of any model used. */
   model?: string;
+  /** The agent exactly: `claude-code`, `cursor` or `grok`. */
+  tool?: string;
   /** Substring of the title, repository, branch, or anything in the record. */
   q?: string;
   since?: string;
@@ -106,6 +113,7 @@ function where(viewer: Principal, filters: Filters): { sql: string; params: unkn
   if (filters.repo_is === UNKNOWN) conditions.push(`repo IS NULL`);
   else if (filters.repo_is) conditions.push(`repo = ${bind(filters.repo_is)}`);
   if (filters.model) conditions.push(`models::text ILIKE ${like(filters.model)}`);
+  if (filters.tool) conditions.push(`source = ${bind(filters.tool)}`);
   if (filters.q) {
     const p = like(filters.q);
     conditions.push(
@@ -123,6 +131,7 @@ const GROUP_KEY: Record<GroupBy, string> = {
   user: `owner_email`,
   repo: `coalesce(repo, '${UNKNOWN}')`,
   model: `coalesce(primary_model, '${UNKNOWN}')`,
+  tool: `source`,
   day: `coalesce(to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), '${UNKNOWN}')`,
 };
 
@@ -135,6 +144,8 @@ const TOTAL_COLUMNS = `
   sum(tool_failures) AS tool_failures, sum(files_changed) AS files_changed,
   sum(lines_added) AS lines_added, sum(lines_removed) AS lines_removed,
   sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens,
+  jsonb_agg(DISTINCT source) AS tools,
+  jsonb_agg(DISTINCT primary_model) FILTER (WHERE primary_model IS NOT NULL) AS models,
   sum(rw_files_measured) AS rw_files_measured, sum(rw_files_rewritten) AS rw_files_rewritten,
   sum(rw_lines_added) AS rw_lines_added, sum(rw_lines_surviving) AS rw_lines_surviving`;
 
@@ -154,6 +165,8 @@ function totals(row: Record<string, unknown>): Totals {
     lines_removed: num(row.lines_removed),
     input_tokens: num(row.input_tokens),
     output_tokens: num(row.output_tokens),
+    tools: strings(row.tools).sort(),
+    models: strings(row.models).sort(),
     rewrite: {
       files_measured: num(row.rw_files_measured),
       files_rewritten: num(row.rw_files_rewritten),
@@ -281,7 +294,8 @@ export async function listFiles(
             sum(coalesce((f->>'lines_added')::double precision, 0)) AS lines_added,
             sum(coalesce((f->>'lines_removed')::double precision, 0)) AS lines_removed,
             bool_or(coalesce((f->>'created')::boolean, false)) AS created,
-            max(started_at) AS last_changed
+            max(started_at) AS last_changed,
+            jsonb_agg(DISTINCT source) AS tools
      FROM ${changed}
      GROUP BY 1 ORDER BY 3 DESC, 1 LIMIT $${params.length + 1}`,
     [...params, limit],
@@ -312,6 +326,7 @@ export async function listFiles(
         lines_removed: num(r.lines_removed),
         created: r.created === true,
         last_changed: iso(r.last_changed),
+        tools: strings(r.tools).sort(),
         rewrite: m
           ? {
               lines_added: num(m.lines_added),
@@ -328,7 +343,7 @@ export async function listFiles(
 export async function filterOptions(
   db: Db,
   viewer: Principal,
-): Promise<{ users: string[]; repos: string[]; models: string[] }> {
+): Promise<{ users: string[]; repos: string[]; models: string[]; tools: string[] }> {
   const { sql, params } = where(viewer, {});
   const column = async (expr: string) =>
     (
@@ -343,5 +358,6 @@ export async function filterOptions(
     users: await column("owner_email"),
     repos: await column("repo"),
     models: await column("primary_model"),
+    tools: await column("source"),
   };
 }

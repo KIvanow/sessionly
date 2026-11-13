@@ -66,6 +66,7 @@ function filtersFrom(query: Record<string, string>): Filters {
     repo: query.repo || undefined,
     repo_is: query.repo_is || undefined,
     model: query.model || undefined,
+    tool: query.tool || undefined,
     q: query.q || undefined,
     since: time(query.since, "since"),
     until: time(query.until, "until"),
@@ -147,8 +148,8 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
   api.get("/summary", async (c) => {
     const query = c.req.query();
     const by = (query.by ?? "user") as GroupBy;
-    if (!["user", "repo", "model", "day"].includes(by)) {
-      throw new BadRequest("by must be user, repo, model or day");
+    if (!["user", "repo", "model", "tool", "day"].includes(by)) {
+      throw new BadRequest("by must be user, repo, model, tool or day");
     }
     return c.json(await summarize(db, c.get("principal"), by, filtersFrom(query)));
   });

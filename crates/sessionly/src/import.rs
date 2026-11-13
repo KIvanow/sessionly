@@ -1,24 +1,28 @@
-//! Backfill: rebuild a session's activity from Claude Code's transcript, for
-//! sessions the hooks did not capture (or captured only partly).
+//! Backfill: rebuild a session's activity from the files an agent keeps about
+//! it, for sessions the hooks did not capture (or captured only partly).
 //!
-//! A transcript is turned into the same event records the capture hook
-//! writes, so everything downstream (normalizing, rewrite rate, ledger) works
-//! unchanged. The records are saved under `imported/`, which makes an imported
-//! session as durable as a captured one: it survives the transcript being
-//! deleted. Tool results are reduced to what normalizing needs, so the saved
-//! file is far smaller than the transcript.
+//! Each agent's session files are turned into the same event records the
+//! capture hook writes, so everything downstream (normalizing, rewrite rate,
+//! ledger) works unchanged. The records are saved under `imported/<agent>/`,
+//! which makes an imported session as durable as a captured one: it survives
+//! the agent deleting its files. Tool results are reduced to what normalizing
+//! needs, so the saved file is far smaller than the original.
 //!
-//! What a transcript cannot tell us: permission prompts that were approved,
-//! and when the session ended.
+//! This file has the shared parts and Claude Code's transcripts; Grok and
+//! Cursor are in `import_grok` and `import_cursor`.
+//!
+//! What a Claude Code transcript cannot tell us: permission prompts that were
+//! approved, and when the session ended.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::transcript;
+use crate::paths::{CLAUDE_CODE, CURSOR, GROK};
+use crate::transcript::{self, Facts};
 
 /// Rows a user row can be besides a prompt the person typed.
 const NOT_A_PROMPT_PREFIXES: &[&str] = &[
@@ -79,27 +83,112 @@ fn slim_result(result: &Value) -> Value {
     slim
 }
 
-struct Builder {
+/// Collects the events of one imported session.
+pub(crate) struct Builder {
+    source: &'static str,
     session_id: String,
     events: Vec<(String, Value)>,
 }
 
 impl Builder {
-    fn push(&mut self, at: &str, hook: &str, mut payload: Value) {
+    pub(crate) fn new(source: &'static str, session_id: &str) -> Builder {
+        Builder {
+            source,
+            session_id: session_id.to_string(),
+            events: Vec::new(),
+        }
+    }
+
+    /// Add an event. `at` is an RFC 3339 time, or empty if the source has none.
+    pub(crate) fn push(&mut self, at: &str, hook: &str, mut payload: Value) {
         payload["session_id"] = json!(self.session_id);
         payload["hook_event_name"] = json!(hook);
         self.events.push((
             at.to_string(),
             json!({
                 "v": crate::capture::RECORD_VERSION,
-                "source": "claude-code",
+                "source": self.source,
                 "origin": "transcript",
-                "received_at": at,
+                "received_at": if at.is_empty() { Value::Null } else { json!(at) },
                 "hook": hook,
                 "session_id": self.session_id,
                 "payload": payload,
             }),
         ));
+    }
+
+    /// The events in time order, with the session start first among equals.
+    /// The sort is stable, so events pushed in order stay in order.
+    pub(crate) fn finish(mut self) -> Vec<Value> {
+        self.events.sort_by(|a, b| {
+            let rank = |e: &Value| u8::from(e["hook"] != "SessionStart");
+            a.0.cmp(&b.0).then(rank(&a.1).cmp(&rank(&b.1)))
+        });
+        self.events.into_iter().map(|(_, event)| event).collect()
+    }
+
+    /// The events as they were added, for a source where only some have a time.
+    pub(crate) fn in_order(self) -> Vec<Value> {
+        self.events.into_iter().map(|(_, event)| event).collect()
+    }
+}
+
+/// Patch lines (`+added`, `-removed`) taking `old` to `new`, comparing lines
+/// as a multiset. Order is not kept; what the rest of the pipeline needs is
+/// which lines appeared and which went away.
+pub(crate) fn patch_lines(old: &str, new: &str) -> Vec<String> {
+    let mut remaining: HashMap<&str, i64> = HashMap::new();
+    for line in old.lines() {
+        *remaining.entry(line).or_insert(0) += 1;
+    }
+    let mut patch = Vec::new();
+    for line in new.lines() {
+        match remaining.get_mut(line) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => patch.push(format!("+{line}")),
+        }
+    }
+    for line in old.lines() {
+        if let Some(n) = remaining.get_mut(line).filter(|n| **n > 0) {
+            *n -= 1;
+            patch.push(format!("-{line}"));
+        }
+    }
+    patch
+}
+
+/// The result of a file edit as normalizing expects it. `created` marks a
+/// file that did not exist before.
+pub(crate) fn edit_result(old: &str, new: &str, created: bool) -> Value {
+    let mut result = json!({
+        "structuredPatch": [{ "lines": patch_lines(old, new) }],
+        "_bytes": new.len(),
+    });
+    if created {
+        result["type"] = json!("create");
+    }
+    result
+}
+
+/// Long strings in a tool's input, cut down: the import keeps what was asked
+/// for, not whole files.
+pub(crate) fn slim_input(input: &Value) -> Value {
+    const KEEP: usize = 500;
+    match input {
+        Value::String(text) if text.len() > KEEP => {
+            let end = (0..=KEEP)
+                .rev()
+                .find(|i| text.is_char_boundary(*i))
+                .unwrap_or(0);
+            json!(format!("{}…", &text[..end]))
+        }
+        Value::Array(items) => items.iter().map(slim_input).collect(),
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), slim_input(v)))
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+        other => other.clone(),
     }
 }
 
@@ -277,10 +366,7 @@ pub fn events_from_transcript(path: &Path) -> Result<Vec<Value>> {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let mut out = Builder {
-        session_id,
-        events: Vec::new(),
-    };
+    let mut out = Builder::new(CLAUDE_CODE, &session_id);
     let main = read_file(path, None, &mut out)?;
     let Some(started) = main.first_at.clone() else {
         return Ok(Vec::new());
@@ -329,26 +415,56 @@ pub fn events_from_transcript(path: &Path) -> Result<Vec<Value>> {
     }
     out.push(&started, "SessionStart", start);
 
-    // Time order, with the session start first among equals. The sort is
-    // stable, so events of one file keep their order.
-    out.events.sort_by(|a, b| {
-        let rank = |e: &Value| u8::from(e["hook"] != "SessionStart");
-        a.0.cmp(&b.0).then(rank(&a.1).cmp(&rank(&b.1)))
-    });
-    Ok(out.events.into_iter().map(|(_, event)| event).collect())
+    Ok(out.finish())
 }
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Report {
     pub imported: u64,
     pub up_to_date: u64,
-    /// Transcripts with nothing to import.
+    /// Sessions with nothing to import.
     pub empty: u64,
     pub failed: Vec<(PathBuf, String)>,
+    /// How many sessions were imported, per agent.
+    pub by_source: BTreeMap<String, u64>,
 }
 
-/// The transcript path and size recorded in an import file's first record.
-fn imported_from(import_file: &Path) -> Option<(PathBuf, u64)> {
+/// Where each agent keeps its session files. `None` means not installed.
+#[derive(Debug, Default, Clone)]
+pub struct AgentHomes {
+    /// `~/.claude/projects`
+    pub claude_projects: Option<PathBuf>,
+    /// `~/.grok/sessions`
+    pub grok_sessions: Option<PathBuf>,
+    /// `~/.cursor/projects`
+    pub cursor_projects: Option<PathBuf>,
+}
+
+impl AgentHomes {
+    pub fn detect() -> AgentHomes {
+        let home = crate::paths::home_dir();
+        let existing = |path: Option<PathBuf>| path.filter(|p| p.is_dir());
+        AgentHomes {
+            claude_projects: existing(transcript::claude_config_dir().map(|d| d.join("projects"))),
+            grok_sessions: existing(
+                std::env::var_os("GROK_HOME")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+                    .or(home.as_ref().map(|h| h.join(".grok")))
+                    .map(|d| d.join("sessions")),
+            ),
+            cursor_projects: existing(home.map(|h| h.join(".cursor").join("projects"))),
+        }
+    }
+}
+
+/// Raised when an importer reads more, or differently, from the same files,
+/// so that sessions imported by an older binary are imported again.
+const IMPORT_VERSION: u64 = 2;
+
+/// The source file, its size and the importer's version recorded in an
+/// import file's first record.
+fn imported_from(import_file: &Path) -> Option<(PathBuf, u64, u64)> {
     use std::io::BufRead;
     let mut line = String::new();
     std::io::BufReader::new(fs::File::open(import_file).ok()?)
@@ -359,6 +475,7 @@ fn imported_from(import_file: &Path) -> Option<(PathBuf, u64)> {
     Some((
         PathBuf::from(payload["transcript_path"].as_str()?),
         payload["transcript_bytes"].as_u64()?,
+        payload["import_version"].as_u64().unwrap_or(1),
     ))
 }
 
@@ -387,69 +504,182 @@ fn write_import(import_file: &Path, events: &[Value]) -> Result<()> {
     Ok(())
 }
 
-fn import_one(transcript: &Path, imported_dir: &Path, report: &mut Report) {
-    let stem = transcript
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned();
-    let target = imported_dir.join(format!("{}.jsonl", crate::capture::file_stem(Some(&stem))));
-    let size = transcript::tree_size(transcript);
-    if imported_from(&target).is_some_and(|(_, bytes)| bytes == size) {
+/// One session an agent has files for.
+struct Found {
+    source: &'static str,
+    session_id: String,
+    /// The main file of the session: what an import records as its origin.
+    path: PathBuf,
+}
+
+/// Combined size of the files a session is imported from. An import is redone
+/// when this changes.
+fn source_bytes(source: &str, path: &Path) -> u64 {
+    match source {
+        GROK => crate::import_grok::session_bytes(path),
+        CURSOR => crate::import_cursor::session_bytes(path),
+        _ => transcript::tree_size(path),
+    }
+}
+
+/// Import one session into `data_dir` unless its import is already current.
+fn import_one(found: &Found, data_dir: &Path, report: &mut Report) {
+    let stem = crate::capture::file_stem(Some(&found.session_id));
+    let target = data_dir
+        .join("imported")
+        .join(found.source)
+        .join(format!("{stem}.jsonl"));
+    let bytes = source_bytes(found.source, &found.path);
+    if imported_from(&target) == Some((found.path.clone(), bytes, IMPORT_VERSION)) {
         report.up_to_date += 1;
         return;
     }
-    let result = events_from_transcript(transcript).and_then(|events| {
-        if events.is_empty() {
+    let built: Result<(Vec<Value>, Option<Facts>)> = match found.source {
+        GROK => crate::import_grok::session(&found.path),
+        CURSOR => crate::import_cursor::session(&found.path),
+        _ => events_from_transcript(&found.path).map(|events| (events, None)),
+    };
+    let result = built.and_then(|(mut events, facts)| {
+        let Some(start) = events.iter_mut().find(|e| e["hook"] == "SessionStart") else {
             return Ok(false);
+        };
+        // Recorded so a later run can tell whether the source has changed.
+        start["payload"]["transcript_path"] = json!(found.path);
+        start["payload"]["transcript_bytes"] = json!(bytes);
+        start["payload"]["import_version"] = json!(IMPORT_VERSION);
+        if let Some(facts) = facts {
+            let facts_path = data_dir
+                .join("transcript-facts")
+                .join(found.source)
+                .join(format!("{stem}.json"));
+            facts.save(&facts_path)?;
         }
         write_import(&target, &events)?;
         Ok(true)
     });
     match result {
-        Ok(true) => report.imported += 1,
+        Ok(true) => {
+            report.imported += 1;
+            *report
+                .by_source
+                .entry(found.source.to_string())
+                .or_insert(0) += 1;
+        }
         Ok(false) => report.empty += 1,
-        Err(err) => report
-            .failed
-            .push((transcript.to_path_buf(), format!("{err:#}"))),
+        Err(err) => report.failed.push((found.path.clone(), format!("{err:#}"))),
     }
 }
 
-/// Import transcripts from Claude Code's projects directory: all of them, or
-/// only the sessions whose id starts with one of `only`.
-pub fn import_all(projects_dir: &Path, imported_dir: &Path, only: &[String]) -> Result<Report> {
-    let mut transcripts: Vec<PathBuf> = fs::read_dir(projects_dir)
-        .with_context(|| format!("reading {}", projects_dir.display()))?
-        .filter_map(|e| e.ok())
-        .filter_map(|project| fs::read_dir(project.path()).ok())
-        .flatten()
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
-        .filter(|p| {
-            let stem = p.file_stem().unwrap_or_default().to_string_lossy();
-            only.is_empty() || only.iter().any(|prefix| stem.starts_with(prefix.as_str()))
-        })
-        .collect();
-    transcripts.sort();
-    let mut report = Report::default();
-    for transcript in transcripts {
-        import_one(&transcript, imported_dir, &mut report);
-    }
-    Ok(report)
-}
-
-/// Re-import sessions that were imported before and whose transcript has
-/// grown since. Never imports a session for the first time.
-pub fn refresh(imported_dir: &Path) -> Report {
-    let mut report = Report::default();
-    let files = fs::read_dir(imported_dir)
+fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = fs::read_dir(dir)
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"));
-    for file in files {
-        if let Some((transcript, _)) = imported_from(&file).filter(|(t, _)| t.is_file()) {
-            import_one(&transcript, imported_dir, &mut report);
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+fn name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Every session the installed agents have files for.
+fn find_sessions(homes: &AgentHomes) -> Vec<Found> {
+    let mut found = Vec::new();
+    // Claude Code: <projects>/<project>/<session>.jsonl
+    for project in homes.claude_projects.iter().flat_map(|d| subdirs(d)) {
+        let mut files: Vec<PathBuf> = fs::read_dir(&project)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+            .collect();
+        files.sort();
+        for path in files {
+            let session_id = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            found.push(Found {
+                source: CLAUDE_CODE,
+                session_id,
+                path,
+            });
+        }
+    }
+    // Grok: <sessions>/<encoded cwd>/<session>/updates.jsonl
+    for project in homes.grok_sessions.iter().flat_map(|d| subdirs(d)) {
+        for session in subdirs(&project) {
+            let path = session.join("updates.jsonl");
+            if path.is_file() {
+                found.push(Found {
+                    source: GROK,
+                    session_id: name_of(&session),
+                    path,
+                });
+            }
+        }
+    }
+    // Cursor: <projects>/<project>/agent-transcripts/<session>/<session>.jsonl
+    for project in homes.cursor_projects.iter().flat_map(|d| subdirs(d)) {
+        for session in subdirs(&project.join("agent-transcripts")) {
+            let session_id = name_of(&session);
+            let path = session.join(format!("{session_id}.jsonl"));
+            if path.is_file() {
+                found.push(Found {
+                    source: CURSOR,
+                    session_id,
+                    path,
+                });
+            }
+        }
+    }
+    found
+}
+
+/// Import sessions from every installed agent: all of them, or only those of
+/// the agents in `agents` and whose id starts with one of `only`.
+pub fn import_all(
+    homes: &AgentHomes,
+    data_dir: &Path,
+    agents: &[String],
+    only: &[String],
+) -> Report {
+    let mut report = Report::default();
+    for found in find_sessions(homes) {
+        let wanted_agent = agents.is_empty() || agents.iter().any(|a| a == found.source);
+        let wanted_id = only.is_empty()
+            || only
+                .iter()
+                .any(|p| found.session_id.starts_with(p.as_str()));
+        if wanted_agent && wanted_id {
+            import_one(&found, data_dir, &mut report);
+        }
+    }
+    report
+}
+
+/// Keep imports current without importing anything new by surprise: redo the
+/// import of a session that was imported before, or that the hooks have
+/// captured, when its files have changed.
+pub fn refresh(homes: &AgentHomes, data_dir: &Path) -> Report {
+    let mut report = Report::default();
+    for found in find_sessions(homes) {
+        let file = format!(
+            "{}.jsonl",
+            crate::capture::file_stem(Some(&found.session_id))
+        );
+        let imported = data_dir.join("imported").join(found.source).join(&file);
+        let captured = data_dir.join("raw").join(found.source).join(&file);
+        // A Claude Code session captured from its start needs no import.
+        let wanted = imported.exists() || (found.source != CLAUDE_CODE && captured.exists());
+        if wanted {
+            import_one(&found, data_dir, &mut report);
         }
     }
     report
@@ -631,7 +861,7 @@ mod tests {
             "events are in time order"
         );
 
-        let s = crate::normalize::from_events(&events, None).unwrap();
+        let s = crate::normalize::from_events(&events, None, "claude-code").unwrap();
         assert_eq!(s.captured_by, crate::session::CapturedBy::Transcript);
         assert!(s.captured_from_start);
         assert_eq!(s.title.as_deref(), Some("My title"));
@@ -689,19 +919,27 @@ mod tests {
         assert_eq!(lines[0].1.len(), 2);
     }
 
+    fn claude_only(projects: &Path) -> AgentHomes {
+        AgentHomes {
+            claude_projects: Some(projects.to_path_buf()),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn saved_import_is_small_and_refreshes_when_the_transcript_grows() {
         let dir = tempfile::tempdir().unwrap();
         let transcript = sample(dir.path());
-        let imported = dir.path().join("imported");
-        let projects = dir.path().to_path_buf();
+        let data = dir.path().join("data");
+        let homes = claude_only(dir.path());
 
-        let first = import_all(&projects, &imported, &[]).unwrap();
+        let first = import_all(&homes, &data, &[], &[]);
         assert_eq!(
             (first.imported, first.up_to_date, first.failed.len()),
             (1, 0, 0)
         );
-        let file = imported.join("sess-1.jsonl");
+        assert_eq!(first.by_source["claude-code"], 1);
+        let file = data.join("imported/claude-code/sess-1.jsonl");
         let saved = fs::read_to_string(&file).unwrap();
         assert!(
             !saved.contains(&"x".repeat(100)),
@@ -713,17 +951,11 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
-        let s = crate::normalize::from_events(&events, None).unwrap();
+        let s = crate::normalize::from_events(&events, None, "claude-code").unwrap();
         assert!(s.tool_calls[0].output_bytes.unwrap() > 5000);
 
-        assert_eq!(import_all(&projects, &imported, &[]).unwrap().up_to_date, 1);
-        assert_eq!(
-            refresh(&imported),
-            Report {
-                up_to_date: 1,
-                ..Default::default()
-            }
-        );
+        assert_eq!(import_all(&homes, &data, &[], &[]).up_to_date, 1);
+        assert_eq!(refresh(&homes, &data).up_to_date, 1);
 
         let mut f = fs::OpenOptions::new()
             .append(true)
@@ -735,16 +967,44 @@ mod tests {
             user(30, "p3", json!("third"), json!({ "turnOrigin": "human" }))
         )
         .unwrap();
-        assert_eq!(refresh(&imported).imported, 1);
+        assert_eq!(refresh(&homes, &data).imported, 1);
         assert!(fs::read_to_string(&file).unwrap().contains("third"));
 
-        // only the named sessions; an unknown prefix matches nothing
-        let none = import_all(&projects, &imported, &["zzz".to_string()]).unwrap();
-        assert_eq!(none, Report::default());
+        // only the named sessions and tools; an unknown prefix matches nothing
+        assert_eq!(
+            import_all(&homes, &data, &[], &["zzz".to_string()]),
+            Report::default()
+        );
+        assert_eq!(
+            import_all(&homes, &data, &["grok".to_string()], &[]),
+            Report::default()
+        );
         // the transcript goes away: the import stays as it is
         fs::remove_dir_all(dir.path().join("proj")).unwrap();
-        assert_eq!(refresh(&imported), Report::default());
+        assert_eq!(refresh(&homes, &data), Report::default());
         assert!(file.exists());
+    }
+
+    #[test]
+    fn refresh_never_imports_a_claude_session_for_the_first_time() {
+        let dir = tempfile::tempdir().unwrap();
+        sample(dir.path());
+        let data = dir.path().join("data");
+        assert_eq!(refresh(&claude_only(dir.path()), &data), Report::default());
+        assert!(!data.join("imported").exists());
+    }
+
+    #[test]
+    fn patches_compare_lines_as_a_multiset() {
+        assert_eq!(patch_lines("a\nb\nb\n", "b\nc\nb\na\n"), ["+c"]);
+        assert_eq!(patch_lines("a\nb\n", "a\n"), ["-b"]);
+        assert_eq!(patch_lines("x\n", "x\nx\n"), ["+x"]);
+        assert_eq!(patch_lines("", "one\ntwo"), ["+one", "+two"]);
+        assert!(patch_lines("same", "same").is_empty());
+        let created = edit_result("", "a\nb\n", true);
+        assert_eq!(created["type"], "create");
+        assert_eq!(created["structuredPatch"][0]["lines"], json!(["+a", "+b"]));
+        assert!(edit_result("a", "b", false).get("type").is_none());
     }
 
     #[test]
@@ -766,7 +1026,7 @@ mod tests {
             ],
         );
         let events = events_from_transcript(&path).unwrap();
-        let s = crate::normalize::from_events(&events, None).unwrap();
+        let s = crate::normalize::from_events(&events, None, "claude-code").unwrap();
         assert_eq!(s.active_ms, 8_000);
         assert_eq!(
             s.prompts[0].outcome,
@@ -781,7 +1041,7 @@ mod tests {
         let path = dir.path().join("p/empty.jsonl");
         write_rows(&path, &[json!({ "type": "ai-title", "aiTitle": "t" })]);
         assert!(events_from_transcript(&path).unwrap().is_empty());
-        let report = import_all(dir.path(), &dir.path().join("imported"), &[]).unwrap();
+        let report = import_all(&claude_only(dir.path()), &dir.path().join("data"), &[], &[]);
         assert_eq!(report.empty, 1);
     }
 }

@@ -25,12 +25,14 @@ pub struct Built {
     pub added_lines: Vec<(String, Vec<u64>)>,
 }
 
-/// Read a raw capture file, add what the transcript says, and normalize.
-/// Returns `None` if the file holds no usable events.
+/// Read a capture or import file of one agent (`source`), add what is known
+/// about cost and usage, and normalize. Returns `None` if the file holds no
+/// usable events.
 ///
-/// The transcript's facts are saved in `facts_dir` after each successful read
-/// and loaded from there when the transcript itself is gone.
-pub fn build_from_raw(raw_path: &Path, facts_dir: &Path) -> Result<Option<Built>> {
+/// For Claude Code the facts come from its transcript: they are saved in
+/// `facts_dir` after each successful read and loaded from there when the
+/// transcript itself is gone. For other agents the importer saved them.
+pub fn build_from_raw(raw_path: &Path, facts_dir: &Path, source: &str) -> Result<Option<Built>> {
     let mut events: Vec<Value> = Vec::new();
     crate::jsonl::for_each(raw_path, |record| events.push(record))?;
     let transcript_path = events
@@ -41,7 +43,10 @@ pub fn build_from_raw(raw_path: &Path, facts_dir: &Path) -> Result<Option<Built>
         "{}.json",
         raw_path.file_stem().unwrap_or_default().to_string_lossy()
     ));
-    let facts = match transcript_path.as_deref().filter(|p| p.is_file()) {
+    let claude_transcript = transcript_path
+        .as_deref()
+        .filter(|p| source == crate::paths::CLAUDE_CODE && p.is_file());
+    let facts = match claude_transcript {
         Some(path) => {
             let facts = transcript::parse(path)?.facts();
             facts.save(&saved)?;
@@ -49,7 +54,7 @@ pub fn build_from_raw(raw_path: &Path, facts_dir: &Path) -> Result<Option<Built>
         }
         None => Facts::load(&saved),
     };
-    let Some(mut session) = from_events(&events, facts.as_ref()) else {
+    let Some(mut session) = from_events(&events, facts.as_ref(), source) else {
         return Ok(None);
     };
     add_local_context(&mut session, facts.as_ref());
@@ -79,10 +84,10 @@ fn add_local_context(session: &mut Session, facts: Option<&Facts>) {
 }
 
 /// Normalize raw capture records (the envelopes written by `sessionly capture`).
-pub fn from_events(events: &[Value], facts: Option<&Facts>) -> Option<Session> {
+pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Option<Session> {
     let mut s = Session {
         schema_version: SCHEMA_VERSION,
-        source: "claude-code".into(),
+        source: source.into(),
         collector_version: env!("CARGO_PKG_VERSION").into(),
         ..Default::default()
     };
@@ -400,7 +405,7 @@ fn files_touched(calls: &[ToolCall], created: &HashSet<String>) -> Vec<FileTouch
 fn apply_facts(s: &mut Session, facts: &Facts, sub_ix: &mut HashMap<String, usize>) {
     s.agent_version = facts.version.clone();
     s.entrypoint = facts.entrypoint.clone();
-    s.cost = Some(facts.cost.clone());
+    s.cost = facts.cost.clone();
     s.models = facts.usage.iter().map(|u| u.model.clone()).collect();
     s.usage = facts.usage.clone();
     for sub in &facts.subagents {
@@ -610,7 +615,7 @@ mod tests {
 
     #[test]
     fn normalizes_a_full_session() {
-        let s = from_events(&sample(), None).unwrap();
+        let s = from_events(&sample(), None, "claude-code").unwrap();
         assert_eq!(s.session_id, "s1");
         assert_eq!(s.cwd.as_deref(), Some("/work/repo"));
         assert_eq!(s.end_reason.as_deref(), Some("other"));
@@ -647,7 +652,7 @@ mod tests {
 
     #[test]
     fn tracks_files_and_line_changes() {
-        let s = from_events(&sample(), None).unwrap();
+        let s = from_events(&sample(), None, "claude-code").unwrap();
         let by_path = |p: &str| s.files.iter().find(|f| f.path == p).unwrap();
         let new = by_path("/work/repo/new.txt");
         assert!(new.created);
@@ -671,7 +676,7 @@ mod tests {
             "UserPromptSubmit",
             json!({ "prompt_id": "p", "prompt": secret }),
         )];
-        let s = from_events(&events, None).unwrap();
+        let s = from_events(&events, None, "claude-code").unwrap();
         let text = &s.prompts[0].text;
         assert_eq!(text.chars, 500);
         assert_eq!(text.preview.chars().count(), PREVIEW_CHARS + 1); // plus ellipsis
@@ -709,7 +714,7 @@ mod tests {
                 json!({ "prompt_id": "p1", "error": "rate_limit" }),
             ),
         ];
-        let s = from_events(&events, None).unwrap();
+        let s = from_events(&events, None, "claude-code").unwrap();
         assert_eq!(s.tool_calls[0].status, ToolStatus::Denied);
         assert_eq!(s.counts.permission_denials, 1);
         assert_eq!(s.counts.api_errors, 1);
@@ -724,7 +729,7 @@ mod tests {
             event(2, "SessionEnd", json!({ "reason": "other" })),
             event(3, "SessionStart", json!({ "source": "resume" })),
         ];
-        let s = from_events(&events, None).unwrap();
+        let s = from_events(&events, None, "claude-code").unwrap();
         assert_eq!(s.end_reason, None);
         assert!(!s.captured_from_start);
     }
@@ -738,7 +743,7 @@ mod tests {
             event(3, "SubagentStart", start()),
             event(4, "SubagentStop", start()),
         ];
-        let s = from_events(&events, None).unwrap();
+        let s = from_events(&events, None, "claude-code").unwrap();
         assert_eq!(s.counts.subagents, 1);
         assert_eq!(s.subagents[0].started_at.unwrap().timestamp() % 60, 1);
         assert_eq!(s.subagents[0].ended_at.unwrap().timestamp() % 60, 4);
@@ -755,18 +760,21 @@ mod tests {
             event(5, "Stop", json!({ "prompt_id": "p1" })),
             event(9, "Stop", json!({ "prompt_id": "p1" })),
         ];
-        assert_eq!(from_events(&events, None).unwrap().active_ms, 8_000);
+        assert_eq!(
+            from_events(&events, None, "claude-code").unwrap().active_ms,
+            8_000
+        );
     }
 
     #[test]
     fn transcript_facts_supply_cost_and_subagent_usage() {
         let facts = Facts {
             version: Some("2.1.302".into()),
-            cost: Cost {
+            cost: Some(Cost {
                 total_usd: 3.5,
                 source: CostSource::Recorded,
                 ..Default::default()
-            },
+            }),
             usage: vec![ModelUsage {
                 model: "claude-opus-5-5".into(),
                 requests: 4,
@@ -786,7 +794,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let s = from_events(&sample(), Some(&facts)).unwrap();
+        let s = from_events(&sample(), Some(&facts), "claude-code").unwrap();
         assert_eq!(s.cost.as_ref().unwrap().total_usd, 3.5);
         assert_eq!(s.models, ["claude-opus-5-5"]);
         assert_eq!(s.agent_version.as_deref(), Some("2.1.302"));
@@ -818,7 +826,9 @@ mod tests {
         let facts_dir = dir.path().join("facts");
 
         let cost_of = || {
-            let built = build_from_raw(&raw, &facts_dir).unwrap().unwrap();
+            let built = build_from_raw(&raw, &facts_dir, "claude-code")
+                .unwrap()
+                .unwrap();
             assert_eq!(built.transcript_path.as_deref(), Some(transcript.as_path()));
             built.session.cost.map(|c| c.total_usd)
         };
@@ -829,7 +839,12 @@ mod tests {
 
     #[test]
     fn no_events_no_session() {
-        assert!(from_events(&[], None).is_none());
-        assert!(from_events(&[json!({ "payload": { "_unparsed": "x" } })], None).is_none());
+        assert!(from_events(&[], None, "claude-code").is_none());
+        assert!(from_events(
+            &[json!({ "payload": { "_unparsed": "x" } })],
+            None,
+            "claude-code"
+        )
+        .is_none());
     }
 }

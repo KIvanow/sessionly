@@ -91,15 +91,18 @@ main > p { margin: 0; }
 .scroll { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
 th, td { text-align: left; padding: 6px 12px 6px 0; border-bottom: 1px solid var(--grid); vertical-align: top; }
-thead th { color: var(--ink-2); font-weight: 500; font-size: 0.8rem; white-space: nowrap; }
+/* Headings of two or three words wrap, so a narrow column of numbers stays narrow. */
+thead th, thead th.num { color: var(--ink-2); font-weight: 500; font-size: 0.8rem; white-space: normal; vertical-align: bottom; line-height: 1.25; }
 tbody th { font-weight: 500; }
 tbody tr:last-child > * { border-bottom: none; }
 .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .nowrap { white-space: nowrap; }
 td.title, th[scope="row"] { max-width: 420px; overflow-wrap: anywhere; }
+/* A row's name stays on one line; the whole of a long one is in its title. */
+th.name { white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 /* Cost with a bar: bars share a left edge, amounts share a right edge. */
 .with-bar { display: inline-flex; align-items: center; gap: 10px; }
-.with-bar .bar-track { width: 90px; height: 8px; }
+.with-bar .bar-track { width: 64px; height: 8px; }
 .with-bar .bar-fill { display: block; height: 100%; min-width: 1px; background: var(--data); border-radius: 0 4px 4px 0; }
 .with-bar .amount { min-width: 84px; }
 button.disclosure { border: none; background: none; padding: 0; font-weight: 500; text-align: left; color: inherit; }
@@ -108,6 +111,14 @@ tr.detail > td { padding: 4px 0 14px 18px; background: var(--page); }
 .files { padding: 8px 12px; overflow-x: auto; }
 .files table { font-size: 0.85rem; }
 .files th[scope="row"] { font-weight: 400; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; max-width: 520px; }
+.files th.plain { font-family: inherit; font-size: inherit; font-weight: 500; white-space: nowrap; }
+.files + .files { border-top: 1px solid var(--grid); }
+.chips { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+td.names { min-width: 150px; }
+.chip {
+  border: 1px solid var(--axis); border-radius: 999px; padding: 0 8px;
+  font-size: 0.78rem; color: var(--ink-2); white-space: nowrap;
+}
 .card > p.hint { margin: -4px 0 8px; font-size: 0.85rem; }
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .search input { width: min(340px, 70vw); }
