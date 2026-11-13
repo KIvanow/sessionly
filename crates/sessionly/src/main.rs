@@ -7,6 +7,9 @@ use clap::{Args, Parser, Subcommand};
 mod capture;
 mod hooks;
 mod paths;
+mod pricing;
+mod report;
+mod transcript;
 mod watch;
 
 #[derive(Parser)]
@@ -30,6 +33,14 @@ enum Command {
     Status(Target),
     /// Pretty-print hook events as they arrive
     Watch,
+    /// Show tokens, cost, models and timing from a session transcript
+    Transcript {
+        /// Session id, or a path to a transcript .jsonl file
+        session: String,
+        /// Print JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
     /// Hook entry point: read one payload on stdin and store it (used by Claude Code)
     Capture,
 }
@@ -89,6 +100,21 @@ fn run(command: Command) -> Result<()> {
         }
         Command::Status(target) => status(&target)?,
         Command::Watch => watch::run(&paths::claude_raw_dir())?,
+        Command::Transcript { session, json } => {
+            let path = PathBuf::from(&session);
+            let path = if path.is_file() {
+                path
+            } else {
+                transcript::find(&session, &paths::claude_raw_dir())
+                    .with_context(|| format!("no transcript found for session {session}"))?
+            };
+            let summary = transcript::parse(&path)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&summary.to_json())?);
+            } else {
+                print!("{}", report::transcript(&summary));
+            }
+        }
         Command::Capture => unreachable!(),
     }
     Ok(())

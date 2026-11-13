@@ -3,9 +3,9 @@
 A searchable ledger of AI coding agent sessions: what was asked, which tools ran, which files
 changed, and what it cost. Claude Code first, other agents later.
 
-**Status: early.** Step 1 of the MVP works: capturing every Claude Code hook event into a local
-ledger. Transcript parsing (cost, tokens, model), normalized sessions, search and team roll-ups
-come next. See [CHANGELOG.md](CHANGELOG.md).
+**Status: early.** Steps 1 and 2 of the MVP work: capturing every Claude Code hook event into a
+local ledger, and reading tokens, cost, models and timing from session transcripts. Normalized
+sessions, search and team roll-ups come next. See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it fits together
 
@@ -40,9 +40,43 @@ settings stay as they are, and the previous file is kept as `settings.json.sessi
 ## Use
 
 ```sh
-sessionly watch      # pretty-print hook events live, in a second terminal
-sessionly status     # hooks installed? how many sessions captured?
+sessionly watch                  # pretty-print hook events live, in a second terminal
+sessionly status                 # hooks installed? how many sessions captured?
+sessionly transcript <session>   # tokens, cost, models and timing (add --json for JSON)
 ```
+
+`sessionly transcript` takes a session id, a unique prefix of one, or a path to a transcript
+file. It works for any past session, including ones from before Sessionly was installed:
+
+```
+Session    5233c02a-28f3-4e87-9fc8-d43379292252
+Time       2026-11-13 13:00:05Z → 13:00:28Z (22s)
+Context    branch HEAD, Claude Code 2.1.302, via sdk-cli
+Cost       $0.20 (recorded by Claude Code)
+
+Main thread
+  model                   reqs     input    output  cache read cache write  est. cost
+  claude-opus-5-5            6        12       630      130.7K       12.8K      $0.14
+
+Subagent aab436e5 (general-purpose): Echo hello from subagent
+  model                   reqs     input    output  cache read cache write  est. cost
+  claude-opus-5-5            2         4       106       24.5K       11.3K      $0.06
+```
+
+### How cost is calculated
+
+Claude Code records its own cost total in the transcript, but only for the latest run of a
+session, and transcripts miss some background API calls. Sessionly combines the two:
+
+- **Earlier runs** (before the last resume): priced from the token counts in the transcript.
+- **Latest run**: Claude Code's recorded total, or our estimate if that is higher.
+- **No recorded total** (session still running or crashed): estimate only, labelled as such.
+
+Estimates use Anthropic's published API prices in
+[`pricing.rs`](crates/sessionly/src/pricing.rs). They matched Claude Code's own figure to the
+cent wherever the transcript was complete. Spend Claude Code recorded but the transcript doesn't
+show is reported separately as background calls. Details in
+[docs/hook-data.md](docs/hook-data.md#8-the-transcript-transcript_path-observed).
 
 Every hook event is appended to `~/.sessionly/raw/claude-code/<session_id>.jsonl` (or under
 `$SESSIONLY_HOME`). One line looks like:
@@ -85,7 +119,7 @@ scripts/dummy-session.sh   # runs a short real Claude Code session that exercise
 ## Roadmap (MVP)
 
 1. ✅ Hook capture → raw JSONL
-2. Transcript parser: tokens, cost, model, timestamps
+2. ✅ Transcript parser: tokens, cost, model, timestamps
 3. Normalized session schema and local storage
 4. Rewrite-rate heuristic (how much of what the agent wrote survived)
 5. CLI: list, show, search
