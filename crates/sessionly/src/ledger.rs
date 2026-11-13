@@ -17,7 +17,7 @@ use crate::rewrite::REWRITTEN_BELOW;
 use crate::session::Session;
 
 /// Bump to change the table layout; older ledgers are rebuilt on open.
-const DB_VERSION: i64 = 3;
+const DB_VERSION: i64 = 4;
 
 const TABLES: &str = "
 CREATE TABLE sessions (
@@ -82,6 +82,15 @@ CREATE TABLE rewrite (
     head        TEXT,
     measured_at TEXT NOT NULL,
     PRIMARY KEY (session_id, path)
+);
+-- What each server was last sent for a session. Losing this table only
+-- means everything is sent again, which a server treats as a replacement.
+CREATE TABLE uploads (
+    session_id  TEXT NOT NULL,
+    server      TEXT NOT NULL,
+    hash        TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, server)
 );
 ";
 
@@ -338,8 +347,8 @@ impl Ledger {
         let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version != DB_VERSION {
             tx.execute_batch(
-                "DROP TABLE IF EXISTS rewrite; DROP TABLE IF EXISTS session_files;
-                 DROP TABLE IF EXISTS sessions;",
+                "DROP TABLE IF EXISTS uploads; DROP TABLE IF EXISTS rewrite;
+                 DROP TABLE IF EXISTS session_files; DROP TABLE IF EXISTS sessions;",
             )?;
             tx.execute_batch(TABLES)?;
             tx.pragma_update(None, "user_version", DB_VERSION)?;
@@ -485,6 +494,37 @@ impl Ledger {
         Ok(Some(serde_json::from_str(record)?))
     }
 
+    /// All session ids, oldest first.
+    pub fn session_ids(&self) -> Result<Vec<String>> {
+        let mut query = self
+            .conn
+            .prepare("SELECT session_id FROM sessions ORDER BY started_at, session_id")?;
+        let ids = query
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
+    /// Hash of what `server` was last sent for a session.
+    pub fn uploaded_hash(&self, session_id: &str, server: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT hash FROM uploads WHERE session_id = ?1 AND server = ?2",
+                [session_id, server],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn mark_uploaded(&mut self, session_id: &str, server: &str, hash: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO uploads VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, server, hash, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     /// Remove every session whose id is not in `keep`, with its files and
     /// measurements. Returns how many were removed.
     pub fn retain(&mut self, keep: &[String]) -> Result<u64> {
@@ -498,6 +538,7 @@ impl Ledger {
         }
         let gone = "session_id NOT IN (SELECT session_id FROM keep)";
         tx.execute(&format!("DELETE FROM rewrite WHERE {gone}"), [])?;
+        tx.execute(&format!("DELETE FROM uploads WHERE {gone}"), [])?;
         let removed = tx.execute(&format!("DELETE FROM sessions WHERE {gone}"), [])?;
         tx.execute_batch("DROP TABLE keep")?;
         tx.commit()?;

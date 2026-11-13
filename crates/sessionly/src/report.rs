@@ -164,6 +164,11 @@ fn tokens(n: u64) -> String {
     }
 }
 
+/// A time span in words, for "… ago".
+pub fn age(span: std::time::Duration) -> String {
+    duration(span.as_millis() as i64)
+}
+
 fn duration(ms: i64) -> String {
     let s = ms / 1000;
     match s {

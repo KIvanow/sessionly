@@ -32,6 +32,24 @@ pub fn built_with(machine_id: &str) -> String {
     )
 }
 
+/// Bring the ledger up to date with everything captured on this machine, then
+/// re-measure how much of each session's changes is still in the files.
+pub fn sync_all(
+    ledger: &mut Ledger,
+    config: &crate::config::Config,
+    force: bool,
+) -> Result<(Report, crate::rewrite::Report)> {
+    let report = run(
+        &crate::paths::claude_raw_dir()?,
+        &crate::paths::claude_facts_dir()?,
+        ledger,
+        &config.machine_id,
+        force,
+    )?;
+    let rewrite = crate::rewrite::measure(ledger, chrono::Utc::now())?;
+    Ok((report, rewrite))
+}
+
 /// Normalize every session in `raw_dir` whose capture or transcript changed
 /// since it was last stored (or all of them with `force`).
 pub fn run(

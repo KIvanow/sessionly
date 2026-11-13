@@ -212,8 +212,8 @@ Limits to know about:
 
 ### What an upload contains
 
-Nothing is uploaded yet. The payload a server will receive is already defined, and you can see
-it for any session:
+Nothing is uploaded unless you connect a server (see [Uploading](#uploading)). You can see
+the payload for any session, connected or not:
 
 ```sh
 sessionly export <session>                     # exactly what would be sent
@@ -241,6 +241,37 @@ config, not a verified identity.
 Fields with a fixed set of values (`status`, `outcome`, `cost.source`, `content`,
 `captured_by`) are enums in the schema. A reader maps a value it doesn't know to `unknown`, and
 ignores fields it doesn't know.
+
+### Uploading
+
+The server and dashboard in this repository are not built yet. The binary's side is, against
+the small API in [docs/api.md](docs/api.md):
+
+```sh
+sessionly connect https://sessionly.example.com   # asks for the token, checks it, saves both
+sessionly upload                                   # send new and changed sessions now
+sessionly upload --dry-run                         # only count what would be sent
+sessionly settings --content previews              # opt in to sending previews
+sessionly disconnect                               # stop uploading, forget the token
+```
+
+- The token can also come from `--token` or the `SESSIONLY_TOKEN` environment variable. It is
+  stored in `~/.sessionly/config.json`, readable only by you, and never printed.
+- Plain `http://` is accepted only for a server on this machine.
+- A session is sent again only when its payload changed. Failed uploads are retried on the next
+  run.
+
+### Automatic sync
+
+When a turn ends (at most every five minutes) and when a session ends, the capture hook starts a
+background `sessionly` process and returns immediately. That process brings the ledger up to
+date, re-measures rewrite rates, and uploads if a server is connected. It prints nothing; each
+run adds a line to `~/.sessionly/auto.log`, and `sessionly status` shows when the last one
+started.
+
+```sh
+sessionly settings --auto-sync off   # only sync when you run a command
+```
 
 ### Transcripts
 

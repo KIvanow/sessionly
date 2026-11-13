@@ -285,3 +285,243 @@ mod tests {
         assert_eq!(redact(&record, Content::Local, Some("/home/ann")), record);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Sending
+// ---------------------------------------------------------------------------
+
+use crate::config::{Config, Server};
+use sha2::{Digest, Sha256};
+use std::time::Duration;
+
+const USER_AGENT: &str = concat!("sessionly/", env!("CARGO_PKG_VERSION"));
+
+/// Give up on a run after this many requests in a row could not reach the server.
+const MAX_UNREACHABLE: usize = 3;
+
+/// Why a request did not succeed.
+#[derive(Debug, PartialEq)]
+pub enum SendError {
+    /// The server does not accept the token (401 or 403).
+    Auth(String),
+    /// The server refused this payload (another 4xx). Retrying won't help.
+    Rejected(String),
+    /// The server could not be reached or failed (network error or 5xx).
+    Unavailable(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendError::Auth(m) => write!(f, "the server did not accept the token ({m})"),
+            SendError::Rejected(m) => write!(f, "the server refused it ({m})"),
+            SendError::Unavailable(m) => write!(f, "the server could not be reached ({m})"),
+        }
+    }
+}
+
+pub struct Client {
+    agent: ureq::Agent,
+    base: String,
+    token: String,
+}
+
+impl Client {
+    pub fn new(server: &Server) -> Client {
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(30)))
+            .http_status_as_error(false)
+            .user_agent(USER_AGENT)
+            .build()
+            .into();
+        Client {
+            agent,
+            base: server.url.trim_end_matches('/').to_string(),
+            token: server.token.clone(),
+        }
+    }
+
+    fn check(
+        result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<(), SendError> {
+        let mut response = result.map_err(|e| SendError::Unavailable(e.to_string()))?;
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        let body: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let detail: String = body.chars().take(200).collect();
+        let message = if detail.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            format!("HTTP {status}: {detail}")
+        };
+        Err(match status {
+            401 | 403 => SendError::Auth(message),
+            400..=499 => SendError::Rejected(message),
+            _ => SendError::Unavailable(message),
+        })
+    }
+
+    /// Check that the server is there and accepts the token.
+    pub fn ping(&self) -> Result<(), SendError> {
+        Self::check(
+            self.agent
+                .get(format!("{}/api/v1/ping", self.base))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .call(),
+        )
+    }
+
+    /// Store or replace one session on the server.
+    pub fn put_session(&self, upload: &Upload) -> Result<(), SendError> {
+        let s = &upload.session;
+        let url = format!(
+            "{}/api/v1/sessions/{}/{}/{}",
+            self.base,
+            url_segment(&s.machine_id),
+            url_segment(&s.source),
+            url_segment(&s.session_id)
+        );
+        Self::check(
+            self.agent
+                .put(url)
+                .header("Authorization", format!("Bearer {}", self.token))
+                .send_json(upload),
+        )
+    }
+}
+
+/// Percent-encode everything outside `[A-Za-z0-9._-]`.
+fn url_segment(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' => (b as char).to_string(),
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+/// Hash of a payload's content, used to skip sessions the server already has.
+/// The time of the rewrite measurement is left out: re-measuring with the same
+/// result is not a change.
+pub fn payload_hash(upload: &Upload) -> String {
+    let mut upload = upload.clone();
+    if let Some(rewrite) = &mut upload.rewrite {
+        rewrite.measured_at = None;
+    }
+    let json = serde_json::to_vec(&upload).expect("payload serializes");
+    Sha256::digest(&json)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct Report {
+    pub sent: u64,
+    /// Sessions the server already has in their current form.
+    pub unchanged: u64,
+    /// Sessions that could not be sent, with the reason.
+    pub failed: Vec<(String, String)>,
+    /// Set when the run stopped early; nothing after that point was tried.
+    pub stopped: Option<String>,
+}
+
+impl Report {
+    pub fn summary(&self) -> String {
+        let mut text = format!(
+            "uploaded {} ({} unchanged, {} failed)",
+            self.sent,
+            self.unchanged,
+            self.failed.len()
+        );
+        if let Some(reason) = &self.stopped {
+            text.push_str(&format!("; stopped: {reason}"));
+        }
+        text
+    }
+}
+
+/// Send every session the server doesn't have in its current form. With
+/// `dry_run`, only count what would be sent.
+pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report> {
+    let Some(server) = &config.server else {
+        anyhow::bail!("no server is configured; run: sessionly connect <url>");
+    };
+    let client = Client::new(server);
+    let mut report = Report::default();
+    let mut unreachable = 0;
+    for id in ledger.session_ids()? {
+        let Some(session) = ledger.get(&id)? else {
+            continue;
+        };
+        let payload = build(ledger, &session, config.upload_content)?;
+        let hash = payload_hash(&payload);
+        if ledger.uploaded_hash(&id, &server.url)?.as_deref() == Some(hash.as_str()) {
+            report.unchanged += 1;
+            continue;
+        }
+        if dry_run {
+            report.sent += 1;
+            continue;
+        }
+        match client.put_session(&payload) {
+            Ok(()) => {
+                ledger.mark_uploaded(&id, &server.url, &hash)?;
+                report.sent += 1;
+                unreachable = 0;
+            }
+            Err(err @ SendError::Auth(_)) => {
+                report.stopped = Some(err.to_string());
+                break;
+            }
+            Err(err @ SendError::Rejected(_)) => report.failed.push((id, err.to_string())),
+            Err(err @ SendError::Unavailable(_)) => {
+                report.failed.push((id, err.to_string()));
+                unreachable += 1;
+                if unreachable >= MAX_UNREACHABLE {
+                    report.stopped = Some(err.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    Ok(report)
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+    use crate::session::Session;
+
+    #[test]
+    fn hash_ignores_only_the_measurement_time() {
+        let mut upload = Upload {
+            schema_version: 1,
+            session: Session {
+                session_id: "s".into(),
+                ..Default::default()
+            },
+            rewrite: Some(RewriteMeasurement {
+                lines_added: 4,
+                lines_surviving: 4,
+                ..Default::default()
+            }),
+        };
+        let before = payload_hash(&upload);
+        upload.rewrite.as_mut().unwrap().measured_at = Some(Utc::now());
+        assert_eq!(payload_hash(&upload), before);
+        upload.rewrite.as_mut().unwrap().lines_surviving = 3;
+        assert_ne!(payload_hash(&upload), before);
+        assert_eq!(before.len(), 64);
+    }
+
+    #[test]
+    fn url_segments_are_safe() {
+        assert_eq!(url_segment("abc-123_x.y"), "abc-123_x.y");
+        assert_eq!(url_segment("a/b ?#"), "a%2Fb%20%3F%23");
+        assert_eq!(url_segment("é"), "%C3%A9");
+    }
+}

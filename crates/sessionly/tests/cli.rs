@@ -9,6 +9,9 @@ fn sessionly(home: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_sessionly"));
     cmd.env("HOME", home)
         .env("SESSIONLY_HOME", home.join("data"))
+        // no background runs unless a test asks for them
+        .env("SESSIONLY_NO_AUTO", "1")
+        .env_remove("SESSIONLY_TOKEN")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("USERPROFILE");
     cmd
@@ -197,6 +200,7 @@ fn the_installed_command_really_runs_capture() {
     let mut hook = Command::new("sh");
     hook.arg("-c")
         .arg(command)
+        .env("SESSIONLY_NO_AUTO", "1")
         .env("HOME", home.path())
         .env("SESSIONLY_HOME", home.path().join("data"));
     let out = run_with_stdin(hook, br#"{"session_id":"s9","hook_event_name":"Stop"}"#);
@@ -517,4 +521,345 @@ fn export_shows_what_would_leave_the_machine() {
             .unwrap(),
     );
     assert!(schema.contains("\"Upload\"") && schema.contains("RewriteMeasurement"));
+}
+
+// ---------------------------------------------------------------------------
+// Upload, against a stand-in server
+// ---------------------------------------------------------------------------
+
+use std::io::{BufRead, BufReader, Read};
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone)]
+struct Received {
+    method: String,
+    path: String,
+    auth: Option<String>,
+    body: String,
+}
+
+/// A minimal HTTP server that records requests and answers with `status`.
+struct StubServer {
+    url: String,
+    received: Arc<Mutex<Vec<Received>>>,
+    status: Arc<AtomicU16>,
+}
+
+impl StubServer {
+    fn start() -> StubServer {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let status = Arc::new(AtomicU16::new(200));
+        let (log, code) = (received.clone(), status.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let mut parts = line.split_whitespace();
+                let method = parts.next().unwrap_or_default().to_string();
+                let path = parts.next().unwrap_or_default().to_string();
+                let (mut auth, mut length) = (None, 0usize);
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':') {
+                        match name.to_ascii_lowercase().as_str() {
+                            "authorization" => auth = Some(value.trim().to_string()),
+                            "content-length" => length = value.trim().parse().unwrap_or(0),
+                            _ => {}
+                        }
+                    }
+                }
+                let mut body = vec![0u8; length];
+                let _ = reader.read_exact(&mut body);
+                log.lock().unwrap().push(Received {
+                    method,
+                    path,
+                    auth,
+                    body: String::from_utf8_lossy(&body).into_owned(),
+                });
+                let status = code.load(Ordering::SeqCst);
+                let answer = r#"{"error":"stub says no"}"#;
+                let _ = reader.get_mut().write_all(
+                    format!(
+                        "HTTP/1.1 {status} Stub\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        StubServer {
+            url,
+            received,
+            status,
+        }
+    }
+
+    fn requests(&self) -> Vec<Received> {
+        self.received.lock().unwrap().clone()
+    }
+
+    fn puts(&self) -> Vec<Received> {
+        self.requests()
+            .into_iter()
+            .filter(|r| r.method == "PUT")
+            .collect()
+    }
+
+    fn answer_with(&self, status: u16) {
+        self.status.store(status, Ordering::SeqCst);
+    }
+}
+
+fn run(home: &Path, args: &[&str]) -> Output {
+    sessionly(home).args(args).output().unwrap()
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn upload_sends_each_session_once_and_again_when_it_changes() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    for (id, dir) in [("up-1", "one"), ("up-2", "two")] {
+        let repo = home.path().join(dir);
+        fs::create_dir_all(&repo).unwrap();
+        capture_editing_session(home.path(), id, &repo);
+    }
+
+    // Not connected: nothing to upload to.
+    let out = run(home.path(), &["upload"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("sessionly connect"),
+        "{}",
+        stderr(&out)
+    );
+
+    // Connecting checks the server and the token before saving anything.
+    let connected = stdout(run(
+        home.path(),
+        &["connect", &server.url, "--token", "secret-token"],
+    ));
+    assert!(
+        connected.contains("Connected to") && connected.contains("metadata"),
+        "{connected}"
+    );
+    let ping = &server.requests()[0];
+    assert_eq!(
+        (ping.method.as_str(), ping.path.as_str()),
+        ("GET", "/api/v1/ping")
+    );
+    assert_eq!(ping.auth.as_deref(), Some("Bearer secret-token"));
+
+    let dry = stdout(run(home.path(), &["upload", "--dry-run"]));
+    assert!(dry.contains("Would upload 2 sessions"), "{dry}");
+    assert!(server.puts().is_empty());
+
+    let sent = stdout(run(home.path(), &["upload"]));
+    assert!(sent.contains("Uploaded 2 sessions"), "{sent}");
+    let puts = server.puts();
+    assert_eq!(puts.len(), 2);
+    let machine_id = json_of(home.path(), &["export", "up-1"])["session"]["machine_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        puts[0].path,
+        format!("/api/v1/sessions/{machine_id}/claude-code/up-1")
+    );
+    assert_eq!(puts[0].auth.as_deref(), Some("Bearer secret-token"));
+    let body: serde_json::Value = serde_json::from_str(&puts[0].body).unwrap();
+    assert_eq!(body["schema_version"], 1);
+    assert_eq!(body["session"]["session_id"], "up-1");
+    assert_eq!(body["session"]["content"], "metadata");
+    assert_eq!(body["rewrite"]["files_measured"], 2);
+    assert!(!puts[0].body.contains("Parser module"));
+    assert!(!puts[0].body.contains(&*home.path().to_string_lossy()));
+
+    // Nothing changed: nothing is sent, even though rewrite was re-measured.
+    let again = stdout(run(home.path(), &["upload"]));
+    assert!(
+        again.contains("Uploaded 0 sessions") && again.contains("2 already up to date"),
+        "{again}"
+    );
+    assert_eq!(server.puts().len(), 2);
+    let status = stdout(run(home.path(), &["status"]));
+    assert!(status.contains("Uploaded:   2 of 2 sessions"), "{status}");
+    assert!(status.contains(&server.url), "{status}");
+
+    // One session gets another prompt: only that one is sent again.
+    capture(
+        home.path(),
+        serde_json::json!({ "session_id": "up-2", "hook_event_name": "UserPromptSubmit",
+                            "prompt_id": "p2", "prompt": "one more thing" }),
+    );
+    let changed = stdout(run(home.path(), &["upload"]));
+    assert!(changed.contains("Uploaded 1 sessions"), "{changed}");
+    assert!(server.puts()[2].path.ends_with("/up-2"));
+
+    // Choosing previews changes what is sent, so everything goes again.
+    stdout(run(home.path(), &["settings", "--content", "previews"]));
+    stdout(run(home.path(), &["upload"]));
+    assert_eq!(server.puts().len(), 5);
+    assert!(server.puts()[3].body.contains("Parser module"));
+}
+
+#[test]
+fn upload_failures_are_reported_and_retried_later() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    capture_editing_session(home.path(), "fail-1", &repo);
+    stdout(run(home.path(), &["connect", &server.url, "--token", "t"]));
+
+    server.answer_with(401);
+    let out = run(home.path(), &["upload"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("did not accept the token"),
+        "{}",
+        stderr(&out)
+    );
+
+    server.answer_with(422);
+    let out = run(home.path(), &["upload"]);
+    assert!(!out.status.success());
+    let text = stderr(&out);
+    assert!(
+        text.contains("fail-1 was not uploaded") && text.contains("stub says no"),
+        "{text}"
+    );
+
+    server.answer_with(503);
+    assert!(!run(home.path(), &["upload"]).status.success());
+
+    // Once the server is healthy the same session goes through.
+    server.answer_with(200);
+    let sent = stdout(run(home.path(), &["upload"]));
+    assert!(sent.contains("Uploaded 1 sessions"), "{sent}");
+
+    let gone = stdout(run(home.path(), &["disconnect"]));
+    assert!(gone.contains("Disconnected"), "{gone}");
+    assert!(!run(home.path(), &["upload"]).status.success());
+    assert!(stdout(run(home.path(), &["disconnect"])).contains("Not connected"));
+}
+
+#[test]
+fn connect_refuses_unsafe_or_unreachable_servers() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run(
+        home.path(),
+        &["connect", "http://example.com", "--token", "t"],
+    );
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("https://"), "{}", stderr(&out));
+
+    // A port nothing listens on.
+    let closed = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port())
+    };
+    let out = run(home.path(), &["connect", &closed, "--token", "t"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("Nothing was saved"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(stdout(run(home.path(), &["settings"])).contains("not connected"));
+
+    // A wrong token is caught by the check too.
+    let server = StubServer::start();
+    server.answer_with(403);
+    let out = run(home.path(), &["connect", &server.url, "--token", "wrong"]);
+    assert!(
+        stderr(&out).contains("did not accept the token"),
+        "{}",
+        stderr(&out)
+    );
+
+    // --no-check saves without contacting the server; the token comes from stdin.
+    let mut cmd = sessionly(home.path());
+    cmd.args(["connect", &closed, "--no-check"]);
+    let out = run_with_stdin(cmd, b"typed-token\n");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let config = fs::read_to_string(home.path().join("data/config.json")).unwrap();
+    assert!(config.contains("typed-token") && config.contains(&closed));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(home.path().join("data/config.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // the token is never printed
+    let shown = stdout(run(home.path(), &["settings"]));
+    assert!(!shown.contains("typed-token"), "{shown}");
+}
+
+#[test]
+fn a_session_ending_uploads_in_the_background() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    stdout(run(home.path(), &["connect", &server.url, "--token", "t"]));
+    let hook = |payload: serde_json::Value| {
+        let mut cmd = sessionly(home.path());
+        cmd.arg("capture")
+            .env_remove("SESSIONLY_NO_AUTO")
+            .env("SESSIONLY_AUTO_DELAY_MS", "0");
+        let out = run_with_stdin(cmd, payload.to_string().as_bytes());
+        assert_silent_success(&out, "capture with auto sync");
+    };
+    let wait_for_puts = |count: usize| {
+        for _ in 0..150 {
+            if server.puts().len() >= count {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    };
+
+    hook(
+        serde_json::json!({ "session_id": "bg-1", "hook_event_name": "UserPromptSubmit",
+                             "prompt_id": "p1", "prompt": "hello" }),
+    );
+    assert!(server.puts().is_empty(), "a prompt alone starts nothing");
+    hook(
+        serde_json::json!({ "session_id": "bg-1", "hook_event_name": "SessionEnd", "reason": "other" }),
+    );
+    assert!(
+        wait_for_puts(1),
+        "no upload arrived after the session ended"
+    );
+    assert!(server.puts()[0].path.ends_with("/claude-code/bg-1"));
+    let log = fs::read_to_string(home.path().join("data/auto.log")).unwrap();
+    assert!(
+        log.contains("synced 1") && log.contains("uploaded 1"),
+        "{log}"
+    );
+    assert!(stdout(run(home.path(), &["status"])).contains("last started"));
+
+    // Switched off: a session ending does nothing.
+    stdout(run(home.path(), &["settings", "--auto-sync", "off"]));
+    hook(
+        serde_json::json!({ "session_id": "bg-2", "hook_event_name": "SessionEnd", "reason": "other" }),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(server.puts().len(), 1);
 }

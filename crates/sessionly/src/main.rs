@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand};
 
+mod auto;
 mod capture;
 mod config;
 mod git;
@@ -87,6 +88,43 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Set the server that sessions are uploaded to
+    Connect {
+        /// Server address, e.g. https://sessionly.example.com
+        url: String,
+        /// Access token. Without this option it is read from standard input.
+        #[arg(long, env = "SESSIONLY_TOKEN", hide_env_values = true)]
+        token: Option<String>,
+        /// How much content uploads carry [default: keep the current setting, initially metadata]
+        #[arg(long, value_enum)]
+        content: Option<session::Content>,
+        /// Save the settings without contacting the server first
+        #[arg(long)]
+        no_check: bool,
+    },
+    /// Stop uploading and forget the server and its token
+    Disconnect,
+    /// Send new and changed sessions to the server
+    Upload {
+        /// Only report how many sessions would be sent
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show or change local settings
+    Settings {
+        /// Sync (and upload, if connected) in the background when a session ends
+        #[arg(long, value_name = "on|off", value_parser = parse_on_off)]
+        auto_sync: Option<bool>,
+        /// How much content uploads carry
+        #[arg(long, value_enum)]
+        content: Option<session::Content>,
+    },
+    /// One background sync and upload (started by the capture hook)
+    #[command(hide = true)]
+    Auto {
+        #[arg(long, default_value_t = 0)]
+        after_ms: u64,
+    },
     /// Print exactly what would be uploaded for a session
     Export {
         /// Session id or a unique prefix of one
@@ -158,6 +196,32 @@ impl From<FilterArgs> for ledger::Filter {
             until: a.until,
             min_cost: a.min_cost,
         }
+    }
+}
+
+fn parse_on_off(text: &str) -> Result<bool> {
+    match text {
+        "on" | "true" => Ok(true),
+        "off" | "false" => Ok(false),
+        _ => bail!("expected on or off"),
+    }
+}
+
+/// A token sent over plain http can be read by anyone on the network, so
+/// http is accepted only for a server on this machine.
+fn check_server_url(url: &str) -> Result<()> {
+    let local = ["http://localhost", "http://127.0.0.1", "http://[::1]"]
+        .iter()
+        .any(|prefix| {
+            url.strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '/']))
+        });
+    if url.starts_with("https://") || local {
+        Ok(())
+    } else {
+        bail!(
+            "the server address must start with https:// (http:// is accepted only for localhost)"
+        )
     }
 }
 
@@ -342,6 +406,97 @@ fn run(command: Command) -> Result<()> {
                 print!("{}", report::transcript(&summary));
             }
         }
+        Command::Connect {
+            url,
+            token,
+            content,
+            no_check,
+        } => {
+            let url = url.trim().trim_end_matches('/').to_string();
+            check_server_url(&url)?;
+            let token = match token {
+                Some(token) => token,
+                None => {
+                    eprint!("Token: ");
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line)?;
+                    line
+                }
+            };
+            let token = token.trim().to_string();
+            if token.is_empty() {
+                bail!("a token is required");
+            }
+            let path = paths::config_path()?;
+            let mut config = config::Config::load(&path)?;
+            let server = config::Server { url, token };
+            if !no_check {
+                if let Err(err) = upload::Client::new(&server).ping() {
+                    bail!("{err}. Nothing was saved; use --no-check to save the settings anyway.");
+                }
+            }
+            println!("Connected to {}", server.url);
+            config.server = Some(server);
+            if let Some(content) = content {
+                config.upload_content = content;
+            }
+            config.save(&path)?;
+            print_settings(&config);
+        }
+        Command::Disconnect => {
+            let path = paths::config_path()?;
+            let mut config = config::Config::load(&path)?;
+            match config.server.take() {
+                Some(server) => {
+                    config.save(&path)?;
+                    println!(
+                        "Disconnected from {}. Nothing more will be uploaded.",
+                        server.url
+                    );
+                }
+                None => println!("Not connected to a server."),
+            }
+        }
+        Command::Upload { dry_run } => {
+            let config = config::Config::load(&paths::config_path()?)?;
+            let mut ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
+            sync_ledger(&mut ledger, false)?;
+            let report = upload::run(&mut ledger, &config, dry_run)?;
+            let server = config.server.as_ref().map_or("", |s| s.url.as_str());
+            if dry_run {
+                println!(
+                    "Would upload {} sessions to {server} ({} already up to date)",
+                    report.sent, report.unchanged
+                );
+            } else {
+                println!(
+                    "Uploaded {} sessions to {server} ({} already up to date)",
+                    report.sent, report.unchanged
+                );
+            }
+            for (id, reason) in &report.failed {
+                eprintln!("warning: {id} was not uploaded: {reason}");
+            }
+            if let Some(reason) = report.stopped {
+                bail!("upload stopped early: {reason}");
+            }
+            if !report.failed.is_empty() {
+                bail!("{} sessions were not uploaded", report.failed.len());
+            }
+        }
+        Command::Settings { auto_sync, content } => {
+            let path = paths::config_path()?;
+            let mut config = config::Config::load(&path)?;
+            if auto_sync.is_some() || content.is_some() {
+                config.auto_sync = auto_sync.unwrap_or(config.auto_sync);
+                config.upload_content = content.unwrap_or(config.upload_content);
+                config.save(&path)?;
+            }
+            print_settings(&config);
+        }
+        Command::Auto { after_ms } => {
+            auto::run(after_ms);
+        }
         Command::Export { session, content } => {
             let config = config::Config::load(&paths::config_path()?)?;
             let mut ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
@@ -372,18 +527,44 @@ fn sync_ledger(
     force: bool,
 ) -> Result<(sync::Report, rewrite::Report)> {
     let config = config::Config::load(&paths::config_path()?)?;
-    let report = sync::run(
-        &paths::claude_raw_dir()?,
-        &paths::claude_facts_dir()?,
-        ledger,
-        &config.machine_id,
-        force,
-    )?;
+    let (report, rewrite) = sync::sync_all(ledger, &config, force)?;
     for (path, err) in &report.failed {
         eprintln!("warning: could not sync {}: {err}", path.display());
     }
-    let rewrite = rewrite::measure(ledger, Utc::now())?;
     Ok((report, rewrite))
+}
+
+fn content_name(content: session::Content) -> &'static str {
+    match content {
+        session::Content::Local => "local",
+        session::Content::Previews => "previews",
+        session::Content::Metadata => "metadata",
+    }
+}
+
+fn print_settings(config: &config::Config) {
+    println!("Machine id: {}", config.machine_id);
+    match &config.server {
+        Some(server) => println!("Server:     {}", server.url),
+        None => println!("Server:     not connected (nothing is uploaded)"),
+    }
+    println!(
+        "Uploads:    {} ({})",
+        content_name(config.upload_content),
+        match config.upload_content {
+            session::Content::Previews =>
+                "200-character previews of prompts, commands and errors are sent",
+            _ => "no text from prompts, commands or output is sent",
+        }
+    );
+    println!(
+        "Auto sync:  {}",
+        if config.auto_sync {
+            "on (runs in the background when a session ends)"
+        } else {
+            "off"
+        }
+    );
 }
 
 fn status(target: &Target) -> Result<()> {
@@ -414,5 +595,19 @@ fn status(target: &Target) -> Result<()> {
         sessions,
         bytes as f64 / 1e6
     );
+    let config = config::Config::load(&paths::config_path()?)?;
+    print_settings(&config);
+    if let Some(ago) = auto::last_started(&paths::data_dir()?) {
+        println!("            last started {} ago", report::age(ago));
+    }
+    if let Some(server) = &config.server {
+        let ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
+        let ids = ledger.session_ids()?;
+        let sent = ids
+            .iter()
+            .filter(|id| matches!(ledger.uploaded_hash(id, &server.url), Ok(Some(_))))
+            .count();
+        println!("Uploaded:   {sent} of {} sessions in the ledger", ids.len());
+    }
     Ok(())
 }

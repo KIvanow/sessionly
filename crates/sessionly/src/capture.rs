@@ -73,7 +73,12 @@ pub fn file_stem(session_id: Option<&str>) -> String {
 }
 
 /// Read one payload from `input` and append it to `raw_dir/<session_id>.jsonl`.
-pub fn capture(raw_dir: &Path, input: &mut impl Read, received_at: &str) -> Result<PathBuf> {
+/// Returns the file written and the hook event's name.
+pub fn capture(
+    raw_dir: &Path,
+    input: &mut impl Read,
+    received_at: &str,
+) -> Result<(PathBuf, String)> {
     let mut bytes = Vec::new();
     input.read_to_end(&mut bytes)?;
     let record = build_record(&String::from_utf8_lossy(&bytes), received_at);
@@ -82,7 +87,8 @@ pub fn capture(raw_dir: &Path, input: &mut impl Read, received_at: &str) -> Resu
     let mut line = serde_json::to_string(&record)?;
     line.push('\n');
     append(&path, line.as_bytes())?;
-    Ok(path)
+    let hook = record["hook"].as_str().unwrap_or("?").to_string();
+    Ok((path, hook))
 }
 
 /// Hook entry point. Always returns exit code 0 and never prints.
@@ -94,11 +100,18 @@ pub fn run() -> i32 {
         let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
         return 0;
     };
-    if let Err(err) = capture(&raw_dir, &mut std::io::stdin().lock(), &received_at) {
-        let _ = append(
-            &raw_dir.join("_errors.log"),
-            format!("{received_at} {err:#}\n").as_bytes(),
-        );
+    match capture(&raw_dir, &mut std::io::stdin().lock(), &received_at) {
+        Ok((_, hook)) => {
+            if let Ok(data_dir) = crate::paths::data_dir() {
+                crate::auto::maybe_spawn(&hook, &data_dir);
+            }
+        }
+        Err(err) => {
+            let _ = append(
+                &raw_dir.join("_errors.log"),
+                format!("{received_at} {err:#}\n").as_bytes(),
+            );
+        }
     }
     0
 }
@@ -174,7 +187,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let payload = br#"{"session_id":"s1","hook_event_name":"PreToolUse"}"#;
         capture(dir.path(), &mut &payload[..], "t1").unwrap();
-        let path = capture(dir.path(), &mut &payload[..], "t2").unwrap();
+        let (path, hook) = capture(dir.path(), &mut &payload[..], "t2").unwrap();
+        assert_eq!(hook, "PreToolUse");
         let text = fs::read_to_string(path).unwrap();
         let lines: Vec<Value> = text
             .lines()
@@ -187,7 +201,7 @@ mod tests {
     #[test]
     fn non_utf8_input_is_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let path = capture(dir.path(), &mut &b"\xff\xfe{"[..], "t").unwrap();
+        let (path, _) = capture(dir.path(), &mut &b"\xff\xfe{"[..], "t").unwrap();
         assert!(path.ends_with("_unknown.jsonl"));
         assert_eq!(fs::read_to_string(path).unwrap().lines().count(), 1);
     }
