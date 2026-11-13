@@ -324,6 +324,7 @@ fn facts(
             transcript_estimate_usd: total_usd,
             unpriced_requests: 0,
             untracked_usd: None,
+            prompts_covered: None,
         }),
         usage: models,
         subagents: Vec::new(),

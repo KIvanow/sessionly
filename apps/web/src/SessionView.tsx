@@ -13,6 +13,11 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
   const hasText = s.content === "previews";
   // Cursor records the end of only some turns: its absence says nothing.
   const noEnd = s.source === "cursor" ? "–" : "no end recorded";
+  // Usage seen only through hooks covers only the turns that ran while they were installed.
+  const covered =
+    s.cost?.prompts_covered == null
+      ? ""
+      : `; covers ${count(s.cost.prompts_covered)} of ${count(counts.prompts ?? 0)} prompts, the ones the hooks saw`;
 
   const tools = new Map<string, { calls: number; notOk: number; ms: number }>();
   for (const call of s.tool_calls ?? []) {
@@ -43,9 +48,9 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
             label="Cost"
             value={
               s.cost
-                ? `${cost(s.cost.total_usd ?? 0, s.cost.source ?? null)} (${(s.cost.source ?? "").replaceAll("_", " ")})`
+                ? `${cost(s.cost.total_usd ?? 0, s.cost.source ?? null)} (${(s.cost.source ?? "").replaceAll("_", " ")}${covered})`
                 : s.source === "cursor"
-                  ? "unknown: Cursor's transcripts record no usage"
+                  ? "unknown: Cursor reports usage only to hooks, and they saw none of this session"
                   : "unknown"
             }
           />
@@ -69,6 +74,9 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
         {s.cost && (s.cost.unpriced_requests ?? 0) > 0 && (
           <p className="muted">The cost leaves out {count(s.cost.unpriced_requests ?? 0)} requests to models without a known price.</p>
         )}
+        {s.cost && s.source === "cursor" && (
+          <p className="muted">The cost is the turns' tokens at API list prices, not what Cursor bills.</p>
+        )}
         {s.captured_from_start === false && (
           <p className="muted">Capture began partway through: activity covers the captured part, cost covers the whole session.</p>
         )}
@@ -82,7 +90,8 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
               <thead>
                 <tr>
                   <th scope="col">Model</th>
-                  <th scope="col" className="num">Requests</th>
+                  {/* Cursor reports tokens per turn, not per request. */}
+                  <th scope="col" className="num">{s.source === "cursor" ? "Turns" : "Requests"}</th>
                   <th scope="col" className="num">Input</th>
                   <th scope="col" className="num">Output</th>
                   <th scope="col" className="num">Cache read</th>

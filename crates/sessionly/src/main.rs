@@ -8,6 +8,7 @@ use clap::{Args, Parser, Subcommand};
 mod auto;
 mod capture;
 mod config;
+mod cursor_hooks;
 mod git;
 mod hooks;
 mod import;

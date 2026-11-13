@@ -6,7 +6,7 @@ import { Overview } from "./Overview.tsx";
 import { SessionView } from "./SessionView.tsx";
 import { Sessions } from "./Sessions.tsx";
 import { Team } from "./Team.tsx";
-import { toolName } from "./format.ts";
+import { modelName, toolName } from "./format.ts";
 import { useApi } from "./useApi.ts";
 
 export interface Scope {
@@ -16,6 +16,8 @@ export interface Scope {
   repo: string;
   /** An agent (`claude-code`, `cursor`, `grok`), or "" for all. */
   tool: string;
+  /** A model id, or "" for all. */
+  model: string;
 }
 
 /** The scope as query parameters for the API. */
@@ -25,7 +27,13 @@ export function scopeParams(scope: Scope): Record<string, string | undefined> {
   const since = Number.isFinite(days)
     ? new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000 - days * 86_400_000).toISOString()
     : undefined;
-  return { since, user: scope.user || undefined, repo: scope.repo || undefined, tool: scope.tool || undefined };
+  return {
+    since,
+    user: scope.user || undefined,
+    repo: scope.repo || undefined,
+    tool: scope.tool || undefined,
+    model_is: scope.model || undefined,
+  };
 }
 
 function useHash(): string {
@@ -98,7 +106,7 @@ export function App() {
 
 function Shell({ token, me, onSignOut }: { token: string; me: Me; onSignOut: () => void }) {
   const route = useHash();
-  const [scope, setScope] = useState<Scope>({ period: "30", user: "", repo: "", tool: "" });
+  const [scope, setScope] = useState<Scope>({ period: "30", user: "", repo: "", tool: "", model: "" });
   const options = useApi<FilterOptions>(token, "/filters", onSignOut);
   const [page, ...rest] = route.split("/");
   const isAdmin = me.role === "admin";
@@ -176,6 +184,17 @@ function Shell({ token, me, onSignOut }: { token: string; me: Me; onSignOut: () 
                 </select>
               </label>
             )}
+            <label>
+              Model
+              <select value={scope.model} onChange={(e) => setScope({ ...scope, model: e.target.value })}>
+                <option value="">All models</option>
+                {options.data?.models.map((m) => (
+                  <option key={m} value={m}>
+                    {modelName(m)}
+                  </option>
+                ))}
+              </select>
+            </label>
           </form>
         )}
         {view}

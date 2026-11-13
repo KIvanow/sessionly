@@ -66,6 +66,7 @@ function filtersFrom(query: Record<string, string>): Filters {
     repo: query.repo || undefined,
     repo_is: query.repo_is || undefined,
     model: query.model || undefined,
+    model_is: query.model_is || undefined,
     tool: query.tool || undefined,
     q: query.q || undefined,
     since: time(query.since, "since"),

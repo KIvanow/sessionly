@@ -4,11 +4,17 @@
 //! A transcript has the prompts (most with the minute they were sent) and
 //! every tool call with its input, and for some turns a row when the turn
 //! ends. It has no tool results, no other times, no tokens, no cost and no
-//! model. So for a Cursor session:
+//! model. So from the transcript alone:
 //! - tool calls are taken as having succeeded;
 //! - the only times are each prompt's minute and the file's own (when it was
 //!   created and last written), so there is no active time;
 //! - cost and models are unknown.
+//!
+//! Turns that ran while the hooks were installed have all of that in the
+//! hook capture (see `cursor_hooks`). Those turns are paired with the
+//! transcript's prompts and get their exact times, tool durations and
+//! failures, model and tokens. The transcript stays the record of what
+//! happened; the hooks add to the turns they saw.
 //!
 //! Cursor's tools are mapped to the names used for Claude Code's (Read, Edit,
 //! Write, Bash, Grep, Glob) so sessions from different agents can be compared.
@@ -20,6 +26,7 @@ use anyhow::Result;
 use chrono::{DateTime, FixedOffset, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use serde_json::{json, Value};
 
+use crate::cursor_hooks::{self, Turn};
 use crate::import::{edit_result, slim_input, Builder};
 use crate::paths::CURSOR;
 use crate::transcript::Facts;
@@ -101,6 +108,35 @@ fn stamp(time: Option<DateTime<Utc>>) -> String {
         .unwrap_or_default()
 }
 
+/// A time the hooks recorded, kept to the millisecond.
+fn exact(time: DateTime<Utc>) -> String {
+    time.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+/// The turn the hooks saw for a prompt in the transcript: the same text, sent
+/// in the minute the transcript gives. Without that minute the text alone
+/// decides, and the earliest turn not yet paired is taken.
+fn find_turn(turns: &[Turn], prompt: &str, minute: Option<DateTime<Utc>>) -> Option<usize> {
+    turns.iter().position(|turn| {
+        !turn.matched
+            && turn.prompt.trim() == prompt
+            && minute.is_none_or(|m| (-60..180).contains(&(turn.at - m).num_seconds()))
+    })
+}
+
+/// The end of a turn as the hooks saw it.
+fn end_turn(out: &mut Builder, turn: &Turn, prompt_id: String) {
+    let Some(ended) = turn.ended_at else { return };
+    match &turn.error {
+        Some(error) => out.push(
+            &exact(ended),
+            "StopFailure",
+            json!({ "prompt_id": prompt_id, "error": error }),
+        ),
+        None => out.push(&exact(ended), "Stop", json!({ "prompt_id": prompt_id })),
+    }
+}
+
 /// Cursor's tool and its input under the names used for Claude Code's tools,
 /// with the result an edit implies.
 fn canonical(name: &str, input: &Value) -> (String, Value, Value) {
@@ -139,10 +175,22 @@ fn canonical(name: &str, input: &Value) -> (String, Value, Value) {
     }
 }
 
-/// Read one transcript file into events. Returns how many tool calls it had.
-fn read_file(path: &Path, agent_id: Option<&str>, out: &mut Builder) -> Result<u64> {
+/// Read one transcript file into events, taking times and outcomes from the
+/// turns the hooks saw (`hooked`; none for a subagent's file). Returns how
+/// many tool calls and prompts it had.
+fn read_file(
+    path: &Path,
+    agent_id: Option<&str>,
+    hooked: &mut [Turn],
+    out: &mut Builder,
+) -> Result<(u64, u64)> {
     let mut prompts = 0u64;
     let mut calls = 0u64;
+    // The hooked turn of the prompt being read, the next of its tool calls to
+    // pair, and whether its end is still to be written.
+    let mut current: Option<usize> = None;
+    let mut next_tool = 0usize;
+    let mut open: Option<usize> = None;
     let stem = path
         .file_stem()
         .unwrap_or_default()
@@ -160,9 +208,24 @@ fn read_file(path: &Path, agent_id: Option<&str>, out: &mut Builder) -> Result<u
                 let text = text.join("\n");
                 let prompt = user_query(&text).to_string();
                 if !prompt.is_empty() && !is_injected_context(&text) {
+                    // The transcript has no row for the end of every turn.
+                    if let Some(i) = open.take() {
+                        end_turn(out, &hooked[i], format!("p{prompts}"));
+                    }
                     prompts += 1;
+                    let minute = prompt_time(&text);
+                    current = find_turn(hooked, &prompt, minute);
+                    next_tool = 0;
+                    let at = match current {
+                        Some(i) => {
+                            hooked[i].matched = true;
+                            open = Some(i);
+                            exact(hooked[i].at)
+                        }
+                        None => stamp(minute),
+                    };
                     out.push(
-                        &stamp(prompt_time(&text)),
+                        &at,
                         "UserPromptSubmit",
                         json!({ "prompt_id": format!("p{prompts}"), "prompt": prompt }),
                     );
@@ -190,15 +253,41 @@ fn read_file(path: &Path, agent_id: Option<&str>, out: &mut Builder) -> Result<u
                     if let Some(agent) = agent_id {
                         payload["agent_id"] = json!(agent);
                     }
-                    out.push("", "PreToolUse", payload.clone());
-                    // No result is recorded; the call is taken as done.
-                    payload["tool_response"] = result;
-                    out.push("", "PostToolUse", payload);
+                    // The hooks saw the turn's calls in the same order. A call
+                    // that does not line up ends the pairing for the turn.
+                    let seen = current
+                        .and_then(|i| hooked[i].tools.get(next_tool))
+                        .filter(|seen| seen.name == name);
+                    let Some(seen) = seen else {
+                        next_tool = usize::MAX;
+                        out.push("", "PreToolUse", payload.clone());
+                        // No result is recorded; the call is taken as done.
+                        payload["tool_response"] = result;
+                        out.push("", "PostToolUse", payload);
+                        continue;
+                    };
+                    next_tool += 1;
+                    out.push(&exact(seen.at), "PreToolUse", payload.clone());
+                    let ms = seen.duration_ms.unwrap_or(0);
+                    let done = exact(seen.at + chrono::Duration::milliseconds(ms as i64));
+                    payload["duration_ms"] = json!(seen.duration_ms);
+                    match &seen.error {
+                        Some(error) => {
+                            payload["error"] = json!(error);
+                            out.push(&done, "PostToolUseFailure", payload);
+                        }
+                        None => {
+                            payload["tool_response"] = result;
+                            out.push(&done, "PostToolUse", payload);
+                        }
+                    }
                 }
             }
             (_, Some("turn_ended")) if agent_id.is_none() => {
                 let prompt_id = format!("p{prompts}");
-                if row["status"] == "error" {
+                if let Some(i) = open.take().filter(|&i| hooked[i].ended_at.is_some()) {
+                    end_turn(out, &hooked[i], prompt_id);
+                } else if row["status"] == "error" {
                     out.push(
                         "",
                         "StopFailure",
@@ -211,7 +300,10 @@ fn read_file(path: &Path, agent_id: Option<&str>, out: &mut Builder) -> Result<u
             _ => {}
         }
     })?;
-    Ok(calls)
+    if let Some(i) = open {
+        end_turn(out, &hooked[i], format!("p{prompts}"));
+    }
+    Ok((calls, prompts))
 }
 
 /// The directory a Cursor project folder name stands for. Cursor names the
@@ -248,16 +340,18 @@ fn time_of(time: std::io::Result<std::time::SystemTime>) -> Option<DateTime<Utc>
     time.ok().map(DateTime::<Utc>::from)
 }
 
-/// The session's events and what little is known beyond them. `transcript`
-/// is `<project>/agent-transcripts/<id>/<id>.jsonl`.
-pub fn session(transcript: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
+/// The session's events and what is known beyond them. `transcript` is
+/// `<project>/agent-transcripts/<id>/<id>.jsonl`; `capture` is the raw hook
+/// capture of the session, if the hooks saw any of it.
+pub fn session(transcript: &Path, capture: Option<&Path>) -> Result<(Vec<Value>, Option<Facts>)> {
     let session_id = transcript
         .file_stem()
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
+    let mut hooked = capture.map(cursor_hooks::read).unwrap_or_default();
     let mut out = Builder::new(CURSOR, &session_id);
-    let calls = read_file(transcript, None, &mut out)?;
+    let (calls, prompts) = read_file(transcript, None, &mut hooked.turns, &mut out)?;
     let mut total = calls;
     for file in subagent_files(transcript) {
         let agent = file
@@ -267,7 +361,7 @@ pub fn session(transcript: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
             .into_owned();
         let identity = json!({ "agent_id": agent, "agent_type": "" });
         out.push("", "SubagentStart", identity.clone());
-        total += read_file(&file, Some(&agent), &mut out)?;
+        total += read_file(&file, Some(&agent), &mut [], &mut out)?.0;
         out.push("", "SubagentStop", identity);
     }
     let events = out.in_order();
@@ -290,9 +384,13 @@ pub fn session(transcript: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
     let mut all = out.in_order();
     all.extend(events);
 
+    let (usage, cost) = cursor_hooks::usage(&hooked.turns, prompts);
     let facts = Facts {
         first_at: created,
         last_at: modified,
+        version: hooked.cursor_version,
+        cost,
+        usage,
         ..Default::default()
     };
     Ok((all, Some(facts)))
@@ -302,6 +400,165 @@ pub fn session(transcript: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn turns_the_hooks_saw_get_their_times_model_and_tokens() {
+        use crate::cursor_hooks::tests::{event, write};
+        use crate::session::{CostSource, Outcome, ToolStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("projects/no-such-place/agent-transcripts/k2/k2.jsonl");
+        let asked = |day: &str, text: &str| {
+            user(&format!(
+                "<timestamp>{day}, 2026, 11:59 PM (UTC+2)</timestamp>\n<user_query>\n{text}\n</user_query>"
+            ))
+        };
+        write_rows(
+            &path,
+            &[
+                // the same words a day earlier, before the hooks were installed
+                asked("Thursday, Nov 12", "which are open?"),
+                uses(&[("Shell", json!({ "command": "gh issue list" }))]),
+                json!({ "type": "turn_ended", "status": "success" }),
+                asked("Friday, Nov 13", "which are open?"),
+                uses(&[
+                    ("Shell", json!({ "command": "gh issue list" })),
+                    ("Read", json!({ "path": "/w/repo/gone.rs" })),
+                ]),
+                // the hooks have no third call for this turn
+                uses(&[("Grep", json!({ "pattern": "TODO" }))]),
+                json!({ "type": "turn_ended", "status": "success" }),
+                // the transcript has no row for the end of this turn
+                asked("Friday, Nov 13", "and now?"),
+            ],
+        );
+        let capture = dir.path().join("raw/cursor/k2.jsonl");
+        write(
+            &capture,
+            &[
+                event(
+                    10,
+                    "beforeSubmitPrompt",
+                    "g1",
+                    json!({ "prompt": "which are open?", "model_id": "claude-opus-5-5" }),
+                ),
+                event(
+                    12,
+                    "preToolUse",
+                    "g1",
+                    json!({ "tool_use_id": "t1", "tool_name": "Shell" }),
+                ),
+                event(
+                    16,
+                    "postToolUse",
+                    "g1",
+                    json!({ "tool_use_id": "t1", "duration": 3503.2, "tool_output": "secret output" }),
+                ),
+                event(
+                    17,
+                    "preToolUse",
+                    "g1",
+                    json!({ "tool_use_id": "t2", "tool_name": "Read" }),
+                ),
+                event(
+                    18,
+                    "postToolUseFailure",
+                    "g1",
+                    json!({ "tool_use_id": "t2", "error_message": "no such file" }),
+                ),
+                event(
+                    30,
+                    "stop",
+                    "g1",
+                    json!({ "status": "completed", "input_tokens": 1_000_000, "output_tokens": 0 }),
+                ),
+                event(
+                    40,
+                    "beforeSubmitPrompt",
+                    "g2",
+                    json!({ "prompt": "and now?", "model_id": "gpt-9" }),
+                ),
+                event(
+                    41,
+                    "stop",
+                    "g2",
+                    json!({ "status": "error", "input_tokens": 100, "output_tokens": 10 }),
+                ),
+            ],
+        );
+
+        let (events, facts) = session(&path, Some(&capture)).unwrap();
+        // what a tool printed stays in the raw capture
+        assert!(!serde_json::to_string(&events).unwrap().contains("secret"));
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CURSOR).unwrap();
+
+        let at = |t: Option<DateTime<Utc>>| t.map(|t| t.format("%d %H:%M:%S%.3f").to_string());
+        let turns: Vec<_> = s
+            .prompts
+            .iter()
+            .map(|p| (at(p.at), at(p.ended_at), p.outcome))
+            .collect();
+        assert_eq!(
+            turns,
+            [
+                (
+                    Some("12 21:59:00.000".into()),
+                    None,
+                    Some(Outcome::Completed)
+                ),
+                (
+                    Some("13 21:59:10.500".into()),
+                    Some("13 21:59:30.500".into()),
+                    Some(Outcome::Completed)
+                ),
+                (
+                    Some("13 21:59:40.500".into()),
+                    Some("13 21:59:41.500".into()),
+                    Some(Outcome::ApiError)
+                ),
+            ]
+        );
+        assert_eq!(s.active_ms, 21_000);
+        let calls: Vec<_> = s
+            .tool_calls
+            .iter()
+            .map(|c| (c.tool.as_str(), c.status, c.duration_ms, c.error.as_deref()))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("Bash", ToolStatus::Ok, None, None),
+                ("Bash", ToolStatus::Ok, Some(3_503), None),
+                (
+                    "Read",
+                    ToolStatus::Failed,
+                    Some(1_000),
+                    Some("no such file")
+                ),
+                ("Grep", ToolStatus::Ok, None, None),
+            ]
+        );
+
+        assert_eq!(s.models, ["claude-opus-5-5", "gpt-9"]);
+        assert_eq!(s.agent_version.as_deref(), Some("3.27.22"));
+        let cost = s.cost.unwrap();
+        assert_eq!(
+            (
+                cost.total_usd,
+                cost.source,
+                cost.unpriced_requests,
+                cost.prompts_covered
+            ),
+            (4.0, CostSource::PartialEstimate, 1, Some(2))
+        );
+
+        // without a capture nothing is made up
+        let (events, facts) = session(&path, None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CURSOR).unwrap();
+        assert!(s.cost.is_none() && s.models.is_empty() && s.active_ms == 0);
+        assert!(s.tool_calls.iter().all(|c| c.status == ToolStatus::Ok));
+    }
 
     #[test]
     fn reads_the_time_beside_a_prompt() {
@@ -374,7 +631,7 @@ mod tests {
             ],
         );
 
-        let (events, facts) = session(&path).unwrap();
+        let (events, facts) = session(&path, None).unwrap();
         let facts = facts.unwrap();
         assert_eq!(events[0]["hook"], "SessionStart");
         assert!(events.iter().all(|e| e["source"] == "cursor"));
@@ -477,7 +734,7 @@ mod tests {
             &path,
             &[json!({ "type": "turn_ended", "status": "success" })],
         );
-        let (events, facts) = session(&path).unwrap();
+        let (events, facts) = session(&path, None).unwrap();
         assert!(events.is_empty() && facts.is_none());
     }
 }

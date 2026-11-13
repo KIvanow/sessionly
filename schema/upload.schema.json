@@ -416,6 +416,16 @@
           ],
           "format": "double",
           "default": null
+        },
+        "prompts_covered": {
+          "description": "How many of the session's prompts the figure covers, when it can't\ncover them all: an agent that reports usage only to hooks (Cursor) has\nnone for turns that ran before the hooks were installed. Null when the\nfigure covers the whole session.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
         }
       }
     },

@@ -66,9 +66,10 @@ main { max-width: 1240px; margin: 0 auto; padding: 20px 24px 60px; display: grid
 main.center { min-height: 100vh; place-items: center; }
 main > p { margin: 0; }
 
-.filters { display: flex; flex-wrap: wrap; gap: 12px 16px; }
+/* The filters share the full width of the page in equal columns. */
+.filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px 16px; }
 .filters label, .inline label, .login label { display: grid; gap: 3px; font-size: 0.85rem; color: var(--ink-2); }
-.filters select { max-width: 280px; }
+.filters select { width: 100%; min-width: 0; }
 
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; min-width: 0; }
 .card > p { margin: 8px 0 0; }

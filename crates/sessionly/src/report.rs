@@ -247,7 +247,8 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
         None if s.source == crate::paths::CURSOR => field(
             &mut out,
             "Cost",
-            "unknown (Cursor's transcripts record no usage)".into(),
+            "unknown (Cursor reports usage only to hooks, and they saw none of this session)"
+                .into(),
         ),
         None => field(&mut out, "Cost", "unknown (no transcript found)".into()),
     }
@@ -261,6 +262,23 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
             &mut out,
             "",
             format!("leaves out {n} requests to models without a known price"),
+        );
+    }
+    if let Some(n) = s.cost.as_ref().and_then(|c| c.prompts_covered) {
+        field(
+            &mut out,
+            "",
+            format!(
+                "covers {n} of {} prompts: the ones the hooks saw",
+                s.prompts.len()
+            ),
+        );
+    }
+    if s.cost.is_some() && s.source == crate::paths::CURSOR {
+        field(
+            &mut out,
+            "",
+            "tokens at API list prices, not what Cursor bills".into(),
         );
     }
     if !s.captured_from_start {

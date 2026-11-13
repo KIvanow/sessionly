@@ -158,6 +158,13 @@ export interface Cost {
    * it can't be worked out (no recorded total, or a model without a known price).
    */
   untracked_usd?: number | null;
+  /**
+   * How many of the session's prompts the figure covers, when it can't
+   * cover them all: an agent that reports usage only to hooks (Cursor) has
+   * none for turns that ran before the hooks were installed. Null when the
+   * figure covers the whole session.
+   */
+  prompts_covered?: number | null;
 }
 export interface ModelUsage {
   model?: string;

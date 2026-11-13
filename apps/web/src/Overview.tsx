@@ -144,10 +144,10 @@ function RepoDetail(props: RepoProps) {
 
 /** The agents that worked in one repository, compared. */
 function RepoTools(props: RepoProps) {
-  const { user, since, tool } = scopeParams(props.scope);
+  const { user, since, tool, model_is } = scopeParams(props.scope);
   const summary = useApi<Summary>(
     props.token,
-    `/summary${query({ by: "tool", repo_is: props.repo, user, since, tool })}`,
+    `/summary${query({ by: "tool", repo_is: props.repo, user, since, tool, model_is })}`,
     props.onSignOut,
   );
   if (summary.error) return <p role="alert">{summary.error}</p>;
@@ -197,11 +197,11 @@ function RepoTools(props: RepoProps) {
 /** The files agents changed in one repository, most lines added first. */
 function RepoFiles(props: RepoProps) {
   const [all, setAll] = useState(false);
-  const { user, since, tool } = scopeParams(props.scope);
+  const { user, since, tool, model_is } = scopeParams(props.scope);
   const several = props.tools.length > 1;
   const list = useApi<FileList>(
     props.token,
-    `/files${query({ repo_is: props.repo, user, since, tool, limit: all ? 2000 : FILES_SHOWN })}`,
+    `/files${query({ repo_is: props.repo, user, since, tool, model_is, limit: all ? 2000 : FILES_SHOWN })}`,
     props.onSignOut,
   );
   if (list.error) return <p role="alert">{list.error}</p>;

@@ -254,26 +254,35 @@ them apart:
 ```
 $ sessionly summary --by tool
 TOOL         SESSIONS       COST    ACTIVE  PROMPTS  TOOLS (FAILED)  FILES           LINES      REWRITTEN  LINES KEPT
-Claude Code       100   $5099.96   169h 2m     1828     40565 (774)    909    +77412 -5448  378/902 (42%)         60%
+Claude Code       100   $5099.96  169h 48m     1830     40635 (774)    910    +77733 -5448  378/903 (42%)         60%
 Grok                3      $6.51    2h 32m       15         572 (9)     26     +6324 -1066     9/26 (35%)         48%
-Cursor             30          -         -      370        5323 (0)    183     +7498 -1431   28/178 (16%)         91%
+Cursor             30      $0.89       26s      371        5324 (0)    183     +7498 -1431   28/178 (16%)         91%
 ```
 
 Both are read from the files the agent itself keeps, by `sessionly import`. The agents' tools
 are mapped to common names (Read, Edit, Write, Bash, Grep, Glob) so a row means the same thing
 whichever agent produced it. Sign-in files of either agent are never opened.
 
+Both agents also run the hooks in `~/.claude/settings.json`, so after `sessionly install` their
+sessions are noticed as they happen and brought in at the next sync without running `import`.
+Checked with Grok 1.0.77 and Cursor 3.27.
+
 | | Read from | Has | Does not have |
 |---|---|---|---|
 | **Grok** | `~/.grok/sessions/<directory>/<session>/` | prompts, tool calls with their outcome, files and lines changed, times, model, tokens, and Grok's own cost figure | subagents; permission prompts (a call that was not allowed counts as failed) |
-| **Cursor** | `~/.cursor/projects/<project>/agent-transcripts/` | prompts and the minute each was sent, tool calls with their input, files and lines changed, subagents | cost, tokens and model; whether a tool call failed (all count as succeeded); how long a turn took (no active time) |
+| **Cursor** | `~/.cursor/projects/<project>/agent-transcripts/`, plus the hook capture | prompts and the minute each was sent, tool calls with their input, files and lines changed, subagents. For turns the hooks saw: exact times, how long each tool call took and whether it failed, the model, and tokens | anything but prompts, tool calls and files for turns that ran before the hooks were installed; Cursor's own cost figure |
 
-Grok's terminal agent also runs the hooks in `~/.claude/settings.json`, so after
-`sessionly install` its sessions are noticed as they happen and imported at the next sync
-without running `import`; this was checked with Grok 1.0.77. Cursor documents the same for its
-agent, but that has not been checked here: until it is, run `sessionly import` to pick up
-Cursor sessions. Cursor's totals are a floor for cost: the sessions happened, but no figure for
-them exists on the machine.
+What Cursor's transcripts leave out, it tells the hooks: when a prompt was sent and its turn
+ended, the model, and the tokens the turn used. A turn the hooks saw is paired with its prompt
+in the transcript (same text, same minute) and gets those. So for a Cursor session:
+
+- **Cost is an estimate, and only for the turns the hooks saw.** It is those turns' tokens at
+  API list prices, which is a measure of the work done, not what Cursor bills. `show` says how
+  many prompts it covers (`covers 1 of 13 prompts`). A session the hooks saw none of has no
+  cost, and adds nothing to totals; a model without a known price is left out the same way.
+- **Active time** counts only those turns too.
+- **Tokens are per turn**, not per request, so a model's request count is its number of turns.
+- For turns from before the hooks, every tool call counts as succeeded and there is no model.
 
 A Cursor session's repository is worked out from the project folder's name, which Cursor
 derives from the path; if that directory no longer exists the session has no repository.
@@ -477,8 +486,8 @@ Sign in with a token. An admin sees the whole team; a member sees their own sess
   those agents within it and to list the files they changed: which agents touched each file,
   sessions, lines added and removed, how many of the agents' lines are still there, and when it
   was last changed.
-- **Sessions:** a searchable, paged list. Period, person, repository and tool filters apply to
-  both pages.
+- **Sessions:** a searchable, paged list. Period, person, repository, tool and model filters
+  apply to both pages; a session counts under its most used model.
 - **One session:** cost and tokens per model, prompts with how long each took and how it ended,
   files changed with how much of each survives, tools, and subagents.
 - **Team** (admins): create a token for someone and revoke tokens.
@@ -491,7 +500,8 @@ While working on the dashboard, `pnpm dev` runs it with live reload and passes A
 server on port 8080.
 
 **API behind it:** `GET /api/v1/summary?by=user|repo|model|tool|day`, `GET /api/v1/sessions`
-(filters `user`, `repo`, `model`, `tool`, `q`, `since`, `until`, paging `limit`, `offset`),
+(filters `user`, `repo`, `model`, `model_is`, `tool`, `q`, `since`, `until`, paging `limit`,
+`offset`),
 `GET /api/v1/sessions/{machine_id}/{source}/{session_id}`, `GET /api/v1/files` (files agents
 changed, with `repo_is` for one repository) and `GET /api/v1/filters`.
 

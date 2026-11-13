@@ -460,7 +460,7 @@ impl AgentHomes {
 
 /// Raised when an importer reads more, or differently, from the same files,
 /// so that sessions imported by an older binary are imported again.
-const IMPORT_VERSION: u64 = 2;
+const IMPORT_VERSION: u64 = 3;
 
 /// The source file, its size and the importer's version recorded in an
 /// import file's first record.
@@ -512,13 +512,25 @@ struct Found {
     path: PathBuf,
 }
 
+/// The raw hook capture of a session, which a Cursor import also reads.
+fn capture_of(found: &Found, data_dir: &Path) -> PathBuf {
+    let stem = crate::capture::file_stem(Some(&found.session_id));
+    data_dir
+        .join("raw")
+        .join(found.source)
+        .join(format!("{stem}.jsonl"))
+}
+
 /// Combined size of the files a session is imported from. An import is redone
 /// when this changes.
-fn source_bytes(source: &str, path: &Path) -> u64 {
-    match source {
-        GROK => crate::import_grok::session_bytes(path),
-        CURSOR => crate::import_cursor::session_bytes(path),
-        _ => transcript::tree_size(path),
+fn source_bytes(found: &Found, data_dir: &Path) -> u64 {
+    let size = |path: &Path| fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    match found.source {
+        GROK => crate::import_grok::session_bytes(&found.path),
+        CURSOR => {
+            crate::import_cursor::session_bytes(&found.path) + size(&capture_of(found, data_dir))
+        }
+        _ => transcript::tree_size(&found.path),
     }
 }
 
@@ -529,14 +541,17 @@ fn import_one(found: &Found, data_dir: &Path, report: &mut Report) {
         .join("imported")
         .join(found.source)
         .join(format!("{stem}.jsonl"));
-    let bytes = source_bytes(found.source, &found.path);
+    let bytes = source_bytes(found, data_dir);
     if imported_from(&target) == Some((found.path.clone(), bytes, IMPORT_VERSION)) {
         report.up_to_date += 1;
         return;
     }
     let built: Result<(Vec<Value>, Option<Facts>)> = match found.source {
         GROK => crate::import_grok::session(&found.path),
-        CURSOR => crate::import_cursor::session(&found.path),
+        CURSOR => {
+            let capture = capture_of(found, data_dir);
+            crate::import_cursor::session(&found.path, capture.exists().then_some(&*capture))
+        }
         _ => events_from_transcript(&found.path).map(|events| (events, None)),
     };
     let result = built.and_then(|(mut events, facts)| {

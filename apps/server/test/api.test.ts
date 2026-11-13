@@ -296,6 +296,17 @@ test("sessions from several agents are told apart", async () => {
     [["src/app.ts", 1]],
   );
   assert.deepEqual((await get(tokens.admin, "/filters")).body.tools, ["claude-code", "cursor", "grok"]);
+
+  // one model at a time: a session counts under its main model, exactly
+  assert.deepEqual(ids(await get(tokens.admin, "/sessions?model_is=grok-4.7-build")), ["grok-1"]);
+  assert.deepEqual(ids(await get(tokens.admin, "/sessions?model_is=grok-4.7")), []);
+  assert.deepEqual(ids(await get(tokens.admin, "/sessions?model_is=(unknown)")), ["cur-1"]);
+  // s-bob-1 used opus too, but mainly haiku
+  assert.ok(!ids(await get(tokens.admin, "/sessions?model_is=claude-opus-5-5")).includes("s-bob-1"));
+  assert.deepEqual(
+    (await get(tokens.admin, "/summary?by=model&model_is=claude-haiku-5-5")).body.groups.map((g: any) => g.key),
+    ["claude-haiku-5-5"],
+  );
   assert.deepEqual((await get(tokens.bob, "/filters")).body.tools, ["claude-code"]);
   assert.equal((await get(tokens.admin, "/sessions/machine-1/cursor/cur-1")).status, 200);
 });

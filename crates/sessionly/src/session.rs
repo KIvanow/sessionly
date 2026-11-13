@@ -112,6 +112,11 @@ pub struct Cost {
     /// Spend the agent recorded that the transcript does not show. Null when
     /// it can't be worked out (no recorded total, or a model without a known price).
     pub untracked_usd: Option<f64>,
+    /// How many of the session's prompts the figure covers, when it can't
+    /// cover them all: an agent that reports usage only to hooks (Cursor) has
+    /// none for turns that ran before the hooks were installed. Null when the
+    /// figure covers the whole session.
+    pub prompts_covered: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -320,6 +320,7 @@ impl TranscriptSummary {
                 transcript_estimate_usd: cost.transcript_estimate_usd,
                 unpriced_requests: cost.unpriced_requests,
                 untracked_usd: cost.untracked_usd,
+                prompts_covered: None,
             }),
             usage,
             subagents: self

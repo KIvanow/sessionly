@@ -93,6 +93,8 @@ export interface Filters {
   repo_is?: string;
   /** Substring of any model used. */
   model?: string;
+  /** The session's main model exactly, as a summary by model names it. */
+  model_is?: string;
   /** The agent exactly: `claude-code`, `cursor` or `grok`. */
   tool?: string;
   /** Substring of the title, repository, branch, or anything in the record. */
@@ -113,6 +115,8 @@ function where(viewer: Principal, filters: Filters): { sql: string; params: unkn
   if (filters.repo_is === UNKNOWN) conditions.push(`repo IS NULL`);
   else if (filters.repo_is) conditions.push(`repo = ${bind(filters.repo_is)}`);
   if (filters.model) conditions.push(`models::text ILIKE ${like(filters.model)}`);
+  if (filters.model_is === UNKNOWN) conditions.push(`primary_model IS NULL`);
+  else if (filters.model_is) conditions.push(`primary_model = ${bind(filters.model_is)}`);
   if (filters.tool) conditions.push(`source = ${bind(filters.tool)}`);
   if (filters.q) {
     const p = like(filters.q);
