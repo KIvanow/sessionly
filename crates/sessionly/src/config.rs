@@ -45,34 +45,73 @@ impl Default for Config {
 impl Config {
     /// Read the config, creating it with a new machine id on first use.
     pub fn load(path: &Path) -> Result<Config> {
-        let mut config: Config = match fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text)
-                .with_context(|| format!("{} is not valid; fix or delete it", path.display()))?,
-            Err(_) => Config::default(),
-        };
-        // Content::Local means "not for upload"; it is never a valid setting.
-        if config.upload_content == Content::Local {
-            config.upload_content = Content::Metadata;
-        }
-        if config.machine_id.is_empty() {
+        // Two tries: if another process creates the file while we do, the
+        // second read picks up its machine id instead of inventing our own.
+        for _ in 0..2 {
+            let existing = fs::read_to_string(path).ok();
+            let mut config: Config = match &existing {
+                Some(text) => serde_json::from_str(text).with_context(|| {
+                    format!("{} is not valid; fix or delete it", path.display())
+                })?,
+                None => Config::default(),
+            };
+            // Content::Local means "not for upload"; it is never a valid setting.
+            if config.upload_content == Content::Local {
+                config.upload_content = Content::Metadata;
+            }
+            if !config.machine_id.is_empty() {
+                return Ok(config);
+            }
             config.machine_id = uuid::Uuid::new_v4().to_string();
-            config.save(path)?;
+            if existing.is_some() {
+                config.save(path)?;
+                return Ok(config);
+            }
+            if config.create(path)? {
+                return Ok(config);
+            }
         }
-        Ok(config)
+        anyhow::bail!("could not create {}", path.display())
     }
 
-    /// Write the config, readable only by the owner (it can hold a token).
-    pub fn save(&self, path: &Path) -> Result<()> {
+    /// Write to a file of our own next to `path`, readable only by the owner
+    /// (the config can hold a token).
+    fn write_private(&self, path: &Path) -> Result<std::path::PathBuf> {
         if let Some(dir) = path.parent() {
             crate::paths::create_private_dir(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
+        let unique = format!(
+            "json.{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let tmp = path.with_extension(unique);
         fs::write(&tmp, serde_json::to_string_pretty(self)? + "\n")?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
         }
+        Ok(tmp)
+    }
+
+    /// Create the config file if it does not exist yet. Returns false if
+    /// another process created it first.
+    fn create(&self, path: &Path) -> Result<bool> {
+        let tmp = self.write_private(path)?;
+        // A hard link fails if the target exists, and the file appears complete.
+        let linked = fs::hard_link(&tmp, path);
+        let _ = fs::remove_file(&tmp);
+        match linked {
+            Ok(()) => Ok(true),
+            Err(_) if path.exists() => Ok(false),
+            Err(err) => Err(err).with_context(|| format!("creating {}", path.display())),
+        }
+    }
+
+    /// Write the config, replacing the file in one step.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let tmp = self.write_private(path)?;
         fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -115,6 +154,21 @@ mod tests {
         );
         fs::write(&path, "{ broken").unwrap();
         assert!(Config::load(&path).is_err());
+    }
+
+    #[test]
+    fn concurrent_first_use_agrees_on_one_machine_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data/config.json");
+        let ids: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| scope.spawn(|| Config::load(&path).unwrap().machine_id))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(ids.iter().all(|id| *id == ids[0]), "{ids:?}");
+        // no temporary files are left behind
+        assert_eq!(fs::read_dir(dir.path().join("data")).unwrap().count(), 1);
     }
 
     #[cfg(unix)]
