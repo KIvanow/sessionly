@@ -17,6 +17,7 @@ import {
   Conflict,
   filterOptions,
   getSession,
+  listFiles,
   listSessions,
   storeUpload,
   summarize,
@@ -43,6 +44,7 @@ function filtersFrom(query: Record<string, string>): Filters {
   return {
     user: query.user || undefined,
     repo: query.repo || undefined,
+    repo_is: query.repo_is || undefined,
     model: query.model || undefined,
     q: query.q || undefined,
     since: time(query.since, "since"),
@@ -146,6 +148,12 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
       session_id: session,
     });
     return found ? c.json(found) : c.json({ error: "no such session" }, 404);
+  });
+
+  api.get("/files", async (c) => {
+    const query = c.req.query();
+    const limit = wholeNumber(query.limit, 200, 2000, "limit");
+    return c.json(await listFiles(db, c.get("principal"), filtersFrom(query), limit));
   });
 
   api.get("/filters", async (c) => c.json(await filterOptions(db, c.get("principal"))));

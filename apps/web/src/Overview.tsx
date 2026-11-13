@@ -1,9 +1,9 @@
-import type { GroupBy, Summary, Totals } from "@sessionly/schema";
-import { useState } from "react";
+import type { FileList, GroupBy, Summary, Totals } from "@sessionly/schema";
+import { Fragment, useState, type ReactNode } from "react";
 import { query } from "./api.ts";
 import { scopeParams, type Scope } from "./App.tsx";
 import { CostChart } from "./CostChart.tsx";
-import { compact, count, duration, linesKept, percent, repoName, rewriteRate, share, usd, usdCompact } from "./format.ts";
+import { compact, count, dateTime, duration, linesKept, percent, repoName, rewriteRate, share, usd, usdCompact } from "./format.ts";
 import { useApi } from "./useApi.ts";
 
 interface Props {
@@ -75,7 +75,14 @@ export function Overview({ token, scope, showUsers, onSignOut }: Props) {
       </section>
       <CostChart days={byDay.data.groups} />
       {showUsers && <Breakdown title="By person" heading="Person" summary={byUser.data} />}
-      <Breakdown title="By repository" heading="Repository" summary={byRepo.data} name={repoName} />
+      <Breakdown
+        title="By repository"
+        heading="Repository"
+        summary={byRepo.data}
+        name={repoName}
+        hint="Open a repository to see the files agents changed in it."
+        detail={(repo) => <RepoFiles token={token} scope={scope} repo={repo} onSignOut={onSignOut} />}
+      />
       <Breakdown title="By model" heading="Model" summary={byModel.data} />
     </>
   );
@@ -93,20 +100,99 @@ function Tile({ label, value, note }: { label: string; value: string; note?: str
 
 const INITIAL_ROWS = 8;
 
+const FILES_SHOWN = 25;
+
+/** The files agents changed in one repository, most lines added first. */
+function RepoFiles(props: { token: string; scope: Scope; repo: string; onSignOut: () => void }) {
+  const [all, setAll] = useState(false);
+  const { user, since } = scopeParams(props.scope);
+  const list = useApi<FileList>(
+    props.token,
+    `/files${query({ repo_is: props.repo, user, since, limit: all ? 2000 : FILES_SHOWN })}`,
+    props.onSignOut,
+  );
+  if (list.error) return <p role="alert">{list.error}</p>;
+  if (!list.data) return <p className="muted">Loading files…</p>;
+  if (list.data.total === 0) {
+    return <p className="muted">No files were changed through an agent's file tools in these sessions.</p>;
+  }
+  return (
+    <div className="files">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">File</th>
+            <th scope="col" className="num">Sessions</th>
+            <th scope="col" className="num">Added</th>
+            <th scope="col" className="num">Removed</th>
+            <th scope="col" className="num">Agent lines still there</th>
+            <th scope="col">Last changed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {list.data.files.map((f) => (
+            <tr key={f.path}>
+              <th scope="row">
+                {f.path}
+                {f.created ? " (new)" : ""}
+              </th>
+              <td className="num">{count(f.sessions)}</td>
+              <td className="num">+{count(f.lines_added)}</td>
+              <td className="num">−{count(f.lines_removed)}</td>
+              <td className="num">
+                {!f.rewrite
+                  ? "–"
+                  : !f.rewrite.exists
+                    ? "file deleted"
+                    : `${percent(share(f.rewrite.lines_surviving, f.rewrite.lines_added))} of ${count(f.rewrite.lines_added)}`}
+              </td>
+              <td className="nowrap">{dateTime(f.last_changed)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {list.data.total > list.data.files.length && (
+        <button className="quiet" onClick={() => setAll(true)}>
+          Show all {count(list.data.total)} files
+        </button>
+      )}
+    </div>
+  );
+}
+
 function Breakdown(props: {
   title: string;
   heading: string;
   summary: Summary | null;
   name?: (key: string) => string;
+  /** If given, each row can be opened to show this below it. */
+  detail?: (key: string) => ReactNode;
+  hint?: string;
 }) {
   const [all, setAll] = useState(false);
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
+  const toggle = (key: string) => {
+    const next = new Set(open);
+    if (!next.delete(key)) next.add(key);
+    setOpen(next);
+  };
   const { summary } = props;
   if (!summary) return null;
   const rows = all ? summary.groups : summary.groups.slice(0, INITIAL_ROWS);
   const largest = Math.max(...summary.groups.map((g) => g.cost_usd), 0);
+  const label = (g: Totals) => (props.name ? props.name(g.key) : g.key);
   const row = (g: Totals) => (
-    <tr key={g.key}>
-      <th scope="row" title={g.key}>{props.name ? props.name(g.key) : g.key}</th>
+    <Fragment key={g.key}>
+    <tr>
+      <th scope="row" title={g.key}>
+        {props.detail ? (
+          <button className="disclosure" aria-expanded={open.has(g.key)} onClick={() => toggle(g.key)}>
+            <span aria-hidden="true">{open.has(g.key) ? "▾" : "▸"}</span> {label(g)}
+          </button>
+        ) : (
+          label(g)
+        )}
+      </th>
       <td className="num">{count(g.sessions)}</td>
       <td className="num">
         {/* The bar repeats the number beside it: its length is cost relative to the largest row. */}
@@ -130,6 +216,12 @@ function Breakdown(props: {
       </td>
       <td className="num">{percent(linesKept(g.rewrite))}</td>
     </tr>
+    {props.detail && open.has(g.key) && (
+      <tr className="detail">
+        <td colSpan={9}>{props.detail(g.key)}</td>
+      </tr>
+    )}
+    </Fragment>
   );
   return (
     <section className="card" aria-label={props.title}>
@@ -141,6 +233,7 @@ function Breakdown(props: {
           </button>
         )}
       </div>
+      {props.hint && <p className="muted hint">{props.hint}</p>}
       <div className="scroll">
         <table>
           <thead>

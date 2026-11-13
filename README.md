@@ -434,6 +434,8 @@ Sign in with a token. An admin sees the whole team; a member sees their own sess
 - **Overview:** total cost, sessions, active time, prompts, tool calls and failure rate, files
   changed, the share of files rewritten since and of agent lines still there; cost per day (per
   week for long ranges, with a table view); and the same totals by person, repository and model.
+  Each repository opens to list the files agents changed in it: sessions, lines added and
+  removed, how many of the agent's lines are still there, and when it was last changed.
 - **Sessions:** a searchable, paged list. Period, person and repository filters apply to both
   pages.
 - **One session:** cost and tokens per model, prompts with how long each took and how it ended,
@@ -449,7 +451,8 @@ server on port 8080.
 
 **API behind it:** `GET /api/v1/summary?by=user|repo|model|day`, `GET /api/v1/sessions`
 (filters `user`, `repo`, `model`, `q`, `since`, `until`, paging `limit`, `offset`),
-`GET /api/v1/sessions/{machine_id}/{source}/{session_id}` and `GET /api/v1/filters`.
+`GET /api/v1/sessions/{machine_id}/{source}/{session_id}`, `GET /api/v1/files` (files agents
+changed, with `repo_is` for one repository) and `GET /api/v1/filters`.
 
 The payload types in `packages/schema` are generated from `schema/upload.schema.json`, which is
 generated from the Rust types. `pnpm gen` regenerates them and a test fails if they are stale.

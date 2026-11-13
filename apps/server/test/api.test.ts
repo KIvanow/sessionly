@@ -206,6 +206,47 @@ test("summary totals per group and overall", async () => {
   assert.equal(none.body.total.cost_usd, 0);
 });
 
+test("files agents changed, per repository", async () => {
+  const withFiles = (id: string, files: unknown[], rewriteFiles: unknown[]) => {
+    const u = upload(id, { files });
+    u.rewrite!.files = rewriteFiles as never;
+    return u;
+  };
+  await put(tokens.ann, withFiles("files-1",
+    [{ path: "src/app.ts", writes: 2, lines_added: 30, lines_removed: 5, created: true },
+     { path: "README.md", reads: 1, writes: 0 }],
+    [{ path: "src/app.ts", lines_added: 20, lines_surviving: 5, exists: true }]));
+  await put(tokens.ann, withFiles("files-2",
+    [{ path: "src/app.ts", writes: 1, lines_added: 10, lines_removed: 0 },
+     { path: "src/gone.ts", writes: 1, lines_added: 4, lines_removed: 0 }],
+    [{ path: "src/app.ts", lines_added: 8, lines_surviving: 8, exists: true },
+     { path: "src/gone.ts", lines_added: 4, lines_surviving: 0, exists: false }]));
+
+  const web = await get(tokens.admin, "/files?repo_is=github.com/acme/web&q=files-");
+  assert.equal(web.status, 200);
+  assert.equal(web.body.total, 2);
+  assert.deepEqual(web.body.files.map((f: any) => f.path), ["src/app.ts", "src/gone.ts"]);
+  const app = web.body.files[0];
+  assert.deepEqual(
+    [app.sessions, app.lines_added, app.lines_removed, app.created],
+    [2, 40, 5, true],
+  );
+  assert.deepEqual(app.rewrite, { lines_added: 28, lines_surviving: 13, exists: true });
+  assert.equal(web.body.files[1].rewrite.exists, false);
+  // a file that was only read is not listed
+  assert.ok(!JSON.stringify(web.body).includes("README.md"));
+
+  // exact repository match, the limit, and visibility
+  assert.equal((await get(tokens.admin, "/files?repo_is=acme/web")).body.total, 0);
+  const limited = await get(tokens.admin, "/files?repo_is=github.com/acme/web&q=files-&limit=1");
+  assert.equal(limited.body.files.length, 1);
+  assert.equal(limited.body.total, 2);
+  assert.equal((await get(tokens.bob, "/files?repo_is=github.com/acme/web")).body.total, 0);
+  // a session without a rewrite measurement still lists its files
+  const api = await get(tokens.bob, "/files?repo_is=github.com/acme/api");
+  assert.equal(api.body.files[0].path, "src/app.ts");
+});
+
 test("admins manage tokens; a revoked token stops working", async () => {
   const post = (token: string, body: unknown) =>
     app.request("/api/v1/tokens", {

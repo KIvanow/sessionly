@@ -89,6 +89,35 @@ export interface SessionDetail {
   upload: Upload;
 }
 
+/** One file agents changed, summed over the sessions that changed it. */
+export interface FileRow {
+  /** Relative to the repository (or `~/…`, or absolute, for files outside it). */
+  path: string;
+  /** Sessions that changed the file. */
+  sessions: number;
+  lines_added: number;
+  lines_removed: number;
+  /** An agent created the file. */
+  created: boolean;
+  /** When a session that changed it last started. */
+  last_changed: string | null;
+  /** Null if no session's changes to this file were measured. */
+  rewrite: {
+    /** Lines agents added that are tracked (not blank or punctuation-only). */
+    lines_added: number;
+    lines_surviving: number;
+    /** False if the file was gone when last measured. */
+    exists: boolean;
+  } | null;
+}
+
+export interface FileList {
+  /** Most lines added first. */
+  files: FileRow[];
+  /** How many files match, before the limit. */
+  total: number;
+}
+
 export interface FilterOptions {
   users: string[];
   repos: string[];

@@ -1,5 +1,5 @@
 // Storing uploaded sessions and answering the dashboard's questions about them.
-import type { GroupBy, Session, SessionRow, Totals, Upload } from "@sessionly/schema";
+import type { FileRow, GroupBy, Session, SessionRow, Totals, Upload } from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
 import type { Db } from "./db.ts";
 
@@ -84,6 +84,8 @@ export interface Filters {
   user?: string;
   /** Substring of the repository. */
   repo?: string;
+  /** The repository exactly, as a summary by repository names it. */
+  repo_is?: string;
   /** Substring of any model used. */
   model?: string;
   /** Substring of the title, repository, branch, or anything in the record. */
@@ -101,6 +103,8 @@ function where(viewer: Principal, filters: Filters): { sql: string; params: unkn
   if (viewer.role !== "admin") conditions.push(`owner_email = ${bind(viewer.email)}`);
   if (filters.user) conditions.push(`owner_email ILIKE ${like(filters.user)}`);
   if (filters.repo) conditions.push(`repo ILIKE ${like(filters.repo)}`);
+  if (filters.repo_is === UNKNOWN) conditions.push(`repo IS NULL`);
+  else if (filters.repo_is) conditions.push(`repo = ${bind(filters.repo_is)}`);
   if (filters.model) conditions.push(`models::text ILIKE ${like(filters.model)}`);
   if (filters.q) {
     const p = like(filters.q);
@@ -254,6 +258,70 @@ export async function getSession(
   if (!row || (viewer.role !== "admin" && row.owner_email !== viewer.email)) return null;
   const payload = typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
   return { owner_email: row.owner_email, updated_at: iso(row.updated_at) ?? "", upload: payload as Upload };
+}
+
+/**
+ * Files that agents changed in the sessions the viewer may see: how much was
+ * added and removed, and how much of what was added is still there.
+ */
+export async function listFiles(
+  db: Db,
+  viewer: Principal,
+  filters: Filters,
+  limit: number,
+): Promise<{ files: FileRow[]; total: number }> {
+  const { sql, params } = where(viewer, filters);
+  const and = sql ? `${sql} AND` : "WHERE";
+  const changed = `sessions CROSS JOIN LATERAL
+    jsonb_array_elements(coalesce(payload->'session'->'files', '[]'::jsonb)) AS f
+    ${and} coalesce((f->>'writes')::double precision, 0) > 0`;
+  const rows = await db.query(
+    `SELECT f->>'path' AS path,
+            count(DISTINCT machine_id || '/' || source || '/' || session_id) AS sessions,
+            sum(coalesce((f->>'lines_added')::double precision, 0)) AS lines_added,
+            sum(coalesce((f->>'lines_removed')::double precision, 0)) AS lines_removed,
+            bool_or(coalesce((f->>'created')::boolean, false)) AS created,
+            max(started_at) AS last_changed
+     FROM ${changed}
+     GROUP BY 1 ORDER BY 3 DESC, 1 LIMIT $${params.length + 1}`,
+    [...params, limit],
+  );
+  const [count] = await db.query<{ n: unknown }>(
+    `SELECT count(DISTINCT f->>'path') AS n FROM ${changed}`,
+    params,
+  );
+  const measured = await db.query(
+    `SELECT r->>'path' AS path,
+            sum(coalesce((r->>'lines_added')::double precision, 0)) AS lines_added,
+            sum(coalesce((r->>'lines_surviving')::double precision, 0)) AS lines_surviving,
+            bool_and(coalesce((r->>'exists')::boolean, true)) AS exists_now
+     FROM sessions CROSS JOIN LATERAL
+       jsonb_array_elements(coalesce(payload->'rewrite'->'files', '[]'::jsonb)) AS r
+     ${sql} GROUP BY 1`,
+    params,
+  );
+  const rewrite = new Map(measured.map((r) => [String(r.path), r]));
+  return {
+    total: num(count?.n),
+    files: rows.map((r) => {
+      const m = rewrite.get(String(r.path));
+      return {
+        path: String(r.path),
+        sessions: num(r.sessions),
+        lines_added: num(r.lines_added),
+        lines_removed: num(r.lines_removed),
+        created: r.created === true,
+        last_changed: iso(r.last_changed),
+        rewrite: m
+          ? {
+              lines_added: num(m.lines_added),
+              lines_surviving: num(m.lines_surviving),
+              exists: m.exists_now !== false,
+            }
+          : null,
+      };
+    }),
+  };
 }
 
 /** Values to offer in the dashboard's filters. */
