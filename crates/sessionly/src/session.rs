@@ -29,6 +29,14 @@ pub struct Session {
     pub source: String,
     /// Version of the sessionly binary that built this record.
     pub collector_version: String,
+    /// Random id of the sessionly installation that captured the session.
+    /// Together with `source` and `session_id` it identifies the record.
+    pub machine_id: String,
+    /// Where the activity (prompts, tool calls, files) was read from.
+    pub captured_by: CapturedBy,
+    /// How much content the record carries. Records leave a machine only as
+    /// `previews` or `metadata`.
+    pub content: Content,
     pub session_id: String,
     pub title: Option<String>,
     /// Who ran the session, from git config on the machine that captured it.
@@ -95,11 +103,7 @@ pub struct Repo {
 pub struct Cost {
     /// Best figure for the whole session, in USD.
     pub total_usd: f64,
-    /// "recorded": the agent's own total. "recorded_and_estimated": its total
-    /// for the latest run plus our estimate for earlier runs. "estimated": our
-    /// estimate from token counts. "partial_estimate": an estimate that leaves
-    /// out requests to models without a known price.
-    pub source: String,
+    pub source: CostSource,
     /// Estimate from the token counts visible in the transcript.
     pub transcript_estimate_usd: f64,
     /// Requests the total leaves out: made on a model without a known price,
@@ -170,8 +174,8 @@ pub struct Prompt {
     /// When the agent finished responding. Null if the turn was interrupted
     /// or is still running.
     pub ended_at: Option<DateTime<Utc>>,
-    /// "completed" or "api_error". Null if interrupted or still running.
-    pub outcome: Option<String>,
+    /// Null if the turn was interrupted or is still running.
+    pub outcome: Option<Outcome>,
     /// API error type when outcome is "api_error".
     pub error: Option<String>,
 }
@@ -186,10 +190,7 @@ pub struct ToolCall {
     pub agent_id: Option<String>,
     pub tool: String,
     pub at: Option<DateTime<Utc>>,
-    /// "ok", "failed", "interrupted", "denied", or "no_result" (the call was
-    /// attempted but no result was captured: rejected by the user, interrupted,
-    /// or still running).
-    pub status: String,
+    pub status: ToolStatus,
     pub duration_ms: Option<u64>,
     /// File the call operated on, for file tools.
     pub file_path: Option<String>,
@@ -235,14 +236,176 @@ pub struct Subagent {
     pub estimated_cost_usd: Option<f64>,
 }
 
+/// How a tool call ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStatus {
+    Ok,
+    Failed,
+    /// The user interrupted it.
+    Interrupted,
+    /// Refused by auto mode.
+    Denied,
+    /// Attempted, but no result was captured: rejected by the user,
+    /// interrupted, or still running.
+    #[default]
+    NoResult,
+    /// A value written by a newer version.
+    #[serde(other)]
+    Unknown,
+}
+
+/// How a prompt turn ended.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Completed,
+    ApiError,
+    /// A value written by a newer version.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Where a session's cost figure comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CostSource {
+    /// The agent's own total, covering every message in the transcript.
+    Recorded,
+    /// The agent's total for one run, combined with our estimates for
+    /// messages outside that run.
+    RecordedAndEstimated,
+    /// Our estimate from token counts only. A lower bound: it misses calls
+    /// that never reach the transcript.
+    #[default]
+    Estimated,
+    /// An estimate that leaves out requests to models without a known price.
+    PartialEstimate,
+    /// A value written by a newer version.
+    #[serde(other)]
+    Unknown,
+}
+
+impl CostSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CostSource::Recorded => "recorded",
+            CostSource::RecordedAndEstimated => "recorded_and_estimated",
+            CostSource::Estimated => "estimated",
+            CostSource::PartialEstimate => "partial_estimate",
+            CostSource::Unknown => "unknown",
+        }
+    }
+}
+
+/// How much content a record carries.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema, clap::ValueEnum,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Content {
+    /// As built on the capturing machine: previews and absolute paths. Never uploaded.
+    #[default]
+    #[value(skip)]
+    Local,
+    /// Previews kept (the first 200 characters of prompts, shell commands,
+    /// search patterns, URLs and error output). Paths are made relative.
+    Previews,
+    /// No text from prompts, commands or output at all: counts, sizes,
+    /// timings, tool names and relative file paths only.
+    Metadata,
+}
+
+/// Where a session's activity was read from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CapturedBy {
+    /// Hook events, as they happened.
+    #[default]
+    Hooks,
+    /// Reconstructed afterwards from the agent's transcript.
+    Transcript,
+}
+
+/// How much of a session's changes is still in the files, measured later.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct RewriteMeasurement {
+    pub measured_at: Option<DateTime<Utc>>,
+    /// Branch and commit that were checked out when measuring.
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub files_measured: u64,
+    /// Files where less than half of the agent's lines survive, or that are gone.
+    pub files_rewritten: u64,
+    /// Lines the agent added that are tracked (not blank or punctuation-only).
+    pub lines_added: u64,
+    /// How many of them are still in the files.
+    pub lines_surviving: u64,
+    pub files: Vec<RewriteFile>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct RewriteFile {
+    pub path: String,
+    pub lines_added: u64,
+    pub lines_surviving: u64,
+    pub exists: bool,
+}
+
+/// What the binary sends to a server for one session. Sending the same
+/// session again replaces what the server has: the key is
+/// (`session.machine_id`, `session.source`, `session.session_id`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Upload {
+    /// Version of the session record format.
+    pub schema_version: u32,
+    pub session: Session,
+    /// Latest rewrite measurement. Null if the session changed no files or
+    /// they could not be measured.
+    pub rewrite: Option<RewriteMeasurement>,
+}
+
+fn pretty(schema: schemars::Schema) -> String {
+    serde_json::to_string_pretty(&schema).expect("schema serializes") + "\n"
+}
+
 /// JSON Schema for [`Session`], pretty-printed with a trailing newline.
 pub fn json_schema() -> String {
-    let schema = schemars::schema_for!(Session);
-    serde_json::to_string_pretty(&schema).expect("schema serializes") + "\n"
+    pretty(schemars::schema_for!(Session))
+}
+
+/// JSON Schema for [`Upload`], the payload a server receives.
+pub fn upload_json_schema() -> String {
+    pretty(schemars::schema_for!(Upload))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_in_upload_schema_is_current() {
+        let on_disk = include_str!("../../../schema/upload.schema.json");
+        assert_eq!(
+            on_disk,
+            super::upload_json_schema(),
+            "schema/upload.schema.json is stale; regenerate with: \
+             cargo run -q -- schema upload > schema/upload.schema.json"
+        );
+    }
+
+    #[test]
+    fn unknown_enum_values_from_a_newer_version_still_parse() {
+        let call: super::ToolCall =
+            serde_json::from_str(r#"{"status":"paused","brand_new_field":1}"#).unwrap();
+        assert_eq!(call.status, super::ToolStatus::Unknown);
+        let cost: super::Cost = serde_json::from_str(r#"{"source":"audited"}"#).unwrap();
+        assert_eq!(cost.source, super::CostSource::Unknown);
+        let old: super::Session = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.content, super::Content::Local);
+    }
+
     #[test]
     fn checked_in_schema_is_current() {
         let on_disk = include_str!("../../../schema/session.schema.json");

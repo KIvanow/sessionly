@@ -15,14 +15,17 @@ pub struct Report {
     pub unchanged: u64,
     /// Capture files with no usable events.
     pub empty: u64,
+    /// Sessions dropped from the ledger because their capture is gone
+    /// (only a full rebuild does this).
+    pub removed: u64,
     pub failed: Vec<(PathBuf, String)>,
 }
 
-/// Identifies the code and price table a record was built with: a record
-/// built by anything else is rebuilt.
-pub fn built_with() -> String {
+/// Identifies the code, price table and machine id a record was built with:
+/// a record built with anything else is rebuilt.
+pub fn built_with(machine_id: &str) -> String {
     format!(
-        "{}+schema{}+prices{}",
+        "{}+schema{}+prices{}+{machine_id}",
         env!("CARGO_PKG_VERSION"),
         crate::session::SCHEMA_VERSION,
         crate::pricing::PRICING_VERSION
@@ -31,7 +34,13 @@ pub fn built_with() -> String {
 
 /// Normalize every session in `raw_dir` whose capture or transcript changed
 /// since it was last stored (or all of them with `force`).
-pub fn run(raw_dir: &Path, facts_dir: &Path, ledger: &mut Ledger, force: bool) -> Result<Report> {
+pub fn run(
+    raw_dir: &Path,
+    facts_dir: &Path,
+    ledger: &mut Ledger,
+    machine_id: &str,
+    force: bool,
+) -> Result<Report> {
     let mut report = Report::default();
     let mut files: Vec<PathBuf> = match fs::read_dir(raw_dir) {
         Ok(entries) => entries
@@ -41,7 +50,8 @@ pub fn run(raw_dir: &Path, facts_dir: &Path, ledger: &mut Ledger, force: bool) -
         Err(_) => return Ok(report),
     };
     files.sort();
-    let built_with = built_with();
+    let built_with = built_with(machine_id);
+    let mut present: Vec<String> = Vec::new();
 
     for raw in files {
         let stem = raw
@@ -65,7 +75,8 @@ pub fn run(raw_dir: &Path, facts_dir: &Path, ledger: &mut Ledger, force: bool) -
             }
         }
         match normalize::build_from_raw(&raw, facts_dir) {
-            Ok(Some(built)) => {
+            Ok(Some(mut built)) => {
+                built.session.machine_id = machine_id.to_string();
                 // `capture` names each file after its session. Anything else
                 // (a copy, a renamed file) must not overwrite the real session.
                 let expected = crate::capture::file_stem(Some(&built.session.session_id));
@@ -86,11 +97,17 @@ pub fn run(raw_dir: &Path, facts_dir: &Path, ledger: &mut Ledger, force: bool) -
                         .map(|p| p.to_string_lossy().into_owned()),
                 };
                 ledger.upsert(&built.session, &fingerprint, &built.added_lines)?;
+                present.push(built.session.session_id);
                 report.synced += 1;
             }
             Ok(None) => report.empty += 1,
             Err(err) => report.failed.push((raw, format!("{err:#}"))),
         }
+    }
+    // A full rebuild makes the ledger match the capture exactly. A normal
+    // sync never removes anything.
+    if force {
+        report.removed = ledger.retain(&present)?;
     }
     Ok(report)
 }
@@ -124,7 +141,7 @@ mod tests {
 
     impl Env {
         fn sync(&mut self, force: bool) -> Report {
-            run(&self.raw, &self.facts, &mut self.ledger, force).unwrap()
+            run(&self.raw, &self.facts, &mut self.ledger, "machine-1", force).unwrap()
         }
 
         fn capture(&self, session: &str, prompts: usize) {
@@ -178,11 +195,21 @@ mod tests {
         env.capture("s1", 2); // s1 grew
         let third = env.sync(false);
         assert_eq!((third.synced, third.unchanged), (1, 1));
-        assert_eq!(env.ledger.get("s1").unwrap().unwrap().counts.prompts, 2);
+        let s1 = env.ledger.get("s1").unwrap().unwrap();
+        assert_eq!(s1.counts.prompts, 2);
+        assert_eq!(s1.machine_id, "machine-1");
 
         let forced = env.sync(true);
         assert_eq!(forced.synced, 2);
         assert!(forced.failed.is_empty());
+
+        // A capture file that is deleted stays in the ledger until a full rebuild.
+        fs::remove_file(env.raw.join("s2.jsonl")).unwrap();
+        assert_eq!(env.sync(false).removed, 0);
+        assert!(env.ledger.get("s2").unwrap().is_some());
+        assert_eq!(env.sync(true).removed, 1);
+        assert!(env.ledger.get("s2").unwrap().is_none());
+        assert!(env.ledger.get("s1").unwrap().is_some());
     }
 
     #[test]

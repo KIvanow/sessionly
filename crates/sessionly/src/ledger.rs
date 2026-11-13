@@ -412,7 +412,7 @@ impl Ledger {
                 s.models.join(","),
                 s.models.first(),
                 s.cost.as_ref().map(|c| c.total_usd),
-                s.cost.as_ref().map(|c| &c.source),
+                s.cost.as_ref().map(|c| c.source.as_str()),
                 s.usage.iter().map(|u| u.input_tokens).sum::<u64>(),
                 s.usage.iter().map(|u| u.output_tokens).sum::<u64>(),
                 s.counts.prompts,
@@ -483,6 +483,25 @@ impl Ledger {
             },
         };
         Ok(Some(serde_json::from_str(record)?))
+    }
+
+    /// Remove every session whose id is not in `keep`, with its files and
+    /// measurements. Returns how many were removed.
+    pub fn retain(&mut self, keep: &[String]) -> Result<u64> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch("CREATE TEMP TABLE keep (session_id TEXT PRIMARY KEY)")?;
+        {
+            let mut insert = tx.prepare("INSERT OR IGNORE INTO keep VALUES (?1)")?;
+            for id in keep {
+                insert.execute([id])?;
+            }
+        }
+        let gone = "session_id NOT IN (SELECT session_id FROM keep)";
+        tx.execute(&format!("DELETE FROM rewrite WHERE {gone}"), [])?;
+        let removed = tx.execute(&format!("DELETE FROM sessions WHERE {gone}"), [])?;
+        tx.execute_batch("DROP TABLE keep")?;
+        tx.commit()?;
+        Ok(removed as u64)
     }
 
     pub fn count(&self) -> Result<u64> {
@@ -673,7 +692,7 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{Cost, FileTouched, Prompt, Repo, Text, User, SCHEMA_VERSION};
+    use crate::session::{Cost, CostSource, FileTouched, Prompt, Repo, Text, User, SCHEMA_VERSION};
 
     fn session(id: &str) -> Session {
         Session {
@@ -771,7 +790,7 @@ mod tests {
             s.models = vec![model.into()];
             s.cost = cost.map(|total_usd| Cost {
                 total_usd,
-                source: "recorded".into(),
+                source: CostSource::Recorded,
                 ..Default::default()
             });
             s.prompts = vec![Prompt {

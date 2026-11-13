@@ -171,30 +171,7 @@ pub struct Recorded {
     pub model_usage: Value,
 }
 
-/// Where the session cost figure comes from.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CostSource {
-    /// Claude Code's recorded total, which covers every message in the transcript.
-    Recorded,
-    /// Recorded total for one run, combined with our estimates for messages
-    /// outside that run (or for the run itself, where our estimate is higher).
-    RecordedAndEstimated,
-    /// Our estimate from token counts only; misses background calls.
-    Estimated,
-    /// Estimate that leaves out requests to models without a known price.
-    Partial,
-}
-
-impl CostSource {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            CostSource::Recorded => "recorded",
-            CostSource::RecordedAndEstimated => "recorded_and_estimated",
-            CostSource::Estimated => "estimated",
-            CostSource::Partial => "partial_estimate",
-        }
-    }
-}
+pub use crate::session::CostSource;
 
 /// Session cost and how it was put together.
 #[derive(Debug, Clone, PartialEq)]
@@ -267,7 +244,7 @@ impl TranscriptSummary {
         let transcript = total.cost_usd;
         let Some(rec) = &self.recorded else {
             let source = if total.unpriced_requests > 0 {
-                CostSource::Partial
+                CostSource::PartialEstimate
             } else {
                 CostSource::Estimated
             };
@@ -339,7 +316,7 @@ impl TranscriptSummary {
             entrypoint: self.entrypoint.clone(),
             cost: session::Cost {
                 total_usd: cost.total_usd,
-                source: cost.source.as_str().into(),
+                source: cost.source,
                 transcript_estimate_usd: cost.transcript_estimate_usd,
                 unpriced_requests: cost.unpriced_requests,
                 untracked_usd: cost.untracked_usd,
@@ -921,7 +898,7 @@ mod tests {
             ),
         );
         let cost = parse(&path).unwrap().cost();
-        assert_eq!(cost.source, CostSource::Partial);
+        assert_eq!(cost.source, CostSource::PartialEstimate);
         assert_eq!(cost.unpriced_requests, 1);
 
         // Inside a recorded run the total covers it, but the untracked share

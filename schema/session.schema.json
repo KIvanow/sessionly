@@ -20,6 +20,21 @@
       "type": "string",
       "default": ""
     },
+    "machine_id": {
+      "description": "Random id of the sessionly installation that captured the session.\nTogether with `source` and `session_id` it identifies the record.",
+      "type": "string",
+      "default": ""
+    },
+    "captured_by": {
+      "description": "Where the activity (prompts, tool calls, files) was read from.",
+      "$ref": "#/$defs/CapturedBy",
+      "default": "hooks"
+    },
+    "content": {
+      "description": "How much content the record carries. Records leave a machine only as\n`previews` or `metadata`.",
+      "$ref": "#/$defs/Content",
+      "default": "local"
+    },
     "session_id": {
       "type": "string",
       "default": ""
@@ -215,6 +230,41 @@
     }
   },
   "$defs": {
+    "CapturedBy": {
+      "description": "Where a session's activity was read from.",
+      "oneOf": [
+        {
+          "description": "Hook events, as they happened.",
+          "type": "string",
+          "const": "hooks"
+        },
+        {
+          "description": "Reconstructed afterwards from the agent's transcript.",
+          "type": "string",
+          "const": "transcript"
+        }
+      ]
+    },
+    "Content": {
+      "description": "How much content a record carries.",
+      "oneOf": [
+        {
+          "description": "As built on the capturing machine: previews and absolute paths. Never uploaded.",
+          "type": "string",
+          "const": "local"
+        },
+        {
+          "description": "Previews kept (the first 200 characters of prompts, shell commands,\nsearch patterns, URLs and error output). Paths are made relative.",
+          "type": "string",
+          "const": "previews"
+        },
+        {
+          "description": "No text from prompts, commands or output at all: counts, sizes,\ntimings, tool names and relative file paths only.",
+          "type": "string",
+          "const": "metadata"
+        }
+      ]
+    },
     "User": {
       "type": "object",
       "properties": {
@@ -269,9 +319,8 @@
           "default": 0.0
         },
         "source": {
-          "description": "\"recorded\": the agent's own total. \"recorded_and_estimated\": its total\nfor the latest run plus our estimate for earlier runs. \"estimated\": our\nestimate from token counts. \"partial_estimate\": an estimate that leaves\nout requests to models without a known price.",
-          "type": "string",
-          "default": ""
+          "$ref": "#/$defs/CostSource",
+          "default": "estimated"
         },
         "transcript_estimate_usd": {
           "description": "Estimate from the token counts visible in the transcript.",
@@ -296,6 +345,36 @@
           "default": null
         }
       }
+    },
+    "CostSource": {
+      "description": "Where a session's cost figure comes from.",
+      "oneOf": [
+        {
+          "description": "The agent's own total, covering every message in the transcript.",
+          "type": "string",
+          "const": "recorded"
+        },
+        {
+          "description": "The agent's total for one run, combined with our estimates for\nmessages outside that run.",
+          "type": "string",
+          "const": "recorded_and_estimated"
+        },
+        {
+          "description": "Our estimate from token counts only. A lower bound: it misses calls\nthat never reach the transcript.",
+          "type": "string",
+          "const": "estimated"
+        },
+        {
+          "description": "An estimate that leaves out requests to models without a known price.",
+          "type": "string",
+          "const": "partial_estimate"
+        },
+        {
+          "description": "A value written by a newer version.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
     },
     "ModelUsage": {
       "type": "object",
@@ -483,10 +562,14 @@
           "default": null
         },
         "outcome": {
-          "description": "\"completed\" or \"api_error\". Null if interrupted or still running.",
-          "type": [
-            "string",
-            "null"
+          "description": "Null if the turn was interrupted or is still running.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Outcome"
+            },
+            {
+              "type": "null"
+            }
           ],
           "default": null
         },
@@ -521,6 +604,23 @@
           "default": ""
         }
       }
+    },
+    "Outcome": {
+      "description": "How a prompt turn ended.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "completed",
+            "api_error"
+          ]
+        },
+        {
+          "description": "A value written by a newer version.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
     },
     "ToolCall": {
       "type": "object",
@@ -558,9 +658,8 @@
           "default": null
         },
         "status": {
-          "description": "\"ok\", \"failed\", \"interrupted\", \"denied\", or \"no_result\" (the call was\nattempted but no result was captured: rejected by the user, interrupted,\nor still running).",
-          "type": "string",
-          "default": ""
+          "$ref": "#/$defs/ToolStatus",
+          "default": "no_result"
         },
         "duration_ms": {
           "type": [
@@ -623,6 +722,38 @@
           "default": 0
         }
       }
+    },
+    "ToolStatus": {
+      "description": "How a tool call ended.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "ok",
+            "failed"
+          ]
+        },
+        {
+          "description": "The user interrupted it.",
+          "type": "string",
+          "const": "interrupted"
+        },
+        {
+          "description": "Refused by auto mode.",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "Attempted, but no result was captured: rejected by the user,\ninterrupted, or still running.",
+          "type": "string",
+          "const": "no_result"
+        },
+        {
+          "description": "A value written by a newer version.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
     },
     "FileTouched": {
       "type": "object",

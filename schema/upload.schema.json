@@ -1,0 +1,1030 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Upload",
+  "description": "What the binary sends to a server for one session. Sending the same\nsession again replaces what the server has: the key is\n(`session.machine_id`, `session.source`, `session.session_id`).",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "description": "Version of the session record format.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "default": 0
+    },
+    "session": {
+      "$ref": "#/$defs/Session",
+      "default": {
+        "schema_version": 0,
+        "source": "",
+        "collector_version": "",
+        "machine_id": "",
+        "captured_by": "hooks",
+        "content": "local",
+        "session_id": "",
+        "title": null,
+        "user": null,
+        "started_at": null,
+        "ended_at": null,
+        "duration_ms": null,
+        "active_ms": 0,
+        "end_reason": null,
+        "captured_from_start": false,
+        "cwd": null,
+        "repo": null,
+        "agent_version": null,
+        "entrypoint": null,
+        "models": [],
+        "permission_modes": [],
+        "cost": null,
+        "usage": [],
+        "counts": {
+          "events": 0,
+          "prompts": 0,
+          "tool_calls": 0,
+          "tool_failures": 0,
+          "permission_requests": 0,
+          "permission_denials": 0,
+          "subagents": 0,
+          "compactions": 0,
+          "api_errors": 0,
+          "files_read": 0,
+          "files_changed": 0,
+          "lines_added": 0,
+          "lines_removed": 0
+        },
+        "prompts": [],
+        "tool_calls": [],
+        "files": [],
+        "subagents": [],
+        "instruction_files": []
+      }
+    },
+    "rewrite": {
+      "description": "Latest rewrite measurement. Null if the session changed no files or\nthey could not be measured.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RewriteMeasurement"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "$defs": {
+    "Session": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "description": "Version of this record format.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 0
+        },
+        "source": {
+          "description": "Agent that produced the session, e.g. \"claude-code\".",
+          "type": "string",
+          "default": ""
+        },
+        "collector_version": {
+          "description": "Version of the sessionly binary that built this record.",
+          "type": "string",
+          "default": ""
+        },
+        "machine_id": {
+          "description": "Random id of the sessionly installation that captured the session.\nTogether with `source` and `session_id` it identifies the record.",
+          "type": "string",
+          "default": ""
+        },
+        "captured_by": {
+          "description": "Where the activity (prompts, tool calls, files) was read from.",
+          "$ref": "#/$defs/CapturedBy",
+          "default": "hooks"
+        },
+        "content": {
+          "description": "How much content the record carries. Records leave a machine only as\n`previews` or `metadata`.",
+          "$ref": "#/$defs/Content",
+          "default": "local"
+        },
+        "session_id": {
+          "type": "string",
+          "default": ""
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "user": {
+          "description": "Who ran the session, from git config on the machine that captured it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/User"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "duration_ms": {
+          "description": "Wall-clock span from first to last activity. Includes idle time and gaps\nbetween resumes, so it can be days for a long-lived session.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "active_ms": {
+          "description": "Time the agent spent working on prompts (sum of prompt turn durations).",
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
+        "end_reason": {
+          "description": "Why the session last ended, as reported by the agent. Null while it is\nopen, including after it has been resumed.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "captured_from_start": {
+          "description": "False when capture began partway through the session (the hooks were\ninstalled after it started). Prompts, tool calls and files then cover\nonly the captured part, while cost and usage cover the whole session.",
+          "type": "boolean",
+          "default": false
+        },
+        "cwd": {
+          "description": "Working directory the session ran in.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Repo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "agent_version": {
+          "description": "Version of the agent CLI.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "entrypoint": {
+          "description": "How the agent was started, e.g. \"cli\" or \"sdk-cli\".",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "models": {
+          "description": "Models that answered at least one request, most used first.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "permission_modes": {
+          "description": "Permission modes seen during the session, in order of first use.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "cost": {
+          "description": "Null when no transcript was available to read cost from.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cost"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "usage": {
+          "description": "Token usage per model, main thread and subagents combined.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelUsage"
+          },
+          "default": []
+        },
+        "counts": {
+          "$ref": "#/$defs/Counts",
+          "default": {
+            "events": 0,
+            "prompts": 0,
+            "tool_calls": 0,
+            "tool_failures": 0,
+            "permission_requests": 0,
+            "permission_denials": 0,
+            "subagents": 0,
+            "compactions": 0,
+            "api_errors": 0,
+            "files_read": 0,
+            "files_changed": 0,
+            "lines_added": 0,
+            "lines_removed": 0
+          }
+        },
+        "prompts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Prompt"
+          },
+          "default": []
+        },
+        "tool_calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolCall"
+          },
+          "default": []
+        },
+        "files": {
+          "description": "Files read or changed through the agent's file tools. Changes made by\nshell commands are not tracked here.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileTouched"
+          },
+          "default": []
+        },
+        "subagents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Subagent"
+          },
+          "default": []
+        },
+        "instruction_files": {
+          "description": "Instruction files (CLAUDE.md, rules) loaded into the session.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "CapturedBy": {
+      "description": "Where a session's activity was read from.",
+      "oneOf": [
+        {
+          "description": "Hook events, as they happened.",
+          "type": "string",
+          "const": "hooks"
+        },
+        {
+          "description": "Reconstructed afterwards from the agent's transcript.",
+          "type": "string",
+          "const": "transcript"
+        }
+      ]
+    },
+    "Content": {
+      "description": "How much content a record carries.",
+      "oneOf": [
+        {
+          "description": "As built on the capturing machine: previews and absolute paths. Never uploaded.",
+          "type": "string",
+          "const": "local"
+        },
+        {
+          "description": "Previews kept (the first 200 characters of prompts, shell commands,\nsearch patterns, URLs and error output). Paths are made relative.",
+          "type": "string",
+          "const": "previews"
+        },
+        {
+          "description": "No text from prompts, commands or output at all: counts, sizes,\ntimings, tool names and relative file paths only.",
+          "type": "string",
+          "const": "metadata"
+        }
+      ]
+    },
+    "User": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "Repo": {
+      "type": "object",
+      "properties": {
+        "root": {
+          "description": "Repository root on the capturing machine.",
+          "type": "string",
+          "default": ""
+        },
+        "remote": {
+          "description": "`origin` remote as host/owner/repo, without credentials.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "Cost": {
+      "type": "object",
+      "properties": {
+        "total_usd": {
+          "description": "Best figure for the whole session, in USD.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "source": {
+          "$ref": "#/$defs/CostSource",
+          "default": "estimated"
+        },
+        "transcript_estimate_usd": {
+          "description": "Estimate from the token counts visible in the transcript.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "unpriced_requests": {
+          "description": "Requests the total leaves out: made on a model without a known price,\noutside any run the agent recorded a total for.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "untracked_usd": {
+          "description": "Spend the agent recorded that the transcript does not show. Null when\nit can't be worked out (no recorded total, or a model without a known price).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      }
+    },
+    "CostSource": {
+      "description": "Where a session's cost figure comes from.",
+      "oneOf": [
+        {
+          "description": "The agent's own total, covering every message in the transcript.",
+          "type": "string",
+          "const": "recorded"
+        },
+        {
+          "description": "The agent's total for one run, combined with our estimates for\nmessages outside that run.",
+          "type": "string",
+          "const": "recorded_and_estimated"
+        },
+        {
+          "description": "Our estimate from token counts only. A lower bound: it misses calls\nthat never reach the transcript.",
+          "type": "string",
+          "const": "estimated"
+        },
+        {
+          "description": "An estimate that leaves out requests to models without a known price.",
+          "type": "string",
+          "const": "partial_estimate"
+        },
+        {
+          "description": "A value written by a newer version.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "ModelUsage": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "default": ""
+        },
+        "requests": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "output_tokens": {
+          "description": "Includes thinking tokens.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "thinking_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "cache_write_5m_tokens": {
+          "description": "Cache writes with a 5-minute lifetime (1.25x the input price).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "cache_write_1h_tokens": {
+          "description": "Cache writes with a 1-hour lifetime (2x the input price).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "estimated_cost_usd": {
+          "description": "Null when the model has no known price.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      }
+    },
+    "Counts": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "description": "Raw hook events the record was built from.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "prompts": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "tool_failures": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "permission_requests": {
+          "description": "Times the user was asked to approve a tool call.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "permission_denials": {
+          "description": "Tool calls refused by auto mode.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "subagents": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "compactions": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "api_errors": {
+          "description": "Turns that ended in an API error.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "files_read": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "files_changed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_added": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_removed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        }
+      }
+    },
+    "Prompt": {
+      "type": "object",
+      "properties": {
+        "prompt_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "text": {
+          "$ref": "#/$defs/Text",
+          "default": {
+            "sha256": "",
+            "chars": 0,
+            "preview": ""
+          }
+        },
+        "ended_at": {
+          "description": "When the agent finished responding. Null if the turn was interrupted\nor is still running.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "outcome": {
+          "description": "Null if the turn was interrupted or is still running.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Outcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "error": {
+          "description": "API error type when outcome is \"api_error\".",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "Text": {
+      "description": "A piece of text kept as hash, length and short preview.",
+      "type": "object",
+      "properties": {
+        "sha256": {
+          "description": "SHA-256 of the full text, hex.",
+          "type": "string",
+          "default": ""
+        },
+        "chars": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "preview": {
+          "description": "First characters of the text.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "Outcome": {
+      "description": "How a prompt turn ended.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "completed",
+            "api_error"
+          ]
+        },
+        {
+          "description": "A value written by a newer version.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "ToolCall": {
+      "type": "object",
+      "properties": {
+        "tool_use_id": {
+          "type": "string",
+          "default": ""
+        },
+        "prompt_id": {
+          "description": "Prompt turn the call belongs to.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "agent_id": {
+          "description": "Set when a subagent made the call.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "tool": {
+          "type": "string",
+          "default": ""
+        },
+        "at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "status": {
+          "$ref": "#/$defs/ToolStatus",
+          "default": "no_result"
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        },
+        "file_path": {
+          "description": "File the call operated on, for file tools.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "input_sha256": {
+          "description": "SHA-256 of the full tool input (JSON), hex.",
+          "type": "string",
+          "default": ""
+        },
+        "input_summary": {
+          "description": "Short human-readable summary of the input: the command, pattern, URL\nor description, depending on the tool.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "output_bytes": {
+          "description": "Size of the tool's result as serialized JSON.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        },
+        "error": {
+          "description": "Start of the error message for failed calls. For shell commands this\nis the start of the command's output.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "lines_added": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_removed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        }
+      }
+    },
+    "ToolStatus": {
+      "description": "How a tool call ended.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "ok",
+            "failed"
+          ]
+        },
+        {
+          "description": "The user interrupted it.",
+          "type": "string",
+          "const": "interrupted"
+        },
+        {
+          "description": "Refused by auto mode.",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "Attempted, but no result was captured: rejected by the user,\ninterrupted, or still running.",
+          "type": "string",
+          "const": "no_result"
+        },
+        {
+          "description": "A value written by a newer version.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "FileTouched": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "default": ""
+        },
+        "reads": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "writes": {
+          "description": "Successful write or edit calls.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "created": {
+          "description": "True if the agent created the file in this session.",
+          "type": "boolean",
+          "default": false
+        },
+        "lines_added": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_removed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        }
+      }
+    },
+    "Subagent": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "default": ""
+        },
+        "agent_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "tool_calls": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "requests": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "estimated_cost_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      }
+    },
+    "RewriteMeasurement": {
+      "description": "How much of a session's changes is still in the files, measured later.",
+      "type": "object",
+      "properties": {
+        "measured_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "branch": {
+          "description": "Branch and commit that were checked out when measuring.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "head": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "files_measured": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "files_rewritten": {
+          "description": "Files where less than half of the agent's lines survive, or that are gone.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_added": {
+          "description": "Lines the agent added that are tracked (not blank or punctuation-only).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_surviving": {
+          "description": "How many of them are still in the files.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RewriteFile"
+          },
+          "default": []
+        }
+      }
+    },
+    "RewriteFile": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "default": ""
+        },
+        "lines_added": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_surviving": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "exists": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    }
+  }
+}

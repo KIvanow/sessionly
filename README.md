@@ -178,7 +178,8 @@ branch). Records are stored in `~/.sessionly/ledger.db` (SQLite).
 Claude Code deletes old transcripts, so after each read Sessionly saves what it needs from one
 (cost, usage, models, branch) under `~/.sessionly/transcript-facts/`. The ledger itself is
 derived data: delete it and `sessionly sync --force` rebuilds it from the raw capture and those
-saved facts. A session is rebuilt when its capture, its transcript or a subagent transcript
+saved facts. A normal sync never removes a session; `--force` also drops sessions whose raw
+capture has been deleted. A session is rebuilt when its capture, its transcript or a subagent transcript
 grows, or when Sessionly or its price table changes.
 
 The record is the contract between this binary and any server it later uploads to. Its JSON
@@ -196,7 +197,8 @@ The record holds metadata and short previews, not full content:
 - Full prompts, file contents and successful command output stay in the raw capture.
 
 The previews and paths are still sensitive: a command can contain a token, a path contains a
-user name. Nothing is uploaded today. Redaction has to exist before any upload does.
+user name. The local record keeps them; what may leave the machine is decided separately (see
+[What an upload contains](#what-an-upload-contains)).
 
 Limits to know about:
 
@@ -207,6 +209,38 @@ Limits to know about:
 - File changes made by shell commands (`sed`, `git apply`, generators) are not attributed to
   files; only the agent's file tools are.
 - User name and email come from git config at sync time. They are a label, not verified identity.
+
+### What an upload contains
+
+Nothing is uploaded yet. The payload a server will receive is already defined, and you can see
+it for any session:
+
+```sh
+sessionly export <session>                     # exactly what would be sent
+sessionly export <session> --content previews  # the same, with previews kept
+sessionly schema upload                        # its JSON Schema
+```
+
+The payload ([schema/upload.schema.json](schema/upload.schema.json)) is the session record plus
+the latest rewrite measurement. Before a record leaves the machine:
+
+- **Paths are made relative:** to the repository for files inside it, otherwise to the home
+  directory (`~/…`). No absolute path under your home directory is sent.
+- **The content level is applied** and written into the record's `content` field:
+
+| Level | What is sent |
+|---|---|
+| `metadata` (default) | Counts, sizes, timings, tool names, statuses, relative file paths, models, tokens, cost, rewrite figures, git user and remote. **No text** from prompts, commands, search patterns, URLs, errors or titles, and no content hashes. |
+| `previews` | The above, plus the 200-character previews and the hashes. A preview can contain anything you typed or ran, including secrets. |
+
+Each installation has a random `machine_id` (in `~/.sessionly/config.json`, created on first
+use). A session is identified by machine id, agent and session id, so uploading it again
+replaces the earlier copy. The git name and email in a record are a label taken from git
+config, not a verified identity.
+
+Fields with a fixed set of values (`status`, `outcome`, `cost.source`, `content`,
+`captured_by`) are enums in the schema. A reader maps a value it doesn't know to `unknown`, and
+ignores fields it doesn't know.
 
 ### Transcripts
 

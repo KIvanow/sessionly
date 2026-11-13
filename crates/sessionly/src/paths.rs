@@ -34,6 +34,11 @@ pub fn claude_facts_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("transcript-facts").join("claude-code"))
 }
 
+/// Local settings: machine id, server, upload policy.
+pub fn config_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("config.json"))
+}
+
 /// Normalized sessions.
 pub fn ledger_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("ledger.db"))

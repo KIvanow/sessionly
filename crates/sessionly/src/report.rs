@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use crate::ledger::{Group, GroupBy, Listed, Rewrite, RewriteRow};
 use crate::rewrite::REWRITTEN_BELOW;
-use crate::session::Session;
+use crate::session::{Outcome, Session, ToolStatus};
 use crate::transcript::{CostSource, TranscriptSummary, Usage, UsageByModel};
 
 pub fn transcript(s: &TranscriptSummary) -> String {
@@ -49,6 +49,7 @@ pub fn transcript(s: &TranscriptSummary) -> String {
         &mut out,
         "Cost",
         match cost.source {
+            CostSource::Unknown => usd(cost.total_usd),
             CostSource::Recorded => format!("{} (recorded by Claude Code)", usd(cost.total_usd)),
             CostSource::RecordedAndEstimated => format!(
                 "{} (one run recorded by Claude Code, the rest estimated)",
@@ -58,14 +59,14 @@ pub fn transcript(s: &TranscriptSummary) -> String {
                 "{} (estimated from the transcript; background calls not included)",
                 usd(cost.total_usd)
             ),
-            CostSource::Partial => format!(
+            CostSource::PartialEstimate => format!(
                 "{} (partial estimate: {} requests to models without a known price)",
                 usd(cost.total_usd),
                 s.total_usage().unpriced_requests
             ),
         },
     );
-    if cost.unpriced_requests > 0 && cost.source != CostSource::Partial {
+    if cost.unpriced_requests > 0 && cost.source != CostSource::PartialEstimate {
         field(
             &mut out,
             "",
@@ -230,7 +231,7 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
             let mut text = format!(
                 "{} ({})",
                 usd(cost.total_usd),
-                cost.source.replace('_', " ")
+                cost.source.as_str().replace('_', " ")
             );
             if let Some(untracked) = cost.untracked_usd.filter(|u| *u >= 0.005) {
                 let _ = write!(text, ", {} not visible in the transcript", usd(untracked));
@@ -317,9 +318,9 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
         out.push_str("\nPrompts\n");
         for p in &s.prompts {
             let time = p.at.map(|t| t.format("%H:%M:%S").to_string());
-            let outcome = match p.outcome.as_deref() {
-                Some("completed") => String::new(),
-                Some(other) => format!("  [{}]", p.error.as_deref().unwrap_or(other)),
+            let outcome = match p.outcome {
+                Some(Outcome::Completed) => String::new(),
+                Some(_) => format!("  [{}]", p.error.as_deref().unwrap_or("api error")),
                 None => "  [no end recorded]".into(),
             };
             let preview: String = p
@@ -373,7 +374,7 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
                 }
             };
             tools[i].1 += 1;
-            tools[i].2 += u64::from(call.status != "ok");
+            tools[i].2 += u64::from(call.status != ToolStatus::Ok);
         }
         tools.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         out.push_str("\nTools\n");

@@ -151,9 +151,9 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>) -> Option<Session> {
                 if let Some(prompt) = s.prompts.iter_mut().rev().find(|pr| pr.prompt_id == id) {
                     prompt.ended_at = at;
                     if hook == "Stop" {
-                        prompt.outcome = Some("completed".into());
+                        prompt.outcome = Some(Outcome::Completed);
                     } else {
-                        prompt.outcome = Some("api_error".into());
+                        prompt.outcome = Some(Outcome::ApiError);
                         prompt.error = text("error");
                     }
                 }
@@ -166,7 +166,7 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>) -> Option<Session> {
             }
             "PostToolUse" => {
                 if let Some(call) = tool_call(&mut s, &mut tool_ix, p, at) {
-                    call.status = "ok".into();
+                    call.status = ToolStatus::Ok;
                     call.duration_ms = p["duration_ms"].as_u64();
                     let response = &p["tool_response"];
                     call.output_bytes = Some(response.to_string().len() as u64);
@@ -180,7 +180,11 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>) -> Option<Session> {
             "PostToolUseFailure" => {
                 if let Some(call) = tool_call(&mut s, &mut tool_ix, p, at) {
                     let interrupted = p["is_interrupt"].as_bool() == Some(true);
-                    call.status = if interrupted { "interrupted" } else { "failed" }.into();
+                    call.status = if interrupted {
+                        ToolStatus::Interrupted
+                    } else {
+                        ToolStatus::Failed
+                    };
                     call.duration_ms = p["duration_ms"].as_u64();
                     call.error = p["error"].as_str().map(|e| truncate(e, PREVIEW_CHARS));
                 }
@@ -189,7 +193,7 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>) -> Option<Session> {
             "PermissionDenied" => {
                 s.counts.permission_denials += 1;
                 if let Some(call) = tool_call(&mut s, &mut tool_ix, p, at) {
-                    call.status = "denied".into();
+                    call.status = ToolStatus::Denied;
                     call.error = p["reason"].as_str().map(|e| truncate(e, PREVIEW_CHARS));
                 }
             }
@@ -256,7 +260,11 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>) -> Option<Session> {
 
     s.counts.prompts = s.prompts.len() as u64;
     s.counts.tool_calls = s.tool_calls.len() as u64;
-    s.counts.tool_failures = s.tool_calls.iter().filter(|c| c.status == "failed").count() as u64;
+    s.counts.tool_failures = s
+        .tool_calls
+        .iter()
+        .filter(|c| c.status == ToolStatus::Failed)
+        .count() as u64;
     s.counts.subagents = s.subagents.len() as u64;
     s.counts.files_read = s.files.iter().filter(|f| f.reads > 0).count() as u64;
     s.counts.files_changed = s.files.iter().filter(|f| f.writes > 0).count() as u64;
@@ -284,7 +292,7 @@ fn tool_call<'a>(
                 prompt_id: text("prompt_id"),
                 agent_id: text("agent_id"),
                 at,
-                status: "no_result".into(),
+                status: ToolStatus::NoResult,
                 file_path: ["file_path", "notebook_path"]
                     .iter()
                     .find_map(|k| input[*k].as_str())
@@ -345,7 +353,7 @@ fn line_changes(input: &Value, response: &Value) -> (u64, u64) {
 fn files_touched(calls: &[ToolCall], created: &HashSet<String>) -> Vec<FileTouched> {
     let mut files: Vec<FileTouched> = Vec::new();
     let mut index: HashMap<&str, usize> = HashMap::new();
-    for call in calls.iter().filter(|c| c.status == "ok") {
+    for call in calls.iter().filter(|c| c.status == ToolStatus::Ok) {
         let Some(path) = call.file_path.as_deref() else {
             continue;
         };
@@ -603,13 +611,11 @@ mod tests {
         assert_eq!(s.prompts.len(), 1);
         assert_eq!(s.prompts[0].text.preview, "do the thing");
         assert_eq!(s.prompts[0].text.chars, 12);
-        assert_eq!(s.prompts[0].outcome.as_deref(), Some("completed"));
+        assert_eq!(s.prompts[0].outcome, Some(Outcome::Completed));
 
-        let status: Vec<_> = s.tool_calls.iter().map(|c| c.status.as_str()).collect();
-        assert_eq!(
-            status,
-            ["ok", "failed", "ok", "ok", "ok", "no_result", "ok"]
-        );
+        use ToolStatus::{Failed, NoResult, Ok};
+        let status: Vec<_> = s.tool_calls.iter().map(|c| c.status).collect();
+        assert_eq!(status, [Ok, Failed, Ok, Ok, Ok, NoResult, Ok]);
         assert_eq!(s.tool_calls[0].input_summary.as_deref(), Some("echo hi"));
         assert_eq!(s.tool_calls[0].duration_ms, Some(700));
         assert_eq!(s.tool_calls[1].error.as_deref(), Some("Exit code 2"));
@@ -689,10 +695,10 @@ mod tests {
             ),
         ];
         let s = from_events(&events, None).unwrap();
-        assert_eq!(s.tool_calls[0].status, "denied");
+        assert_eq!(s.tool_calls[0].status, ToolStatus::Denied);
         assert_eq!(s.counts.permission_denials, 1);
         assert_eq!(s.counts.api_errors, 1);
-        assert_eq!(s.prompts[0].outcome.as_deref(), Some("api_error"));
+        assert_eq!(s.prompts[0].outcome, Some(Outcome::ApiError));
         assert_eq!(s.prompts[0].error.as_deref(), Some("rate_limit"));
     }
 
@@ -743,7 +749,7 @@ mod tests {
             version: Some("2.1.302".into()),
             cost: Cost {
                 total_usd: 3.5,
-                source: "recorded".into(),
+                source: CostSource::Recorded,
                 ..Default::default()
             },
             usage: vec![ModelUsage {

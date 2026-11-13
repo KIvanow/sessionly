@@ -6,6 +6,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand};
 
 mod capture;
+mod config;
 mod git;
 mod hooks;
 mod jsonl;
@@ -18,6 +19,7 @@ mod rewrite;
 mod session;
 mod sync;
 mod transcript;
+mod upload;
 mod watch;
 
 #[derive(Parser)]
@@ -85,10 +87,27 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Print the JSON Schema of the session record
-    Schema,
+    /// Print exactly what would be uploaded for a session
+    Export {
+        /// Session id or a unique prefix of one
+        session: String,
+        /// How much content to include [default: the configured level, normally metadata]
+        #[arg(long, value_enum)]
+        content: Option<session::Content>,
+    },
+    /// Print the JSON Schema of the session record, or of the upload payload
+    Schema {
+        #[arg(value_enum, default_value = "session")]
+        which: SchemaKind,
+    },
     /// Hook entry point: read one payload on stdin and store it (used by Claude Code)
     Capture,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum SchemaKind {
+    Session,
+    Upload,
 }
 
 #[derive(Args)]
@@ -248,6 +267,12 @@ fn run(command: Command) -> Result<()> {
                 "Synced: {} updated, {} unchanged, {} without usable events",
                 report.synced, report.unchanged, report.empty
             );
+            if report.removed > 0 {
+                println!(
+                    "Removed: {} sessions whose capture no longer exists",
+                    report.removed
+                );
+            }
             println!(
                 "Rewrite: {} changed files measured, {} in directories that no longer exist",
                 rewrite.measured, rewrite.unavailable
@@ -317,7 +342,24 @@ fn run(command: Command) -> Result<()> {
                 print!("{}", report::transcript(&summary));
             }
         }
-        Command::Schema => print!("{}", session::json_schema()),
+        Command::Export { session, content } => {
+            let config = config::Config::load(&paths::config_path()?)?;
+            let mut ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
+            sync_ledger(&mut ledger, false)?;
+            let record = ledger
+                .get(&session)?
+                .with_context(|| format!("no session matching \"{session}\" in the ledger"))?;
+            let payload =
+                upload::build(&ledger, &record, content.unwrap_or(config.upload_content))?;
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        }
+        Command::Schema { which } => print!(
+            "{}",
+            match which {
+                SchemaKind::Session => session::json_schema(),
+                SchemaKind::Upload => session::upload_json_schema(),
+            }
+        ),
         Command::Capture => unreachable!("handled in main"),
     }
     Ok(())
@@ -329,10 +371,12 @@ fn sync_ledger(
     ledger: &mut ledger::Ledger,
     force: bool,
 ) -> Result<(sync::Report, rewrite::Report)> {
+    let config = config::Config::load(&paths::config_path()?)?;
     let report = sync::run(
         &paths::claude_raw_dir()?,
         &paths::claude_facts_dir()?,
         ledger,
+        &config.machine_id,
         force,
     )?;
     for (path, err) in &report.failed {

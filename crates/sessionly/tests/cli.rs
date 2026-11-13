@@ -455,3 +455,66 @@ fn list_filters_and_summary_groups() {
     );
     assert!(none.contains("No sessions match"));
 }
+
+#[test]
+fn export_shows_what_would_leave_the_machine() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    capture_editing_session(home.path(), "exp-1", &repo);
+    fs::write(repo.join("new.txt"), "alpha one\nbeta two\n").unwrap();
+    let home_text = home.path().to_string_lossy().into_owned();
+
+    // Default level: no text from the session, no absolute paths.
+    let text = stdout(
+        sessionly(home.path())
+            .args(["export", "exp"])
+            .output()
+            .unwrap(),
+    );
+    assert!(!text.contains("Parser module"), "{text}");
+    assert!(!text.contains(&home_text), "{text}");
+    let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(payload["schema_version"], 1);
+    let session = &payload["session"];
+    assert_eq!(session["content"], "metadata");
+    assert_eq!(session["captured_by"], "hooks");
+    assert_eq!(session["machine_id"].as_str().unwrap().len(), 36);
+    assert_eq!(session["repo"]["root"], "~/repo");
+    assert_eq!(session["files"][0]["path"], "new.txt");
+    assert_eq!(session["prompts"][0]["text"]["preview"], "");
+    assert_eq!(session["prompts"][0]["text"]["chars"], 36);
+    assert_eq!(session["tool_calls"][0]["status"], "ok");
+    let rewrite = &payload["rewrite"];
+    assert_eq!(rewrite["files_measured"], 2);
+    assert_eq!(rewrite["files_rewritten"], 1); // old.txt was never written to disk
+    assert_eq!(rewrite["files"][0]["path"], "new.txt");
+    assert_eq!(rewrite["files"][0]["lines_surviving"], 2);
+
+    // Previews are opt-in; paths stay relative.
+    let previews = stdout(
+        sessionly(home.path())
+            .args(["export", "exp", "--content", "previews"])
+            .output()
+            .unwrap(),
+    );
+    assert!(previews.contains("Parser module"));
+    assert!(!previews.contains(&home_text));
+    // "local" is not something that can be exported
+    let local = sessionly(home.path())
+        .args(["export", "exp", "--content", "local"])
+        .output()
+        .unwrap();
+    assert!(!local.status.success());
+
+    // The machine id is stable and part of every record.
+    let again = json_of(home.path(), &["export", "exp"]);
+    assert_eq!(again["session"]["machine_id"], session["machine_id"]);
+    let schema = stdout(
+        sessionly(home.path())
+            .args(["schema", "upload"])
+            .output()
+            .unwrap(),
+    );
+    assert!(schema.contains("\"Upload\"") && schema.contains("RewriteMeasurement"));
+}
