@@ -174,7 +174,18 @@ fn the_installed_command_really_runs_capture() {
         .env("SESSIONLY_HOME", home.path().join("data"))
         .args(["install", "--project"])
         .arg(&project);
-    stdout(install.output().unwrap());
+    // Running a file right after copying it can fail with "text file busy"
+    // while another test thread is spawning a process; retry briefly.
+    let installed = (0..50)
+        .find_map(|_| match install.output() {
+            Err(err) if err.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                None
+            }
+            other => Some(other.unwrap()),
+        })
+        .expect("copied binary stayed busy");
+    stdout(installed);
     let settings: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(project.join(".claude/settings.json")).unwrap())
             .unwrap();
