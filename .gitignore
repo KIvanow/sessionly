@@ -5,3 +5,6 @@ node_modules/
 .sessionly/
 # working notes, kept locally
 /docs/
+dist/
+# local server data (embedded database)
+/apps/server/data/

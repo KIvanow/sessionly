@@ -270,8 +270,8 @@ ignores fields it doesn't know.
 
 ### Uploading
 
-The server and dashboard in this repository are not built yet. The binary's side is. It needs
-two endpoints from a server, both with `Authorization: Bearer <token>`:
+The binary uploads to a Sessionly server (see [Server](#server)). It uses two endpoints, both
+with `Authorization: Bearer <token>`:
 
 - `GET /api/v1/ping` answers 2xx if the token is accepted.
 - `PUT /api/v1/sessions/{machine_id}/{source}/{session_id}` stores or replaces one session. The
@@ -381,11 +381,55 @@ prints and always exits 0, whatever its input or arguments, so a capture failure
 change your session. If another capture holds the file for more than 1.5 seconds it writes
 anyway instead of waiting. Errors go to `_errors.log` next to the data.
 
+## Server
+
+The server receives uploads and answers the dashboard's questions. It is TypeScript
+(`apps/server`, Hono) and speaks Postgres. The dashboard itself is not built yet.
+
+```sh
+pnpm install
+SESSIONLY_ADMIN_TOKEN=choose-a-long-secret SESSIONLY_ADMIN_EMAIL=you@example.com pnpm server
+```
+
+That starts it on `http://127.0.0.1:8080` with an embedded database in `apps/server/data`, which
+is enough to try it or for a small team. Set `DATABASE_URL=postgres://…` to use a Postgres
+server. Then, on a developer's machine:
+
+```sh
+sessionly connect http://127.0.0.1:8080   # paste the token
+sessionly upload
+```
+
+| Setting | Meaning |
+|---|---|
+| `PORT`, `HOST` | Where to listen. Default `127.0.0.1:8080`; use `HOST=0.0.0.0` in a container. |
+| `DATABASE_URL` | `postgres://…`, or unset for the embedded database. |
+| `SESSIONLY_ADMIN_TOKEN` | An admin token that always works, for first use. |
+| `SESSIONLY_ADMIN_EMAIL` | Who uploads made with that token belong to. |
+
+**People and tokens.** Each token belongs to one person and is either `member` or `admin`.
+Uploads are filed under the token's owner, whatever name the record carries. A member sees their
+own sessions; an admin sees everyone's. An admin creates and revokes tokens through
+`POST /api/v1/tokens`, `GET /api/v1/tokens` and `DELETE /api/v1/tokens/{id}`, or from the command
+line with `pnpm token create --email ann@example.com` (with the embedded database, stop the
+server first). Only a hash of each token is stored.
+
+**For the dashboard:** `GET /api/v1/summary?by=user|repo|model|day`, `GET /api/v1/sessions`
+(filters `user`, `repo`, `model`, `q`, `since`, `until`, paging `limit`, `offset`),
+`GET /api/v1/sessions/{machine_id}/{source}/{session_id}` and `GET /api/v1/filters`.
+
+The payload types in `packages/schema` are generated from `schema/upload.schema.json`, which is
+generated from the Rust types. `pnpm gen` regenerates them and a test fails if they are stale.
+
+Checked with the real binary and one machine's history: 100 sessions uploaded in under three
+seconds, and the server's totals equal the local `sessionly summary` exactly.
+
 ## Develop
 
 ```sh
 cargo test
 cargo clippy --all-targets
+pnpm typecheck && pnpm test   # the TypeScript side
 scripts/dummy-session.sh   # runs a short real Claude Code session that exercises most hooks
 ```
 
@@ -396,5 +440,5 @@ scripts/dummy-session.sh   # runs a short real Claude Code session that exercise
 3. ✅ Normalized session schema and local storage
 4. ✅ Rewrite rate (how much of what the agent wrote survived)
 5. ✅ CLI: list, show, search
-6. ✅ Aggregation on one machine (`summary`); next: upload, ingest API and team dashboard
+6. ✅ Aggregation on one machine (`summary`), upload, and the server; next: the dashboard
 7. Polish, docs, example data

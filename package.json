@@ -1,0 +1,15 @@
+{
+  "name": "sessionly-workspace",
+  "private": true,
+  "packageManager": "pnpm@10.4.1",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "gen": "pnpm --filter @sessionly/schema gen",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "server": "pnpm --filter @sessionly/server start",
+    "token": "pnpm --filter @sessionly/server token"
+  }
+}
