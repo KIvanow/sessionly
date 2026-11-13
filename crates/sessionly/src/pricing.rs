@@ -3,7 +3,7 @@
 //!
 //! Prices are USD per million tokens. Cache writes cost 1.25x input (5-minute
 //! TTL) or 2x input (1-hour TTL). Cache reads vary by model. Checked against
-//! Claude Code's own `cost-state` totals; see docs/hook-data.md.
+//! Claude Code's own `cost-state` totals.
 
 /// Per-million-token prices for one model.
 #[derive(Debug, Clone, Copy, PartialEq)]

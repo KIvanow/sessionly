@@ -21,8 +21,8 @@ pub const TOOL_EVENTS: &[&str] = &[
     "PermissionDenied",
 ];
 
-/// Observe-only events without a tool matcher. Left out on purpose (see
-/// docs/hook-data.md): WorktreeCreate/WorktreeRemove replace behaviour instead of
+/// Observe-only events without a tool matcher. Left out on purpose:
+/// WorktreeCreate/WorktreeRemove replace behaviour instead of
 /// observing it, PreModelSwitch blocks the switch on timeout, MessageDisplay
 /// fires per streamed chunk, and the rest are low value for a ledger.
 pub const OTHER_EVENTS: &[&str] = &[

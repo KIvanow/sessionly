@@ -270,8 +270,12 @@ ignores fields it doesn't know.
 
 ### Uploading
 
-The server and dashboard in this repository are not built yet. The binary's side is, against
-the small API in [docs/api.md](docs/api.md):
+The server and dashboard in this repository are not built yet. The binary's side is. It needs
+two endpoints from a server, both with `Authorization: Bearer <token>`:
+
+- `GET /api/v1/ping` answers 2xx if the token is accepted.
+- `PUT /api/v1/sessions/{machine_id}/{source}/{session_id}` stores or replaces one session. The
+  body is the payload described under [What an upload contains](#what-an-upload-contains).
 
 ```sh
 sessionly connect https://sessionly.example.com   # asks for the token, checks it, saves both
@@ -340,8 +344,7 @@ How close is it? On one machine with 97 transcripts, the estimate for a recorded
 Claude Code's total to the cent in about a third of the sessions and was lower in most of the
 rest: 23% of recorded spend ($536 of $2,359) does not appear in any transcript. We report that
 share as `untracked_usd` and have not yet identified what it is. An estimate without a recorded
-total is therefore a lower bound. Details in
-[docs/hook-data.md](docs/hook-data.md#8-the-transcript-transcript_path-observed).
+total is therefore a lower bound.
 
 ### Raw capture
 
@@ -367,8 +370,7 @@ SubagentStop, PreCompact, PostCompact, PostModelSwitch, TaskCreated, TaskComplet
 InstructionsLoaded.
 
 Events that change Claude Code's behaviour when hooked (WorktreeCreate, WorktreeRemove,
-PreModelSwitch) are left out on purpose. [docs/hook-data.md](docs/hook-data.md) covers every
-event, its payload, and why it is or isn't useful.
+PreModelSwitch) are left out on purpose.
 
 ### Hook overhead
 
