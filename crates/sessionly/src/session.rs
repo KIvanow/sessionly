@@ -194,6 +194,9 @@ pub struct ToolCall {
     /// Set when a subagent made the call.
     pub agent_id: Option<String>,
     pub tool: String,
+    /// Model that made the call. Null where the agent does not say: Grok, and
+    /// Cursor turns the hooks did not see.
+    pub model: Option<String>,
     pub at: Option<DateTime<Utc>>,
     pub status: ToolStatus,
     pub duration_ms: Option<u64>,
@@ -374,6 +377,25 @@ pub struct Upload {
     /// Latest rewrite measurement. Null if the session changed no files or
     /// they could not be measured.
     pub rewrite: Option<RewriteMeasurement>,
+    /// The lines the agent added, as hashes, so a server can tell which lines
+    /// of a pull request an agent wrote. Sent only when that is switched on
+    /// (`sessionly settings --line-hashes on`); empty otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<AddedLines>,
+}
+
+/// Lines an agent added to one file with one model. A line is hashed without
+/// the whitespace at its ends; blank lines and lines without a letter or
+/// digit are left out. The same line added twice is listed twice.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct AddedLines {
+    /// As in the session's `files`.
+    pub path: String,
+    /// Null if the model is not known.
+    pub model: Option<String>,
+    /// First 8 bytes of each line's SHA-256, as 16 hex digits.
+    pub hashes: Vec<String>,
 }
 
 fn pretty(schema: schemars::Schema) -> String {

@@ -42,11 +42,45 @@ pub fn line_hash(line: &str) -> Option<u64> {
     Some(u64::from_le_bytes(digest[..8].try_into().unwrap()))
 }
 
+/// The lines an agent added to one file, as hashes, grouped by the model
+/// that wrote them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FileLines {
+    pub path: String,
+    /// Models in name order, an unknown model first; each with its lines'
+    /// hashes in order. A line added twice is there twice.
+    pub by_model: Vec<(Option<String>, Vec<u64>)>,
+}
+
+impl FileLines {
+    pub fn hashes(&self) -> impl Iterator<Item = u64> + '_ {
+        self.by_model
+            .iter()
+            .flat_map(|(_, hashes)| hashes.iter().copied())
+    }
+}
+
 /// The agent's added lines per file, from raw capture records. Each file's
 /// list keeps duplicates (it is a multiset) and files are in order of first change.
+#[cfg(test)]
 pub fn added_lines(events: &[Value]) -> Vec<(String, Vec<u64>)> {
+    added_lines_by_model(events, &HashMap::new())
+        .into_iter()
+        .map(|file| {
+            let mut hashes: Vec<u64> = file.hashes().collect();
+            hashes.sort_unstable();
+            (file.path, hashes)
+        })
+        .collect()
+}
+
+/// The agent's added lines per file and model, from raw capture records.
+/// `models` says which model made a tool call, by tool use id. Files are in
+/// order of first change.
+pub fn added_lines_by_model(events: &[Value], models: &HashMap<&str, &str>) -> Vec<FileLines> {
     let mut order: Vec<String> = Vec::new();
-    let mut counts: HashMap<String, HashMap<u64, i64>> = HashMap::new();
+    // Per file and line: the model behind each time the line was added.
+    let mut counts: HashMap<String, HashMap<u64, Vec<Option<&str>>>> = HashMap::new();
     for record in events {
         if record["hook"].as_str() != Some("PostToolUse") {
             continue;
@@ -90,27 +124,47 @@ pub fn added_lines(events: &[Value]) -> Vec<(String, Vec<u64>)> {
         if !counts.contains_key(path) {
             order.push(path.to_string());
         }
+        let model = p["tool_use_id"]
+            .as_str()
+            .and_then(|id| models.get(id).copied());
         let file = counts.entry(path.to_string()).or_default();
         // A line the agent removes again was its own to remove: un-count it.
         for hash in removed {
-            if let Some(n) = file.get_mut(&hash).filter(|n| **n > 0) {
-                *n -= 1;
+            if let Some(writers) = file.get_mut(&hash) {
+                writers.pop();
             }
         }
         for hash in added {
-            *file.entry(hash).or_insert(0) += 1;
+            file.entry(hash).or_default().push(model);
         }
     }
     order
         .into_iter()
         .filter_map(|path| {
-            let mut hashes: Vec<u64> = counts[&path]
-                .iter()
-                .flat_map(|(hash, n)| std::iter::repeat_n(*hash, (*n).max(0) as usize))
+            let mut by_model: std::collections::BTreeMap<Option<&str>, Vec<u64>> =
+                Default::default();
+            for (hash, writers) in &counts[&path] {
+                for model in writers {
+                    by_model.entry(*model).or_default().push(*hash);
+                }
+            }
+            let by_model: Vec<(Option<String>, Vec<u64>)> = by_model
+                .into_iter()
+                .map(|(model, mut hashes)| {
+                    hashes.sort_unstable();
+                    (model.map(String::from), hashes)
+                })
                 .collect();
-            hashes.sort_unstable();
-            (!hashes.is_empty()).then_some((path, hashes))
+            (!by_model.is_empty()).then_some(FileLines { path, by_model })
         })
+        .collect()
+}
+
+/// A line's hash as it is uploaded: the first 8 bytes of its SHA-256 in hex.
+pub fn hash_hex(hash: u64) -> String {
+    hash.to_le_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
         .collect()
 }
 
@@ -243,6 +297,67 @@ mod tests {
         assert_eq!(line_hash("  });"), None);
         assert_eq!(line_hash("let x = 1;"), line_hash("\t  let x = 1;  "));
         assert_ne!(line_hash("let x = 1;"), line_hash("let x = 2;"));
+    }
+
+    /// The GitHub Action hashes pull request lines itself: both must agree.
+    #[test]
+    fn hashes_match_the_shared_cases() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../../../action/test/line-hashes.json")).unwrap();
+        let cases = cases["cases"].as_array().unwrap();
+        assert!(cases.len() > 20);
+        for case in cases {
+            let line = case["line"].as_str().unwrap();
+            assert_eq!(
+                line_hash(line).map(hash_hex).as_deref(),
+                case["hash"].as_str(),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn groups_added_lines_by_the_model_that_wrote_them() {
+        let by = |id: &str, mut event: Value| {
+            event["payload"]["tool_use_id"] = json!(id);
+            event
+        };
+        let events = vec![
+            by(
+                "t1",
+                post("/r/a.rs", json!({}), patch(&["+one();", "+two();", "+}"])),
+            ),
+            by(
+                "t2",
+                post("/r/a.rs", json!({}), patch(&["+three();", "+one();"])),
+            ),
+            // the latest writer of a line is the one whose line is removed
+            by(
+                "t3",
+                post("/r/a.rs", json!({}), patch(&["-one();", "+four();"])),
+            ),
+            by("t9", post("/r/b.rs", json!({}), patch(&["+solo();"]))),
+        ];
+        let models = HashMap::from([("t1", "opus"), ("t2", "haiku"), ("t3", "opus")]);
+        let lines = added_lines_by_model(&events, &models);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0].by_model,
+            [
+                (Some("haiku".to_string()), hashes(&["three();"])),
+                (
+                    Some("opus".to_string()),
+                    hashes(&["one();", "two();", "four();"])
+                ),
+            ]
+        );
+        // a call with no known model
+        assert_eq!(lines[1].by_model, [(None, hashes(&["solo();"]))]);
+        assert_eq!(lines[0].hashes().count(), 4);
+        assert_eq!(
+            hash_hex(u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 0xff])),
+            "00010203040506ff"
+        );
     }
 
     #[test]

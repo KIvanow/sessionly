@@ -135,6 +135,10 @@ enum Command {
         /// How much content uploads carry
         #[arg(long, value_enum)]
         content: Option<session::Content>,
+        /// Upload hashes of the lines agents added, so the server can tell
+        /// which lines of a pull request an agent wrote
+        #[arg(long, value_name = "on|off", value_parser = parse_on_off)]
+        line_hashes: Option<bool>,
     },
     /// One background sync and upload (started by the capture hook)
     #[command(hide = true)]
@@ -568,12 +572,17 @@ fn run(command: Command) -> Result<()> {
                 Err(err) => bail!("{err}"),
             }
         }
-        Command::Settings { auto_sync, content } => {
+        Command::Settings {
+            auto_sync,
+            content,
+            line_hashes,
+        } => {
             let path = paths::config_path()?;
             let mut config = config::Config::load(&path)?;
-            if auto_sync.is_some() || content.is_some() {
+            if auto_sync.is_some() || content.is_some() || line_hashes.is_some() {
                 config.auto_sync = auto_sync.unwrap_or(config.auto_sync);
                 config.upload_content = content.unwrap_or(config.upload_content);
+                config.upload_line_hashes = line_hashes.unwrap_or(config.upload_line_hashes);
                 config.save(&path)?;
             }
             print_settings(&config);
@@ -588,8 +597,12 @@ fn run(command: Command) -> Result<()> {
             let record = ledger
                 .get(&session)?
                 .with_context(|| format!("no session matching \"{session}\" in the ledger"))?;
-            let payload =
-                upload::build(&ledger, &record, content.unwrap_or(config.upload_content))?;
+            let payload = upload::build(
+                &ledger,
+                &record,
+                content.unwrap_or(config.upload_content),
+                config.upload_line_hashes,
+            )?;
             println!("{}", serde_json::to_string_pretty(&payload)?);
         }
         Command::Schema { which } => print!(
@@ -639,6 +652,14 @@ fn print_settings(config: &config::Config) {
             session::Content::Previews =>
                 "200-character previews of prompts, commands and errors are sent",
             _ => "no text from prompts, commands or output is sent",
+        }
+    );
+    println!(
+        "Hashes:     {}",
+        if config.upload_line_hashes {
+            "on (hashes of the lines agents added are sent, for pull request reports)"
+        } else {
+            "off"
         }
     );
     println!(

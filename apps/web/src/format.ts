@@ -68,9 +68,21 @@ export function modelName(model: string): string {
   return model.replace(/^claude-/, "");
 }
 
+/** A total over a number of things, to one decimal: 3 over 2 -> "1.5"; over none -> "–" */
+export function average(total: number, over: number): string {
+  return over > 0 ? (total / over).toFixed(1).replace(/\.0$/, "") : "–";
+}
+
 /** 0.4183 -> "42%"; null -> "–" */
 export function percent(share: number | null): string {
   return share == null || Number.isNaN(share) ? "–" : `${Math.round(share * 100)}%`;
+}
+
+/** A share of lines as a percentage: "100%" only for all of them, "0%" only for none. */
+export function shareOf(part: number, wholeAmount: number): string {
+  if (!(wholeAmount > 0)) return "–";
+  const rounded = Math.round((part / wholeAmount) * 100);
+  return `${part < wholeAmount ? Math.min(rounded, 99) : rounded}%`.replace(/^0%$/, part > 0 ? "1%" : "0%");
 }
 
 export function share(part: number, wholeAmount: number): number | null {

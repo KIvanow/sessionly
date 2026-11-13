@@ -21,8 +21,8 @@ pub struct Built {
     pub session: Session,
     /// Where the hooks said the transcript is, whether or not it still exists.
     pub transcript_path: Option<PathBuf>,
-    /// Hashes of the lines the agent added, per changed file (see `rewrite`).
-    pub added_lines: Vec<(String, Vec<u64>)>,
+    /// Hashes of the lines the agent added, per changed file and model (see `rewrite`).
+    pub added_lines: Vec<crate::rewrite::FileLines>,
 }
 
 /// Read a capture or import file of one agent (`source`), add what is known
@@ -58,10 +58,18 @@ pub fn build_from_raw(raw_path: &Path, facts_dir: &Path, source: &str) -> Result
         return Ok(None);
     };
     add_local_context(&mut session, facts.as_ref());
+    // A call whose model is not known is put down to the session's main one.
+    let main = session.models.first();
+    let models: HashMap<&str, &str> = session
+        .tool_calls
+        .iter()
+        .filter_map(|c| Some((c.tool_use_id.as_str(), c.model.as_ref().or(main)?.as_str())))
+        .collect();
+    let added_lines = crate::rewrite::added_lines_by_model(&events, &models);
     Ok(Some(Built {
         session,
         transcript_path,
-        added_lines: crate::rewrite::added_lines(&events),
+        added_lines,
     }))
 }
 
@@ -311,6 +319,7 @@ fn tool_call<'a>(
                 tool_use_id: id.to_string(),
                 prompt_id: text("prompt_id"),
                 agent_id: text("agent_id"),
+                model: text("model"),
                 at,
                 status: ToolStatus::NoResult,
                 file_path: ["file_path", "notebook_path"]
@@ -408,6 +417,9 @@ fn apply_facts(s: &mut Session, facts: &Facts, sub_ix: &mut HashMap<String, usiz
     s.cost = facts.cost.clone();
     s.models = facts.usage.iter().map(|u| u.model.clone()).collect();
     s.usage = facts.usage.clone();
+    for call in s.tool_calls.iter_mut().filter(|c| c.model.is_none()) {
+        call.model = facts.tool_models.get(&call.tool_use_id).cloned();
+    }
     for sub in &facts.subagents {
         let i = *sub_ix.entry(sub.agent_id.clone()).or_insert_with(|| {
             s.subagents.push(Subagent {
@@ -835,6 +847,79 @@ mod tests {
         assert_eq!(cost_of(), Some(20.0));
         std::fs::remove_file(&transcript).unwrap();
         assert_eq!(cost_of(), Some(20.0), "kept from the saved facts");
+    }
+
+    #[test]
+    fn lines_are_put_down_to_the_model_that_wrote_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("t/s1.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        let said = |id: &str, model: &str, tool: &str| {
+            json!({ "type": "assistant", "timestamp": "2026-11-13T10:00:00Z",
+                    "message": { "id": id, "model": model, "usage": { "output_tokens": 10 },
+                                 "content": [{ "type": "text", "text": "ok" },
+                                             { "type": "tool_use", "id": tool, "name": "Edit" }] } })
+        };
+        let rows = [
+            said("m1", "claude-opus-5-5", "t1"),
+            said("m2", "claude-haiku-5-5", "t2"),
+            said("m3", "claude-opus-5-5", "t4"),
+        ];
+        let text: Vec<String> = rows.iter().map(Value::to_string).collect();
+        std::fs::write(&transcript, text.join("\n")).unwrap();
+
+        let edit = |second: u32, id: &str, line: &str| {
+            event(
+                second,
+                "PostToolUse",
+                json!({ "tool_use_id": id, "tool_name": "Edit",
+                        "tool_input": { "file_path": "/r/a.rs" },
+                        "tool_response": { "structuredPatch": [{ "lines": [format!("+{line}")] }] } }),
+            )
+        };
+        let mut start = event(0, "SessionStart", json!({ "source": "startup" }));
+        start["payload"]["transcript_path"] = json!(transcript);
+        let events = [
+            start,
+            edit(1, "t1", "one();"),
+            edit(2, "t2", "two();"),
+            // a call the transcript does not have: the session's main model
+            edit(3, "t3", "three();"),
+        ];
+        let raw = dir.path().join("raw/s1.jsonl");
+        std::fs::create_dir_all(raw.parent().unwrap()).unwrap();
+        let text: Vec<String> = events.iter().map(Value::to_string).collect();
+        std::fs::write(&raw, text.join("\n")).unwrap();
+
+        let check = || {
+            let built = build_from_raw(&raw, &dir.path().join("facts"), "claude-code")
+                .unwrap()
+                .unwrap();
+            let models: Vec<_> = built
+                .session
+                .tool_calls
+                .iter()
+                .map(|c| c.model.as_deref())
+                .collect();
+            assert_eq!(
+                models,
+                [Some("claude-opus-5-5"), Some("claude-haiku-5-5"), None]
+            );
+            let hash = |line: &str| crate::rewrite::line_hash(line).unwrap();
+            let mut opus = vec![hash("one();"), hash("three();")];
+            opus.sort_unstable();
+            assert_eq!(
+                built.added_lines[0].by_model,
+                [
+                    (Some("claude-haiku-5-5".to_string()), vec![hash("two();")]),
+                    (Some("claude-opus-5-5".to_string()), opus),
+                ]
+            );
+        };
+        check();
+        // which model made a call is kept with the saved facts
+        std::fs::remove_file(&transcript).unwrap();
+        check();
     }
 
     #[test]

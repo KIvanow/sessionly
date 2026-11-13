@@ -8,6 +8,8 @@ importers:
 
   .: {}
 
+  action: {}
+
   apps/server:
     dependencies:
       '@electric-sql/pglite':

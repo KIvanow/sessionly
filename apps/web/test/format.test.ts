@@ -38,6 +38,16 @@ test("time and shares", () => {
   assert.equal(f.duration(843_000), "14m 3s");
   assert.equal(f.duration(203_760_000), "56h 36m");
   assert.equal(f.duration(-5), "0s");
+  assert.equal(f.average(3, 2), "1.5");
+  assert.equal(f.average(4, 2), "2");
+  assert.equal(f.average(1, 3), "0.3");
+  assert.equal(f.average(1, 0), "–");
+  assert.equal(f.shareOf(660, 663), "99%");
+  assert.equal(f.shareOf(663, 663), "100%");
+  assert.equal(f.shareOf(1, 1000), "1%");
+  assert.equal(f.shareOf(0, 10), "0%");
+  assert.equal(f.shareOf(5, 10), "50%");
+  assert.equal(f.shareOf(0, 0), "–");
   assert.equal(f.percent(0.4183), "42%");
   assert.equal(f.percent(null), "–");
   assert.equal(f.share(1, 0), null);

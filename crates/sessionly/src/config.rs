@@ -23,6 +23,9 @@ pub struct Config {
     /// Bring the ledger up to date (and upload, if a server is set) in the
     /// background when a session ends.
     pub auto_sync: bool,
+    /// Upload hashes of the lines agents added, so the server can tell which
+    /// lines of a pull request an agent wrote. Off unless switched on.
+    pub upload_line_hashes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,6 +41,7 @@ impl Default for Config {
             server: None,
             upload_content: Content::Metadata,
             auto_sync: true,
+            upload_line_hashes: false,
         }
     }
 }

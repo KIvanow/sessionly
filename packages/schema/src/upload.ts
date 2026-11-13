@@ -21,6 +21,12 @@ export interface Upload {
    * they could not be measured.
    */
   rewrite?: RewriteMeasurement | null;
+  /**
+   * The lines the agent added, as hashes, so a server can tell which lines
+   * of a pull request an agent wrote. Sent only when that is switched on
+   * (`sessionly settings --line-hashes on`); empty otherwise.
+   */
+  lines?: AddedLines[];
 }
 export interface Session {
   /**
@@ -259,6 +265,11 @@ export interface ToolCall {
    */
   agent_id?: string | null;
   tool?: string;
+  /**
+   * Model that made the call. Null where the agent does not say: Grok, and
+   * Cursor turns the hooks did not see.
+   */
+  model?: string | null;
   at?: string | null;
   /**
    * How a tool call ended.
@@ -346,4 +357,23 @@ export interface RewriteFile {
   lines_added?: number;
   lines_surviving?: number;
   exists?: boolean;
+}
+/**
+ * Lines an agent added to one file with one model. A line is hashed without
+ * the whitespace at its ends; blank lines and lines without a letter or
+ * digit are left out. The same line added twice is listed twice.
+ */
+export interface AddedLines {
+  /**
+   * As in the session's `files`.
+   */
+  path?: string;
+  /**
+   * Null if the model is not known.
+   */
+  model?: string | null;
+  /**
+   * First 8 bytes of each line's SHA-256, as 16 hex digits.
+   */
+  hashes?: string[];
 }

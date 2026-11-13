@@ -150,6 +150,7 @@ export function Team({ token, onSignOut }: { token: string; onSignOut: () => voi
             <select value={role} onChange={(e) => setRole(e.target.value as Role)}>
               <option value="member">Member</option>
               <option value="admin">Admin</option>
+              <option value="ci">CI (reports pull requests, nothing else)</option>
             </select>
           </label>
           <button type="submit">Create token</button>

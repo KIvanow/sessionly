@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, ApiError, savedToken, saveToken } from "./api.ts";
 import { Login } from "./Login.tsx";
 import { Overview } from "./Overview.tsx";
+import { Pulls } from "./Pulls.tsx";
 import { SessionView } from "./SessionView.tsx";
 import { Sessions } from "./Sessions.tsx";
 import { Team } from "./Team.tsx";
@@ -117,8 +118,13 @@ function Shell({ token, me, onSignOut }: { token: string; me: Me; onSignOut: () 
       return <SessionView token={token} address={rest.join("/")} onSignOut={onSignOut} />;
     }
     if (page === "team" && isAdmin) return <Team token={token} onSignOut={onSignOut} />;
+    if (page === "pulls" && isAdmin) {
+      return (
+        <Pulls token={token} scope={scope} setScope={setScope} repos={options.data?.repos ?? []} onSignOut={onSignOut} />
+      );
+    }
     return <Overview token={token} scope={scope} showUsers={isAdmin} onSignOut={onSignOut} />;
-  }, [page, rest.join("/"), token, scope, isAdmin]);
+  }, [page, rest.join("/"), token, scope, isAdmin, options.data]);
 
   const scoped = page === "" || page === "sessions";
   const link = (target: string, label: string) => (
@@ -134,6 +140,7 @@ function Shell({ token, me, onSignOut }: { token: string; me: Me; onSignOut: () 
         <nav aria-label="Main">
           {link("", "Overview")}
           {link("sessions", "Sessions")}
+          {isAdmin && link("pulls", "Pull requests")}
           {isAdmin && link("team", "Team")}
         </nav>
         <span className="who">

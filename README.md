@@ -310,6 +310,14 @@ the latest rewrite measurement. Before a record leaves the machine:
 | `metadata` (default) | Counts, sizes, timings, tool names, statuses, relative file paths, models, tokens, cost, rewrite figures, git user and remote. **No text** from prompts, commands, search patterns, URLs, errors or titles, and no content hashes. |
 | `previews` | The above, plus the 200-character previews and the hashes. A preview can contain anything you typed or ran, including secrets. |
 
+**Line hashes are a separate switch, off by default.** `sessionly settings --line-hashes on`
+adds, per changed file and model, a hash of every line the agent added (the first 8 bytes of
+the SHA-256 of the line without the whitespace at its ends; blank lines and lines without a
+letter or digit are left out). A server needs them to tell which lines of a pull request an
+agent wrote (see [Pull requests](#pull-requests)). A hash does not give the line back, but a
+short or common line can be guessed and checked against it, so treat them as you would the
+names of the files.
+
 Each installation has a random `machine_id` (in `~/.sessionly/config.json`, created on first
 use). A session is identified by machine id, agent and session id, so uploading it again
 replaces the earlier copy. The git name and email in a record are a label taken from git
@@ -468,9 +476,10 @@ for anything but localhost.
 | `SESSIONLY_ADMIN_TOKEN` | An admin token that always works, for first use. |
 | `SESSIONLY_ADMIN_EMAIL` | Who uploads made with that token belong to. |
 
-**People and tokens.** Each token belongs to one person and is either `member` or `admin`.
+**People and tokens.** Each token belongs to one person and is `member`, `admin` or `ci`.
 Uploads are filed under the token's owner, whatever name the record carries. A member sees their
-own sessions; an admin sees everyone's. An admin creates and revokes tokens through
+own sessions; an admin sees everyone's. A `ci` token is for the GitHub Action: it can report
+pull requests and nothing else. An admin creates and revokes tokens through
 `POST /api/v1/tokens`, `GET /api/v1/tokens` and `DELETE /api/v1/tokens/{id}`, or from the command
 line with `pnpm token create --email ann@example.com` (with the embedded database, stop the
 server first). Only a hash of each token is stored.
@@ -499,7 +508,74 @@ show titles and the first 200 characters of each prompt.
 While working on the dashboard, `pnpm dev` runs it with live reload and passes API calls to a
 server on port 8080.
 
-**API behind it:** `GET /api/v1/summary?by=user|repo|model|tool|day`, `GET /api/v1/sessions`
+### Pull requests
+
+How much of a pull request did coding agents write, with which models, and how did those lines
+fare in review? The [GitHub Action](action/) reports each pull request to the server when it is
+opened, pushed to, reviewed and closed; the server matches the lines it adds against the lines
+agents added in uploaded sessions. No source code leaves GitHub or anyone's machine: both sides
+send hashes.
+
+```yaml
+# .github/workflows/sessionly.yml
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, closed]
+  pull_request_review:
+    types: [submitted]
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: KIvanow/sessionly/action@main
+        with:
+          url: https://sessionly.example.com
+          token: ${{ secrets.SESSIONLY_TOKEN }}   # a token with the ci role
+```
+
+It needs three things: that workflow, a `ci` token (Team page) saved as a secret, and
+`sessionly settings --line-hashes on` on the machines whose sessions should count.
+
+The **Pull requests** page (admins) then shows, for the period and repository chosen:
+
+- per pull request: lines added, how many an agent wrote and with which tool and model, how
+  many of the agent's lines survived review, review rounds, and review comments by people and
+  by bots (CodeRabbit and the like);
+- **by model**: the same summed, so you can see whose lines get through review as written and
+  whose take several rounds.
+
+How to read it:
+
+- **A line is an agent's** when a session added that line to that file, the session is by
+  someone who committed to the pull request (the email git is set up with is the one commits
+  carry), and it started at most 90 days before the pull request was opened. Everything else
+  counts as not an agent's: people without Sessionly, sessions uploaded without line hashes,
+  changes made by shell commands, generated files. So the agent share is a floor.
+- **Survived review** compares the pull request as it was opened with how it ended: of the
+  agent's lines it had at the start, how many are still in it. It is only known for pull
+  requests the Action saw being opened (or could reconstruct, see `backfill` below). A line
+  that was reformatted counts as changed.
+- **A review round** is review feedback (a review that comments or asks for changes, or a
+  comment on the diff, from anyone but the author) followed by a new commit.
+- **By model is a description, not a ranking.** Harder work goes to stronger models, a pull
+  request with two models counts under both, and a handful of pull requests says little.
+- The model is known per line for Claude Code, and for Cursor turns the hooks saw; otherwise
+  the session's main model stands in, or it is shown as not known.
+
+The Action writes the figures to the run's summary page. It comments on the pull request only
+if you set `comment: true` (and give it `pull-requests: write`); a badge on every pull request
+changes how people feel about being measured, so that is yours to switch on. Other inputs:
+`ignore` (files to leave out; lock files by default), `other-names` (names the repository's
+clones may still have as their origin after a rename or transfer), `backfill` (for a pull
+request from before the Action was added, first report it as it was when opened, worked out
+from its commits) and `pr-number` (to report one from a manually started workflow). See
+[action/README.md](action/README.md).
+
+**API behind it:** `PUT /api/v1/prs` (the Action's report; `ci` or `admin`), `GET /api/v1/prs`
+and `GET /api/v1/prs/summary` (admins; filters `repo`, `state`, `since`). For sessions:
+`GET /api/v1/summary?by=user|repo|model|tool|day`, `GET /api/v1/sessions`
 (filters `user`, `repo`, `model`, `model_is`, `tool`, `q`, `since`, `until`, paging `limit`,
 `offset`),
 `GET /api/v1/sessions/{machine_id}/{source}/{session_id}`, `GET /api/v1/files` (files agents
@@ -538,7 +614,7 @@ Contributions use DCO sign-off (`git commit -s`); see [CONTRIBUTING.md](CONTRIBU
 ```sh
 cargo test
 cargo clippy --all-targets
-pnpm typecheck && pnpm test   # the TypeScript side
+pnpm typecheck && pnpm test   # the TypeScript side and the GitHub Action
 scripts/dummy-session.sh   # runs a short real Claude Code session that exercises most hooks
 ```
 
@@ -551,4 +627,5 @@ scripts/dummy-session.sh   # runs a short real Claude Code session that exercise
 5. ✅ CLI: list, show, search
 6. ✅ Aggregation on one machine (`summary`), upload, server and team dashboard
 7. ✅ Cursor and Grok sessions beside Claude Code's
-8. Polish, docs, example data
+8. ✅ Pull requests: how much agents wrote, with which models, and how it fared in review
+9. Polish, docs, example data

@@ -1,0 +1,74 @@
+name: Sessionly pull request report
+description: >-
+  Reports a pull request to your Sessionly server, which works out how much of
+  it coding agents wrote, with which models, and how those lines fare in review.
+branding:
+  icon: git-pull-request
+  color: blue
+
+inputs:
+  url:
+    description: Address of your Sessionly server, e.g. https://sessionly.example.com
+    required: true
+  token:
+    description: A Sessionly token with the ci role. Keep it in a secret.
+    required: true
+  github-token:
+    description: Token used to read the pull request (and to comment, if that is switched on).
+    default: ${{ github.token }}
+  comment:
+    description: Post the figures as a comment on the pull request, kept up to date. Needs pull-requests write permission.
+    default: "false"
+  summary:
+    description: Write the figures to the workflow run's summary page.
+    default: "true"
+  ignore:
+    description: >-
+      Files to leave out, separated by commas or new lines: a file name, a
+      path, or a pattern with * (which also matches /).
+    default: package-lock.json, pnpm-lock.yaml, yarn.lock, bun.lock, Cargo.lock, go.sum, poetry.lock, uv.lock, composer.lock, Gemfile.lock, *.min.js, *.min.css, *.snap, *.map
+  other-names:
+    description: >-
+      Other names clones of this repository may still have as their origin,
+      as owner/name separated by commas: for example the name it had before
+      it was renamed or moved to another owner.
+    default: ""
+  backfill:
+    description: >-
+      For a pull request from before the Action was added: first report it as
+      it was when it was opened, worked out from its commits, so that what
+      review changed can still be measured. Changes nothing for a pull
+      request the server already knows.
+    default: "false"
+  pr-number:
+    description: The pull request to report. Only needed when the workflow was not started by a pull request.
+    default: ""
+  fail-on-error:
+    description: Fail the job if the report cannot be made or sent. By default a problem is only a warning.
+    default: "false"
+
+outputs:
+  lines:
+    description: Tracked lines the pull request adds.
+    value: ${{ steps.report.outputs.lines }}
+  agent-lines:
+    description: How many of them a coding agent wrote.
+    value: ${{ steps.report.outputs.agent-lines }}
+
+runs:
+  using: composite
+  steps:
+    - id: report
+      shell: bash
+      run: node "$GITHUB_ACTION_PATH/src/main.mjs"
+      env:
+        SESSIONLY_URL: ${{ inputs.url }}
+        SESSIONLY_TOKEN: ${{ inputs.token }}
+        SESSIONLY_GITHUB_TOKEN: ${{ inputs.github-token }}
+        SESSIONLY_COMMENT: ${{ inputs.comment }}
+        SESSIONLY_SUMMARY: ${{ inputs.summary }}
+        SESSIONLY_IGNORE: ${{ inputs.ignore }}
+        SESSIONLY_OTHER_NAMES: ${{ inputs.other-names }}
+        SESSIONLY_BACKFILL: ${{ inputs.backfill }}
+        SESSIONLY_PR_NUMBER: ${{ inputs.pr-number }}
+        SESSIONLY_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}

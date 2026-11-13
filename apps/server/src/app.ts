@@ -24,6 +24,7 @@ import {
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
+import { BadReport, listPulls, storePull, summarizePulls, type PullFilters } from "./pulls.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
 /** A record lists every tool call, so a long session is several megabytes. */
@@ -94,12 +95,20 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
   api.use("*", async (c, next) => {
     const principal = await authenticate(db, c.req.header("authorization"), options.bootstrap);
     if (!principal) return c.json({ error: "missing or unknown token" }, 401);
+    // A ci token reports pull requests and does nothing else.
+    if (principal.role === "ci") {
+      const reporting = c.req.method === "PUT" && c.req.path.endsWith("/prs");
+      if (!reporting && !c.req.path.endsWith("/ping")) {
+        return c.json({ error: "this token only reports pull requests" }, 403);
+      }
+    }
     c.set("principal", principal);
     await next();
   });
 
   api.onError((err, c) => {
     if (err instanceof BadRequest) return c.json({ error: err.message }, 400);
+    if (err instanceof BadReport) return c.json({ error: err.message }, 422);
     if (err instanceof ApiError) return c.json({ error: err.message, code: err.code }, err.status);
     console.error(err);
     return c.json({ error: "internal error" }, 500);
@@ -182,6 +191,50 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
 
   api.get("/filters", async (c) => c.json(await filterOptions(db, c.get("principal"))));
 
+  // Pull requests: the GitHub Action reports them, admins read them.
+  const adminsOnly = (p: Principal) => {
+    if (p.role !== "admin") throw new ApiError(403, "admins_only", "admins only");
+  };
+  const pullFilters = (query: Record<string, string>): PullFilters => {
+    const state = query.state || undefined;
+    if (state && !["open", "merged", "closed"].includes(state)) {
+      throw new BadRequest("state must be open, merged or closed");
+    }
+    return { repo: query.repo || undefined, state, since: time(query.since, "since") };
+  };
+  api.put(
+    "/prs",
+    bodyLimit({
+      maxSize: MAX_UPLOAD_BYTES,
+      onError: (c) => c.json({ error: "the report is too large" }, 413),
+    }),
+    async (c) => {
+      if (c.get("principal").role === "member") {
+        return c.json({ error: "reporting pull requests needs a ci or admin token" }, 403);
+      }
+      let body: unknown;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: "the body is not JSON" }, 400);
+      }
+      return c.json({ stored: true, attribution: await storePull(db, body) });
+    },
+  );
+  api.get("/prs/summary", async (c) => {
+    adminsOnly(c.get("principal"));
+    return c.json(await summarizePulls(db, pullFilters(c.req.query())));
+  });
+  api.get("/prs", async (c) => {
+    adminsOnly(c.get("principal"));
+    const query = c.req.query();
+    const page = {
+      limit: wholeNumber(query.limit, 50, 500, "limit"),
+      offset: wholeNumber(query.offset, 0, Number.MAX_SAFE_INTEGER, "offset"),
+    };
+    return c.json(await listPulls(db, pullFilters(query), page));
+  });
+
   // Token management, for admins.
   const admin = new Hono<Env>();
   admin.use("*", async (c, next) => {
@@ -194,7 +247,9 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
     const email = typeof body.email === "string" ? body.email.trim() : "";
     const role = (body.role ?? "member") as Role;
     if (!/^\S+@\S+$/.test(email)) throw new BadRequest("email is required");
-    if (role !== "admin" && role !== "member") throw new BadRequest("role must be admin or member");
+    if (role !== "admin" && role !== "member" && role !== "ci") {
+      throw new BadRequest("role must be admin, member or ci");
+    }
     const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : null;
     const created = await createToken(db, { email, name, role });
     // The only time the token itself is returned.

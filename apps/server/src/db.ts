@@ -98,6 +98,41 @@ const MIGRATIONS: string[] = [
    )`,
   `CREATE INDEX sessions_started ON sessions (started_at DESC)`,
   `CREATE INDEX sessions_owner ON sessions (owner_email)`,
+  // A third kind of token, for the GitHub Action.
+  `ALTER TABLE tokens DROP CONSTRAINT tokens_role_check`,
+  `ALTER TABLE tokens ADD CONSTRAINT tokens_role_check CHECK (role IN ('admin', 'member', 'ci'))`,
+  `CREATE TABLE pull_requests (
+     repo                text NOT NULL,
+     number              integer NOT NULL,
+     head_repo           text,
+     title               text,
+     url                 text,
+     author              text NOT NULL,
+     state               text NOT NULL,
+     draft               boolean NOT NULL DEFAULT false,
+     head_ref            text,
+     base_ref            text,
+     created_at          timestamptz,
+     merged_at           timestamptz,
+     closed_at           timestamptz,
+     first_event         text NOT NULL,
+     last_event          text NOT NULL,
+     commits             integer NOT NULL DEFAULT 0,
+     reviews             integer NOT NULL DEFAULT 0,
+     changes_requested   integer NOT NULL DEFAULT 0,
+     review_comments     integer NOT NULL DEFAULT 0,
+     bot_review_comments integer NOT NULL DEFAULT 0,
+     review_rounds       integer NOT NULL DEFAULT 0,
+     files_without_diff  integer NOT NULL DEFAULT 0,
+     -- added lines per file, as hashes: when first reported, and now
+     first_files         jsonb NOT NULL,
+     last_files          jsonb NOT NULL,
+     attribution         jsonb NOT NULL,
+     first_seen_at       timestamptz NOT NULL DEFAULT now(),
+     updated_at          timestamptz NOT NULL DEFAULT now(),
+     PRIMARY KEY (repo, number)
+   )`,
+  `CREATE INDEX sessions_repo ON sessions (repo)`,
 ];
 
 /**

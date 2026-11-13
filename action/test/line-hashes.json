@@ -1,0 +1,117 @@
+{
+ "about": "Lines and the hash each gets: the first 8 bytes of the SHA-256 of the line without the whitespace at its ends, or null for a line that is not tracked (blank, or without a letter or digit). The binary and the GitHub Action must agree on every one.",
+ "cases": [
+  {
+   "line": "",
+   "hash": null
+  },
+  {
+   "line": "   ",
+   "hash": null
+  },
+  {
+   "line": "\t",
+   "hash": null
+  },
+  {
+   "line": "}",
+   "hash": null
+  },
+  {
+   "line": "  });",
+   "hash": null
+  },
+  {
+   "line": "// ---",
+   "hash": null
+  },
+  {
+   "line": "_",
+   "hash": null
+  },
+  {
+   "line": "\ud83d\ude42",
+   "hash": null
+  },
+  {
+   "line": "=> {",
+   "hash": null
+  },
+  {
+   "line": "let x = 1;",
+   "hash": "aad7378dfeb85170"
+  },
+  {
+   "line": "\t  let x = 1;  ",
+   "hash": "aad7378dfeb85170"
+  },
+  {
+   "line": "let x = 1;\r",
+   "hash": "aad7378dfeb85170"
+  },
+  {
+   "line": "\u00a0let x = 1;\u00a0",
+   "hash": "aad7378dfeb85170"
+  },
+  {
+   "line": "\u3000let x = 1;\u2003",
+   "hash": "aad7378dfeb85170"
+  },
+  {
+   "line": "let x = 1;\u0085",
+   "hash": "aad7378dfeb85170"
+  },
+  {
+   "line": "let x = 2;",
+   "hash": "be7db96f61ab6ff9"
+  },
+  {
+   "line": "42",
+   "hash": "73475cb40a568e8d"
+  },
+  {
+   "line": "x",
+   "hash": "2d711642b726b044"
+  },
+  {
+   "line": "  return null;",
+   "hash": "4ad2292cb6c5c2d3"
+  },
+  {
+   "line": "caf\u00e9 = True",
+   "hash": "c59d8936342b389c"
+  },
+  {
+   "line": "\u5909\u6570 = 1",
+   "hash": "bd252ce89f337601"
+  },
+  {
+   "line": "\u00e9",
+   "hash": "4a99557e4033c353"
+  },
+  {
+   "line": "\u2167",
+   "hash": "bb15e9e3c2fd7f84"
+  },
+  {
+   "line": "\u00b2",
+   "hash": "57853aa61cfb7ae7"
+  },
+  {
+   "line": "\ufefflet x = 1;",
+   "hash": "ecb79cd0695427da"
+  },
+  {
+   "line": "\ufeff",
+   "hash": null
+  },
+  {
+   "line": "const s = \"  spaced  inside  \";",
+   "hash": "965b28bbc6dde05f"
+  },
+  {
+   "line": "+ plus is part of the line",
+   "hash": "438cea0bd5ba8a01"
+  }
+ ]
+}

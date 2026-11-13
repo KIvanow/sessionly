@@ -13,11 +13,11 @@ use rusqlite::types::Value as Sql;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row as SqlRow};
 use serde::Serialize;
 
-use crate::rewrite::REWRITTEN_BELOW;
+use crate::rewrite::{FileLines, REWRITTEN_BELOW};
 use crate::session::Session;
 
 /// Bump to change the table layout; older ledgers are rebuilt on open.
-const DB_VERSION: i64 = 4;
+const DB_VERSION: i64 = 5;
 
 const TABLES: &str = "
 CREATE TABLE sessions (
@@ -67,6 +67,9 @@ CREATE TABLE session_files (
     lines_removed INTEGER NOT NULL,
     -- hashes of the lines the agent added (8 bytes each), for the rewrite rate
     added_hashes  BLOB,
+    -- which model wrote them: JSON [[model or null, count], ...], in the
+    -- order of the hashes
+    added_models  TEXT,
     PRIMARY KEY (session_id, path)
 );
 CREATE INDEX session_files_path ON session_files(path);
@@ -392,7 +395,7 @@ impl Ledger {
         &mut self,
         s: &Session,
         built_from: &Fingerprint,
-        added_lines: &[(String, Vec<u64>)],
+        added_lines: &[FileLines],
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -449,13 +452,17 @@ impl Ledger {
             ],
         )?;
         {
-            let mut insert =
-                tx.prepare("INSERT INTO session_files VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")?;
+            let mut insert = tx
+                .prepare("INSERT INTO session_files VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")?;
             for f in &s.files {
-                let hashes: Option<Vec<u8>> = added_lines
-                    .iter()
-                    .find(|(path, _)| *path == f.path)
-                    .map(|(_, hashes)| hashes.iter().flat_map(|h| h.to_le_bytes()).collect());
+                let lines = added_lines.iter().find(|lines| lines.path == f.path);
+                let hashes: Option<Vec<u8>> =
+                    lines.map(|l| l.hashes().flat_map(|h| h.to_le_bytes()).collect());
+                let models: Option<String> = lines.map(|l| {
+                    let runs: Vec<(&Option<String>, usize)> =
+                        l.by_model.iter().map(|(m, h)| (m, h.len())).collect();
+                    serde_json::to_string(&runs).expect("serializes")
+                });
                 insert.execute(params![
                     s.session_id,
                     f.path,
@@ -464,7 +471,8 @@ impl Ledger {
                     f.created,
                     f.lines_added,
                     f.lines_removed,
-                    hashes
+                    hashes,
+                    models
                 ])?;
             }
         }
@@ -559,6 +567,39 @@ impl Ledger {
         Ok(self
             .conn
             .query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))?)
+    }
+
+    /// The lines a session added, per changed file and model.
+    pub fn lines_of(&self, session_id: &str) -> Result<Vec<FileLines>> {
+        let mut query = self.conn.prepare(
+            "SELECT path, added_hashes, added_models FROM session_files
+             WHERE session_id = ?1 AND added_hashes IS NOT NULL ORDER BY path",
+        )?;
+        let files = query
+            .query_map([session_id], |r| {
+                let blob: Vec<u8> = r.get(1)?;
+                let runs: Option<String> = r.get(2)?;
+                Ok((r.get::<_, String>(0)?, blob, runs))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(files
+            .into_iter()
+            .map(|(path, blob, runs)| {
+                let mut hashes = blob
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|c| u64::from_le_bytes(*c));
+                let runs: Vec<(Option<String>, usize)> = runs
+                    .and_then(|r| serde_json::from_str(&r).ok())
+                    .unwrap_or_default();
+                let by_model = runs
+                    .into_iter()
+                    .map(|(model, n)| (model, hashes.by_ref().take(n).collect()))
+                    .collect();
+                FileLines { path, by_model }
+            })
+            .collect())
     }
 
     /// Every changed file with tracked added lines.
@@ -859,7 +900,13 @@ mod tests {
             s.active_ms = 60_000;
             s
         };
-        let lines = vec![("/r/a.rs".to_string(), vec![1u64, 2, 3, 4])];
+        let lines = vec![FileLines {
+            path: "/r/a.rs".into(),
+            by_model: vec![
+                (None, vec![1]),
+                (Some("claude-opus-5-5".into()), vec![2, 3, 4]),
+            ],
+        }];
         ledger
             .upsert(
                 &make(
@@ -1075,7 +1122,14 @@ mod tests {
         // rebuilding the session drops the measurement of a file it no longer lists
         let s = ledger.get("s1").unwrap().unwrap();
         ledger
-            .upsert(&s, &fingerprint(2), &[("/r/a.rs".to_string(), vec![1])])
+            .upsert(
+                &s,
+                &fingerprint(2),
+                &[FileLines {
+                    path: "/r/a.rs".into(),
+                    by_model: vec![(None, vec![1])],
+                }],
+            )
             .unwrap();
         assert_eq!(ledger.rewrite_of("s1").unwrap().0.len(), 1);
     }

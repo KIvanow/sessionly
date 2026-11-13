@@ -95,7 +95,7 @@ export function Overview({ token, scope, showUsers, onSignOut }: Props) {
   );
 }
 
-function Tile({ label, value, note }: { label: string; value: string; note?: string }) {
+export function Tile({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
     <div className="tile">
       <span className="label">{label}</span>
@@ -106,7 +106,7 @@ function Tile({ label, value, note }: { label: string; value: string; note?: str
 }
 
 /** Names side by side: the agents or models behind a row. */
-function Names({ list }: { list: string[] }) {
+export function Names({ list }: { list: string[] }) {
   if (list.length === 0) return <>–</>;
   return (
     <span className="chips">

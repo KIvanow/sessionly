@@ -460,7 +460,7 @@ impl AgentHomes {
 
 /// Raised when an importer reads more, or differently, from the same files,
 /// so that sessions imported by an older binary are imported again.
-const IMPORT_VERSION: u64 = 3;
+const IMPORT_VERSION: u64 = 4;
 
 /// The source file, its size and the importer's version recorded in an
 /// import file's first record.

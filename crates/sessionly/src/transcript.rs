@@ -213,6 +213,8 @@ pub struct TranscriptSummary {
     pub recorded: Option<Recorded>,
     /// Lines that weren't valid JSON (for example a partially written last line).
     pub skipped_lines: u64,
+    /// The model behind each tool call, by tool use id, subagents included.
+    pub tool_models: HashMap<String, String>,
     messages: Vec<Message>,
 }
 
@@ -340,6 +342,7 @@ impl TranscriptSummary {
                     }
                 })
                 .collect(),
+            tool_models: self.tool_models.clone(),
         }
     }
 
@@ -406,6 +409,9 @@ pub struct Facts {
     pub cost: Option<session::Cost>,
     pub usage: Vec<session::ModelUsage>,
     pub subagents: Vec<SubagentFacts>,
+    /// The model behind each tool call, by tool use id.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub tool_models: HashMap<String, String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -536,6 +542,16 @@ fn scan(
         match row.get("type").and_then(Value::as_str) {
             Some("assistant") => {
                 let message = &row["message"];
+                if let Some(model) = message["model"].as_str().filter(|m| *m != "<synthetic>") {
+                    let calls = message["content"].as_array().into_iter().flatten();
+                    for call in calls.filter(|b| b["type"] == "tool_use") {
+                        if let Some(id) = call["id"].as_str() {
+                            summary
+                                .tool_models
+                                .insert(id.to_string(), model.to_string());
+                        }
+                    }
+                }
                 let (Some(id), Some(usage)) = (message["id"].as_str(), message.get("usage")) else {
                     return;
                 };

@@ -12,7 +12,9 @@ use chrono::{DateTime, Utc};
 
 use crate::ledger::Ledger;
 use crate::rewrite::REWRITTEN_BELOW;
-use crate::session::{Content, RewriteFile, RewriteMeasurement, Session, Upload, SCHEMA_VERSION};
+use crate::session::{
+    AddedLines, Content, RewriteFile, RewriteMeasurement, Session, Upload, SCHEMA_VERSION,
+};
 
 /// `path` without the machine-specific part: relative to the repository if it
 /// is inside it, else `~/…` if it is under the home directory, else unchanged.
@@ -130,13 +132,43 @@ fn rewrite_measurement(
     }))
 }
 
-/// Everything a server gets for one session.
-pub fn build(ledger: &Ledger, session: &Session, content: Content) -> Result<Upload> {
+/// The lines the session's agent added, as hashes, with paths as in the
+/// uploaded record.
+fn added_lines(ledger: &Ledger, session: &Session, home: Option<&str>) -> Result<Vec<AddedLines>> {
+    let root = session.repo.as_ref().map(|r| r.root.as_str());
+    let mut lines = Vec::new();
+    for file in ledger.lines_of(&session.session_id)? {
+        let path = relative_path(&file.path, root, home);
+        for (model, hashes) in file.by_model {
+            lines.push(AddedLines {
+                path: path.clone(),
+                model,
+                hashes: hashes.into_iter().map(crate::rewrite::hash_hex).collect(),
+            });
+        }
+    }
+    Ok(lines)
+}
+
+/// Everything a server gets for one session. `line_hashes` adds the hashes
+/// of the lines the agent wrote.
+pub fn build(
+    ledger: &Ledger,
+    session: &Session,
+    content: Content,
+    line_hashes: bool,
+) -> Result<Upload> {
     let home = crate::paths::home_dir().map(|h| h.to_string_lossy().into_owned());
+    let home = home.as_deref();
     Ok(Upload {
         schema_version: SCHEMA_VERSION,
-        session: redact(session, content, home.as_deref()),
-        rewrite: rewrite_measurement(ledger, session, home.as_deref())?,
+        session: redact(session, content, home),
+        rewrite: rewrite_measurement(ledger, session, home)?,
+        lines: if line_hashes && content != Content::Local {
+            added_lines(ledger, session, home)?
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -489,7 +521,12 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
         let Some(session) = ledger.get(&id)? else {
             continue;
         };
-        let payload = build(ledger, &session, config.upload_content)?;
+        let payload = build(
+            ledger,
+            &session,
+            config.upload_content,
+            config.upload_line_hashes,
+        )?;
         let hash = payload_hash(&payload);
         if ledger.uploaded_hash(&id, &server.url)?.as_deref() == Some(hash.as_str()) {
             report.unchanged += 1;
@@ -541,6 +578,7 @@ mod send_tests {
                 lines_surviving: 4,
                 ..Default::default()
             }),
+            lines: Vec::new(),
         };
         let before = payload_hash(&upload);
         upload.rewrite.as_mut().unwrap().measured_at = Some(Utc::now());
@@ -548,6 +586,73 @@ mod send_tests {
         upload.rewrite.as_mut().unwrap().lines_surviving = 3;
         assert_ne!(payload_hash(&upload), before);
         assert_eq!(before.len(), 64);
+    }
+
+    #[test]
+    fn line_hashes_are_sent_only_when_switched_on() {
+        use crate::ledger::Fingerprint;
+        use crate::rewrite::FileLines;
+        use crate::session::{Content, FileTouched, Repo};
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = Ledger::open(&dir.path().join("ledger.db")).unwrap();
+        let session = Session {
+            session_id: "s".into(),
+            repo: Some(Repo {
+                root: "/w/repo".into(),
+                ..Default::default()
+            }),
+            files: vec![FileTouched {
+                path: "/w/repo/src/a.rs".into(),
+                writes: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let lines = [FileLines {
+            path: "/w/repo/src/a.rs".into(),
+            by_model: vec![
+                (None, vec![0x0807_0605_0403_0201]),
+                (Some("claude-opus-5-5".into()), vec![2, 3]),
+            ],
+        }];
+        let built_from = Fingerprint {
+            built_with: "test".into(),
+            raw_bytes: 1,
+            transcript_path: None,
+            transcript_bytes: 0,
+        };
+        ledger.upsert(&session, &built_from, &lines).unwrap();
+
+        let off = build(&ledger, &session, Content::Metadata, false).unwrap();
+        assert!(off.lines.is_empty());
+        assert!(!serde_json::to_string(&off).unwrap().contains("\"lines\""));
+
+        let on = build(&ledger, &session, Content::Metadata, true).unwrap();
+        let sent: Vec<_> = on
+            .lines
+            .iter()
+            .map(|l| (l.path.as_str(), l.model.as_deref(), l.hashes.clone()))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                ("src/a.rs", None, vec!["0102030405060708".to_string()]),
+                (
+                    "src/a.rs",
+                    Some("claude-opus-5-5"),
+                    vec![
+                        "0200000000000000".to_string(),
+                        "0300000000000000".to_string()
+                    ]
+                ),
+            ]
+        );
+        assert_ne!(payload_hash(&on), payload_hash(&off));
+        // a record that stays on the machine carries none
+        assert!(build(&ledger, &session, Content::Local, true)
+            .unwrap()
+            .lines
+            .is_empty());
     }
 
     #[test]

@@ -659,6 +659,14 @@
           "type": "string",
           "default": ""
         },
+        "model": {
+          "description": "Model that made the call. Null where the agent does not say: Grok, and\nCursor turns the hooks did not see.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "at": {
           "type": [
             "string",

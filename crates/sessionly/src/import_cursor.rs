@@ -253,6 +253,10 @@ fn read_file(
                     if let Some(agent) = agent_id {
                         payload["agent_id"] = json!(agent);
                     }
+                    // Every call of a turn the hooks saw was made by its model.
+                    if let Some(model) = current.and_then(|i| hooked[i].model.as_deref()) {
+                        payload["model"] = json!(model);
+                    }
                     // The hooks saw the turn's calls in the same order. A call
                     // that does not line up ends the pairing for the turn.
                     let seen = current
@@ -540,6 +544,9 @@ mod tests {
             ]
         );
 
+        let by: Vec<_> = s.tool_calls.iter().map(|c| c.model.as_deref()).collect();
+        let opus = Some("claude-opus-5-5");
+        assert_eq!(by, [None, opus, opus, opus]);
         assert_eq!(s.models, ["claude-opus-5-5", "gpt-9"]);
         assert_eq!(s.agent_version.as_deref(), Some("3.27.22"));
         let cost = s.cost.unwrap();

@@ -2,7 +2,11 @@
 // which produces them, and the web app, which reads them.
 import type { Upload } from "./upload.ts";
 
-export type Role = "admin" | "member";
+/**
+ * `ci` is for the GitHub Action: it can report pull requests and nothing
+ * else.
+ */
+export type Role = "admin" | "member" | "ci";
 
 export interface Me {
   ok: true;
@@ -149,4 +153,156 @@ export interface CreatedToken {
   email: string;
   name: string | null;
   role: Role;
+}
+
+/** Added lines of one file, as hashes (see `AddedLines` in the upload). */
+export interface FileHashes {
+  path: string;
+  hashes: string[];
+}
+
+/**
+ * What the GitHub Action sends each time something happens on a pull
+ * request: where it stands, how review went so far, and the lines it adds.
+ */
+export interface PullReport {
+  /** `github.com/owner/name` of the repository the pull request is in. */
+  repo: string;
+  /** The repository its branch is in, when that is a fork. */
+  head_repo?: string | null;
+  /**
+   * Other names clones of the repository may still have as their origin,
+   * for example from before it was renamed or moved to another owner.
+   */
+  aliases?: string[];
+  /**
+   * Email addresses its commits were made with. Sessions count toward the
+   * pull request only if they are by one of these people (a session records
+   * the email git is set up with, which is the one commits carry). Used for
+   * matching and not stored. Without any, every session in the repository
+   * is looked at.
+   */
+  commit_emails?: string[];
+  number: number;
+  title?: string | null;
+  url?: string | null;
+  /** Login of who opened it. */
+  author: string;
+  state: "open" | "merged" | "closed";
+  draft?: boolean;
+  head_ref?: string | null;
+  base_ref?: string | null;
+  created_at: string;
+  merged_at?: string | null;
+  closed_at?: string | null;
+  /** What prompted the report: `opened`, `synchronize`, `closed`, `review`, … */
+  event: string;
+  commits: number;
+  /** Reviews submitted by anyone but the author, bots included. */
+  reviews: number;
+  /** Reviews that asked for changes. */
+  changes_requested: number;
+  /** Comments on the diff by people other than the author. */
+  review_comments: number;
+  /** Comments on the diff by bots (CodeRabbit and the like). */
+  bot_review_comments: number;
+  /** Times review feedback was followed by a new commit. */
+  review_rounds: number;
+  /** The lines the pull request adds, per file, as it is now. */
+  files: FileHashes[];
+  /** Changed files GitHub gave no diff for (too large, or binary). */
+  files_without_diff?: number;
+}
+
+/** Lines an agent wrote, by which agent and model. */
+export interface LinesBy {
+  /** The agent: `claude-code`, `cursor`, `grok`. */
+  tool: string;
+  /** Null if the model is not known. */
+  model: string | null;
+  lines: number;
+}
+
+/**
+ * Which of a pull request's lines agents wrote. Only tracked lines count
+ * (not blank, not punctuation only), and only agents whose sessions were
+ * uploaded with line hashes: everything else counts as not an agent's, so
+ * the agent figures are a floor.
+ */
+export interface PullAttribution {
+  /** As first reported (when it was opened, if the Action ran then). */
+  first: { lines: number; agent_lines: number };
+  /** Whether the first report was made when it was opened. */
+  from_open: boolean;
+  /** As last reported. */
+  now: { lines: number; agent_lines: number; by: LinesBy[] };
+  /** The agent lines at first report, and how many are still there now. */
+  by: (LinesBy & { surviving: number })[];
+}
+
+export interface PullRow {
+  repo: string;
+  number: number;
+  title: string | null;
+  url: string | null;
+  author: string;
+  state: "open" | "merged" | "closed";
+  created_at: string | null;
+  merged_at: string | null;
+  /** The event of the first report: `opened` if the Action saw it from the start. */
+  first_event: string;
+  commits: number;
+  reviews: number;
+  changes_requested: number;
+  review_comments: number;
+  bot_review_comments: number;
+  review_rounds: number;
+  files_without_diff: number;
+  attribution: PullAttribution;
+  updated_at: string;
+}
+
+export interface PullList {
+  /** Most recently created first. */
+  pulls: PullRow[];
+  total: number;
+}
+
+/**
+ * Pull requests an agent and model had lines in, summed. A pull request with
+ * lines from two models counts under both.
+ */
+export interface PullsByModel extends LinesBy {
+  /** Pull requests it has lines in, as last reported; `lines` are those lines. */
+  pulls: number;
+  /**
+   * Its lines in pull requests when they were opened. Only pull requests
+   * reported from the moment they were opened count here: for the others
+   * there is nothing to compare the end with.
+   */
+  opened_lines: number;
+  /** Of `opened_lines`, still in the pull request at last report. */
+  surviving: number;
+  review_rounds: number;
+  changes_requested: number;
+  review_comments: number;
+  bot_review_comments: number;
+}
+
+export interface PullSummary {
+  /** Most lines first. */
+  by_model: PullsByModel[];
+  total: {
+    pulls: number;
+    /** Pull requests with at least one agent line. */
+    pulls_with_agent_lines: number;
+    /** Tracked lines the pull requests add, as last reported, and how many an agent wrote. */
+    lines: number;
+    agent_lines: number;
+    /** Pull requests reported from the moment they were opened. */
+    pulls_from_open: number;
+    /** Agent lines those had when opened, and how many are still there. */
+    opened_agent_lines: number;
+    agent_lines_surviving: number;
+  };
 }
