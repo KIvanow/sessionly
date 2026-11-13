@@ -21,6 +21,8 @@ pub struct Built {
     pub session: Session,
     /// Where the hooks said the transcript is, whether or not it still exists.
     pub transcript_path: Option<PathBuf>,
+    /// Hashes of the lines the agent added, per changed file (see `rewrite`).
+    pub added_lines: Vec<(String, Vec<u64>)>,
 }
 
 /// Read a raw capture file, add what the transcript says, and normalize.
@@ -54,6 +56,7 @@ pub fn build_from_raw(raw_path: &Path, facts_dir: &Path) -> Result<Option<Built>
     Ok(Some(Built {
         session,
         transcript_path,
+        added_lines: crate::rewrite::added_lines(&events),
     }))
 }
 

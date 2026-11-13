@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand};
 
 mod capture;
@@ -13,6 +14,7 @@ mod normalize;
 mod paths;
 mod pricing;
 mod report;
+mod rewrite;
 mod session;
 mod sync;
 mod transcript;
@@ -45,6 +47,28 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// List sessions, newest first
+    List {
+        #[command(flatten)]
+        filter: FilterArgs,
+        /// Show at most this many sessions
+        #[arg(long, short = 'n', default_value_t = 30)]
+        limit: u64,
+        /// Print JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Totals per user, repository, model or day
+    Summary {
+        #[command(flatten)]
+        filter: FilterArgs,
+        /// What to group sessions by
+        #[arg(long, value_enum, default_value = "user")]
+        by: ledger::GroupBy,
+        /// Print JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
     /// Show one session from the ledger
     Show {
         /// Session id or a unique prefix of one
@@ -72,6 +96,76 @@ struct Target {
     /// Use <DIR>/.claude/settings.json instead of ~/.claude/settings.json
     #[arg(long, value_name = "DIR")]
     project: Option<PathBuf>,
+}
+
+/// Which sessions to include. Text filters match substrings, ignoring case.
+#[derive(Args)]
+struct FilterArgs {
+    /// Repository: part of its remote (owner/name) or its path
+    #[arg(long)]
+    repo: Option<String>,
+    /// User: part of the git name or email
+    #[arg(long)]
+    user: Option<String>,
+    /// Model: part of a model name, e.g. "opus"
+    #[arg(long)]
+    model: Option<String>,
+    /// File: part of the path of a file the session read or changed
+    #[arg(long)]
+    file: Option<String>,
+    /// Text in prompts, titles, shell commands, search patterns or file paths
+    #[arg(long, short = 's')]
+    search: Option<String>,
+    /// Started at or after: a date (2026-11-01), a time (RFC 3339) or an age (7d, 12h, 2w)
+    #[arg(long, value_parser = parse_time)]
+    since: Option<DateTime<Utc>>,
+    /// Started before: same forms as --since
+    #[arg(long, value_parser = parse_time)]
+    until: Option<DateTime<Utc>>,
+    /// Cost of at least this many dollars
+    #[arg(long, value_name = "USD")]
+    min_cost: Option<f64>,
+}
+
+impl From<FilterArgs> for ledger::Filter {
+    fn from(a: FilterArgs) -> Self {
+        ledger::Filter {
+            repo: a.repo,
+            user: a.user,
+            model: a.model,
+            file: a.file,
+            text: a.search,
+            since: a.since,
+            until: a.until,
+            min_cost: a.min_cost,
+        }
+    }
+}
+
+/// A date, an RFC 3339 time, or an age such as `7d` counted back from now.
+fn parse_time(text: &str) -> Result<DateTime<Utc>> {
+    let text = text.trim();
+    if let Ok(time) = DateTime::parse_from_rfc3339(text) {
+        return Ok(time.with_timezone(&Utc));
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+        return Ok(date.and_hms_opt(0, 0, 0).unwrap().and_utc());
+    }
+    let age = text.char_indices().last().and_then(|(i, unit)| {
+        let n: i64 = text[..i].parse().ok().filter(|n| *n >= 0)?;
+        match unit {
+            'h' => Duration::try_hours(n),
+            'd' => Duration::try_days(n),
+            'w' => Duration::try_weeks(n),
+            _ => None,
+        }
+    });
+    match age {
+        Some(age) => Ok(Utc::now() - age),
+        None => {
+            bail!("expected a date (2026-11-01), an RFC 3339 time, or an age like 7d, 12h or 2w")
+        }
+    }
 }
 
 impl Target {
@@ -149,10 +243,14 @@ fn run(command: Command) -> Result<()> {
         Command::Watch => watch::run(&paths::claude_raw_dir()?)?,
         Command::Sync { force } => {
             let mut ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
-            let report = sync_ledger(&mut ledger, force)?;
+            let (report, rewrite) = sync_ledger(&mut ledger, force)?;
             println!(
                 "Synced: {} updated, {} unchanged, {} without usable events",
                 report.synced, report.unchanged, report.empty
+            );
+            println!(
+                "Rewrite: {} changed files measured, {} in directories that no longer exist",
+                rewrite.measured, rewrite.unavailable
             );
             println!(
                 "Ledger: {} sessions in {}",
@@ -173,7 +271,35 @@ fn run(command: Command) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&record)?);
             } else {
-                print!("{}", report::session(&record));
+                let (files, measured_at) = ledger.rewrite_of(&record.session_id)?;
+                print!(
+                    "{}",
+                    report::session(&record, &files, measured_at.as_deref())
+                );
+            }
+        }
+        Command::List {
+            filter,
+            limit,
+            json,
+        } => {
+            let mut ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
+            sync_ledger(&mut ledger, false)?;
+            let rows = ledger.list(&filter.into(), Some(limit))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                print!("{}", report::list(&rows, limit));
+            }
+        }
+        Command::Summary { filter, by, json } => {
+            let mut ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
+            sync_ledger(&mut ledger, false)?;
+            let groups = ledger.summary(&filter.into(), by)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&groups)?);
+            } else {
+                print!("{}", report::summary(&groups, by));
             }
         }
         Command::Transcript { session, json } => {
@@ -197,7 +323,12 @@ fn run(command: Command) -> Result<()> {
     Ok(())
 }
 
-fn sync_ledger(ledger: &mut ledger::Ledger, force: bool) -> Result<sync::Report> {
+/// Bring the ledger up to date with the capture, then re-measure how much of
+/// each session's changes is still in the files.
+fn sync_ledger(
+    ledger: &mut ledger::Ledger,
+    force: bool,
+) -> Result<(sync::Report, rewrite::Report)> {
     let report = sync::run(
         &paths::claude_raw_dir()?,
         &paths::claude_facts_dir()?,
@@ -207,7 +338,8 @@ fn sync_ledger(ledger: &mut ledger::Ledger, force: bool) -> Result<sync::Report>
     for (path, err) in &report.failed {
         eprintln!("warning: could not sync {}: {err}", path.display());
     }
-    Ok(report)
+    let rewrite = rewrite::measure(ledger, Utc::now())?;
+    Ok((report, rewrite))
 }
 
 fn status(target: &Target) -> Result<()> {

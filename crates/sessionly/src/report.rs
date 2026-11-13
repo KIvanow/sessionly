@@ -2,6 +2,8 @@
 
 use std::fmt::Write;
 
+use crate::ledger::{Group, GroupBy, Listed, Rewrite, RewriteRow};
+use crate::rewrite::REWRITTEN_BELOW;
 use crate::session::Session;
 use crate::transcript::{CostSource, TranscriptSummary, Usage, UsageByModel};
 
@@ -177,8 +179,9 @@ fn short(id: &str) -> &str {
     }
 }
 
-/// `sessionly show`: one normalized session.
-pub fn session(s: &Session) -> String {
+/// `sessionly show`: one normalized session, with the latest rewrite
+/// measurement of its changed files.
+pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -> String {
     let mut out = String::new();
     let field = |out: &mut String, name: &str, value: String| {
         let _ = writeln!(out, "{name:<10} {value}");
@@ -274,6 +277,42 @@ pub fn session(s: &Session) -> String {
         ),
     );
 
+    if !rewrite.is_empty() {
+        let total = Rewrite {
+            files_measured: rewrite.len() as u64,
+            files_rewritten: rewrite.iter().filter(|r| is_rewritten(r)).count() as u64,
+            lines_added: rewrite.iter().map(|r| r.added).sum(),
+            lines_surviving: rewrite.iter().map(|r| r.surviving).sum(),
+        };
+        let mut text = format!(
+            "{} of {} changed files rewritten since; {} of {} added lines still there",
+            total.files_rewritten,
+            total.files_measured,
+            percent(total.line_survival()),
+            total.lines_added
+        );
+        let checkout = rewrite.iter().find_map(|r| r.branch.as_deref());
+        let mut details: Vec<String> = Vec::new();
+        details.extend(measured_at.map(|t| format!("measured {}", minute(t))));
+        details.extend(checkout.map(|b| format!("on {b}")));
+        if !details.is_empty() {
+            let _ = write!(text, " ({})", details.join(" "));
+        }
+        field(&mut out, "Rewrite", text);
+        let session_branch = s.repo.as_ref().and_then(|r| r.branch.as_deref());
+        if let (Some(then), Some(now)) = (session_branch, checkout) {
+            if then != now && then != "HEAD" {
+                field(
+                    &mut out,
+                    "",
+                    format!(
+                        "the session ran on {then}; files were compared as checked out on {now}"
+                    ),
+                );
+            }
+        }
+    }
+
     if !s.prompts.is_empty() {
         out.push_str("\nPrompts\n");
         for p in &s.prompts {
@@ -303,11 +342,20 @@ pub fn session(s: &Session) -> String {
     if !changed.is_empty() {
         out.push_str("\nFiles changed\n");
         for f in changed {
+            let kept = match rewrite.iter().find(|r| r.path == f.path) {
+                Some(r) if !r.file_exists => "deleted".to_string(),
+                Some(r) => format!(
+                    "kept {}",
+                    percent(Some(r.surviving as f64 / r.added as f64))
+                ),
+                None => String::new(),
+            };
             let _ = writeln!(
                 out,
-                "  {:>6} {:>6}  {}{}",
+                "  {:>6} {:>6}  {:<9}  {}{}",
                 format!("+{}", f.lines_added),
                 format!("-{}", f.lines_removed),
+                kept,
                 relative(&f.path, root),
                 if f.created { "  (new)" } else { "" }
             );
@@ -358,6 +406,15 @@ pub fn session(s: &Session) -> String {
     out
 }
 
+/// `text` in at most `width` characters, shortened with an ellipsis if needed.
+fn fit(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        text.to_string()
+    } else {
+        clip(text, width.saturating_sub(1))
+    }
+}
+
 fn clip(text: &str, max_chars: usize) -> String {
     match text.char_indices().nth(max_chars) {
         Some((end, _)) => format!("{}…", &text[..end]),
@@ -370,4 +427,191 @@ fn relative<'a>(path: &'a str, root: Option<&str>) -> &'a str {
         .map(|p| p.trim_start_matches('/'))
         .filter(|p| !p.is_empty())
         .unwrap_or(path)
+}
+
+fn is_rewritten(r: &RewriteRow) -> bool {
+    r.added > 0 && (r.surviving as f64 / r.added as f64) < REWRITTEN_BELOW
+}
+
+fn percent(share: Option<f64>) -> String {
+    match share {
+        Some(share) => format!("{:.0}%", share * 100.0),
+        None => "-".into(),
+    }
+}
+
+/// `2026-11-13T17:39:42+00:00` as `2026-11-13 17:39`.
+fn minute(timestamp: &str) -> String {
+    timestamp
+        .chars()
+        .take(16)
+        .collect::<String>()
+        .replace('T', " ")
+}
+
+/// The short name of a repository: `owner/name` of a remote, or the last
+/// directory of a path.
+fn repo_name(repo: &str) -> String {
+    let parts: Vec<&str> = repo.split('/').filter(|p| !p.is_empty()).collect();
+    match parts.as_slice() {
+        [] => repo.to_string(),
+        [.., owner, name] if !repo.starts_with('/') => format!("{owner}/{name}"),
+        [.., name] => name.to_string(),
+    }
+}
+
+/// `sessionly list`.
+pub fn list(rows: &[Listed], limit: u64) -> String {
+    if rows.is_empty() {
+        return "No sessions match.\n".into();
+    }
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<8}  {:<16}  {:>7}  {:>8}  {:>5}  {:>12}  {:>9}  {:<22}  PROMPT",
+        "ID", "STARTED (UTC)", "ACTIVE", "COST", "FILES", "LINES", "REWRITTEN", "REPO"
+    );
+    for r in rows {
+        let cost = match (r.cost_usd, r.cost_source.as_deref()) {
+            (Some(cost), Some("recorded")) => usd(cost),
+            // anything not fully recorded is an estimate, or part of one
+            (Some(cost), _) => format!("~{}", usd(cost)),
+            (None, _) => "-".into(),
+        };
+        let rewritten = if r.rewrite.files_measured > 0 {
+            format!("{}/{}", r.rewrite.files_rewritten, r.rewrite.files_measured)
+        } else {
+            "-".into()
+        };
+        let prompt = r
+            .title
+            .as_deref()
+            .or(r.first_prompt.as_deref())
+            .unwrap_or("");
+        let prompt: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        let _ = writeln!(
+            out,
+            "{:<8}  {:<16}  {:>7}  {:>8}  {:>5}  {:>12}  {:>9}  {:<22}  {}",
+            short(&r.session_id),
+            r.started_at.as_deref().map(minute).unwrap_or_default(),
+            duration(r.active_ms),
+            cost,
+            r.files_changed,
+            format!("+{} -{}", r.lines_added, r.lines_removed),
+            rewritten,
+            fit(&r.repo.as_deref().map(repo_name).unwrap_or_default(), 22),
+            clip(&prompt, 60)
+        );
+    }
+    if rows.len() as u64 == limit {
+        let _ = writeln!(out, "(showing the newest {limit}; use --limit for more)");
+    }
+    out
+}
+
+/// `sessionly summary`.
+pub fn summary(groups: &[Group], by: GroupBy) -> String {
+    if groups.is_empty() {
+        return "No sessions match.\n".into();
+    }
+    let heading = match by {
+        GroupBy::User => "USER",
+        GroupBy::Repo => "REPO",
+        GroupBy::Model => "MODEL",
+        GroupBy::Day => "DAY (UTC)",
+    };
+    let label = |g: &Group| match by {
+        GroupBy::Repo if g.key != "total" => repo_name(&g.key),
+        _ => g.key.clone(),
+    };
+    let width = groups
+        .iter()
+        .map(|g| label(g).chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(heading.len(), 40);
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<width$}  {:>8}  {:>9}  {:>8}  {:>7}  {:>14}  {:>5}  {:>14}  {:>13}  {:>10}",
+        heading,
+        "SESSIONS",
+        "COST",
+        "ACTIVE",
+        "PROMPTS",
+        "TOOLS (FAILED)",
+        "FILES",
+        "LINES",
+        "REWRITTEN",
+        "LINES KEPT"
+    );
+    let mut without_cost = 0;
+    for g in groups {
+        if g.key == "total" {
+            let _ = writeln!(out, "{}", "-".repeat(width + 106));
+            without_cost = g.sessions_without_cost;
+        }
+        let rewritten = match g.rewrite.rate() {
+            Some(rate) => format!(
+                "{}/{} ({:.0}%)",
+                g.rewrite.files_rewritten,
+                g.rewrite.files_measured,
+                rate * 100.0
+            ),
+            None => "-".into(),
+        };
+        let _ = writeln!(
+            out,
+            "{:<width$}  {:>8}  {:>9}  {:>8}  {:>7}  {:>14}  {:>5}  {:>14}  {:>13}  {:>10}",
+            fit(&label(g), width),
+            g.sessions,
+            usd(g.cost_usd),
+            duration(g.active_ms),
+            g.prompts,
+            format!("{} ({})", g.tool_calls, g.tool_failures),
+            g.files_changed,
+            format!("+{} -{}", g.lines_added, g.lines_removed),
+            rewritten,
+            percent(g.rewrite.line_survival())
+        );
+    }
+    if without_cost > 0 {
+        let _ = writeln!(
+            out,
+            "({without_cost} sessions have no cost figure and add nothing to COST)"
+        );
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fits_text_into_a_column() {
+        assert_eq!(fit("exactly-10", 10), "exactly-10");
+        assert_eq!(fit("eleven-char", 10), "eleven-ch…");
+        assert_eq!(fit("ünïcödé-text", 8).chars().count(), 8);
+    }
+
+    #[test]
+    fn names_repositories_briefly() {
+        assert_eq!(
+            repo_name("github.com/KIvanow/sessionly"),
+            "KIvanow/sessionly"
+        );
+        assert_eq!(repo_name("/home/me/code/thing"), "thing");
+        assert_eq!(repo_name("solo"), "solo");
+        assert_eq!(repo_name(""), "");
+    }
+
+    #[test]
+    fn formats_small_values() {
+        assert_eq!(percent(Some(0.126)), "13%");
+        assert_eq!(percent(None), "-");
+        assert_eq!(minute("2026-11-13T17:39:42+00:00"), "2026-11-13 17:39");
+        assert_eq!(short("abcdefghij"), "abcdefgh");
+        assert_eq!(short("abc"), "abc");
+    }
 }

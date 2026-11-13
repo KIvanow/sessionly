@@ -3,9 +3,10 @@
 A searchable ledger of AI coding agent sessions: what was asked, which tools ran, which files
 changed, and what it cost. Claude Code first, other agents later.
 
-**Status: early.** Steps 1 to 3 of the MVP work: capturing every Claude Code hook event,
-reading tokens, cost, models and timing from session transcripts, and normalizing both into one
-session record stored in a local SQLite ledger. Rewrite rate, search and team roll-ups come next.
+**Status: early.** The local half of the MVP works: capturing every Claude Code hook event,
+reading tokens and cost from transcripts, normalizing both into one session record in a local
+SQLite ledger, measuring how much of each session's changes survive, and listing, searching and
+summarizing sessions from the command line. The server and team dashboard come next.
 
 ## How it fits together
 
@@ -51,12 +52,92 @@ What install does to the settings file:
 ```sh
 sessionly watch                  # pretty-print hook events live, in a second terminal
 sessionly status                 # hooks installed? how many sessions captured?
-sessionly sync                   # normalize captured sessions into the ledger
+sessionly list                   # sessions, newest first, with filters and text search
+sessionly summary                # totals per user, repo, model or day
 sessionly show <session>         # one session: cost, prompts, files changed, tools, subagents
 sessionly transcript <session>   # tokens and cost per model, straight from a transcript
+sessionly sync                   # bring the ledger up to date (list, summary and show do this too)
 ```
 
-`<session>` is a session id or a unique prefix of one. `show` and `transcript` take `--json`.
+`<session>` is a session id or a unique prefix of one. Every command above takes `--json`.
+
+### List and search
+
+```
+$ sessionly list
+ID        STARTED (UTC)      ACTIVE      COST  FILES         LINES  REWRITTEN  REPO      PROMPT
+2b02c8f5  2026-11-13 18:29      14s     $0.17      2        +24 -0        1/2  e2e2      Do these steps in order, one tool call each: 1. Write a new …
+8b1e867c  2026-11-13 18:29       7s     $0.15      0         +0 -0          -  e2e2      Do these steps in order, one tool call each: 1. Write a new …
+6c6a61b0  2026-11-13 18:10      15s     $0.29      1         +1 -0        0/1  e2e2      Do these steps in order, one tool call each, and keep going …
+```
+
+A cost shown with `~` is an estimate, or includes one. Filters combine, and text filters match
+substrings ignoring case:
+
+| Option | Keeps sessions |
+|---|---|
+| `--repo TEXT` | in a repository whose remote or path contains TEXT |
+| `--user TEXT` | by a user whose git name or email contains TEXT |
+| `--model TEXT` | that used a model containing TEXT, e.g. `opus` |
+| `--file TEXT` | that read or changed a file whose path contains TEXT |
+| `--search TEXT`, `-s` | with TEXT in a prompt, title, shell command, search pattern or file path |
+| `--since WHEN`, `--until WHEN` | started in that range: a date (`2026-11-01`), an RFC 3339 time, or an age (`7d`, `12h`, `2w`) |
+| `--min-cost USD` | that cost at least that much |
+| `--limit N`, `-n` | only the newest N (default 30) |
+
+Search covers the 200-character previews in the session record, not full prompts or output.
+
+### Summary
+
+`sessionly summary` takes the same filters and groups with `--by user` (default), `repo`,
+`model` or `day`:
+
+```
+$ sessionly summary --since 7d
+USER                SESSIONS       COST    ACTIVE  PROMPTS  TOOLS (FAILED)  FILES   LINES      REWRITTEN  LINES KEPT
+k.ivanow@gmail.com         3      $0.60       37s        3          11 (1)      3  +25 -0      1/3 (33%)         24%
+---------------------------------------------------------------------------------------------------------------------
+total                      3      $0.60       37s        3          11 (1)      3  +25 -0      1/3 (33%)         24%
+```
+
+A session counts under its most used model. With one machine this is one user's view; the same
+grouping is what the team dashboard will show once sessions are uploaded.
+
+### Rewrite rate
+
+How much of what the agent wrote is still there later. For each file a session changed,
+Sessionly keeps the lines the agent added (as hashes) and, on every sync, counts how many are
+still in the file on disk.
+
+- **REWRITTEN `1/2`:** one of the two changed files has kept less than half of the agent's lines.
+  A deleted file counts as rewritten.
+- **LINES KEPT:** the share of the agent's added lines that still exist.
+
+`sessionly show` gives it per file:
+
+```
+Rewrite    1 of 2 changed files rewritten since; 19% of 16 added lines still there (measured 2026-11-13 18:30 on master)
+
+Files changed
+     +23     -0  kept 13%   calc.py  (new)
+      +1     -0  kept 100%  README.md
+```
+
+What it does and doesn't mean:
+
+- A line matches by content anywhere in the file, ignoring leading and trailing whitespace, so
+  moved or re-indented code counts as kept.
+- Blank lines and lines with no letter or digit (`}`, `);`) are not tracked. That is why the
+  count of added lines here is lower than under LINES.
+- Lines the agent removed again in the same session are not counted against it.
+- The comparison is with whatever is checked out when the measurement runs. `show` says which
+  branch that was, and warns if it differs from the session's branch.
+- A session that just ended scores 100%. The number only becomes meaningful with time, so read
+  it together with the session's age.
+- It measures survival, not quality or cause: code can be rewritten for reasons that have
+  nothing to do with how it was written.
+- Only changes made through the agent's file tools are tracked, not edits made by shell commands.
+- If the session's directory no longer exists, the last measurement is kept.
 
 ```
 $ sessionly show 8d89
@@ -220,7 +301,7 @@ scripts/dummy-session.sh   # runs a short real Claude Code session that exercise
 1. ✅ Hook capture → raw JSONL
 2. ✅ Transcript parser: tokens, cost, model, timestamps
 3. ✅ Normalized session schema and local storage
-4. Rewrite-rate heuristic (how much of what the agent wrote survived)
-5. CLI: list, show, search
-6. Team aggregation, ingest API and dashboard
+4. ✅ Rewrite rate (how much of what the agent wrote survived)
+5. ✅ CLI: list, show, search
+6. ✅ Aggregation on one machine (`summary`); next: upload, ingest API and team dashboard
 7. Polish, docs, example data

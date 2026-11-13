@@ -264,3 +264,193 @@ fn parallel_first_sync_on_a_new_ledger() {
         );
     }
 }
+
+/// Feed one hook payload to `sessionly capture`.
+fn capture(home: &Path, payload: serde_json::Value) {
+    let mut cmd = sessionly(home);
+    cmd.arg("capture");
+    let out = run_with_stdin(cmd, payload.to_string().as_bytes());
+    assert_silent_success(&out, "capture");
+}
+
+/// A session in `cwd` that created `new.txt` (four lines) and added two lines to `old.txt`.
+fn capture_editing_session(home: &Path, id: &str, cwd: &Path) {
+    use serde_json::json;
+    let base = |hook: &str| json!({ "session_id": id, "hook_event_name": hook, "cwd": cwd });
+    let mut start = base("SessionStart");
+    start["source"] = json!("startup");
+    capture(home, start);
+    let mut prompt = base("UserPromptSubmit");
+    prompt["prompt_id"] = json!("p1");
+    prompt["prompt"] = json!("Add the Parser module and wire it in");
+    capture(home, prompt);
+
+    let mut write = base("PostToolUse");
+    write["tool_use_id"] = json!("t1");
+    write["tool_name"] = json!("Write");
+    write["tool_input"] = json!({ "file_path": cwd.join("new.txt"),
+                                  "content": "alpha one\nbeta two\ngamma three\ndelta four\n" });
+    write["tool_response"] = json!({ "type": "create", "structuredPatch": [] });
+    capture(home, write);
+
+    let mut edit = base("PostToolUse");
+    edit["tool_use_id"] = json!("t2");
+    edit["tool_name"] = json!("Edit");
+    edit["tool_input"] = json!({ "file_path": cwd.join("old.txt") });
+    edit["tool_response"] = json!({ "structuredPatch": [{ "lines":
+        [" existing line", "-removed line", "+added first", "+added second", "+}"] }] });
+    capture(home, edit);
+
+    let mut stop = base("Stop");
+    stop["prompt_id"] = json!("p1");
+    capture(home, stop);
+}
+
+fn json_of(home: &Path, args: &[&str]) -> serde_json::Value {
+    serde_json::from_str(&stdout(sessionly(home).args(args).output().unwrap())).unwrap()
+}
+
+#[test]
+fn rewrite_rate_follows_the_files_on_disk() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    capture_editing_session(home.path(), "edit-1", &repo);
+    // The files as the agent left them.
+    fs::write(
+        repo.join("new.txt"),
+        "alpha one\nbeta two\ngamma three\ndelta four\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("old.txt"),
+        "existing line\nadded first\nadded second\n}\n",
+    )
+    .unwrap();
+
+    let rewrite = |home: &Path| json_of(home, &["list", "--json"])[0]["rewrite"].clone();
+    let fresh = rewrite(home.path());
+    assert_eq!(fresh["files_measured"], 2);
+    assert_eq!(fresh["files_rewritten"], 0);
+    // four lines in new.txt, two in old.txt: the lone "}" is not tracked
+    assert_eq!(
+        (
+            fresh["lines_added"].as_u64(),
+            fresh["lines_surviving"].as_u64()
+        ),
+        (Some(6), Some(6))
+    );
+
+    // Someone rewrites most of new.txt and re-indents old.txt.
+    fs::write(
+        repo.join("new.txt"),
+        "alpha one\nsomething else\nentirely\ndifferent\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("old.txt"),
+        "existing line\n    added first\n\tadded second\n}\n",
+    )
+    .unwrap();
+    let later = rewrite(home.path());
+    assert_eq!(later["files_rewritten"], 1);
+    assert_eq!(later["lines_surviving"], 3);
+    let shown = stdout(
+        sessionly(home.path())
+            .args(["show", "edit-1"])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        shown.contains("1 of 2 changed files rewritten since"),
+        "{shown}"
+    );
+    assert!(shown.contains("kept 25%"), "{shown}");
+    assert!(shown.contains("kept 100%"), "{shown}");
+
+    // A deleted file counts as rewritten.
+    fs::remove_file(repo.join("old.txt")).unwrap();
+    assert_eq!(rewrite(home.path())["files_rewritten"], 2);
+    let shown = stdout(
+        sessionly(home.path())
+            .args(["show", "edit-1"])
+            .output()
+            .unwrap(),
+    );
+    assert!(shown.contains("deleted"), "{shown}");
+
+    // If the whole directory is gone nothing can be measured: the last result stays.
+    fs::remove_dir_all(&repo).unwrap();
+    let sync = stdout(sessionly(home.path()).arg("sync").output().unwrap());
+    assert!(
+        sync.contains("2 in directories that no longer exist"),
+        "{sync}"
+    );
+    assert_eq!(rewrite(home.path())["files_rewritten"], 2);
+}
+
+#[test]
+fn list_filters_and_summary_groups() {
+    let home = tempfile::tempdir().unwrap();
+    for (id, dir) in [("aaa-1", "storefront"), ("bbb-2", "billing-svc")] {
+        let repo = home.path().join(dir);
+        fs::create_dir_all(&repo).unwrap();
+        capture_editing_session(home.path(), id, &repo);
+    }
+    let ids = |args: &[&str]| -> Vec<String> {
+        let mut all = vec!["list", "--json"];
+        all.extend(args);
+        json_of(home.path(), &all)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["session_id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(ids(&[]).len(), 2);
+    assert_eq!(ids(&["--repo", "STOREFRONT"]), ["aaa-1"]);
+    assert_eq!(ids(&["--file", "billing-svc/new.txt"]), ["bbb-2"]);
+    assert_eq!(ids(&["--search", "parser module"]).len(), 2);
+    assert_eq!(ids(&["--search", "no such text"]).len(), 0);
+    assert_eq!(ids(&["--since", "1h"]).len(), 2);
+    assert_eq!(ids(&["--until", "1h"]).len(), 0);
+    assert_eq!(ids(&["--since", "2999-01-01"]).len(), 0);
+    assert_eq!(ids(&["--limit", "1"]).len(), 1);
+    assert_eq!(ids(&["--min-cost", "0.01"]).len(), 0); // no transcript, so no cost
+
+    let table = stdout(sessionly(home.path()).arg("list").output().unwrap());
+    assert!(
+        table.contains("aaa-1") && table.contains("Add the Parser module"),
+        "{table}"
+    );
+    let bad = sessionly(home.path())
+        .args(["list", "--since", "soon"])
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+
+    let by_repo = json_of(home.path(), &["summary", "--by", "repo", "--json"]);
+    let groups = by_repo.as_array().unwrap();
+    assert_eq!(groups.len(), 3);
+    assert_eq!(groups[2]["key"], "total");
+    assert_eq!(groups[2]["sessions"], 2);
+    assert_eq!(groups[2]["sessions_without_cost"], 2);
+    assert_eq!(groups[2]["files_changed"], 4);
+    let table = stdout(
+        sessionly(home.path())
+            .args(["summary", "--by", "day"])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        table.contains("DAY (UTC)") && table.contains("total"),
+        "{table}"
+    );
+    let none = stdout(
+        sessionly(home.path())
+            .args(["summary", "--user", "nobody"])
+            .output()
+            .unwrap(),
+    );
+    assert!(none.contains("No sessions match"));
+}

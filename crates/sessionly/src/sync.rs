@@ -85,7 +85,7 @@ pub fn run(raw_dir: &Path, facts_dir: &Path, ledger: &mut Ledger, force: bool) -
                         .transcript_path
                         .map(|p| p.to_string_lossy().into_owned()),
                 };
-                ledger.upsert(&built.session, &fingerprint)?;
+                ledger.upsert(&built.session, &fingerprint, &built.added_lines)?;
                 report.synced += 1;
             }
             Ok(None) => report.empty += 1,
