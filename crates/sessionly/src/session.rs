@@ -244,8 +244,11 @@ pub enum ToolStatus {
     Failed,
     /// The user interrupted it.
     Interrupted,
-    /// Refused by auto mode.
+    /// Refused by auto mode or a permission rule.
     Denied,
+    /// The user declined the permission prompt. Known only for sessions read
+    /// from a transcript; a hook-captured one shows `no_result` instead.
+    Rejected,
     /// Attempted, but no result was captured: rejected by the user,
     /// interrupted, or still running.
     #[default]

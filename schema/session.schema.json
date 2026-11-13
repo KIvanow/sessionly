@@ -739,9 +739,14 @@
           "const": "interrupted"
         },
         {
-          "description": "Refused by auto mode.",
+          "description": "Refused by auto mode or a permission rule.",
           "type": "string",
           "const": "denied"
+        },
+        {
+          "description": "The user declined the permission prompt. Known only for sessions read\nfrom a transcript; a hook-captured one shows `no_result` instead.",
+          "type": "string",
+          "const": "rejected"
         },
         {
           "description": "Attempted, but no result was captured: rejected by the user,\ninterrupted, or still running.",

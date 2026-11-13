@@ -10,6 +10,7 @@ mod capture;
 mod config;
 mod git;
 mod hooks;
+mod import;
 mod jsonl;
 mod ledger;
 mod normalize;
@@ -49,6 +50,11 @@ enum Command {
         /// Rebuild every session, not only the ones that changed
         #[arg(long)]
         force: bool,
+    },
+    /// Bring in past sessions from Claude Code's transcripts
+    Import {
+        /// Session ids (or the start of one) to import [default: every transcript]
+        sessions: Vec<String>,
     },
     /// List sessions, newest first
     List {
@@ -345,6 +351,26 @@ fn run(command: Command) -> Result<()> {
                 "Ledger: {} sessions in {}",
                 ledger.count()?,
                 paths::ledger_path()?.display()
+            );
+        }
+        Command::Import { sessions } => {
+            let projects = transcript::claude_config_dir()
+                .context("cannot find Claude Code's directory")?
+                .join("projects");
+            let report = import::import_all(&projects, &paths::claude_imported_dir()?, &sessions)?;
+            println!(
+                "Imported: {} sessions from transcripts, {} already up to date, {} with nothing to import",
+                report.imported, report.up_to_date, report.empty
+            );
+            for (path, err) in &report.failed {
+                eprintln!("warning: could not import {}: {err}", path.display());
+            }
+            let mut ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
+            let (synced, _) = sync_ledger(&mut ledger, false)?;
+            println!(
+                "Ledger: {} sessions ({} updated just now)",
+                ledger.count()?,
+                synced.synced
             );
         }
         Command::Show { session, json } => {

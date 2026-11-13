@@ -456,13 +456,13 @@ fn minute(timestamp: &str) -> String {
 }
 
 /// The short name of a repository: `owner/name` of a remote, or the last
-/// directory of a path.
+/// two directories of a path (one is too often the same for two projects).
 fn repo_name(repo: &str) -> String {
     let parts: Vec<&str> = repo.split('/').filter(|p| !p.is_empty()).collect();
     match parts.as_slice() {
         [] => repo.to_string(),
-        [.., owner, name] if !repo.starts_with('/') => format!("{owner}/{name}"),
-        [.., name] => name.to_string(),
+        [.., owner, name] => format!("{owner}/{name}"),
+        [name] => name.to_string(),
     }
 }
 
@@ -607,7 +607,8 @@ mod tests {
             repo_name("github.com/KIvanow/sessionly"),
             "KIvanow/sessionly"
         );
-        assert_eq!(repo_name("/home/me/code/thing"), "thing");
+        assert_eq!(repo_name("/home/me/code/thing"), "code/thing");
+        assert_eq!(repo_name("/thing"), "thing");
         assert_eq!(repo_name("solo"), "solo");
         assert_eq!(repo_name(""), "");
     }

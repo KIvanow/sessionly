@@ -202,13 +202,39 @@ user name. The local record keeps them; what may leave the machine is decided se
 
 Limits to know about:
 
-- Only sessions captured by the hooks are in the ledger.
-- If the hooks were installed partway through a session, its record says so
-  (`captured_from_start: false`): prompts, tools and files cover the captured part, cost covers
-  the whole session.
+- Sessions from before the hooks were installed are not in the ledger until you run
+  `sessionly import` (see [Past sessions](#past-sessions)).
+- If the hooks were installed partway through a session and it hasn't been imported, its record
+  says so (`captured_from_start: false`): prompts, tools and files cover the captured part, cost
+  covers the whole session.
 - File changes made by shell commands (`sed`, `git apply`, generators) are not attributed to
   files; only the agent's file tools are.
 - User name and email come from git config at sync time. They are a label, not verified identity.
+
+### Past sessions
+
+```sh
+sessionly import              # every transcript Claude Code still has
+sessionly import 2b02c8f5     # only sessions whose id starts with this
+```
+
+`import` rebuilds a session's activity from Claude Code's transcript: prompts, tool calls with
+their outcome, files changed with line counts, subagents, and the lines needed for the rewrite
+rate. Cost and tokens come from the transcript as usual. On one machine it turned 2.5 GB of
+transcripts (100 sessions) into 99 MB in about a minute.
+
+- The result is saved under `~/.sessionly/imported/`, so an imported session survives its
+  transcript being deleted. Tool output is not copied, only its size.
+- An imported session is marked `captured_by: transcript`. If a session also has a hook capture
+  that saw it from the start, the hook capture is used; a capture that began partway gives way
+  to the import.
+- A session that was imported is re-imported automatically when its transcript grows. Nothing is
+  imported for the first time unless you run the command.
+- A transcript doesn't record permission prompts that were approved (so `permission requests`
+  is 0), or when the session ended. It does record prompts the user declined, which a hook
+  capture can't see: those tool calls show as `rejected`.
+- Run on the same sessions, an import and a hook capture agreed on prompts, tool calls, failures,
+  subagents, files and lines changed, and cost.
 
 ### What an upload contains
 

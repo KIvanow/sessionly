@@ -106,6 +106,9 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>) -> Option<Session> {
         if s.session_id.is_empty() {
             s.session_id = session_id;
         }
+        if record["origin"].as_str() == Some("transcript") {
+            s.captured_by = CapturedBy::Transcript;
+        }
         s.counts.events += 1;
         let at = record["received_at"]
             .as_str()
@@ -169,7 +172,12 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>) -> Option<Session> {
                     call.status = ToolStatus::Ok;
                     call.duration_ms = p["duration_ms"].as_u64();
                     let response = &p["tool_response"];
-                    call.output_bytes = Some(response.to_string().len() as u64);
+                    // An imported result is reduced and carries its original size.
+                    call.output_bytes = Some(
+                        response["_bytes"]
+                            .as_u64()
+                            .unwrap_or(response.to_string().len() as u64),
+                    );
                     (call.lines_added, call.lines_removed) =
                         line_changes(&p["tool_input"], response);
                     if response["type"].as_str() == Some("create") {
@@ -187,6 +195,13 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>) -> Option<Session> {
                     };
                     call.duration_ms = p["duration_ms"].as_u64();
                     call.error = p["error"].as_str().map(|e| truncate(e, PREVIEW_CHARS));
+                }
+            }
+            // Only the transcript importer produces this: hooks don't say how
+            // a permission prompt was answered.
+            "ToolRejected" => {
+                if let Some(call) = tool_call(&mut s, &mut tool_ix, p, at) {
+                    call.status = ToolStatus::Rejected;
                 }
             }
             "PermissionRequest" => s.counts.permission_requests += 1,

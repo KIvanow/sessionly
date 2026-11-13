@@ -28,6 +28,12 @@ pub fn claude_raw_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("raw").join("claude-code"))
 }
 
+/// Sessions rebuilt from transcripts by `sessionly import`, in the same
+/// format as the raw capture.
+pub fn claude_imported_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("imported").join("claude-code"))
+}
+
 /// What we last read from each session's transcript, kept so cost survives
 /// the transcript being deleted.
 pub fn claude_facts_dir() -> Result<PathBuf> {
