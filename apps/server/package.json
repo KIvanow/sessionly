@@ -2,6 +2,7 @@
   "name": "@sessionly/server",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "start": "node src/index.ts",
@@ -22,5 +23,8 @@
     "@types/node": "^24.0.0",
     "@types/pg": "^8.11.0",
     "typescript": "^7.0.2"
+  },
+  "exports": {
+    ".": "./src/lib.ts"
   }
 }

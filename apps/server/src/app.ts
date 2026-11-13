@@ -29,9 +29,29 @@ import { uploadProblems, type Upload } from "./validate.ts";
 /** A record lists every tool call, so a long session is several megabytes. */
 const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
 
-type Env = { Variables: { principal: Principal } };
+export type Env = { Variables: { principal: Principal } };
+
+/** The authenticated API router: every route on it has `c.get("principal")`. */
+export type Api = Hono<Env>;
+
+/**
+ * Adds routes to the authenticated API. This is how optional parts plug in
+ * without the core depending on them.
+ */
+export type Extension = (api: Api, ctx: { db: Db }) => void;
 
 class BadRequest extends Error {}
+
+/** An error an extension wants answered with a given status and a stable code. */
+export class ApiError extends Error {
+  status: 400 | 403 | 404 | 409;
+  code: string;
+  constructor(status: 400 | 403 | 404 | 409, code: string, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
 
 function time(value: string | undefined, name: string): string | undefined {
   if (!value) return undefined;
@@ -63,6 +83,7 @@ export interface Options {
   bootstrap?: Bootstrap;
   /** Folder with the built dashboard, served at the root if given. */
   webRoot?: string;
+  extensions?: Extension[];
 }
 
 export function createApp(db: Db, options: Options = {}): Hono<Env> {
@@ -77,6 +98,7 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
 
   api.onError((err, c) => {
     if (err instanceof BadRequest) return c.json({ error: err.message }, 400);
+    if (err instanceof ApiError) return c.json({ error: err.message, code: err.code }, err.status);
     console.error(err);
     return c.json({ error: "internal error" }, 500);
   });
@@ -182,6 +204,8 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
       : c.json({ error: "no such active token" }, 404),
   );
   api.route("/tokens", admin);
+
+  for (const extend of options.extensions ?? []) extend(api, { db });
 
   const app = new Hono<Env>();
   app.route("/api/v1", api);

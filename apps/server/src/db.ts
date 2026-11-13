@@ -1,6 +1,7 @@
 // Database access. The server speaks Postgres. Without a DATABASE_URL it runs
 // on PGlite (Postgres compiled to WebAssembly, stored in a local folder), so a
 // single process is enough to try it or to self-host for a small team.
+import { mkdirSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import pg from "pg";
 
@@ -22,13 +23,20 @@ export async function openDb(url: string): Promise<Db> {
       close: () => pool.end(),
     };
   } else {
-    const lite = url === "memory://" ? new PGlite() : new PGlite(url.replace(/^file:/, ""));
+    let lite: PGlite;
+    if (url === "memory://") {
+      lite = new PGlite();
+    } else {
+      const dir = url.replace(/^file:/, "");
+      mkdirSync(dir, { recursive: true });
+      lite = new PGlite(dir);
+    }
     db = {
       query: async (text, params) => (await lite.query(text, params as unknown[])).rows as never[],
       close: () => lite.close(),
     };
   }
-  await migrate(db);
+  await runMigrations(db, "migrations", MIGRATIONS);
   return db;
 }
 
@@ -92,13 +100,19 @@ const MIGRATIONS: string[] = [
   `CREATE INDEX sessions_owner ON sessions (owner_email)`,
 ];
 
-async function migrate(db: Db): Promise<void> {
-  await db.query(`CREATE TABLE IF NOT EXISTS migrations (id integer PRIMARY KEY)`);
-  const done = new Set((await db.query<{ id: number }>(`SELECT id FROM migrations`)).map((r) => r.id));
-  for (const [id, sql] of MIGRATIONS.entries()) {
+/**
+ * Run the statements in `list` that `table` doesn't record yet, in order.
+ * The core uses the table "migrations"; anything that adds its own tables
+ * keeps its own list under its own table name.
+ */
+export async function runMigrations(db: Db, table: string, list: string[]): Promise<void> {
+  if (!/^[a-z_]+$/.test(table)) throw new Error("migration table names are lower-case words");
+  await db.query(`CREATE TABLE IF NOT EXISTS ${table} (id integer PRIMARY KEY)`);
+  const done = new Set((await db.query<{ id: number }>(`SELECT id FROM ${table}`)).map((r) => r.id));
+  for (const [id, sql] of list.entries()) {
     if (!done.has(id)) {
       await db.query(sql);
-      await db.query(`INSERT INTO migrations (id) VALUES ($1)`, [id]);
+      await db.query(`INSERT INTO ${table} (id) VALUES ($1)`, [id]);
     }
   }
 }

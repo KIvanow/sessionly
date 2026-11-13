@@ -247,6 +247,21 @@ test("files agents changed, per repository", async () => {
   assert.equal(api.body.files[0].path, "src/app.ts");
 });
 
+test("the embedded database creates its folder", async () => {
+  const { mkdtempSync, existsSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = join(mkdtempSync(join(tmpdir(), "sessionly-db-")), "not", "there", "yet");
+  const fresh = await openDb(`file:${dir}`);
+  await createToken(fresh, { email: "a@example.com", role: "member" });
+  await fresh.close();
+  assert.ok(existsSync(dir));
+  // and the data is still there when it is opened again
+  const again = await openDb(`file:${dir}`);
+  assert.equal((await again.query(`SELECT email FROM tokens`)).length, 1);
+  await again.close();
+});
+
 test("admins manage tokens; a revoked token stops working", async () => {
   const post = (token: string, body: unknown) =>
     app.request("/api/v1/tokens", {

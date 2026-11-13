@@ -590,8 +590,98 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
     out
 }
 
+/// `sessionly license status`: the server's answer in words.
+pub fn license(server: &str, state: &serde_json::Value) -> String {
+    let mut out = String::new();
+    let field = |out: &mut String, name: &str, value: String| {
+        let _ = writeln!(out, "{name:<10} {value}");
+    };
+    let day = |v: &serde_json::Value| {
+        v.as_str()
+            .map_or("?".to_string(), |t| t.chars().take(10).collect())
+    };
+    field(&mut out, "Server", server.to_string());
+    field(
+        &mut out,
+        "Org",
+        state["org"]
+            .as_str()
+            .map_or("not set (SESSIONLY_ORG)".into(), String::from),
+    );
+    let l = &state["license"];
+    let status = state["status"].as_str().unwrap_or("missing");
+    let text = match status {
+        "active" => format!("active until {}", day(&l["expiresAt"])),
+        "grace" => format!(
+            "expired on {}; its features turn read-only on {}",
+            day(&l["expiresAt"]),
+            day(&state["readOnlyAt"])
+        ),
+        "expired" => format!(
+            "expired on {}; its features have been read-only since {}",
+            day(&l["expiresAt"]),
+            day(&state["readOnlyAt"])
+        ),
+        _ => "none installed (core features only)".to_string(),
+    };
+    field(&mut out, "License", text);
+    if l.is_object() {
+        field(
+            &mut out,
+            "Edition",
+            format!(
+                "{}, {} seats ({} people have access now)",
+                l["edition"].as_str().unwrap_or("?"),
+                l["seats"].as_u64().unwrap_or(0),
+                state["people"].as_u64().unwrap_or(0)
+            ),
+        );
+        let features: Vec<&str> = l["features"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| f.as_str())
+            .collect();
+        field(
+            &mut out,
+            "Features",
+            if features.is_empty() {
+                "none".into()
+            } else {
+                features.join(", ")
+            },
+        );
+        field(&mut out, "Id", l["id"].as_str().unwrap_or("?").to_string());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn describes_license_states() {
+        let state = |status: &str| {
+            serde_json::json!({
+                "status": status, "org": "acme", "people": 3,
+                "readOnlyAt": "2027-01-15T00:00:00.000Z",
+                "license": { "id": "lic_1", "edition": "business", "seats": 25,
+                             "features": ["content_policy"], "expiresAt": "2027-01-01T00:00:00.000Z" }
+            })
+        };
+        let active = license("https://s.example", &state("active"));
+        assert!(active.contains("active until 2027-01-01"), "{active}");
+        assert!(active.contains("business, 25 seats (3 people have access now)"));
+        assert!(active.contains("content_policy"));
+        assert!(license("s", &state("grace")).contains("turn read-only on 2027-01-15"));
+        assert!(license("s", &state("expired")).contains("read-only since 2027-01-15"));
+        let none = license(
+            "s",
+            &serde_json::json!({ "status": "missing", "license": null, "org": null }),
+        );
+        assert!(none.contains("none installed") && none.contains("not set (SESSIONLY_ORG)"));
+        assert!(!none.contains("Edition"));
+    }
+
     use super::*;
 
     #[test]

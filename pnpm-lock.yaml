@@ -73,6 +73,25 @@ importers:
         specifier: ^8.3.8
         version: 8.3.8(@types/node@24.13.3)
 
+  ee:
+    dependencies:
+      '@sessionly/server':
+        specifier: workspace:*
+        version: link:../apps/server
+      hono:
+        specifier: ^4.13.16
+        version: 4.13.18
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
   packages/schema:
     devDependencies:
       '@types/node':
@@ -681,6 +700,9 @@ packages:
     resolution: {integrity: sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ==}
     engines: {node: '>=0.4'}
 
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+
 snapshots:
 
   '@apidevtools/json-schema-ref-parser@11.9.3':
@@ -1115,3 +1137,5 @@ snapshots:
       fsevents: 2.3.3
 
   xtend@4.0.2: {}
+
+  zod@4.4.3: {}

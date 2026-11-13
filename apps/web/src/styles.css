@@ -134,6 +134,9 @@ tr.detail > td { padding: 4px 0 14px 18px; background: var(--page); }
 .facts dt { color: var(--ink-2); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
 .inline { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-top: 12px; }
+.license-form { display: grid; gap: 10px; margin-top: 14px; justify-items: start; }
+.license-form label { display: grid; gap: 4px; font-size: 0.85rem; color: var(--ink-2); width: 100%; }
+textarea { font: 0.85rem ui-monospace, SFMono-Regular, Menlo, monospace; color: inherit; background: var(--surface); border: 1px solid var(--axis); border-radius: 6px; padding: 6px 10px; width: 100%; }
 .created { margin-top: 14px; padding: 12px; border: 1px solid var(--axis); border-radius: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .created p { margin: 0; flex-basis: 100%; }
 .created code { overflow-wrap: anywhere; }

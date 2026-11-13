@@ -1,0 +1,13 @@
+# Business / Enterprise: the server with ee/ features, on top of the core stack.
+#   SESSIONLY_ADMIN_TOKEN=... SESSIONLY_ORG=acme \
+#     docker compose -f docker-compose.yml -f docker-compose.ee.yml up -d --build
+# Then install the license: sessionly license install acme.license
+# Without a license this runs exactly like the core stack.
+services:
+  server:
+    build:
+      context: .
+      target: ee
+    environment:
+      # This install's org id; a license is accepted only if it names the same org.
+      SESSIONLY_ORG: ${SESSIONLY_ORG:?set SESSIONLY_ORG to the org id your license names}

@@ -1,0 +1,10 @@
+Sessionly
+Copyright 2026 Kristiyan Ivanov
+
+Everything outside the ee/ directory is licensed under the Apache License, Version 2.0
+(LICENSE). The ee/ directory is licensed under the Sessionly Enterprise Edition License
+(LICENSE-EE).
+
+Model prices in crates/sessionly/src/pricing.rs are transcribed from the providers' public
+pricing. Product and provider names are trademarks of their owners and are used only to identify
+the tools Sessionly works with.

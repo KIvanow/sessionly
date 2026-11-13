@@ -4,6 +4,97 @@ import { api } from "./api.ts";
 import { dateTime } from "./format.ts";
 import { useApi } from "./useApi.ts";
 
+/** What the Business and Enterprise server says about its license. */
+interface LicenseView {
+  status: "missing" | "active" | "grace" | "expired";
+  readOnlyAt: string | null;
+  org: string | null;
+  people: number;
+  license: {
+    id: string;
+    edition: string;
+    features: string[];
+    seats: number;
+    expiresAt: string;
+  } | null;
+}
+
+const day = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "?");
+
+/** License status, and installing one. The core server has no license at all. */
+function License({ token, onSignOut }: { token: string; onSignOut: () => void }) {
+  const found = useApi<LicenseView>(token, "/license", onSignOut);
+  const [text, setText] = useState("");
+  const [problem, setProblem] = useState<string | null>(null);
+  const [installed, setInstalled] = useState<LicenseView | null>(null);
+
+  if (found.errorStatus === 404) {
+    return (
+      <section className="card">
+        <h2>License</h2>
+        <p className="muted">
+          This is the core server (Apache-2.0). It needs no license. Business and Enterprise features
+          run on the ee server.
+        </p>
+      </section>
+    );
+  }
+  const view = installed ?? found.data;
+  if (!view) return found.error ? <p role="alert">{found.error}</p> : null;
+  const l = view.license;
+  const status =
+    view.status === "active"
+      ? `Active until ${day(l?.expiresAt)}`
+      : view.status === "grace"
+        ? `Expired on ${day(l?.expiresAt)}; its features turn read-only on ${day(view.readOnlyAt)}`
+        : view.status === "expired"
+          ? `Expired on ${day(l?.expiresAt)}; its features have been read-only since ${day(view.readOnlyAt)}`
+          : "No license installed: core features only";
+
+  async function install(e: React.FormEvent) {
+    e.preventDefault();
+    setProblem(null);
+    try {
+      setInstalled(await api<LicenseView>(token, "/license", { method: "POST", body: { license: text } }));
+      setText("");
+    } catch (err) {
+      setProblem((err as Error).message);
+    }
+  }
+
+  return (
+    <section className="card">
+      <h2>License</h2>
+      <dl className="facts">
+        <dt>Status</dt>
+        <dd>{status}</dd>
+        <dt>Org</dt>
+        <dd>{view.org ?? "not set (SESSIONLY_ORG)"}</dd>
+        {l && (
+          <>
+            <dt>Edition</dt>
+            <dd>
+              {l.edition}, {l.seats} seats ({view.people} people have access now)
+            </dd>
+            <dt>Features</dt>
+            <dd>{l.features.join(", ") || "none"}</dd>
+          </>
+        )}
+      </dl>
+      <form className="license-form" onSubmit={install}>
+        <label>
+          Install a license: paste the contents of the license file
+          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={3} spellCheck={false} />
+        </label>
+        <button type="submit" disabled={!text.trim()}>
+          Install license
+        </button>
+      </form>
+      {problem && <p role="alert">{problem}</p>}
+    </section>
+  );
+}
+
 /** People and their access tokens (admins only). */
 export function Team({ token, onSignOut }: { token: string; onSignOut: () => void }) {
   const list = useApi<{ tokens: TokenInfo[] }>(token, "/tokens", onSignOut);
@@ -114,6 +205,7 @@ export function Team({ token, onSignOut }: { token: string; onSignOut: () => voi
           </div>
         )}
       </section>
+      <License token={token} onSignOut={onSignOut} />
     </>
   );
 }

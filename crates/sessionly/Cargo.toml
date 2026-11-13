@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
 description = "Local collector and ledger for AI coding agent sessions"
+license = "Apache-2.0"
 homepage = "https://sessionly.dev"
 repository = "https://github.com/KIvanow/sessionly"
 

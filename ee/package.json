@@ -1,0 +1,22 @@
+{
+  "name": "@sessionly/ee",
+  "version": "0.1.0",
+  "private": true,
+  "license": "SEE LICENSE IN ../LICENSE-EE",
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.ts",
+    "sign-license": "node scripts/sign-license.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "@sessionly/server": "workspace:*",
+    "hono": "^4.13.16",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2"
+  }
+}

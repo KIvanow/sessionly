@@ -116,6 +116,11 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// The server's Business or Enterprise license
+    License {
+        #[command(subcommand)]
+        action: LicenseAction,
+    },
     /// Show or change local settings
     Settings {
         /// Sync (and upload, if connected) in the background when a session ends
@@ -146,6 +151,17 @@ enum Command {
     },
     /// Hook entry point: read one payload on stdin and store it (used by Claude Code)
     Capture,
+}
+
+#[derive(Subcommand)]
+enum LicenseAction {
+    /// Show the license installed on the connected server
+    Status,
+    /// Install a license file on the connected server (needs an admin token)
+    Install {
+        /// The license file you were issued
+        file: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -508,6 +524,31 @@ fn run(command: Command) -> Result<()> {
             }
             if !report.failed.is_empty() {
                 bail!("{} sessions were not uploaded", report.failed.len());
+            }
+        }
+        Command::License { action } => {
+            let config = config::Config::load(&paths::config_path()?)?;
+            let Some(server) = &config.server else {
+                bail!("no server is configured; run: sessionly connect <url>");
+            };
+            let client = upload::Client::new(server);
+            let answer = match action {
+                LicenseAction::Status => client.get("/api/v1/license"),
+                LicenseAction::Install { file } => {
+                    let text = std::fs::read_to_string(&file)
+                        .with_context(|| format!("reading {}", file.display()))?;
+                    client.post("/api/v1/license", &serde_json::json!({ "license": text }))
+                }
+            };
+            match answer {
+                Ok(state) => print!("{}", report::license(&server.url, &state)),
+                // The core server has no license endpoints at all.
+                Err(upload::SendError::Rejected(m)) if m.starts_with("HTTP 404") => println!(
+                    "{} runs the core server, which needs no license. Business and Enterprise \
+                     features need the ee server.",
+                    server.url
+                ),
+                Err(err) => bail!("{err}"),
             }
         }
         Command::Settings { auto_sync, content } => {

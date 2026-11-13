@@ -4,6 +4,7 @@
 //   node src/cli.ts token revoke <id>
 // With the embedded database, stop the server first (one process at a time),
 // or use the /api/v1/tokens endpoints with an admin token instead.
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createToken, listTokens, revokeToken, type Role } from "./auth.ts";
 import { openDb } from "./db.ts";
@@ -20,7 +21,8 @@ function usage(): never {
 }
 if (group !== "token") usage();
 
-const db = await openDb(process.env.DATABASE_URL ?? "file:./data/pglite");
+const embedded = fileURLToPath(new URL("../data/pglite", import.meta.url));
+const db = await openDb(process.env.DATABASE_URL ?? `file:${embedded}`);
 try {
   if (action === "create") {
     const role = (values.role ?? "member") as Role;

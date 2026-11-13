@@ -341,24 +341,29 @@ impl Client {
         }
     }
 
+    /// The response body as JSON (null if there is none) for a 2xx answer.
     fn check(
         result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
-    ) -> Result<(), SendError> {
+    ) -> Result<serde_json::Value, SendError> {
         let mut response = result.map_err(|e| SendError::Unavailable(e.to_string()))?;
         let status = response.status().as_u16();
-        if (200..300).contains(&status) {
-            return Ok(());
-        }
         let body = response.body_mut().read_to_string().unwrap_or_default();
-        let body: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
-        let detail: String = body.chars().take(200).collect();
+        if (200..300).contains(&status) {
+            return Ok(serde_json::from_str(&body).unwrap_or(serde_json::Value::Null));
+        }
+        // Prefer the server's own message over the raw body.
+        let said = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(String::from))
+            .unwrap_or_else(|| body.split_whitespace().collect::<Vec<_>>().join(" "));
+        let detail: String = said.chars().take(200).collect();
         let message = if detail.is_empty() {
             format!("HTTP {status}")
         } else {
             format!("HTTP {status}: {detail}")
         };
         Err(match status {
-            401 | 403 => SendError::Auth(message),
+            401 | 403 if !is_license_refusal(&body) => SendError::Auth(message),
             400..=499 => SendError::Rejected(message),
             _ => SendError::Unavailable(message),
         })
@@ -366,11 +371,28 @@ impl Client {
 
     /// Check that the server is there and accepts the token.
     pub fn ping(&self) -> Result<(), SendError> {
+        self.get("/api/v1/ping").map(|_| ())
+    }
+
+    pub fn get(&self, path: &str) -> Result<serde_json::Value, SendError> {
         Self::check(
             self.agent
-                .get(format!("{}/api/v1/ping", self.base))
+                .get(format!("{}{path}", self.base))
                 .header("Authorization", format!("Bearer {}", self.token))
                 .call(),
+        )
+    }
+
+    pub fn post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, SendError> {
+        Self::check(
+            self.agent
+                .post(format!("{}{path}", self.base))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .send_json(body),
         )
     }
 
@@ -390,7 +412,17 @@ impl Client {
                 .header("Authorization", format!("Bearer {}", self.token))
                 .send_json(upload),
         )
+        .map(|_| ())
     }
+}
+
+/// A 403 about the license or the caller's role is about this request, not
+/// about the token being wrong.
+fn is_license_refusal(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["code"].as_str().map(String::from))
+        .is_some_and(|code| code.starts_with("license_") || code == "admins_only")
 }
 
 /// Percent-encode everything outside `[A-Za-z0-9._-]`.

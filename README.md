@@ -416,7 +416,7 @@ for anything but localhost.
 | Setting | Meaning |
 |---|---|
 | `PORT`, `HOST` | Where to listen. Default `127.0.0.1:8080`; use `HOST=0.0.0.0` in a container. |
-| `DATABASE_URL` | `postgres://…`, or unset for the embedded database. |
+| `DATABASE_URL` | `postgres://…`, or unset for the embedded database (in `apps/server/data`; in the Docker image, `/data`). |
 | `SESSIONLY_ADMIN_TOKEN` | An admin token that always works, for first use. |
 | `SESSIONLY_ADMIN_EMAIL` | Who uploads made with that token belong to. |
 
@@ -460,6 +460,27 @@ generated from the Rust types. `pnpm gen` regenerates them and a test fails if t
 Checked with the real binary and one machine's history, against both the embedded database and
 Postgres in Docker: 100 sessions uploaded in under three seconds, a repeat upload sent nothing,
 and the server's totals equal the local `sessionly summary` exactly.
+
+## Editions and license
+
+Everything outside `ee/` is Apache-2.0 (`LICENSE`): the `sessionly` binary (capture, ledger,
+rewrite rate, command line, upload), the server and the dashboard. It never needs a license key.
+
+`ee/` (`LICENSE-EE`) holds the Business and Enterprise features. So far there is one: a content
+policy, where the organisation sets what uploads from its engineers should contain. Run the ee
+server in place of the core one (`pnpm --filter @sessionly/ee start`, or the
+`docker-compose.ee.yml` overlay) and install a license:
+
+```sh
+sessionly license install acme.license   # needs an admin token
+sessionly license status
+```
+
+Licenses are Ed25519-signed files checked offline (no phone-home). After a license expires its
+features keep working for 14 days, then turn read-only. The core never stops. See
+[ee/README.md](ee/README.md).
+
+Contributions use DCO sign-off (`git commit -s`); see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Develop
 
