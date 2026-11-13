@@ -5,10 +5,15 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 mod capture;
+mod git;
 mod hooks;
+mod ledger;
+mod normalize;
 mod paths;
 mod pricing;
 mod report;
+mod session;
+mod sync;
 mod transcript;
 mod watch;
 
@@ -41,6 +46,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Normalize captured sessions into the local ledger
+    Sync {
+        /// Rebuild every session, not only the ones that changed
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show one session from the ledger
+    Show {
+        /// Session id or a unique prefix of one
+        session: String,
+        /// Print the full session record as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the JSON Schema of the session record
+    Schema,
     /// Hook entry point: read one payload on stdin and store it (used by Claude Code)
     Capture,
 }
@@ -67,6 +88,12 @@ fn main() -> ExitCode {
     if let Command::Capture = cli.command {
         // Kept separate: the hook path must stay silent and always exit 0.
         return ExitCode::from(capture::run() as u8);
+    }
+    // Exit quietly when output is piped into something that stops reading
+    // (`sessionly show … | head`), instead of panicking on a closed pipe.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     match run(cli.command) {
         Ok(()) => ExitCode::SUCCESS,
@@ -115,9 +142,45 @@ fn run(command: Command) -> Result<()> {
                 print!("{}", report::transcript(&summary));
             }
         }
+        Command::Sync { force } => {
+            let mut ledger = ledger::Ledger::open(&paths::ledger_path())?;
+            print_sync(&sync::run(&paths::claude_raw_dir(), &mut ledger, force)?);
+            println!(
+                "Ledger: {} sessions in {}",
+                ledger.count()?,
+                paths::ledger_path().display()
+            );
+        }
+        Command::Show { session, json } => {
+            // Always show current data: pick up anything captured since the last sync.
+            let mut ledger = ledger::Ledger::open(&paths::ledger_path())?;
+            let report = sync::run(&paths::claude_raw_dir(), &mut ledger, false)?;
+            for (path, err) in &report.failed {
+                eprintln!("warning: could not sync {}: {err}", path.display());
+            }
+            let record = ledger.get(&session)?.with_context(|| {
+                format!("no session matching \"{session}\" in the ledger (only sessions captured by the hooks are stored)")
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&record)?);
+            } else {
+                print!("{}", report::session(&record));
+            }
+        }
+        Command::Schema => print!("{}", session::json_schema()),
         Command::Capture => unreachable!(),
     }
     Ok(())
+}
+
+fn print_sync(report: &sync::Report) {
+    println!(
+        "Synced: {} updated, {} unchanged, {} without usable events",
+        report.synced, report.unchanged, report.empty
+    );
+    for (path, err) in &report.failed {
+        eprintln!("warning: could not sync {}: {err}", path.display());
+    }
 }
 
 fn status(target: &Target) -> Result<()> {

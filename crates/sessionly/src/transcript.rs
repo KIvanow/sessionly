@@ -84,6 +84,8 @@ impl Usage {
                 self.cost_usd += cost;
                 cost
             }
+            // `<synthetic>` messages carry no tokens: nothing to price.
+            None if prompt + output == 0 => 0.0,
             None => {
                 self.unpriced_requests += 1;
                 0.0
@@ -186,9 +188,10 @@ pub struct Cost {
     pub source: CostSource,
     /// Our estimate over every API response in the transcript.
     pub transcript_estimate_usd: f64,
-    /// Spend in the recorded run that the transcript doesn't show
-    /// (recorded total minus our estimate for that run, never negative).
-    pub untracked_usd: f64,
+    /// Spend in the recorded run that the transcript doesn't show (recorded
+    /// total minus our estimate for that run, never negative). `None` when it
+    /// can't be worked out: no recorded total, or a model without a known price.
+    pub untracked_usd: Option<f64>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -246,7 +249,7 @@ impl TranscriptSummary {
                 total_usd: transcript,
                 source,
                 transcript_estimate_usd: transcript,
-                untracked_usd: 0.0,
+                untracked_usd: None,
             };
         };
         let before_run: f64 = match rec.run_started_at {
@@ -267,7 +270,8 @@ impl TranscriptSummary {
                 CostSource::Recorded
             },
             transcript_estimate_usd: transcript,
-            untracked_usd: (rec.total_cost_usd - run_estimate).max(0.0),
+            untracked_usd: (total.unpriced_requests == 0)
+                .then(|| (rec.total_cost_usd - run_estimate).max(0.0)),
         }
     }
 
@@ -609,9 +613,9 @@ mod tests {
         let haiku = (1000.0 * 0.10 + 2000.0 * 0.50 + 1000.0 * 0.125) / 1e6;
         let cost = s.cost();
         // the <synthetic> message has no price but also no tokens
-        assert_eq!(cost.source, CostSource::Partial);
+        assert_eq!(cost.source, CostSource::Estimated);
         assert!((cost.total_usd - (opus + haiku)).abs() < 1e-9);
-        assert_eq!(cost.untracked_usd, 0.0);
+        assert_eq!(cost.untracked_usd, None);
     }
 
     const OPUS: f64 = (10.0 * 4.0 + 100.0 * 20.0) / 1e6 + 0.20 + 8.0;
@@ -640,7 +644,7 @@ mod tests {
         // no startTime: the recorded run covers the whole transcript
         assert_eq!(cost.source, CostSource::Recorded);
         assert_eq!(cost.total_usd, 12.5);
-        assert!((cost.untracked_usd - (12.5 - OPUS - HAIKU)).abs() < 1e-9);
+        assert!((cost.untracked_usd.unwrap() - (12.5 - OPUS - HAIKU)).abs() < 1e-9);
         let rec = s.recorded.unwrap();
         assert_eq!(rec.total_duration_ms, Some(61_000));
         assert_eq!(rec.lines_added, Some(4));
@@ -655,7 +659,7 @@ mod tests {
         let cost = parse(&path).unwrap().cost();
         assert_eq!(cost.source, CostSource::RecordedAndEstimated);
         assert!((cost.total_usd - (OPUS + 1.0)).abs() < 1e-9);
-        assert!((cost.untracked_usd - (1.0 - HAIKU)).abs() < 1e-9);
+        assert!((cost.untracked_usd.unwrap() - (1.0 - HAIKU)).abs() < 1e-9);
     }
 
     #[test]
@@ -664,7 +668,30 @@ mod tests {
         append_cost_state(&path, 0.0, Some("2026-11-13T10:00:30Z"));
         let cost = parse(&path).unwrap().cost();
         assert!((cost.total_usd - (OPUS + HAIKU)).abs() < 1e-9);
-        assert_eq!(cost.untracked_usd, 0.0);
+        assert_eq!(cost.untracked_usd, Some(0.0));
+    }
+
+    #[test]
+    fn unknown_model_makes_estimate_partial() {
+        let (_dir, path) = fixture(false);
+        let row = assistant(
+            "m9",
+            "claude-future-9",
+            usage(5, 5, 0, 0, 0),
+            "2026-11-13T10:00:03.000Z",
+        );
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "{row}"
+        )
+        .unwrap();
+        let cost = parse(&path).unwrap().cost();
+        assert_eq!(cost.source, CostSource::Partial);
+        // and with a recorded total, the untracked share can't be known
+        append_cost_state(&path, 20.0, None);
+        let cost = parse(&path).unwrap().cost();
+        assert_eq!(cost.source, CostSource::Recorded);
+        assert_eq!(cost.untracked_usd, None);
     }
 
     #[test]

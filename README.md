@@ -3,9 +3,9 @@
 A searchable ledger of AI coding agent sessions: what was asked, which tools ran, which files
 changed, and what it cost. Claude Code first, other agents later.
 
-**Status: early.** Steps 1 and 2 of the MVP work: capturing every Claude Code hook event into a
-local ledger, and reading tokens, cost, models and timing from session transcripts. Normalized
-sessions, search and team roll-ups come next.
+**Status: early.** Steps 1 to 3 of the MVP work: capturing every Claude Code hook event,
+reading tokens, cost, models and timing from session transcripts, and normalizing both into one
+session record stored in a local SQLite ledger. Rewrite rate, search and team roll-ups come next.
 
 ## How it fits together
 
@@ -42,11 +42,70 @@ settings stay as they are, and the previous file is kept as `settings.json.sessi
 ```sh
 sessionly watch                  # pretty-print hook events live, in a second terminal
 sessionly status                 # hooks installed? how many sessions captured?
-sessionly transcript <session>   # tokens, cost, models and timing (add --json for JSON)
+sessionly sync                   # normalize captured sessions into the ledger
+sessionly show <session>         # one session: cost, prompts, files changed, tools, subagents
+sessionly transcript <session>   # tokens and cost per model, straight from a transcript
 ```
 
-`sessionly transcript` takes a session id, a unique prefix of one, or a path to a transcript
-file. It works for any past session, including ones from before Sessionly was installed:
+`<session>` is a session id or a unique prefix of one. `show` and `transcript` take `--json`.
+
+```
+$ sessionly show 8d89
+Session    8d893de5-59ac-4cc7-a3fe-57f4e342b8a9
+User       Kristiyan Ivanov, k.ivanow@gmail.com
+Repo       /tmp/e2e (master)
+Time       2026-11-13 17:39:42Z → 17:40:08Z (25s elapsed, 21s active)
+Models     claude-opus-5-5
+Cost       $0.31 (recorded)
+Activity   1 prompts, 7 tool calls (1 failed), 1 subagents, 2 permission requests
+Files      1 changed (+1 -0), 1 read
+
+Prompts
+  17:39:45  Do these steps in order, one tool call each, and keep going if a step fails: 1. Write a…
+
+Files changed
+      +1     -0  README.md
+
+Tools
+      2  Bash  (1 without a successful result)
+      2  Write  (2 without a successful result)
+      1  Agent
+      1  Edit
+      1  Read
+
+Subagents
+  ad8b2722  general-purpose    1 tool calls     $0.11  Echo hello from subagent
+```
+
+A repository with an `origin` remote is shown as `host/owner/repo`.
+
+### The session record
+
+`sessionly sync` builds one record per session from two sources: the captured hook events
+(prompts, tool calls, files, subagents, errors) and the transcript (tokens, cost, models, git
+branch). Records are stored in `~/.sessionly/ledger.db` (SQLite). The ledger is derived data:
+delete it and `sessionly sync --force` rebuilds it from the raw capture.
+
+The record is the contract between this binary and any server it later uploads to. Its JSON
+Schema is [schema/session.schema.json](schema/session.schema.json), generated from the Rust
+types by `sessionly schema`; a test fails if the checked-in file is stale.
+
+The record holds metadata, not content:
+
+- **Prompts:** SHA-256, length and the first 200 characters.
+- **Tool calls:** tool, status, duration, file path, SHA-256 of the input, size of the output,
+  and a one-line summary (the shell command, search pattern or URL, cut to 200 characters).
+- **Files:** path, read and write counts, lines added and removed.
+- Full prompts, file contents and command output stay in the raw capture.
+
+Only sessions captured by the hooks are in the ledger. File changes made by shell commands
+(`sed`, `git apply`, generators) are not attributed to files; only the agent's file tools are.
+
+### Transcripts
+
+`sessionly transcript` reads Claude Code's transcript directly. It also accepts a path to a
+transcript file, and works for any past session, including ones from before Sessionly was
+installed:
 
 ```
 Session    5233c02a-28f3-4e87-9fc8-d43379292252
@@ -73,10 +132,13 @@ session, and transcripts miss some background API calls. Sessionly combines the 
 - **No recorded total** (session still running or crashed): estimate only, labelled as such.
 
 Estimates use Anthropic's published API prices in
-[`pricing.rs`](crates/sessionly/src/pricing.rs). They matched Claude Code's own figure to the
+[`pricing.rs`](crates/sessionly/src/pricing.rs). A model that isn't in the table is left
+unpriced and the estimate is labelled partial. They matched Claude Code's own figure to the
 cent wherever the transcript was complete. Spend Claude Code recorded but the transcript doesn't
 show is reported separately as background calls. Details in
 [docs/hook-data.md](docs/hook-data.md#8-the-transcript-transcript_path-observed).
+
+### Raw capture
 
 Every hook event is appended to `~/.sessionly/raw/claude-code/<session_id>.jsonl` (or under
 `$SESSIONLY_HOME`). One line looks like:
@@ -120,7 +182,7 @@ scripts/dummy-session.sh   # runs a short real Claude Code session that exercise
 
 1. ✅ Hook capture → raw JSONL
 2. ✅ Transcript parser: tokens, cost, model, timestamps
-3. Normalized session schema and local storage
+3. ✅ Normalized session schema and local storage
 4. Rewrite-rate heuristic (how much of what the agent wrote survived)
 5. CLI: list, show, search
 6. Team aggregation, ingest API and dashboard

@@ -13,6 +13,11 @@ pub fn claude_raw_dir() -> PathBuf {
     data_dir().join("raw").join("claude-code")
 }
 
+/// Normalized sessions.
+pub fn ledger_path() -> PathBuf {
+    data_dir().join("ledger.db")
+}
+
 pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))

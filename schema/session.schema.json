@@ -1,0 +1,680 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Session",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "description": "Version of this record format.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "source": {
+      "description": "Agent that produced the session, e.g. \"claude-code\".",
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "user": {
+      "description": "Who ran the session, from git config on the machine that captured it.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/User"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "started_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "ended_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "duration_ms": {
+      "description": "Wall-clock span from first to last activity. Includes idle time and gaps\nbetween resumes, so it can be days for a long-lived session.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "active_ms": {
+      "description": "Time the agent spent working on prompts (sum of prompt turn durations).",
+      "type": "integer",
+      "format": "int64"
+    },
+    "end_reason": {
+      "description": "Why the session ended, as reported by the agent. Null while it is open.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cwd": {
+      "description": "Working directory the session ran in.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "repo": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Repo"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "agent_version": {
+      "description": "Version of the agent CLI.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "entrypoint": {
+      "description": "How the agent was started, e.g. \"cli\" or \"sdk-cli\".",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "models": {
+      "description": "Models that answered at least one request, most used first.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "permission_modes": {
+      "description": "Permission modes seen during the session, in order of first use.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "cost": {
+      "description": "Null when no transcript was available to read cost from.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Cost"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "usage": {
+      "description": "Token usage per model, main thread and subagents combined.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ModelUsage"
+      }
+    },
+    "counts": {
+      "$ref": "#/$defs/Counts"
+    },
+    "prompts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Prompt"
+      }
+    },
+    "tool_calls": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ToolCall"
+      }
+    },
+    "files": {
+      "description": "Files read or changed through the agent's file tools. Changes made by\nshell commands are not tracked here.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FileTouched"
+      }
+    },
+    "subagents": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Subagent"
+      }
+    },
+    "instruction_files": {
+      "description": "Instruction files (CLAUDE.md, rules) loaded into the session.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "source",
+    "session_id",
+    "active_ms",
+    "models",
+    "permission_modes",
+    "usage",
+    "counts",
+    "prompts",
+    "tool_calls",
+    "files",
+    "subagents",
+    "instruction_files"
+  ],
+  "$defs": {
+    "User": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Repo": {
+      "type": "object",
+      "properties": {
+        "root": {
+          "description": "Repository root on the capturing machine.",
+          "type": "string"
+        },
+        "remote": {
+          "description": "`origin` remote as host/owner/repo, without credentials.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "root"
+      ]
+    },
+    "Cost": {
+      "type": "object",
+      "properties": {
+        "total_usd": {
+          "description": "Best figure for the whole session, in USD.",
+          "type": "number",
+          "format": "double"
+        },
+        "source": {
+          "description": "\"recorded\": the agent's own total. \"recorded_and_estimated\": its total\nfor the latest run plus our estimate for earlier runs. \"estimated\": our\nestimate from token counts. \"partial_estimate\": an estimate that leaves\nout requests to models without a known price.",
+          "type": "string"
+        },
+        "transcript_estimate_usd": {
+          "description": "Estimate from the token counts visible in the transcript.",
+          "type": "number",
+          "format": "double"
+        },
+        "untracked_usd": {
+          "description": "Spend the agent recorded that the transcript does not show. Null when\nit can't be worked out (no recorded total, or a model without a known price).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "total_usd",
+        "source",
+        "transcript_estimate_usd"
+      ]
+    },
+    "ModelUsage": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "requests": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "description": "Includes thinking tokens.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "thinking_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "estimated_cost_usd": {
+          "description": "Null when the model has no known price.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "model",
+        "requests",
+        "input_tokens",
+        "output_tokens",
+        "thinking_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens"
+      ]
+    },
+    "Counts": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "description": "Raw hook events the record was built from.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "prompts": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tool_failures": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "permission_requests": {
+          "description": "Times the user was asked to approve a tool call.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "permission_denials": {
+          "description": "Tool calls refused by auto mode.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "subagents": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "compactions": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "api_errors": {
+          "description": "Turns that ended in an API error.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "files_read": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "files_changed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lines_added": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lines_removed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "events",
+        "prompts",
+        "tool_calls",
+        "tool_failures",
+        "permission_requests",
+        "permission_denials",
+        "subagents",
+        "compactions",
+        "api_errors",
+        "files_read",
+        "files_changed",
+        "lines_added",
+        "lines_removed"
+      ]
+    },
+    "Prompt": {
+      "type": "object",
+      "properties": {
+        "prompt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "text": {
+          "$ref": "#/$defs/Text"
+        },
+        "ended_at": {
+          "description": "When the agent finished responding. Null if the turn was interrupted\nor is still running.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "outcome": {
+          "description": "\"completed\" or \"api_error\". Null if interrupted or still running.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "description": "API error type when outcome is \"api_error\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
+    "Text": {
+      "description": "A piece of text kept as hash, length and short preview.",
+      "type": "object",
+      "properties": {
+        "sha256": {
+          "description": "SHA-256 of the full text, hex.",
+          "type": "string"
+        },
+        "chars": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "preview": {
+          "description": "First characters of the text.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha256",
+        "chars",
+        "preview"
+      ]
+    },
+    "ToolCall": {
+      "type": "object",
+      "properties": {
+        "tool_use_id": {
+          "type": "string"
+        },
+        "prompt_id": {
+          "description": "Prompt turn the call belongs to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent_id": {
+          "description": "Set when a subagent made the call.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "type": "string"
+        },
+        "at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "status": {
+          "description": "\"ok\", \"failed\", \"interrupted\", \"denied\", or \"no_result\" (the call was\nattempted but no result was captured: rejected by the user, interrupted,\nor still running).",
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "file_path": {
+          "description": "File the call operated on, for file tools.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input_sha256": {
+          "description": "SHA-256 of the full tool input (JSON), hex.",
+          "type": "string"
+        },
+        "input_summary": {
+          "description": "Short human-readable summary of the input: the command, pattern, URL\nor description, depending on the tool.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_bytes": {
+          "description": "Size of the tool's result as serialized JSON.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error": {
+          "description": "Start of the error message for failed calls.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lines_added": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lines_removed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "tool_use_id",
+        "tool",
+        "status",
+        "input_sha256",
+        "lines_added",
+        "lines_removed"
+      ]
+    },
+    "FileTouched": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "reads": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "writes": {
+          "description": "Successful write or edit calls.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "created": {
+          "description": "True if the agent created the file in this session.",
+          "type": "boolean"
+        },
+        "lines_added": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lines_removed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "path",
+        "reads",
+        "writes",
+        "created",
+        "lines_added",
+        "lines_removed"
+      ]
+    },
+    "Subagent": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "agent_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "tool_calls": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "requests": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "estimated_cost_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "agent_id",
+        "tool_calls",
+        "requests",
+        "input_tokens",
+        "output_tokens"
+      ]
+    }
+  }
+}
