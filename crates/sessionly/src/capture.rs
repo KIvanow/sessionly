@@ -88,8 +88,10 @@ pub fn capture(raw_dir: &Path, input: &mut impl Read, received_at: &str) -> Resu
 /// Hook entry point. Always returns exit code 0 and never prints.
 pub fn run() -> i32 {
     let received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
-    // No home directory: nowhere safe to write, so do nothing.
+    // No home directory: nowhere safe to write. Still read the payload, so
+    // the process feeding it to us doesn't hit a closed pipe.
     let Ok(raw_dir) = crate::paths::claude_raw_dir() else {
+        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
         return 0;
     };
     if let Err(err) = capture(&raw_dir, &mut std::io::stdin().lock(), &received_at) {

@@ -21,7 +21,8 @@ fn run_with_stdin(mut cmd: Command, stdin: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    // The child may exit without reading everything; that is its business.
+    let _ = child.stdin.take().unwrap().write_all(stdin);
     child.wait_with_output().unwrap()
 }
 
