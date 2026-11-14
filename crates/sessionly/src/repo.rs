@@ -182,10 +182,13 @@ fetch() {
   waited=0
   until mkdir "$lock" 2> /dev/null; do
     [ -x "$bin" ] && return 0
-    # A lock left behind by a hook that was killed.
-    [ -n "$(find "$lock" -maxdepth 0 -mmin +2 2> /dev/null)" ] && rmdir "$lock" 2> /dev/null
     waited=$((waited + 1))
-    [ "$waited" -gt 300 ] && return 1
+    if [ "$waited" -gt 300 ]; then
+      # Half a minute: whoever is downloading was killed, or is too slow to
+      # wait for. This event is not captured; the next hook may try.
+      rmdir "$lock" 2> /dev/null
+      return 1
+    fi
     sleep 0.1
   done
   [ -x "$bin" ] || download

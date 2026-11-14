@@ -1268,7 +1268,15 @@ fn hooks_arriving_together_share_one_download() {
     });
     assert_eq!(repo.captured("sandbox", "claude-code", "s1").len(), 6);
     let log = fs::read_to_string(repo.home("sandbox").join(".sessionly/bootstrap.log")).unwrap();
-    assert_eq!(log.matches("installed sessionly").count(), 1, "{log}");
+    let left: Vec<_> = fs::read_dir(repo.home("sandbox").join(".sessionly/bin"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        log.matches("installed sessionly").count(),
+        1,
+        "{log}\nin bin: {left:?}"
+    );
 }
 
 #[cfg(target_os = "linux")]
