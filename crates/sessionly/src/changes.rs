@@ -27,7 +27,7 @@
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -51,6 +51,12 @@ const MAX_NEW_FILES: usize = 2000;
 
 const LOCK_WAIT: Duration = Duration::from_secs(3);
 
+/// Tools that only read: the file they name is not being changed.
+const READ_ONLY: &[&str] = &["Read", "Grep", "Glob", "LS"];
+
+/// A file tool seen to start and never to end is taken to be at work this long.
+const EDIT_LASTS_MS: u64 = 60_000;
+
 /// What is remembered between the events of one session.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -61,12 +67,35 @@ struct State {
     tree: Option<String>,
     /// The commit that was checked out then.
     head: Option<String>,
-    /// When a shell command last began, in seconds.
+    /// When it was last seen, in milliseconds.
+    seen_at: u64,
+    /// When a shell command last began, in milliseconds.
     at: u64,
     /// Shell commands that have begun and not ended.
     open: u32,
     /// Looking took too long once: it is not tried again.
     gave_up: bool,
+    /// Files the agent's file tools are changing or changed lately.
+    edited: Vec<Edited>,
+}
+
+/// A file one of the agent's file tools was seen at work on.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct Edited {
+    path: String,
+    /// When the tool was last heard of, in milliseconds.
+    at: u64,
+    /// The tool began and has not been seen to end.
+    open: bool,
+}
+
+/// One event, as far as it matters here.
+enum Event<'a> {
+    /// A shell command began, or ended, in the repository at `root`.
+    Shell { root: &'a Path, ended: bool },
+    /// A file tool began, or ended, its work on a file.
+    Edit { path: PathBuf, ended: bool },
 }
 
 #[derive(Debug, PartialEq)]
@@ -81,30 +110,68 @@ enum Stop {
 /// event: `{"changes": [{"path", "status", "lines"}]}`, or
 /// `{"changes_skipped": "<why>"}` when a change was seen and not counted.
 /// `lines` are patch lines, `+added` and `-removed`.
+///
+/// Agents run tools side by side, so a file tool may change a file while a
+/// shell command runs. That tool reports the change itself: its events are
+/// noted here so the file is not counted a second time as the command's.
 pub fn observe(data_dir: &Path, record: &Value) -> Option<Value> {
     let p = &record["payload"];
     let ended = match record["hook"].as_str()?.to_lowercase().as_str() {
         "pretooluse" => false,
-        "posttooluse" | "posttoolusefailure" => true,
+        "posttooluse" | "posttoolusefailure" | "afterfileedit" => true,
         _ => return None,
     };
-    if !SHELL_TOOLS.contains(&p["tool_name"].as_str()?) {
-        return None;
+    fn text(v: &Value) -> Option<&Path> {
+        v.as_str().filter(|text| !text.is_empty()).map(Path::new)
     }
     let cwd = [&p["cwd"], &p["workspace_roots"][0]]
         .into_iter()
-        .find_map(|v| v.as_str().filter(|dir| !dir.is_empty()))?;
-    let root = crate::git::repo_root(Path::new(cwd))?;
+        .find_map(text);
+    let tool = p["tool_name"].as_str().unwrap_or_default();
+    let root;
+    let event = if SHELL_TOOLS.contains(&tool) {
+        root = crate::git::repo_root(cwd?)?;
+        Event::Shell { root: &root, ended }
+    } else if READ_ONLY.contains(&tool) {
+        return None;
+    } else {
+        let input = &p["tool_input"];
+        let named = [
+            &p["file_path"],
+            &input["file_path"],
+            &input["notebook_path"],
+            &input["path"],
+            &input["target_file"],
+        ]
+        .into_iter()
+        .find_map(text)?;
+        let path = if named.is_absolute() {
+            named.to_path_buf()
+        } else {
+            cwd?.join(named)
+        };
+        Event::Edit { path, ended }
+    };
     let stem = crate::capture::file_stem(record["session_id"].as_str());
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    step(&data_dir.join("snapshots").join(stem), &root, ended, now)
+        .map_or(0, |d| d.as_millis() as u64);
+    step(&data_dir.join("snapshots").join(stem), event, now)
 }
 
-/// One event of a shell command, in the repository at `root`, with `dir` to
-/// keep what is remembered. `ended` is false for the command's start.
-fn step(dir: &Path, root: &Path, ended: bool, now: u64) -> Option<Value> {
+/// A path as the file system knows it, as far as it exists yet, so that two
+/// ways of naming one file (through a link, say) compare equal.
+fn place(path: &Path) -> PathBuf {
+    for known in path.ancestors().skip(1) {
+        if let (Ok(real), Ok(rest)) = (fs::canonicalize(known), path.strip_prefix(known)) {
+            return real.join(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
+/// One event at `now` (in milliseconds), with `dir` to keep what is remembered.
+fn step(dir: &Path, event: Event, now: u64) -> Option<Value> {
     crate::paths::create_private_dir(dir).ok()?;
     // Hooks run in parallel: one at a time looks at the tree.
     let lock = File::create(dir.join("lock")).ok()?;
@@ -124,16 +191,38 @@ fn step(dir: &Path, root: &Path, ended: bool, now: u64) -> Option<Value> {
     if state.gave_up {
         return None;
     }
+    let said = match event {
+        Event::Edit { path, ended } => {
+            let path = place(&path).to_string_lossy().into_owned();
+            state.edited.retain(|edited| edited.path != path);
+            state.edited.push(Edited {
+                path,
+                at: now,
+                open: !ended,
+            });
+            None
+        }
+        Event::Shell { root, ended } => shell(dir, &mut state, root, ended, now),
+    };
+    if let Ok(text) = serde_json::to_string(&state) {
+        let _ = fs::write(&state_path, text);
+    }
+    said
+}
+
+/// A shell command's start or end: look at the working tree, and at its end
+/// answer what changed since the last look.
+fn shell(dir: &Path, state: &mut State, root: &Path, ended: bool, now: u64) -> Option<Value> {
     let root_text = root.to_string_lossy();
     if state.root != root_text {
         // Another repository than last time: start over.
         let _ = fs::remove_file(dir.join("index"));
-        state = State {
+        *state = State {
             root: root_text.into_owned(),
+            edited: std::mem::take(&mut state.edited),
             ..State::default()
         };
     }
-
     let git = Git {
         root,
         dir,
@@ -141,6 +230,7 @@ fn step(dir: &Path, root: &Path, ended: bool, now: u64) -> Option<Value> {
     };
     let before = state.tree.take();
     let head_before = state.head.take();
+    let seen_before = state.seen_at;
     let mut said = None;
     match git.snapshot() {
         Ok((tree, head)) => {
@@ -149,13 +239,32 @@ fn step(dir: &Path, root: &Path, ended: bool, now: u64) -> Option<Value> {
             // before an edit a file tool made.
             if let Some(from) = before.filter(|from| ended && state.open > 0 && *from != tree) {
                 let moved = head_before != head;
+                let since = state.at / 1000;
                 said = Some(
-                    if moved && !git.made_since(head_before.as_deref(), head.as_deref(), state.at) {
+                    if moved && !git.made_since(head_before.as_deref(), head.as_deref(), since) {
                         json!({ "changes_skipped": "the commit checked out changed" })
                     } else {
                         match git.diff(&from, &tree) {
-                            Ok(files) if files.is_empty() => Value::Null,
-                            Ok(files) => json!({ "changes": files }),
+                            Ok(mut files) => {
+                                // A file tool at work since the last look
+                                // reports what it changed itself.
+                                files.retain(|file| {
+                                    let path =
+                                        place(Path::new(file["path"].as_str().unwrap_or("")));
+                                    !state.edited.iter().any(|edited| {
+                                        Path::new(&edited.path) == path
+                                            && (edited.at >= seen_before
+                                                || (edited.open
+                                                    && now.saturating_sub(edited.at)
+                                                        < EDIT_LASTS_MS))
+                                    })
+                                });
+                                if files.is_empty() {
+                                    Value::Null
+                                } else {
+                                    json!({ "changes": files })
+                                }
+                            }
                             Err(Stop::TooLarge) => json!({ "changes_skipped": "too large" }),
                             Err(_) => json!({ "changes_skipped": "could not be compared" }),
                         }
@@ -164,6 +273,7 @@ fn step(dir: &Path, root: &Path, ended: bool, now: u64) -> Option<Value> {
             }
             state.tree = Some(tree);
             state.head = head;
+            state.seen_at = now;
             if ended {
                 state.open = state.open.saturating_sub(1);
             } else {
@@ -179,9 +289,10 @@ fn step(dir: &Path, root: &Path, ended: bool, now: u64) -> Option<Value> {
             }
         }
     }
-    if let Ok(text) = serde_json::to_string(&state) {
-        let _ = fs::write(&state_path, text);
-    }
+    // File tools heard of long ago no longer matter.
+    state
+        .edited
+        .retain(|edited| now.saturating_sub(edited.at) < 10 * EDIT_LASTS_MS);
     said.filter(|said| !said.is_null())
 }
 
@@ -466,13 +577,12 @@ pub fn of(record: &Value) -> impl Iterator<Item = (&str, bool, impl Iterator<Ite
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     struct Repo {
         _home: tempfile::TempDir,
         root: PathBuf,
         dir: PathBuf,
-        /// The time, in seconds: each command begins later than the last.
+        /// The time, in milliseconds: each command begins later than the last.
         now: std::cell::Cell<u64>,
     }
 
@@ -485,7 +595,7 @@ mod tests {
                 dir: home.path().join("snapshots/s1"),
                 _home: home,
                 root,
-                now: std::cell::Cell::new(1_700_000_000),
+                now: std::cell::Cell::new(1_700_000_000_000),
             };
             repo.git(&["init", "--quiet", "--initial-branch", "main"]);
             repo.write(".gitignore", "target/\n");
@@ -519,7 +629,7 @@ mod tests {
         /// Commit everything, at the time it is now.
         fn commit(&self, message: &str) {
             self.git(&["add", "--all"]);
-            let date = format!("@{} +0000", self.now.get());
+            let date = format!("@{} +0000", self.now.get() / 1000);
             let out = Command::new("git")
                 .arg("-C")
                 .arg(&self.root)
@@ -546,10 +656,25 @@ mod tests {
 
         /// A shell command's start, then `during`, then what its end answers.
         fn command(&self, during: impl FnOnce()) -> Option<Value> {
-            self.now.set(self.now.get() + 100);
-            assert_eq!(step(&self.dir, &self.root, false, self.now.get()), None);
+            self.now.set(self.now.get() + 100_000);
+            assert_eq!(self.shell(false), None);
+            self.now.set(self.now.get() + 1000);
             during();
-            step(&self.dir, &self.root, true, self.now.get() + 1)
+            self.now.set(self.now.get() + 1000);
+            self.shell(true)
+        }
+
+        /// A shell command's start or end, now.
+        fn shell(&self, ended: bool) -> Option<Value> {
+            let root = &self.root;
+            step(&self.dir, Event::Shell { root, ended }, self.now.get())
+        }
+
+        /// A file tool's start or end on a file, now. It answers nothing.
+        fn edit(&self, name: &str, ended: bool) {
+            let path = self.root.join(name);
+            let said = step(&self.dir, Event::Edit { path, ended }, self.now.get());
+            assert_eq!(said, None);
         }
 
         /// The changed files as (name, status, lines).
@@ -623,13 +748,40 @@ mod tests {
 
         // An end whose start was not seen: nothing can be said of it.
         repo.write("hello.py", "edited again\n");
-        assert_eq!(step(&repo.dir, &repo.root, true, repo.now.get() + 20), None);
+        assert_eq!(repo.shell(true), None);
         // The next command is seen whole again.
         let said = repo.command(|| repo.write("old.txt", "one\n"));
         assert_eq!(
             repo.changes(said),
             [file("old.txt", "M", &["-two", "-three"])]
         );
+    }
+
+    #[test]
+    fn a_file_tools_edit_while_a_command_runs_is_not_the_commands() {
+        let repo = Repo::new();
+        // Side by side: a file tool writes one file, the command another.
+        let said = repo.command(|| {
+            repo.edit("hello.py", false);
+            repo.write("hello.py", "written by a file tool\n");
+            repo.edit("hello.py", true);
+            repo.write("old.txt", "one\n");
+        });
+        assert_eq!(repo.changes(said), [file("old.txt", "M", &["-two"])]);
+        // The tool began before the command and is still writing as it ends.
+        repo.now.set(repo.now.get() + 5000);
+        repo.edit("src/new.py", false);
+        repo.now.set(repo.now.get() + 1000);
+        assert_eq!(repo.shell(false), None);
+        repo.write("src/new.py", "print(1)\n");
+        repo.now.set(repo.now.get() + 1000);
+        assert_eq!(repo.shell(true), None);
+        repo.edit("src/new.py", true);
+
+        // One after the other: the tool has finished, so what the command
+        // then does to the same file is the command's.
+        let said = repo.command(|| repo.write("hello.py", "written by a file tool\nand sed\n"));
+        assert_eq!(repo.changes(said), [file("hello.py", "M", &["+and sed"])]);
     }
 
     #[test]
@@ -704,6 +856,17 @@ mod tests {
             None
         );
         assert!(!repo.dir.exists());
+
+        // A file tool's events are only noted.
+        let mut write = event("PreToolUse", "Write", &repo.root);
+        write["payload"]["tool_input"] = json!({ "file_path": "hello.py" });
+        assert_eq!(observe(data, &write), None);
+        let state = fs::read_to_string(repo.dir.join("state.json")).unwrap();
+        assert!(
+            state.contains("hello.py") && state.contains(r#""open":true"#),
+            "{state}"
+        );
+        assert!(!repo.dir.join("index").exists());
 
         // Cursor names the events and the tool its own way, and the folder too.
         let cursor = |hook: &str| {

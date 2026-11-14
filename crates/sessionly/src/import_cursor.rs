@@ -647,6 +647,10 @@ pub fn session_from_hooks(capture: &Path) -> Result<(Vec<Value>, Option<Facts>)>
         all[0]["runtime"] = runtime.to_json();
     }
     all.extend(events);
+    // These came from the hooks, not from a transcript.
+    for event in &mut all {
+        event["origin"] = json!("hooks");
+    }
 
     let (usage, cost) = cursor_hooks::usage(&hooked.turns, prompts);
     let facts = Facts {
@@ -1352,6 +1356,16 @@ mod tests {
         let mut s = s;
         crate::normalize::apply_runtime(&mut s, &seen);
         assert_eq!(s.runtime.as_ref().unwrap().kind, RuntimeKind::Cloud);
+        // Should the socket not have said which agent this is, the session's
+        // own id is the agent's.
+        let mut unnamed = s.clone();
+        unnamed.session_id = "bc-64f0".into();
+        let quiet = crate::runtime::Seen {
+            id: None,
+            ..seen.clone()
+        };
+        crate::normalize::apply_runtime(&mut unnamed, &quiet);
+        assert_eq!(unnamed.runtime.unwrap().id.as_deref(), Some("bc-64f0"));
         assert_eq!(s.user.unwrap().email.as_deref(), Some("ann@example.com"));
         assert_eq!(s.entrypoint.as_deref(), Some("website"));
         let lines = crate::rewrite::added_lines_by_model(&events, &Default::default());
@@ -1401,6 +1415,7 @@ mod tests {
         assert_eq!(s.prompts.len(), 1);
         assert_eq!(s.prompts[0].text.preview, "");
         assert!(!s.captured_from_start);
+        assert_eq!(s.captured_by, crate::session::CapturedBy::Hooks);
         assert_eq!(s.tool_calls.len(), 1);
         assert_eq!(s.models, ["cursor-grok-4.6-high-fast"]);
         assert_eq!(

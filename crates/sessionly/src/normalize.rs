@@ -119,9 +119,13 @@ fn add_local_context(
 /// Mark a session as having run in the cloud. Git there is set up as the
 /// agent, so the person is the one the platform named, or nobody.
 pub fn apply_runtime(session: &mut Session, runtime: &crate::runtime::Seen) {
+    // A Cursor cloud agent's session id is the agent's id (`bc-…`), should
+    // its socket not have said so.
+    let own = (session.source == crate::paths::CURSOR && session.session_id.starts_with("bc-"))
+        .then(|| session.session_id.clone());
     session.runtime = Some(Runtime {
         kind: RuntimeKind::Cloud,
-        id: runtime.id.clone(),
+        id: runtime.id.clone().or(own),
     });
     session.user = runtime.user_email.clone().map(|email| User {
         name: None,

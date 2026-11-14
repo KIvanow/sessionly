@@ -284,7 +284,9 @@ What is different about a session from the cloud:
   They count toward the session's files and lines, the rewrite rate and pull requests like
   any other edit. The comparison uses git with an index and objects kept in `~/.sessionly`;
   the repository's own index, objects and HEAD are not written. Files git ignores are not
-  looked at, and new files over 1 MB are left out. A command that moves to commits it did
+  looked at, and new files over 1 MB are left out. Agents run tools side by side: a file a
+  file tool changes while a command runs is that tool's, and is not counted a second time
+  as the command's. A command that moves to commits it did
   not make (`git pull`, `git checkout main`, a rebase) is not counted, since what that
   brings in is other people's work. A command that carries on in the background is counted
   up to when the call returned. This is not done on a person's machine: whatever the person
