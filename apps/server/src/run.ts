@@ -4,6 +4,7 @@
 //   DATABASE_URL           postgres://… ; default: an embedded database in apps/server/data
 //   SESSIONLY_ADMIN_TOKEN  an admin token that always works (for first use)
 //   SESSIONLY_ADMIN_EMAIL  whose sessions uploads with that token belong to
+//   SESSIONLY_HOSTED       "true" for a service that many organisations share
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
@@ -19,7 +20,31 @@ export interface RunOptions {
   edition?: string;
 }
 
+/**
+ * What a service shared by many organisations must not be started with. A
+ * self-hosted install has one organisation, "default", and none of this
+ * applies to it.
+ */
+export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
+  const problems: string[] = [];
+  if (env.SESSIONLY_ADMIN_TOKEN) {
+    problems.push("SESSIONLY_ADMIN_TOKEN is set: a hosted service has no admin of every organisation.");
+  }
+  if (!/^postgres(ql)?:\/\//.test(env.DATABASE_URL ?? "")) {
+    problems.push("DATABASE_URL must be a postgres:// address: the embedded database is for one install.");
+  }
+  return problems;
+}
+
 export async function runServer(options: RunOptions = {}): Promise<void> {
+  const hosted = process.env.SESSIONLY_HOSTED === "true";
+  if (hosted) {
+    const problems = hostedProblems(process.env);
+    if (problems.length) {
+      for (const problem of problems) console.error(`SESSIONLY_HOSTED: ${problem}`);
+      process.exit(1);
+    }
+  }
   // The embedded database lives next to the server's code, wherever it is started from.
   const embedded = fileURLToPath(new URL("../data/pglite", import.meta.url));
   const databaseUrl = process.env.DATABASE_URL ?? `file:${embedded}`;
@@ -46,7 +71,7 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
     const edition = options.edition ? `, ${options.edition}` : "";
     console.log(`sessionly server on http://${hostname}:${info.port} (${where}${edition})`);
     if (!webRoot) console.log("The dashboard is not built; run `pnpm build` to serve it here.");
-    if (!adminToken) {
+    if (!adminToken && !hosted) {
       console.log(
         "No SESSIONLY_ADMIN_TOKEN set: create tokens with `pnpm token create --email you@example.com --role admin`",
       );

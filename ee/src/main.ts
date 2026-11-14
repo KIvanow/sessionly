@@ -12,5 +12,5 @@ const env = loadEeEnv();
 await runServer({
   edition: "Business and Enterprise features",
   prepare: migrateEe,
-  extensions: (db) => [eeApi({ entitlements: new Entitlements(db), org: env.org })],
+  extensions: () => [eeApi({ entitlements: new Entitlements(), org: env.org })],
 });

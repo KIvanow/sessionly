@@ -17,7 +17,7 @@ before(async () => {
   db = await openDb("memory://");
   await migrateEe(db);
   await migrateEe(db); // running it again changes nothing
-  const ent = new Entitlements(db, () => clock.now, issuer.publicKey, 0);
+  const ent = new Entitlements(() => clock.now, issuer.publicKey, 0);
   app = createApp(db, {
     bootstrap: { token: ADMIN, email: "boss@example.com" },
     extensions: [eeApi({ entitlements: ent, org: "acme", now: () => clock.now })],

@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
-import { createToken } from "../src/auth.ts";
-import { openDb, type Db } from "../src/db.ts";
+import type { Db } from "../src/db.ts";
+import { testDb, tokenFor } from "./helpers.ts";
 import { attribute, type Claim } from "../src/pulls.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
@@ -87,11 +87,11 @@ let app: Hono<Env>;
 const tokens = { admin: "", ann: "", ci: "" };
 
 before(async () => {
-  db = await openDb("memory://");
+  db = await testDb();
   app = createApp(db, {});
-  tokens.admin = (await createToken(db, { email: "boss@example.com", role: "admin" })).token;
-  tokens.ann = (await createToken(db, { email: "ann@example.com", role: "member" })).token;
-  tokens.ci = (await createToken(db, { email: "ci@example.com", role: "ci" })).token;
+  tokens.admin = await tokenFor(db, { email: "boss@example.com", role: "admin" });
+  tokens.ann = await tokenFor(db, { email: "ann@example.com", role: "member" });
+  tokens.ci = await tokenFor(db, { email: "ci@example.com", role: "ci" });
 });
 after(() => db.close());
 

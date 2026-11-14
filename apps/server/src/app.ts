@@ -12,7 +12,7 @@ import {
   type Principal,
   type Role,
 } from "./auth.ts";
-import type { Db } from "./db.ts";
+import type { Db, OrgDb } from "./db.ts";
 import {
   Conflict,
   filterOptions,
@@ -30,18 +30,26 @@ import { uploadProblems, type Upload } from "./validate.ts";
 /** A record lists every tool call, so a long session is several megabytes. */
 const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
 
-export type Env = { Variables: { principal: Principal } };
+export type Env = { Variables: { principal: Principal; db: OrgDb } };
 
-/** The authenticated API router: every route on it has `c.get("principal")`. */
+/**
+ * The authenticated API router. Every route on it has `c.get("principal")`,
+ * who is asking, and `c.get("db")`, the database as their organisation sees
+ * it: the only way a route reaches data.
+ */
 export type Api = Hono<Env>;
 
 /**
  * Adds routes to the authenticated API. This is how optional parts plug in
- * without the core depending on them.
+ * without the core depending on them. Routes read `c.get("db")`; the `db`
+ * here is the owner's and is for setting up, not for answering requests.
  */
 export type Extension = (api: Api, ctx: { db: Db }) => void;
 
 class BadRequest extends Error {}
+
+/** Thrown to undo what a request wrote, once its answer is already decided. */
+class Undo extends Error {}
 
 /** An error an extension wants answered with a given status and a stable code. */
 export class ApiError extends Error {
@@ -120,6 +128,32 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
     await next();
   });
 
+  api.use(
+    "*",
+    bodyLimit({
+      maxSize: MAX_UPLOAD_BYTES,
+      onError: (c) => c.json({ error: "the request is too large" }, 413),
+    }),
+  );
+
+  // The rest of the request runs in one transaction, as the organisation of
+  // its token: `c.get("db")` sees that organisation's rows and no others.
+  api.use("*", async (c, next) => {
+    // The body is read first, so that a slow sender holds no database connection.
+    if (c.req.raw.body) await c.req.arrayBuffer();
+    try {
+      await db.asOrg(c.get("principal").orgId, async (orgDb) => {
+        c.set("db", orgDb);
+        await next();
+        // A handler that threw has been answered for already (see onError).
+        // What it wrote before throwing must not stay.
+        if (c.error) throw new Undo();
+      });
+    } catch (err) {
+      if (!(err instanceof Undo)) throw err;
+    }
+  });
+
   api.onError((err, c) => {
     if (err instanceof BadRequest) return c.json({ error: err.message }, 400);
     if (err instanceof BadReport) return c.json({ error: err.message }, 422);
@@ -128,16 +162,12 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
     return c.json({ error: "internal error" }, 500);
   });
 
-  const whoami = (p: Principal) => ({ ok: true, email: p.email, name: p.name, role: p.role });
+  const whoami = (p: Principal) => ({ ok: true, org: p.orgId, email: p.email, name: p.name, role: p.role });
   api.get("/ping", (c) => c.json(whoami(c.get("principal"))));
   api.get("/me", (c) => c.json(whoami(c.get("principal"))));
 
   api.put(
     "/sessions/:machine/:source/:session",
-    bodyLimit({
-      maxSize: MAX_UPLOAD_BYTES,
-      onError: (c) => c.json({ error: "the upload is too large" }, 413),
-    }),
     async (c) => {
       let body: unknown;
       try {
@@ -161,7 +191,7 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
       }
       let stored: boolean;
       try {
-        stored = await storeUpload(db, upload, c.get("principal"));
+        stored = await storeUpload(c.get("db"), upload, c.get("principal"));
       } catch (err) {
         if (err instanceof Conflict) return c.json({ error: err.message }, 409);
         throw err;
@@ -177,7 +207,7 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
     if (!["user", "repo", "model", "tool", "day", "runtime"].includes(by)) {
       throw new BadRequest("by must be user, repo, model, tool, day or runtime");
     }
-    return c.json(await summarize(db, c.get("principal"), by, filtersFrom(query)));
+    return c.json(await summarize(c.get("db"), c.get("principal"), by, filtersFrom(query)));
   });
 
   api.get("/sessions", async (c) => {
@@ -186,12 +216,12 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
       limit: wholeNumber(query.limit, 50, 500, "limit"),
       offset: wholeNumber(query.offset, 0, Number.MAX_SAFE_INTEGER, "offset"),
     };
-    return c.json(await listSessions(db, c.get("principal"), filtersFrom(query), page));
+    return c.json(await listSessions(c.get("db"), c.get("principal"), filtersFrom(query), page));
   });
 
   api.get("/sessions/:machine/:source/:session", async (c) => {
     const { machine, source, session } = c.req.param();
-    const found = await getSession(db, c.get("principal"), {
+    const found = await getSession(c.get("db"), c.get("principal"), {
       machine_id: machine,
       source,
       session_id: session,
@@ -202,10 +232,10 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
   api.get("/files", async (c) => {
     const query = c.req.query();
     const limit = wholeNumber(query.limit, 200, 2000, "limit");
-    return c.json(await listFiles(db, c.get("principal"), filtersFrom(query), limit));
+    return c.json(await listFiles(c.get("db"), c.get("principal"), filtersFrom(query), limit));
   });
 
-  api.get("/filters", async (c) => c.json(await filterOptions(db, c.get("principal"))));
+  api.get("/filters", async (c) => c.json(await filterOptions(c.get("db"), c.get("principal"))));
 
   // Pull requests: the GitHub Action reports them, admins read them.
   const adminsOnly = (p: Principal) => {
@@ -220,10 +250,6 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
   };
   api.put(
     "/prs",
-    bodyLimit({
-      maxSize: MAX_UPLOAD_BYTES,
-      onError: (c) => c.json({ error: "the report is too large" }, 413),
-    }),
     async (c) => {
       if (c.get("principal").role === "member") {
         return c.json({ error: "reporting pull requests needs a ci or admin token" }, 403);
@@ -234,12 +260,12 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
       } catch {
         return c.json({ error: "the body is not JSON" }, 400);
       }
-      return c.json({ stored: true, attribution: await storePull(db, body) });
+      return c.json({ stored: true, attribution: await storePull(c.get("db"), body) });
     },
   );
   api.get("/prs/summary", async (c) => {
     adminsOnly(c.get("principal"));
-    return c.json(await summarizePulls(db, pullFilters(c.req.query())));
+    return c.json(await summarizePulls(c.get("db"), pullFilters(c.req.query())));
   });
   api.get("/prs", async (c) => {
     adminsOnly(c.get("principal"));
@@ -248,7 +274,7 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
       limit: wholeNumber(query.limit, 50, 500, "limit"),
       offset: wholeNumber(query.offset, 0, Number.MAX_SAFE_INTEGER, "offset"),
     };
-    return c.json(await listPulls(db, pullFilters(query), page));
+    return c.json(await listPulls(c.get("db"), pullFilters(query), page));
   });
 
   // Token management, for admins.
@@ -257,7 +283,7 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
     if (c.get("principal").role !== "admin") return c.json({ error: "admins only" }, 403);
     await next();
   });
-  admin.get("/", async (c) => c.json({ tokens: await listTokens(db) }));
+  admin.get("/", async (c) => c.json({ tokens: await listTokens(c.get("db")) }));
   admin.post("/", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const email = typeof body.email === "string" ? body.email.trim() : "";
@@ -267,12 +293,12 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
       throw new BadRequest("role must be admin, member, ci or env");
     }
     const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : null;
-    const created = await createToken(db, { email, name, role });
+    const created = await createToken(c.get("db"), { email, name, role });
     // The only time the token itself is returned.
     return c.json({ ...created, email: email.toLowerCase(), name, role }, 201);
   });
   admin.delete("/:id", async (c) =>
-    (await revokeToken(db, c.req.param("id")))
+    (await revokeToken(c.get("db"), c.req.param("id")))
       ? c.json({ revoked: true })
       : c.json({ error: "no such active token" }, 404),
   );
