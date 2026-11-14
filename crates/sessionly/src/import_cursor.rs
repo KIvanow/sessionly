@@ -30,8 +30,8 @@ use anyhow::Result;
 use chrono::{DateTime, FixedOffset, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use serde_json::{json, Value};
 
-use crate::cursor_hooks::{self, Turn};
-use crate::import::{edit_result, slim_input, Builder};
+use crate::cursor_hooks::{self, FileEdit, Tool, Turn};
+use crate::import::{edit_result, patch_lines, slim_input, Builder};
 use crate::paths::CURSOR;
 use crate::transcript::Facts;
 
@@ -443,11 +443,75 @@ fn canonical_hooked(name: &str, input: &Value) -> (String, Value) {
     }
 }
 
+/// Cursor's tools that change a file.
+const EDITING_TOOLS: &[&str] = &[
+    "Write",
+    "StrReplace",
+    "Edit",
+    "MultiEdit",
+    "EditNotebook",
+    "ApplyPatch",
+];
+
+/// Which of a turn's tool calls made each file edit the hooks were told of
+/// (by position in `turn.tools`), and the edits no call accounts for. An
+/// edit is put down to the last call before it that names its file, or
+/// failing that the last one made with an editing tool.
+fn edits_by_call(
+    turn: &Turn,
+) -> (
+    std::collections::HashMap<usize, Vec<&FileEdit>>,
+    Vec<&FileEdit>,
+) {
+    let mut by_call: std::collections::HashMap<usize, Vec<&FileEdit>> = Default::default();
+    let mut loose = Vec::new();
+    for edit in &turn.edits {
+        let names_file = |tool: &Tool| {
+            ["file_path", "path", "target_file"]
+                .iter()
+                .any(|key| tool.input[*key].as_str() == Some(edit.path.as_str()))
+        };
+        let before = || {
+            turn.tools
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, tool)| tool.at <= edit.at && tool.name != "Read")
+        };
+        let call = before()
+            .find(|(_, tool)| names_file(tool))
+            .or_else(|| before().find(|(_, tool)| EDITING_TOOLS.contains(&tool.name.as_str())));
+        match call {
+            Some((i, _)) => by_call.entry(i).or_default().push(edit),
+            None => loose.push(edit),
+        }
+    }
+    (by_call, loose)
+}
+
+/// The result of a call that made `edits`, as normalizing expects it.
+/// Whether a file was new is not reported, so none counts as created.
+fn edits_result(edits: &[&FileEdit]) -> Value {
+    let changes = || edits.iter().flat_map(|edit| &edit.changes);
+    let hunks: Vec<Value> = changes()
+        .map(|(old, new)| json!({ "lines": patch_lines(old, new) }))
+        .collect();
+    json!({
+        "structuredPatch": hunks,
+        "_bytes": changes().map(|(_, new)| new.len()).sum::<usize>(),
+    })
+}
+
 /// The session as the hooks alone saw it, for a session Cursor has written
 /// no transcript for: `capture` is its raw hook capture. It has the prompts,
-/// the tool calls with their times and outcome, the model and tokens, but
-/// not what an edit changed, so no lines are counted until the transcript
-/// is there.
+/// the tool calls with their times and outcome, the model and (from the
+/// editor) tokens.
+///
+/// What an edit changed is known only where the hooks were told
+/// (`afterFileEdit`, which a repository's `.cursor/hooks.json` asks for and
+/// the hooks in `~/.claude/settings.json` cannot). Otherwise no lines are
+/// counted until the transcript is there. A cloud agent never has a
+/// transcript: this is all there is of its session.
 pub fn session_from_hooks(capture: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
     let session_id = capture
         .file_stem()
@@ -472,9 +536,21 @@ pub fn session_from_hooks(capture: &Path) -> Result<(Vec<Value>, Option<Facts>)>
                 json!({ "prompt_id": format!("p{prompts}"), "prompt": turn.prompt.trim() }),
             );
         }
-        for seen in &turn.tools {
+        let (mut edits_of, loose) = edits_by_call(turn);
+        for (position, seen) in turn.tools.iter().enumerate() {
             calls += 1;
-            let (tool, input) = canonical_hooked(&seen.name, &seen.input);
+            let edits = edits_of.remove(&position).unwrap_or_default();
+            let (tool, input) = match edits.first() {
+                Some(first) => {
+                    let tool = if seen.name == "Write" {
+                        "Write"
+                    } else {
+                        "Edit"
+                    };
+                    (tool.to_string(), json!({ "file_path": first.path }))
+                }
+                None => canonical_hooked(&seen.name, &seen.input),
+            };
             let id = if seen.id.is_empty() {
                 format!("{session_id}-{calls}")
             } else {
@@ -491,20 +567,46 @@ pub fn session_from_hooks(capture: &Path) -> Result<(Vec<Value>, Option<Facts>)>
                 payload["model"] = json!(model);
             }
             out.push(&exact(seen.at), "PreToolUse", payload.clone());
-            // A call the hooks never saw finish stays open.
-            let Some(ms) = seen.duration_ms else { continue };
-            let done = exact(seen.at + chrono::Duration::milliseconds(ms as i64));
-            payload["duration_ms"] = json!(ms);
+            // A call the hooks never saw finish stays open, unless they saw
+            // what it changed.
+            let done = match (seen.duration_ms, edits.last()) {
+                (Some(ms), _) => {
+                    payload["duration_ms"] = json!(ms);
+                    exact(seen.at + chrono::Duration::milliseconds(ms as i64))
+                }
+                (None, Some(edit)) => exact(edit.at),
+                (None, None) => continue,
+            };
             match &seen.error {
                 Some(error) => {
                     payload["error"] = json!(error);
                     out.push(&done, "PostToolUseFailure", payload);
                 }
                 None => {
-                    payload["tool_response"] = json!({});
+                    payload["tool_response"] = if edits.is_empty() {
+                        json!({})
+                    } else {
+                        edits_result(&edits)
+                    };
                     out.push(&done, "PostToolUse", payload);
                 }
             }
+        }
+        // An edit no tool call accounts for is a call of its own.
+        for edit in loose {
+            calls += 1;
+            let mut payload = json!({
+                "prompt_id": format!("p{prompts}"),
+                "tool_use_id": format!("{session_id}-{calls}"),
+                "tool_name": "Edit",
+                "tool_input": { "file_path": edit.path },
+            });
+            if let Some(model) = turn.model.as_deref() {
+                payload["model"] = json!(model);
+            }
+            out.push(&exact(edit.at), "PreToolUse", payload.clone());
+            payload["tool_response"] = edits_result(&[edit]);
+            out.push(&exact(edit.at), "PostToolUse", payload);
         }
         if own_prompt {
             end_turn(&mut out, turn, format!("p{prompts}"));
@@ -519,6 +621,10 @@ pub fn session_from_hooks(capture: &Path) -> Result<(Vec<Value>, Option<Facts>)>
     if let Some(cwd) = &hooked.cwd {
         start["cwd"] = json!(cwd);
     }
+    // Without tokens nothing else names the session's model.
+    if let Some(model) = hooked.turns.iter().find_map(|turn| turn.model.as_deref()) {
+        start["model"] = json!(model);
+    }
     let mut out = Builder::new(CURSOR, &session_id);
     out.push(
         &hooked.first_at.map(exact).unwrap_or_default(),
@@ -526,6 +632,10 @@ pub fn session_from_hooks(capture: &Path) -> Result<(Vec<Value>, Option<Facts>)>
         start,
     );
     let mut all = out.in_order();
+    // Where it ran goes with the session, as it did with the captured events.
+    if let Some(runtime) = &hooked.runtime {
+        all[0]["runtime"] = runtime.to_json();
+    }
     all.extend(events);
 
     let (usage, cost) = cursor_hooks::usage(&hooked.turns, prompts);
@@ -1012,6 +1122,242 @@ mod tests {
         );
         let (events, facts) = session_from_hooks(&capture).unwrap();
         assert!(events.is_empty() && facts.is_none());
+    }
+
+    /// As a real cloud agent reported it (2026-11-14): one turn's events
+    /// under three ids, one id shared by two calls, no tokens.
+    #[test]
+    fn a_cloud_agents_session_is_built_from_its_hooks() {
+        use crate::cursor_hooks::tests::{event, write};
+        use crate::session::{Outcome, RuntimeKind, ToolStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("raw/cursor/bc-64f0.jsonl");
+        let cloud = |mut event: Value, said: Value| {
+            event["payload"]["model"] = json!("cursor-grok-4.6-high-fast");
+            event["payload"]["workspace_roots"] = json!(["/workspace"]);
+            event["payload"]["transcript_path"] = Value::Null;
+            event["runtime"] = said;
+            event
+        };
+        let asked = json!({ "kind": "cloud", "id": "bc-64f0", "started_from": "website",
+            "user_email": "ann@example.com" });
+        let quiet = json!({ "kind": "cloud" });
+        let tool = |name: &str, id: &str, input: Value| json!({ "tool_use_id": id, "tool_name": name, "tool_input": input });
+        let shared = "call-f315-9\nfc_7683_0";
+        write(
+            &capture,
+            &[
+                cloud(
+                    event(
+                        1,
+                        "beforeSubmitPrompt",
+                        "prompt-1",
+                        json!({ "prompt": "add a docstring" }),
+                    ),
+                    asked.clone(),
+                ),
+                cloud(
+                    event(
+                        2,
+                        "preToolUse",
+                        "tools-1",
+                        tool(
+                            "Read",
+                            shared,
+                            json!({ "file_path": "/workspace/hello.py" }),
+                        ),
+                    ),
+                    quiet.clone(),
+                ),
+                cloud(
+                    event(
+                        3,
+                        "postToolUse",
+                        "tools-1",
+                        json!({ "tool_use_id": shared, "duration": 1.69 }),
+                    ),
+                    quiet.clone(),
+                ),
+                cloud(
+                    event(
+                        4,
+                        "preToolUse",
+                        "tools-1",
+                        tool(
+                            "Write",
+                            shared,
+                            json!({ "file_path": "/workspace/hello.py" }),
+                        ),
+                    ),
+                    quiet.clone(),
+                ),
+                cloud(
+                    event(
+                        5,
+                        "afterFileEdit",
+                        "tools-1",
+                        json!({ "file_path": "/workspace/hello.py",
+                        "edits": [{ "old_string": "def greet(name):\n    return name\n",
+                            "new_string": "def greet(name):\n    \"\"\"Greet someone.\"\"\"\n    return name\n" }] }),
+                    ),
+                    quiet.clone(),
+                ),
+                cloud(
+                    event(
+                        6,
+                        "postToolUse",
+                        "tools-1",
+                        json!({ "tool_use_id": shared, "duration": 8.694 }),
+                    ),
+                    quiet.clone(),
+                ),
+                cloud(
+                    event(
+                        7,
+                        "preToolUse",
+                        "tools-1",
+                        tool("Shell", "s1", json!({ "command": "git push" })),
+                    ),
+                    quiet.clone(),
+                ),
+                cloud(
+                    event(
+                        8,
+                        "postToolUseFailure",
+                        "tools-1",
+                        json!({ "tool_use_id": "s1", "duration": 85.6,
+                        "error_message": "rejected", "failure_type": "error" }),
+                    ),
+                    quiet.clone(),
+                ),
+                cloud(
+                    event(
+                        9,
+                        "stop",
+                        "run-10ef",
+                        json!({ "status": "completed", "loop_count": 0 }),
+                    ),
+                    asked.clone(),
+                ),
+                cloud(
+                    event(
+                        40,
+                        "beforeSubmitPrompt",
+                        "prompt-2",
+                        json!({ "prompt": "run the report" }),
+                    ),
+                    asked.clone(),
+                ),
+                cloud(
+                    event(
+                        41,
+                        "preToolUse",
+                        "tools-2",
+                        tool("Shell", "s2", json!({ "command": "sh report.sh" })),
+                    ),
+                    quiet.clone(),
+                ),
+            ],
+        );
+        let (events, facts) = session_from_hooks(&capture).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CURSOR).unwrap();
+
+        let prompts: Vec<_> = s
+            .prompts
+            .iter()
+            .map(|p| (p.text.preview.as_str(), p.outcome))
+            .collect();
+        assert_eq!(
+            prompts,
+            [
+                ("add a docstring", Some(Outcome::Completed)),
+                ("run the report", None)
+            ]
+        );
+        assert_eq!(s.active_ms, 8_000);
+        let calls: Vec<_> = s
+            .tool_calls
+            .iter()
+            .map(|c| {
+                (
+                    c.tool.as_str(),
+                    c.status,
+                    c.prompt_id.as_deref(),
+                    c.lines_added,
+                )
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("Read", ToolStatus::Ok, Some("p1"), 0),
+                ("Write", ToolStatus::Ok, Some("p1"), 1),
+                ("Bash", ToolStatus::Failed, Some("p1"), 0),
+                ("Bash", ToolStatus::NoResult, Some("p2"), 0),
+            ]
+        );
+        assert_eq!(s.files.len(), 1);
+        let file = &s.files[0];
+        assert_eq!(
+            (
+                file.path.as_str(),
+                file.reads,
+                file.writes,
+                file.lines_added,
+                file.lines_removed
+            ),
+            ("/workspace/hello.py", 1, 1, 1, 0)
+        );
+        assert_eq!(s.cwd.as_deref(), Some("/workspace"));
+        assert_eq!(s.models, ["cursor-grok-4.6-high-fast"]);
+        // Cursor's cloud reports no tokens, so there is no cost to show.
+        assert_eq!(s.cost, None);
+
+        // Where it ran travels with the events, and the line it added is
+        // there for the rewrite rate and for pull requests.
+        let seen = crate::runtime::Seen::of(&events).unwrap();
+        assert_eq!(seen.id.as_deref(), Some("bc-64f0"));
+        assert_eq!(seen.user_email.as_deref(), Some("ann@example.com"));
+        let mut s = s;
+        crate::normalize::apply_runtime(&mut s, &seen);
+        assert_eq!(s.runtime.as_ref().unwrap().kind, RuntimeKind::Cloud);
+        assert_eq!(s.user.unwrap().email.as_deref(), Some("ann@example.com"));
+        assert_eq!(s.entrypoint.as_deref(), Some("website"));
+        let lines = crate::rewrite::added_lines_by_model(&events, &Default::default());
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].path, "/workspace/hello.py");
+    }
+
+    #[test]
+    fn an_edit_no_call_accounts_for_is_a_call_of_its_own() {
+        use crate::cursor_hooks::tests::{event, write};
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("raw/cursor/k9.jsonl");
+        write(
+            &capture,
+            &[
+                event(
+                    1,
+                    "beforeSubmitPrompt",
+                    "g1",
+                    json!({ "prompt": "tidy up" }),
+                ),
+                event(
+                    2,
+                    "afterFileEdit",
+                    "g1",
+                    json!({ "file_path": "/w/a.rs",
+                    "edits": [{ "old_string": "", "new_string": "fn a() {}\nfn b() {}\n" },
+                              { "old_string": "old\n", "new_string": "new\n" }] }),
+                ),
+            ],
+        );
+        let (events, facts) = session_from_hooks(&capture).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CURSOR).unwrap();
+        assert_eq!(s.tool_calls.len(), 1);
+        assert_eq!(s.tool_calls[0].tool, "Edit");
+        assert_eq!((s.files[0].lines_added, s.files[0].lines_removed), (3, 1));
+        assert!(!s.files[0].created);
     }
 
     #[test]

@@ -23,6 +23,8 @@ pub struct Built {
     pub transcript_path: Option<PathBuf>,
     /// Hashes of the lines the agent added, per changed file and model (see `rewrite`).
     pub added_lines: Vec<crate::rewrite::FileLines>,
+    /// What a cloud platform said about the session, if it ran in one.
+    pub runtime: Option<crate::runtime::Seen>,
 }
 
 /// Read a capture or import file of one agent (`source`), add what is known
@@ -63,7 +65,8 @@ pub fn build_from_raw(raw_path: &Path, facts_dir: &Path, source: &str) -> Result
     if session.prompts.is_empty() && session.tool_calls.is_empty() && !spent {
         return Ok(None);
     }
-    add_local_context(&mut session, facts.as_ref());
+    let runtime = crate::runtime::Seen::of(&events);
+    add_local_context(&mut session, facts.as_ref(), runtime.as_ref());
     // A call whose model is not known is put down to the session's main one.
     let main = session.models.first();
     let models: HashMap<&str, &str> = session
@@ -76,24 +79,56 @@ pub fn build_from_raw(raw_path: &Path, facts_dir: &Path, source: &str) -> Result
         session,
         transcript_path,
         added_lines,
+        runtime,
     }))
 }
 
-/// Repository and user details read from the local machine.
-fn add_local_context(session: &mut Session, facts: Option<&Facts>) {
-    let Some(cwd) = session.cwd.as_deref().map(Path::new) else {
-        return;
-    };
-    if let Some(root) = crate::git::repo_root(cwd) {
-        session.repo = Some(Repo {
-            remote: crate::git::origin_remote(&root),
-            branch: facts.and_then(|f| f.git_branch.clone()),
-            root: root.to_string_lossy().into_owned(),
-        });
+/// Repository and user details read from the local machine, and for a
+/// session in the cloud (`runtime`) what the platform said instead.
+fn add_local_context(
+    session: &mut Session,
+    facts: Option<&Facts>,
+    runtime: Option<&crate::runtime::Seen>,
+) {
+    if let Some(cwd) = session.cwd.as_deref().map(Path::new) {
+        if let Some(root) = crate::git::repo_root(cwd) {
+            let recorded = facts.and_then(|f| f.git_branch.clone());
+            session.repo = Some(Repo {
+                remote: crate::git::origin_remote(&root),
+                // A sandbox holds one session, and its agent makes a branch
+                // for the work after the session has begun: the branch
+                // checked out now is the session's. On a person's machine it
+                // may be anything by now, so only the transcript is believed.
+                branch: match runtime {
+                    Some(_) => crate::git::current_branch(&root).or(recorded),
+                    None => recorded,
+                },
+                root: root.to_string_lossy().into_owned(),
+            });
+        }
+        let (name, email) = crate::git::user(cwd);
+        if name.is_some() || email.is_some() {
+            session.user = Some(User { name, email });
+        }
     }
-    let (name, email) = crate::git::user(cwd);
-    if name.is_some() || email.is_some() {
-        session.user = Some(User { name, email });
+    if let Some(runtime) = runtime {
+        apply_runtime(session, runtime);
+    }
+}
+
+/// Mark a session as having run in the cloud. Git there is set up as the
+/// agent, so the person is the one the platform named, or nobody.
+pub fn apply_runtime(session: &mut Session, runtime: &crate::runtime::Seen) {
+    session.runtime = Some(Runtime {
+        kind: RuntimeKind::Cloud,
+        id: runtime.id.clone(),
+    });
+    session.user = runtime.user_email.clone().map(|email| User {
+        name: None,
+        email: Some(email),
+    });
+    if session.entrypoint.is_none() {
+        session.entrypoint = runtime.started_from.clone();
     }
 }
 

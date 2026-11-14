@@ -39,8 +39,12 @@ pub struct Session {
     pub content: Content,
     pub session_id: String,
     pub title: Option<String>,
-    /// Who ran the session, from git config on the machine that captured it.
+    /// Who ran the session: from git config on the machine that captured it,
+    /// or, for a session that ran in the cloud, the person the platform says
+    /// started it (git there is set up as the agent).
     pub user: Option<User>,
+    /// Where the session ran, if not on a person's own machine.
+    pub runtime: Option<Runtime>,
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
     /// Wall-clock span from first to last activity. Includes idle time and gaps
@@ -60,7 +64,8 @@ pub struct Session {
     pub repo: Option<Repo>,
     /// Version of the agent CLI.
     pub agent_version: Option<String>,
-    /// How the agent was started, e.g. "cli" or "sdk-cli".
+    /// How the agent was started, e.g. "cli" or "sdk-cli"; for a cloud
+    /// session, what the platform says started it ("remote_mobile", "website").
     pub entrypoint: Option<String>,
     /// Models that answered at least one request, most used first.
     pub models: Vec<String>,
@@ -86,6 +91,28 @@ pub struct Session {
 pub struct User {
     pub name: Option<String>,
     pub email: Option<String>,
+}
+
+/// A session that a cloud platform ran in a sandbox of its own: a Claude Code
+/// cloud session or a Cursor cloud agent. Such a record's `machine_id` is
+/// "cloud", since the sandbox is new each time.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Runtime {
+    pub kind: RuntimeKind,
+    /// The platform's own id for the session (`cse_…`, `bc-…`), which is
+    /// what its web pages and API go by.
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeKind {
+    #[default]
+    Cloud,
+    /// A value written by a newer version.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]

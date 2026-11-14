@@ -14,6 +14,20 @@ fn sessionly(home: &Path) -> Command {
         .env_remove("SESSIONLY_TOKEN")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("USERPROFILE");
+    // These tests may themselves run inside a cloud session: the binary
+    // under test is on a person's own machine unless a test says otherwise.
+    for name in [
+        "CLAUDE_CODE_REMOTE",
+        "CLAUDE_CODE_REMOTE_SESSION_ID",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_USER_EMAIL",
+        "SESSIONLY_URL",
+        "SESSIONLY_CONTENT",
+        "SESSIONLY_LINE_HASHES",
+    ] {
+        cmd.env_remove(name);
+    }
+    cmd.env("CURSOR_AGENT_SOCKET", home.join("no-such-socket"));
     cmd
 }
 
@@ -871,4 +885,418 @@ fn a_session_ending_uploads_in_the_background() {
     );
     std::thread::sleep(std::time::Duration::from_millis(1500));
     assert_eq!(server.puts().len(), 1);
+}
+
+/// A Claude Code cloud session, as its hooks and environment were on
+/// 2026-11-14: the sandbox is started ahead of time under another session
+/// id, git is set up as the agent, and nobody runs `sessionly connect`.
+#[test]
+fn a_cloud_session_is_uploaded_at_each_turns_end_for_whoever_started_it() {
+    use serde_json::json;
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    let repo = home.path().join("user/probe");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
+    };
+    git(&["init", "--quiet", "--initial-branch", "main"]);
+    git(&["config", "user.name", "Claude"]);
+    git(&["config", "user.email", "noreply@anthropic.com"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/acme/probe.git",
+    ]);
+
+    let hook = |payload: serde_json::Value, person: bool| {
+        let mut cmd = sessionly(home.path());
+        cmd.arg("capture")
+            .env_remove("SESSIONLY_NO_AUTO")
+            .env("SESSIONLY_AUTO_DELAY_MS", "0")
+            .env("CLAUDE_CODE_REMOTE", "true")
+            .env("SESSIONLY_URL", &server.url)
+            .env("SESSIONLY_TOKEN", "environment-token")
+            .env("SESSIONLY_LINE_HASHES", "on");
+        if person {
+            cmd.env("CLAUDE_CODE_REMOTE_SESSION_ID", "cse_01probe")
+                .env("CLAUDE_CODE_ENTRYPOINT", "remote_mobile")
+                .env("CLAUDE_CODE_USER_EMAIL", "ann@example.com");
+        }
+        let out = run_with_stdin(cmd, payload.to_string().as_bytes());
+        assert_silent_success(&out, "capture in a sandbox");
+    };
+    let wait_for_puts = |count: usize| {
+        for _ in 0..150 {
+            if server.puts().len() >= count {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    };
+    let wait_for_log = |text: &str| {
+        for _ in 0..150 {
+            let log = fs::read_to_string(home.path().join("data/auto.log")).unwrap_or_default();
+            if log.contains(text) {
+                return log;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("the background run never logged {text:?}");
+    };
+    let event =
+        |id: &str, hook: &str| json!({ "session_id": id, "hook_event_name": hook, "cwd": repo });
+
+    // The sandbox being started: a session nobody is in. Nothing to upload.
+    let mut early = event("warm-up", "SessionStart");
+    early["source"] = json!("startup");
+    hook(early, false);
+    let mut gone = event("warm-up", "SessionEnd");
+    gone["reason"] = json!("other");
+    hook(gone, false);
+    wait_for_log("synced 0");
+    assert!(server.puts().is_empty(), "an empty session was uploaded");
+
+    // The session that moves in. The agent makes its branch while it works.
+    let mut start = event("cl-1", "SessionStart");
+    start["source"] = json!("startup");
+    hook(start, true);
+    let mut prompt = event("cl-1", "UserPromptSubmit");
+    prompt["prompt_id"] = json!("p1");
+    prompt["prompt"] = json!("add a greeting");
+    hook(prompt, true);
+    git(&["checkout", "--quiet", "-b", "ccr-4d29d410-k9pftj"]);
+    let mut write = event("cl-1", "PostToolUse");
+    write["tool_use_id"] = json!("t1");
+    write["tool_name"] = json!("Write");
+    write["tool_input"] = json!({ "file_path": repo.join("hello.py"),
+                                  "content": "def greet(name):\n    return name\n" });
+    write["tool_response"] = json!({ "type": "create", "structuredPatch": [] });
+    hook(write, true);
+    let mut stop = event("cl-1", "Stop");
+    stop["prompt_id"] = json!("p1");
+    hook(stop.clone(), true);
+    assert!(wait_for_puts(1), "nothing was uploaded when the turn ended");
+
+    let first = &server.puts()[0];
+    assert_eq!(first.path, "/api/v1/sessions/cloud/claude-code/cl-1");
+    assert_eq!(first.auth.as_deref(), Some("Bearer environment-token"));
+    let sent: serde_json::Value = serde_json::from_str(&first.body).unwrap();
+    let s = &sent["session"];
+    assert_eq!(s["machine_id"], "cloud");
+    assert_eq!(
+        s["runtime"],
+        json!({ "kind": "cloud", "id": "cse_01probe" })
+    );
+    // The person the platform named, not the agent git is set up as.
+    assert_eq!(
+        s["user"],
+        json!({ "name": null, "email": "ann@example.com" })
+    );
+    assert_eq!(s["entrypoint"], "remote_mobile");
+    assert_eq!(s["repo"]["remote"], "github.com/acme/probe");
+    assert_eq!(s["repo"]["branch"], "ccr-4d29d410-k9pftj");
+    assert_eq!(s["files"][0]["path"], "hello.py");
+    assert_eq!(sent["lines"][0]["hashes"].as_array().unwrap().len(), 2);
+
+    // A second turn straight after is uploaded too: the sandbox may not be
+    // there in five minutes.
+    let mut again = event("cl-1", "UserPromptSubmit");
+    again["prompt_id"] = json!("p2");
+    again["prompt"] = json!("thanks");
+    hook(again, true);
+    stop["prompt_id"] = json!("p2");
+    hook(stop, true);
+    assert!(wait_for_puts(2), "the second turn was not uploaded");
+    let sent: serde_json::Value = serde_json::from_str(&server.puts()[1].body).unwrap();
+    assert_eq!(sent["session"]["counts"]["prompts"], 2);
+
+    // The token came from the environment and stays there.
+    let config = fs::read_to_string(home.path().join("data/config.json")).unwrap();
+    assert!(!config.contains("environment-token"), "{config}");
+    assert!(config.contains(r#""machine_id": "cloud""#), "{config}");
+    let shown = stdout(run(home.path(), &["show", "cl-1"]));
+    assert!(
+        shown.contains("the cloud (cse_01probe), started from remote_mobile"),
+        "{shown}"
+    );
+}
+
+/// A repository set up with `install --repo`, and a release for its script to
+/// fetch: this build, packed the way the release workflow packs it.
+#[cfg(target_os = "linux")]
+struct CloudRepo {
+    dir: tempfile::TempDir,
+}
+
+#[cfg(target_os = "linux")]
+impl CloudRepo {
+    /// `honest` is whether the checksum written into the script is the
+    /// archive's own.
+    fn new(honest: bool) -> CloudRepo {
+        let dir = tempfile::tempdir().unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        let archive = format!(
+            "sessionly-{}-unknown-linux-musl.tar.gz",
+            std::env::consts::ARCH
+        );
+        let release = dir.path().join(format!("release/v{version}"));
+        fs::create_dir_all(&release).unwrap();
+        fs::copy(env!("CARGO_BIN_EXE_sessionly"), release.join("sessionly")).unwrap();
+        let packed = Command::new("tar")
+            .args(["-czf", &archive, "sessionly"])
+            .current_dir(&release)
+            .status()
+            .unwrap();
+        assert!(packed.success());
+        let sum = stdout(
+            Command::new("sha256sum")
+                .arg(release.join(&archive))
+                .output()
+                .unwrap(),
+        );
+        let sum = sum.split_whitespace().next().unwrap().to_string();
+        let written = if honest { sum } else { "0".repeat(64) };
+        let sums = dir.path().join("SHA256SUMS");
+        fs::write(&sums, format!("{written}  {archive}\n")).unwrap();
+
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let installed = stdout(
+            sessionly(&dir.path().join("installer-home"))
+                .args(["install", "--repo"])
+                .arg(&repo)
+                .arg("--checksums")
+                .arg(&sums)
+                .env(
+                    "SESSIONLY_RELEASE_BASE",
+                    format!("file://{}/release", dir.path().display()),
+                )
+                .output()
+                .unwrap(),
+        );
+        assert!(
+            installed.contains(".sessionly/hook.sh") && installed.contains("Commit"),
+            "{installed}"
+        );
+        CloudRepo { dir }
+    }
+
+    fn home(&self, name: &str) -> std::path::PathBuf {
+        self.dir.path().join(name)
+    }
+
+    /// Run the committed script as an agent would, with only `env` set.
+    fn hook(
+        &self,
+        home: &str,
+        via: &str,
+        env: &[(&str, &str)],
+        payload: &serde_json::Value,
+    ) -> Output {
+        let home = self.home(home);
+        fs::create_dir_all(&home).unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.arg(".sessionly/hook.sh")
+            .arg(via)
+            .current_dir(self.dir.path().join("repo"))
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("HOME", &home)
+            .env("SESSIONLY_NO_AUTO", "1")
+            .env("CURSOR_AGENT_SOCKET", home.join("no-such-socket"))
+            .envs(env.iter().copied());
+        run_with_stdin(cmd, payload.to_string().as_bytes())
+    }
+
+    fn captured(&self, home: &str, agent: &str, id: &str) -> Vec<serde_json::Value> {
+        let path = self
+            .home(home)
+            .join(format!(".sessionly/raw/{agent}/{id}.jsonl"));
+        fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_repository_script_captures_in_a_sandbox_and_nowhere_else() {
+    use serde_json::json;
+    let repo = CloudRepo::new(true);
+    let stop = json!({ "session_id": "s1", "hook_event_name": "Stop" });
+
+    // A person's own machine: nothing happens, not even a folder.
+    let out = repo.hook("laptop", "claude", &[], &stop);
+    assert_silent_success(&out, "on a laptop");
+    assert!(!repo.home("laptop").join(".sessionly").exists());
+
+    // A Claude Code cloud session: the binary is fetched, checked and used.
+    let cloud = [
+        ("CLAUDE_CODE_REMOTE", "true"),
+        ("CLAUDE_CODE_USER_EMAIL", "ann@example.com"),
+    ];
+    let out = repo.hook("sandbox", "claude", &cloud, &stop);
+    assert_silent_success(&out, "first hook in a sandbox");
+    let events = repo.captured("sandbox", "claude-code", "s1");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["runtime"]["kind"], "cloud");
+    assert_eq!(events[0]["runtime"]["user_email"], "ann@example.com");
+    let log = fs::read_to_string(repo.home("sandbox").join(".sessionly/bootstrap.log")).unwrap();
+    assert!(log.contains("installed sessionly"), "{log}");
+    // The second event finds it there.
+    assert_silent_success(
+        &repo.hook("sandbox", "claude", &cloud, &stop),
+        "second hook",
+    );
+    assert_eq!(repo.captured("sandbox", "claude-code", "s1").len(), 2);
+    let log = fs::read_to_string(repo.home("sandbox").join(".sessionly/bootstrap.log")).unwrap();
+    assert_eq!(log.lines().count(), 1, "{log}");
+
+    // Cursor's cloud runs both hook files: only its own entry captures.
+    let socket = repo.home("cursor-vm").join("api.sock");
+    fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let socket = socket.to_string_lossy().into_owned();
+    let vm = [
+        ("CURSOR_AGENT_SOCKET", socket.as_str()),
+        ("CURSOR_VERSION", "1.0.0"),
+    ];
+    let tool = json!({ "conversation_id": "bc-1", "session_id": "bc-1", "cursor_version": "1.0.0",
+                       "hook_event_name": "preToolUse", "tool_name": "Read", "tool_use_id": "t1" });
+    assert_silent_success(
+        &repo.hook("cursor-vm", "claude", &vm, &tool),
+        "the other file's entry",
+    );
+    assert!(repo.captured("cursor-vm", "cursor", "bc-1").is_empty());
+    assert_silent_success(
+        &repo.hook("cursor-vm", "cursor", &vm, &tool),
+        "Cursor's own entry",
+    );
+    let events = repo.captured("cursor-vm", "cursor", "bc-1");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["runtime"], json!({ "kind": "cloud" }));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hooks_arriving_together_share_one_download() {
+    let repo = CloudRepo::new(true);
+    let cloud = [("CLAUDE_CODE_REMOTE", "true")];
+    std::thread::scope(|scope| {
+        for n in 0..6 {
+            let (repo, cloud) = (&repo, &cloud);
+            scope.spawn(move || {
+                let event = serde_json::json!({ "session_id": "s1", "hook_event_name": "PreToolUse", "n": n });
+                assert_silent_success(&repo.hook("sandbox", "claude", cloud, &event), "a parallel hook");
+            });
+        }
+    });
+    assert_eq!(repo.captured("sandbox", "claude-code", "s1").len(), 6);
+    let log = fs::read_to_string(repo.home("sandbox").join(".sessionly/bootstrap.log")).unwrap();
+    assert_eq!(log.matches("installed sessionly").count(), 1, "{log}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_download_that_fails_its_checksum_is_not_run() {
+    let repo = CloudRepo::new(false);
+    let cloud = [("CLAUDE_CODE_REMOTE", "true")];
+    let stop = serde_json::json!({ "session_id": "s1", "hook_event_name": "Stop" });
+    for attempt in ["first", "second"] {
+        assert_silent_success(&repo.hook("sandbox", "claude", &cloud, &stop), attempt);
+    }
+    assert!(repo.captured("sandbox", "claude-code", "s1").is_empty());
+    let bin = repo.home("sandbox").join(".sessionly/bin");
+    let kept: Vec<_> = fs::read_dir(&bin)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(kept, [format!("failed-{}", env!("CARGO_PKG_VERSION"))]);
+    // It said why once, and did not try again straight away.
+    let log = fs::read_to_string(repo.home("sandbox").join(".sessionly/bootstrap.log")).unwrap();
+    assert_eq!(
+        log.matches("does not match its checksum").count(),
+        1,
+        "{log}"
+    );
+}
+
+#[test]
+fn install_in_a_repository_round_trip() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let sums = home.path().join("SHA256SUMS");
+    fs::write(
+        &sums,
+        format!(
+            "{}  sessionly-x86_64-unknown-linux-musl.tar.gz\n",
+            "ab".repeat(32)
+        ),
+    )
+    .unwrap();
+    let repo_arg = repo.to_str().unwrap();
+
+    // The option that only makes sense with --repo says so.
+    let out = run(
+        home.path(),
+        &["install", "--checksums", sums.to_str().unwrap()],
+    );
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("--repo"), "{}", stderr(&out));
+
+    let text = stdout(run(
+        home.path(),
+        &[
+            "install",
+            "--repo",
+            repo_arg,
+            "--checksums",
+            sums.to_str().unwrap(),
+        ],
+    ));
+    assert!(text.contains("wrote      .sessionly/hook.sh"), "{text}");
+    assert!(text.contains("SESSIONLY_URL"), "{text}");
+    // Nothing of this machine's is touched or written into the repository.
+    assert!(!home.path().join(".claude").exists());
+    let settings = fs::read_to_string(repo.join(".claude/settings.json")).unwrap();
+    assert!(
+        !settings.contains(home.path().to_str().unwrap()),
+        "{settings}"
+    );
+
+    let status = stdout(run(home.path(), &["status", "--repo", repo_arg]));
+    assert!(
+        status.contains(&format!("fetching sessionly {}", env!("CARGO_PKG_VERSION")))
+            && status.contains("7/7 events in .cursor/hooks.json"),
+        "{status}"
+    );
+    let again = stdout(run(
+        home.path(),
+        &[
+            "install",
+            "--repo",
+            repo_arg,
+            "--checksums",
+            sums.to_str().unwrap(),
+        ],
+    ));
+    assert!(!again.contains("wrote "), "{again}");
+
+    let removed = stdout(run(home.path(), &["uninstall", "--repo", repo_arg]));
+    assert_eq!(removed.lines().count(), 3, "{removed}");
+    assert!(!repo.join(".sessionly").exists() && !repo.join(".claude").exists());
+    let status = stdout(run(home.path(), &["status", "--repo", repo_arg]));
+    assert!(status.contains("not installed"), "{status}");
 }

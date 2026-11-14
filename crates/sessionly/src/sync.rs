@@ -119,7 +119,14 @@ fn build(
     {
         return Ok(from_raw);
     }
-    Ok(from(imported)?.or(from_raw))
+    // Only the capture knows that a session ran in the cloud, and for whom.
+    let runtime = from_raw.as_ref().and_then(|b| b.runtime.clone());
+    let mut from_import = from(imported)?;
+    if let (Some(built), Some(runtime)) = (&mut from_import, &runtime) {
+        normalize::apply_runtime(&mut built.session, runtime);
+        built.runtime = Some(runtime.clone());
+    }
+    Ok(from_import.or(from_raw))
 }
 
 /// Normalize every session whose capture, import or transcript changed since

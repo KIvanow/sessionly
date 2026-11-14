@@ -19,8 +19,10 @@ mod ledger;
 mod normalize;
 mod paths;
 mod pricing;
+mod repo;
 mod report;
 mod rewrite;
+mod runtime;
 mod session;
 mod sync;
 mod transcript;
@@ -40,9 +42,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Add the capture hooks to Claude Code settings
-    Install(Target),
-    /// Remove the capture hooks from Claude Code settings
+    /// Add the capture hooks: to this machine's settings, or with --repo to a
+    /// repository, for sessions that run in the cloud
+    Install {
+        #[command(flatten)]
+        target: Target,
+        /// With --repo: read the release's SHA256SUMS from this file instead
+        /// of downloading it
+        #[arg(long, value_name = "FILE", requires = "repo")]
+        checksums: Option<PathBuf>,
+    },
+    /// Remove the capture hooks again
     Uninstall(Target),
     /// Show whether the hooks are installed and how much has been captured
     Status(Target),
@@ -185,6 +195,17 @@ struct Target {
     /// Use <DIR>/.claude/settings.json instead of ~/.claude/settings.json
     #[arg(long, value_name = "DIR")]
     project: Option<PathBuf>,
+    /// The repository at DIR (default: this directory), for Claude Code
+    /// cloud sessions and Cursor cloud agents: a script and hook entries to
+    /// commit, which do nothing on a person's own machine
+    #[arg(
+        long,
+        value_name = "DIR",
+        num_args = 0..=1,
+        default_missing_value = ".",
+        conflicts_with = "project"
+    )]
+    repo: Option<PathBuf>,
 }
 
 /// Which sessions to include. Text filters match substrings, ignoring case.
@@ -243,24 +264,6 @@ fn parse_on_off(text: &str) -> Result<bool> {
     }
 }
 
-/// A token sent over plain http can be read by anyone on the network, so
-/// http is accepted only for a server on this machine.
-fn check_server_url(url: &str) -> Result<()> {
-    let local = ["http://localhost", "http://127.0.0.1", "http://[::1]"]
-        .iter()
-        .any(|prefix| {
-            url.strip_prefix(prefix)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '/']))
-        });
-    if url.starts_with("https://") || local {
-        Ok(())
-    } else {
-        bail!(
-            "the server address must start with https:// (http:// is accepted only for localhost)"
-        )
-    }
-}
-
 /// A date, an RFC 3339 time, or an age such as `7d` counted back from now.
 fn parse_time(text: &str) -> Result<DateTime<Utc>> {
     let text = text.trim();
@@ -295,6 +298,65 @@ impl Target {
             .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
         hooks::settings_path(project.as_deref())
     }
+
+    /// The repository named with `--repo`, as an absolute path.
+    fn repo_dir(&self) -> Option<PathBuf> {
+        self.repo
+            .as_deref()
+            .map(|dir| std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf()))
+    }
+}
+
+/// `sessionly install --repo`: write the script and the hook entries, and
+/// say what is left for a person to do.
+fn install_in_repo(dir: &std::path::Path, checksums: Option<&std::path::Path>) -> Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+    let base = std::env::var("SESSIONLY_RELEASE_BASE")
+        .ok()
+        .filter(|base| !base.trim().is_empty())
+        .unwrap_or_else(|| repo::DEFAULT_RELEASE_BASE.to_string());
+    let sums = match checksums {
+        Some(file) => {
+            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?
+        }
+        None => {
+            let url = repo::checksums_url(&base, version);
+            upload::fetch_text(&url).with_context(|| {
+                format!(
+                    "could not get the checksums of sessionly {version} from {url}. \
+                     The script must name a released version; if this build is not \
+                     one, install with a released sessionly, or pass --checksums FILE"
+                )
+            })?
+        }
+    };
+    let release = repo::Release::from_checksums(version, &base, &sums)?;
+    let written = repo::install(dir, &release)?;
+    for file in &written {
+        let path = file.path.strip_prefix(dir).unwrap_or(&file.path);
+        println!(
+            "{}  {}",
+            if file.changed {
+                "wrote    "
+            } else {
+                "unchanged"
+            },
+            path.display()
+        );
+    }
+    println!();
+    println!("Sessions in the cloud will fetch sessionly {version} and capture with it.");
+    println!("What is left to do:");
+    println!("  1. Commit those three files.");
+    println!("  2. Give the cloud environment SESSIONLY_URL and SESSIONLY_TOKEN, as secrets");
+    println!("     (a token made for it on the server's Team page). Without them the");
+    println!("     session is captured in the sandbox and sent nowhere.");
+    println!("  3. Claude Code only: add the server's host to the environment's allowed");
+    println!("     domains. Cursor's cloud agents can reach it as they are.");
+    println!("Optional, also in the environment: SESSIONLY_LINE_HASHES=on (needed for");
+    println!("pull request figures) and SESSIONLY_CONTENT=previews.");
+    println!("On a person's own machine the script does nothing.");
+    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -324,7 +386,10 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> Result<()> {
     match command {
-        Command::Install(target) => {
+        Command::Install { target, checksums } => {
+            if let Some(dir) = target.repo_dir() {
+                return install_in_repo(&dir, checksums.as_deref());
+            }
             let path = target.settings_path()?;
             let exe = std::env::current_exe().context("locating the sessionly binary")?;
             let changed = hooks::install(&path, &hooks::capture_command(&exe))?;
@@ -351,8 +416,21 @@ fn run(command: Command) -> Result<()> {
             }
         }
         Command::Uninstall(target) => {
+            if let Some(dir) = target.repo_dir() {
+                let touched = repo::uninstall(&dir)?;
+                if touched.is_empty() {
+                    println!("No Sessionly files in {}", dir.display());
+                }
+                for path in &touched {
+                    println!(
+                        "removed from  {}",
+                        path.strip_prefix(&dir).unwrap_or(path).display()
+                    );
+                }
+                return Ok(());
+            }
             let path = target.settings_path()?;
-            if hooks::uninstall(&path)? {
+            if hooks::uninstall(&path, hooks::Kind::Machine)? {
                 println!("Removed Sessionly hooks from {}", path.display());
             } else {
                 println!("No Sessionly hooks in {}", path.display());
@@ -476,7 +554,7 @@ fn run(command: Command) -> Result<()> {
             no_check,
         } => {
             let url = url.trim().trim_end_matches('/').to_string();
-            check_server_url(&url)?;
+            config::check_server_url(&url)?;
             let token = match token {
                 Some(token) => token,
                 None => {
@@ -521,7 +599,7 @@ fn run(command: Command) -> Result<()> {
             }
         }
         Command::Upload { dry_run } => {
-            let config = config::Config::load(&paths::config_path()?)?;
+            let config = config::Config::load(&paths::config_path()?)?.with_environment();
             let mut ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
             sync_ledger(&mut ledger, false)?;
             let report = upload::run(&mut ledger, &config, dry_run)?;
@@ -673,8 +751,29 @@ fn print_settings(config: &config::Config) {
 }
 
 fn status(target: &Target) -> Result<()> {
+    if let Some(dir) = target.repo_dir() {
+        let found = repo::status(&dir)?;
+        println!("Repository: {}", dir.display());
+        match &found.script_version {
+            Some(version) => {
+                println!("Script:     .sessionly/hook.sh, fetching sessionly {version}")
+            }
+            None => println!("Script:     not installed (run: sessionly install --repo)"),
+        }
+        println!(
+            "Claude Code: {}/{} events in .claude/settings.json",
+            found.claude_events,
+            hooks::all_events().count()
+        );
+        println!(
+            "Cursor:     {}/{} events in .cursor/hooks.json",
+            found.cursor_events,
+            repo::CURSOR_EVENTS.len()
+        );
+        return Ok(());
+    }
     let path = target.settings_path()?;
-    let installed = hooks::installed_events(&path)?;
+    let installed = hooks::installed_events(&path, hooks::Kind::Machine)?;
     let total = hooks::all_events().count();
     println!("Settings:   {}", path.display());
     println!("Hooks:      {}/{} events", installed.len(), total);

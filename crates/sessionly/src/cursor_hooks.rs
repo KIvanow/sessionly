@@ -5,6 +5,13 @@
 //! Cursor runs the hooks in `~/.claude/settings.json` under its own event
 //! names (`beforeSubmitPrompt`, `preToolUse`, `postToolUse`, `stop`). The
 //! events of one turn share a `generation_id`. Checked with Cursor 3.27.
+//!
+//! A cloud agent is different in three ways (checked 2026-11-14). It keeps no
+//! transcript, so its hooks are all there is. The events of one turn do not
+//! share an id: the prompt has one, the tool calls another, the end a third,
+//! so they are taken in the order they came. And `stop` has no tokens. Its
+//! hooks come from the repository's `.cursor/hooks.json`, which can also ask
+//! for `afterFileEdit`: what an edit changed.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -38,6 +45,15 @@ pub struct Tokens {
     pub cache_write: u64,
 }
 
+/// What one edit changed in a file, as `afterFileEdit` reports it.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct FileEdit {
+    pub path: String,
+    pub at: DateTime<Utc>,
+    /// Each change as the text before and after.
+    pub changes: Vec<(String, String)>,
+}
+
 /// One turn: a prompt, the tool calls it led to, and how it ended.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Turn {
@@ -50,6 +66,8 @@ pub struct Turn {
     pub model: Option<String>,
     pub tokens: Option<Tokens>,
     pub tools: Vec<Tool>,
+    /// File edits, where the hooks were told of them.
+    pub edits: Vec<FileEdit>,
     /// Whether the turn has been paired with a prompt in the transcript.
     pub matched: bool,
 }
@@ -66,6 +84,8 @@ pub struct Capture {
     /// When the hooks first and last heard from the session.
     pub first_at: Option<DateTime<Utc>>,
     pub last_at: Option<DateTime<Utc>>,
+    /// What Cursor's cloud said about the session, if it ran there.
+    pub runtime: Option<crate::runtime::Seen>,
 }
 
 /// Read a raw hook capture. A turn whose prompt the hooks did not see (they
@@ -82,6 +102,7 @@ pub fn read(capture: &Path) -> Capture {
             .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
             .map(|t| t.with_timezone(&Utc));
         let Some(at) = at else { return };
+        crate::runtime::Seen::note(&mut out.runtime, &record);
         out.first_at = Some(out.first_at.map_or(at, |first| first.min(at)));
         out.last_at = Some(out.last_at.map_or(at, |last| last.max(at)));
         if let Some(version) = text("cursor_version") {
@@ -106,13 +127,32 @@ pub fn read(capture: &Path) -> Capture {
             });
             return;
         }
-        let Some(turn) = by_generation
-            .get(&generation)
-            .and_then(|&i| out.turns.get_mut(i))
+        // In the cloud the events of a turn carry ids of their own: they
+        // belong to the prompt before them.
+        let latest = out.turns.len().checked_sub(1);
+        let in_cloud = record["runtime"]["kind"] == "cloud";
+        let known = by_generation.get(&generation).copied();
+        let Some(turn) = known
+            .or(latest.filter(|_| in_cloud))
+            .and_then(|i| out.turns.get_mut(i))
         else {
             return;
         };
         match hook.as_str() {
+            "afterfileedit" => {
+                let changes = p["edits"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|edit| {
+                        let side = |key: &str| edit[key].as_str().unwrap_or_default().to_string();
+                        (side("old_string"), side("new_string"))
+                    })
+                    .collect();
+                if let Some(path) = text("file_path") {
+                    turn.edits.push(FileEdit { path, at, changes });
+                }
+            }
             "pretooluse" => turn.tools.push(Tool {
                 id: text("tool_use_id").unwrap_or_default(),
                 name: text("tool_name").unwrap_or_default(),

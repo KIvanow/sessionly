@@ -205,6 +205,16 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
             who.iter().flatten().copied().collect::<Vec<_>>().join(", "),
         );
     }
+    if let Some(runtime) = &s.runtime {
+        let mut text = "the cloud".to_string();
+        if let Some(id) = &runtime.id {
+            let _ = write!(text, " ({id})");
+        }
+        if let Some(from) = &s.entrypoint {
+            let _ = write!(text, ", started from {from}");
+        }
+        field(&mut out, "Ran in", text);
+    }
     let root = s.repo.as_ref().map(|r| r.root.as_str());
     match &s.repo {
         Some(repo) => {
@@ -244,6 +254,11 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
             }
             field(&mut out, "Cost", text);
         }
+        None if s.source == crate::paths::CURSOR && s.runtime.is_some() => field(
+            &mut out,
+            "Cost",
+            "unknown (Cursor's cloud agents do not report usage to hooks)".into(),
+        ),
         None if s.source == crate::paths::CURSOR => field(
             &mut out,
             "Cost",

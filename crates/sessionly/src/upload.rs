@@ -358,14 +358,56 @@ pub struct Client {
     token: String,
 }
 
+/// Whose certificates to accept: those in the file `SSL_CERT_FILE` names,
+/// if it names one with certificates in it, else the list built into the
+/// binary. A sandbox whose outbound HTTPS is re-signed on the way out (a
+/// Claude Code cloud session) names its own certificate that way, as curl
+/// and git expect; without this every upload from there would be refused.
+fn root_certs(file: Option<&std::path::Path>) -> ureq::tls::RootCerts {
+    use ureq::tls::{parse_pem, PemItem, RootCerts};
+    let certs: Vec<_> = file
+        .and_then(|path| std::fs::read(path).ok())
+        .map(|pem| {
+            parse_pem(&pem)
+                .filter_map(|item| match item {
+                    Ok(PemItem::Certificate(cert)) => Some(cert),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if certs.is_empty() {
+        RootCerts::WebPki
+    } else {
+        RootCerts::new_with_certs(&certs)
+    }
+}
+
+fn agent() -> ureq::Agent {
+    let cert_file = std::env::var_os("SSL_CERT_FILE").filter(|v| !v.is_empty());
+    let roots = root_certs(cert_file.as_deref().map(std::path::Path::new));
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(30)))
+        .http_status_as_error(false)
+        .user_agent(USER_AGENT)
+        .tls_config(ureq::tls::TlsConfig::builder().root_certs(roots).build())
+        .build()
+        .into()
+}
+
+/// The body of a public page, for a 2xx answer. No token is sent.
+pub fn fetch_text(url: &str) -> Result<String> {
+    let mut response = agent().get(url).call()?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        anyhow::bail!("HTTP {status}");
+    }
+    Ok(response.body_mut().read_to_string()?)
+}
+
 impl Client {
     pub fn new(server: &Server) -> Client {
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(30)))
-            .http_status_as_error(false)
-            .user_agent(USER_AGENT)
-            .build()
-            .into();
+        let agent = agent();
         Client {
             agent,
             base: server.url.trim_end_matches('/').to_string(),
@@ -564,6 +606,39 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
 mod send_tests {
     use super::*;
     use crate::session::Session;
+
+    const TEST_ROOT: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBkzCCATmgAwIBAgIUMqwuwKivQuHPdTx3XTffenXz6iYwCgYIKoZIzj0EAwIw\n\
+HjEcMBoGA1UEAwwTU2Vzc2lvbmx5IHRlc3Qgcm9vdDAgFw0yNjExMTQxMzU3NTla\n\
+GA8yMTI2MTAyMTEzNTc1OVowHjEcMBoGA1UEAwwTU2Vzc2lvbmx5IHRlc3Qgcm9v\n\
+dDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABH9Q+GgpnZUzUofUH5yy7dBItB5q\n\
+FGyQ3n7LC0ZtfYV28Gnq/zwh/61wHQvi0Jp72rJxczUEAzxMX8vPhRY82KqjUzBR\n\
+MB0GA1UdDgQWBBSqcwZMe68cUp5A6/V80aZWP+7NAzAfBgNVHSMEGDAWgBSqcwZM\n\
+e68cUp5A6/V80aZWP+7NAzAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gA\n\
+MEUCIQD/GGpV2axLeXGbkqFDKzVOvVXX3KKC6M9MGVUtLgk8vwIgNRUflMHi/u/P\n\
+JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
+-----END CERTIFICATE-----\n";
+
+    #[test]
+    fn a_named_certificate_file_replaces_the_built_in_list() {
+        use ureq::tls::RootCerts;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(root_certs(None), RootCerts::WebPki));
+        assert!(matches!(
+            root_certs(Some(&dir.path().join("missing.pem"))),
+            RootCerts::WebPki
+        ));
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, "nothing to see\n").unwrap();
+        assert!(matches!(root_certs(Some(&empty)), RootCerts::WebPki));
+
+        let bundle = dir.path().join("ca.pem");
+        std::fs::write(&bundle, format!("# a bundle\n{TEST_ROOT}\n{TEST_ROOT}")).unwrap();
+        match root_certs(Some(&bundle)) {
+            RootCerts::Specific(certs) => assert_eq!(certs.len(), 2),
+            _ => panic!("the file's certificates were not used"),
+        }
+    }
 
     #[test]
     fn hash_ignores_only_the_measurement_time() {

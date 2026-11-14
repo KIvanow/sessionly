@@ -30,6 +30,18 @@ pub fn origin_remote(root: &Path) -> Option<String> {
     normalize_remote(&config(root, "remote.origin.url")?)
 }
 
+/// The branch checked out at `root` right now. `None` on a detached HEAD.
+pub fn current_branch(root: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !branch.is_empty()).then_some(branch)
+}
+
 /// Git user (name, email) as configured for `dir`, falling back to global config.
 pub fn user(dir: &Path) -> (Option<String>, Option<String>) {
     (config(dir, "user.name"), config(dir, "user.email"))

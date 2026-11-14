@@ -97,18 +97,28 @@ pub fn file_stem(session_id: Option<&str>) -> String {
 /// Read one payload from `input` and append it to
 /// `raw_root/<agent>/<session_id>.jsonl`. Returns the file written and the
 /// hook event's name.
+///
+/// `runtime` is asked, with the agent and the event's name, what a cloud
+/// platform says about the session (see `runtime`); its answer is stored
+/// with the event. On a person's own machine it answers nothing.
 pub fn capture(
     raw_root: &Path,
     input: &mut impl Read,
     received_at: &str,
+    runtime: impl Fn(&str, &str) -> Option<Value>,
 ) -> Result<(PathBuf, String)> {
     let mut bytes = Vec::new();
     input.read_to_end(&mut bytes)?;
-    let record = build_record(&String::from_utf8_lossy(&bytes), received_at);
+    let mut record = build_record(&String::from_utf8_lossy(&bytes), received_at);
     let stem = file_stem(record["session_id"].as_str());
     let source = record["source"]
         .as_str()
-        .unwrap_or(crate::paths::CLAUDE_CODE);
+        .unwrap_or(crate::paths::CLAUDE_CODE)
+        .to_string();
+    let source = source.as_str();
+    if let Some(said) = runtime(source, record["hook"].as_str().unwrap_or_default()) {
+        record["runtime"] = said;
+    }
     let path = raw_root.join(source).join(format!("{stem}.jsonl"));
     let mut line = serde_json::to_string(&record)?;
     line.push('\n');
@@ -126,7 +136,13 @@ pub fn run() -> i32 {
         let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
         return 0;
     };
-    match capture(&raw_dir, &mut std::io::stdin().lock(), &received_at) {
+    let runtime = crate::runtime::describe;
+    match capture(
+        &raw_dir,
+        &mut std::io::stdin().lock(),
+        &received_at,
+        runtime,
+    ) {
         Ok((_, hook)) => {
             if let Ok(data_dir) = crate::paths::data_dir() {
                 crate::auto::maybe_spawn(&hook, &data_dir);
@@ -170,6 +186,37 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// A session on a person's own machine: the platform says nothing.
+    fn local(_source: &str, _hook: &str) -> Option<Value> {
+        None
+    }
+
+    #[test]
+    fn what_a_cloud_platform_says_is_stored_with_the_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let cloud = |source: &str, hook: &str| {
+            Some(json!({ "kind": "cloud", "id": format!("{source}/{hook}") }))
+        };
+        let payload = br#"{"session_id":"s1","hook_event_name":"Stop"}"#;
+        let (path, _) = capture(dir.path(), &mut &payload[..], "t", cloud).unwrap();
+        let record: Value =
+            serde_json::from_str(fs::read_to_string(&path).unwrap().trim()).unwrap();
+        assert_eq!(
+            record["runtime"],
+            json!({ "kind": "cloud", "id": "claude-code/Stop" })
+        );
+        assert_eq!(
+            record["payload"],
+            json!({ "session_id": "s1", "hook_event_name": "Stop" })
+        );
+
+        capture(dir.path(), &mut &payload[..], "t", local).unwrap();
+        let last: Value =
+            serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap())
+                .unwrap();
+        assert_eq!(last.get("runtime"), None);
+    }
+
     #[test]
     fn wraps_payload_with_hook_and_session() {
         let record = build_record(
@@ -212,8 +259,8 @@ mod tests {
     fn appends_one_line_per_call() {
         let dir = tempfile::tempdir().unwrap();
         let payload = br#"{"session_id":"s1","hook_event_name":"PreToolUse"}"#;
-        capture(dir.path(), &mut &payload[..], "t1").unwrap();
-        let (path, hook) = capture(dir.path(), &mut &payload[..], "t2").unwrap();
+        capture(dir.path(), &mut &payload[..], "t1", local).unwrap();
+        let (path, hook) = capture(dir.path(), &mut &payload[..], "t2", local).unwrap();
         assert_eq!(hook, "PreToolUse");
         let text = fs::read_to_string(path).unwrap();
         let lines: Vec<Value> = text
@@ -246,7 +293,7 @@ mod tests {
             ),
         ];
         for (payload, source, id) in cases {
-            let (path, _) = capture(dir.path(), &mut payload.as_bytes(), "t").unwrap();
+            let (path, _) = capture(dir.path(), &mut payload.as_bytes(), "t", local).unwrap();
             assert_eq!(path, dir.path().join(source).join(format!("{id}.jsonl")));
             let record: Value =
                 serde_json::from_str(fs::read_to_string(path).unwrap().trim()).unwrap();
@@ -258,7 +305,7 @@ mod tests {
     #[test]
     fn non_utf8_input_is_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let (path, _) = capture(dir.path(), &mut &b"\xff\xfe{"[..], "t").unwrap();
+        let (path, _) = capture(dir.path(), &mut &b"\xff\xfe{"[..], "t", local).unwrap();
         assert!(path.ends_with("claude-code/_unknown.jsonl"));
         assert_eq!(fs::read_to_string(path).unwrap().lines().count(), 1);
     }

@@ -23,6 +23,7 @@
         "session_id": "",
         "title": null,
         "user": null,
+        "runtime": null,
         "started_at": null,
         "ended_at": null,
         "duration_ms": null,
@@ -127,10 +128,22 @@
           "default": null
         },
         "user": {
-          "description": "Who ran the session, from git config on the machine that captured it.",
+          "description": "Who ran the session: from git config on the machine that captured it,\nor, for a session that ran in the cloud, the person the platform says\nstarted it (git there is set up as the agent).",
           "anyOf": [
             {
               "$ref": "#/$defs/User"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "runtime": {
+          "description": "Where the session ran, if not on a person's own machine.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Runtime"
             },
             {
               "type": "null"
@@ -210,7 +223,7 @@
           "default": null
         },
         "entrypoint": {
-          "description": "How the agent was started, e.g. \"cli\" or \"sdk-cli\".",
+          "description": "How the agent was started, e.g. \"cli\" or \"sdk-cli\"; for a cloud\nsession, what the platform says started it (\"remote_mobile\", \"website\").",
           "type": [
             "string",
             "null"
@@ -363,6 +376,39 @@
           "default": null
         }
       }
+    },
+    "Runtime": {
+      "description": "A session that a cloud platform ran in a sandbox of its own: a Claude Code\ncloud session or a Cursor cloud agent. Such a record's `machine_id` is\n\"cloud\", since the sandbox is new each time.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/RuntimeKind",
+          "default": "cloud"
+        },
+        "id": {
+          "description": "The platform's own id for the session (`cse_…`, `bc-…`), which is\nwhat its web pages and API go by.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "RuntimeKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "cloud"
+          ]
+        },
+        {
+          "description": "A value written by a newer version.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
     },
     "Repo": {
       "type": "object",

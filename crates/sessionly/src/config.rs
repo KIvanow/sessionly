@@ -4,17 +4,37 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::session::Content;
+
+/// A token sent over plain http can be read by anyone on the network, so
+/// http is accepted only for a server on this machine.
+pub fn check_server_url(url: &str) -> Result<()> {
+    let local = ["http://localhost", "http://127.0.0.1", "http://[::1]"]
+        .iter()
+        .any(|prefix| {
+            url.strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', '/']))
+        });
+    if url.starts_with("https://") || local {
+        Ok(())
+    } else {
+        bail!(
+            "the server address must start with https:// (http:// is accepted only for localhost)"
+        )
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Random id for this installation, created on first use. It tells a
     /// server which machine a session came from; it is not derived from
-    /// anything about the machine.
+    /// anything about the machine. In a cloud session's sandbox it is the
+    /// word "cloud": a sandbox is new each time, and a session that moves
+    /// to another one must stay the same session.
     pub machine_id: String,
     /// Where to upload sessions. Nothing is uploaded while this is unset.
     pub server: Option<Server>,
@@ -49,6 +69,57 @@ impl Default for Config {
 impl Config {
     /// Read the config, creating it with a new machine id on first use.
     pub fn load(path: &Path) -> Result<Config> {
+        Self::load_with(path, || {
+            if crate::runtime::in_cloud() {
+                crate::runtime::CLOUD_MACHINE_ID.to_string()
+            } else {
+                uuid::Uuid::new_v4().to_string()
+            }
+        })
+    }
+
+    /// Settings given through the environment, for a sandbox where nobody
+    /// can run `sessionly connect`:
+    ///
+    /// - `SESSIONLY_URL` and `SESSIONLY_TOKEN` name the server, unless one is
+    ///   already saved;
+    /// - `SESSIONLY_CONTENT` (`metadata` or `previews`) and
+    ///   `SESSIONLY_LINE_HASHES` (`on` or `off`) override what is saved.
+    ///
+    /// The result is for use, not for saving: a token from the environment
+    /// is never written to disk.
+    pub fn with_environment(self) -> Config {
+        self.with_env(&|name| std::env::var(name).ok())
+    }
+
+    fn with_env(mut self, env: &dyn Fn(&str) -> Option<String>) -> Config {
+        let var = |name: &str| {
+            env(name)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        if self.server.is_none() {
+            if let (Some(url), Some(token)) = (var("SESSIONLY_URL"), var("SESSIONLY_TOKEN")) {
+                let url = url.trim_end_matches('/').to_string();
+                if check_server_url(&url).is_ok() {
+                    self.server = Some(Server { url, token });
+                }
+            }
+        }
+        match var("SESSIONLY_CONTENT").as_deref() {
+            Some("previews") => self.upload_content = Content::Previews,
+            Some("metadata") => self.upload_content = Content::Metadata,
+            _ => {}
+        }
+        match var("SESSIONLY_LINE_HASHES").as_deref() {
+            Some("on" | "true" | "1") => self.upload_line_hashes = true,
+            Some("off" | "false" | "0") => self.upload_line_hashes = false,
+            _ => {}
+        }
+        self
+    }
+
+    fn load_with(path: &Path, new_machine_id: impl Fn() -> String) -> Result<Config> {
         // Two tries: if another process creates the file while we do, the
         // second read picks up its machine id instead of inventing our own.
         for _ in 0..2 {
@@ -66,7 +137,7 @@ impl Config {
             if !config.machine_id.is_empty() {
                 return Ok(config);
             }
-            config.machine_id = uuid::Uuid::new_v4().to_string();
+            config.machine_id = new_machine_id();
             if existing.is_some() {
                 config.save(path)?;
                 return Ok(config);
@@ -125,16 +196,92 @@ impl Config {
 mod tests {
     use super::*;
 
+    fn random_id() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
+    #[test]
+    fn every_sandbox_shares_one_machine_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let cloud = || crate::runtime::CLOUD_MACHINE_ID.to_string();
+        let first = Config::load_with(&dir.path().join("a/config.json"), cloud).unwrap();
+        let second = Config::load_with(&dir.path().join("b/config.json"), cloud).unwrap();
+        assert_eq!(first.machine_id, "cloud");
+        assert_eq!(second.machine_id, first.machine_id);
+    }
+
+    #[test]
+    fn the_environment_names_a_server_and_what_to_send() {
+        let given = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            }
+        };
+        let base = Config::default();
+        assert_eq!(base.clone().with_env(&given(&[])), base);
+
+        let set = base.clone().with_env(&given(&[
+            ("SESSIONLY_URL", " https://sessionly.example.com/ "),
+            ("SESSIONLY_TOKEN", "sly_abc\n"),
+            ("SESSIONLY_CONTENT", "previews"),
+            ("SESSIONLY_LINE_HASHES", "on"),
+        ]));
+        let server = Server {
+            url: "https://sessionly.example.com".into(),
+            token: "sly_abc".into(),
+        };
+        assert_eq!(set.server, Some(server.clone()));
+        assert_eq!(set.upload_content, Content::Previews);
+        assert!(set.upload_line_hashes);
+
+        // Half an address is none, and a token is not sent over plain http.
+        let url_only = given(&[("SESSIONLY_URL", "https://sessionly.example.com")]);
+        assert_eq!(base.clone().with_env(&url_only).server, None);
+        let plain = given(&[
+            ("SESSIONLY_URL", "http://sessionly.example.com"),
+            ("SESSIONLY_TOKEN", "sly_abc"),
+        ]);
+        assert_eq!(base.clone().with_env(&plain).server, None);
+
+        // A saved server stays; the other two settings can be switched back.
+        let saved = Config {
+            server: Some(Server {
+                url: "https://saved.example.com".into(),
+                token: "sly_saved".into(),
+            }),
+            upload_content: Content::Previews,
+            upload_line_hashes: true,
+            ..Config::default()
+        };
+        let changed = saved.clone().with_env(&given(&[
+            ("SESSIONLY_URL", "https://sessionly.example.com"),
+            ("SESSIONLY_TOKEN", "sly_abc"),
+            ("SESSIONLY_CONTENT", "metadata"),
+            ("SESSIONLY_LINE_HASHES", "off"),
+        ]));
+        assert_eq!(changed.server, saved.server);
+        assert_eq!(changed.upload_content, Content::Metadata);
+        assert!(!changed.upload_line_hashes);
+        let nonsense = given(&[
+            ("SESSIONLY_CONTENT", "everything"),
+            ("SESSIONLY_LINE_HASHES", "maybe"),
+        ]);
+        assert_eq!(saved.clone().with_env(&nonsense), saved);
+    }
+
     #[test]
     fn creates_a_stable_machine_id() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("data/config.json");
-        let first = Config::load(&path).unwrap();
+        let first = Config::load_with(&path, random_id).unwrap();
         assert_eq!(first.machine_id.len(), 36);
         assert_eq!(first.upload_content, Content::Metadata);
         assert!(first.auto_sync);
         assert!(first.server.is_none());
-        assert_eq!(Config::load(&path).unwrap(), first);
+        assert_eq!(Config::load_with(&path, random_id).unwrap(), first);
     }
 
     #[test]

@@ -32,16 +32,21 @@ const LOG_LIMIT_BYTES: u64 = 256 * 1024;
 /// Called by the capture hook after an event is stored. Starts a background
 /// run if this event calls for one. Never fails and never waits.
 pub fn maybe_spawn(hook: &str, data_dir: &Path) {
-    let delay_ms = match hook {
-        "SessionEnd" => SESSION_END_DELAY_MS,
-        "Stop" => 0,
+    // Cursor names its events in camel case: `stop`, `sessionEnd`.
+    let hook = hook.to_lowercase();
+    let delay_ms = match hook.as_str() {
+        "sessionend" => SESSION_END_DELAY_MS,
+        "stop" => 0,
         _ => return,
     };
     if std::env::var_os("SESSIONLY_NO_AUTO").is_some() || !auto_sync_enabled(data_dir) {
         return;
     }
     let stamp = data_dir.join("auto.stamp");
-    if hook == "Stop" && age(&stamp).is_some_and(|age| age < TURN_INTERVAL) {
+    // A sandbox can be gone minutes after a turn, and Cursor's cloud never
+    // says that a session ended: there, every turn's end is acted on.
+    let often = crate::runtime::in_cloud();
+    if hook == "stop" && !often && age(&stamp).is_some_and(|age| age < TURN_INTERVAL) {
         return;
     }
     let Ok(exe) = std::env::current_exe() else {
@@ -123,7 +128,7 @@ fn locked(data_dir: &Path) -> Result<Option<File>> {
 }
 
 fn once() -> Result<String> {
-    let config = Config::load(&crate::paths::config_path()?)?;
+    let config = Config::load(&crate::paths::config_path()?)?.with_environment();
     let mut ledger = Ledger::open(&crate::paths::ledger_path()?)?;
     let (synced, _) = crate::sync::sync_all(&mut ledger, &config, false)?;
     let mut outcome = format!(

@@ -727,8 +727,11 @@ pub fn refresh(homes: &AgentHomes, data_dir: &Path) -> Report {
         );
         let imported = data_dir.join("imported").join(found.source).join(&file);
         let captured = data_dir.join("raw").join(found.source).join(&file);
-        // A Claude Code session captured from its start needs no import.
-        let wanted = imported.exists() || (found.source != CLAUDE_CODE && captured.exists());
+        // A Claude Code session captured from its start needs no import. In
+        // a sandbox nobody will run `import` for one whose capture began
+        // partway (it moved in from a sandbox that is gone), so it is done here.
+        let wanted = imported.exists()
+            || (captured.exists() && (found.source != CLAUDE_CODE || crate::runtime::in_cloud()));
         if wanted {
             import_one(&found, data_dir, &mut report);
         }

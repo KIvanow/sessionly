@@ -49,7 +49,7 @@ pub fn all_events() -> impl Iterator<Item = &'static str> {
 
 /// Quote a string as one POSIX shell word. Hook commands are run by a shell,
 /// so a path with spaces, quotes or `$` must not be interpreted.
-fn shell_quote(text: &str) -> String {
+pub(crate) fn shell_quote(text: &str) -> String {
     let plain = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
     if !text.is_empty() && text.chars().all(plain) {
         text.to_string()
@@ -80,16 +80,34 @@ fn first_word(command: &str) -> Option<(String, &str)> {
     quote.is_none().then_some((word, ""))
 }
 
-/// True for a hook whose command is exactly `<path to sessionly> capture`.
-fn is_ours(hook: &Value) -> bool {
-    let Some(command) = hook.get("command").and_then(Value::as_str) else {
-        return false;
-    };
-    let Some((program, rest)) = first_word(command.trim()) else {
-        return false;
-    };
+/// The two hooks Sessionly installs. They live side by side: a repository's
+/// settings file can have both, and each is installed and removed on its own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Kind {
+    /// `<path to sessionly> capture`: this machine's binary, for sessions on
+    /// this machine.
+    Machine,
+    /// `…/.sessionly/hook.sh <agent>`: the script committed to a repository,
+    /// for sessions in the cloud (see `repo`).
+    Repo,
+}
+
+/// Which of our hooks a command is, if either.
+pub fn kind_of(command: &str) -> Option<Kind> {
+    let (program, rest) = first_word(command.trim())?;
     let name = program.rsplit(['/', '\\']).next().unwrap_or_default();
-    rest.trim() == "capture" && matches!(name, "sessionly" | "sessionly.exe")
+    if rest.trim() == "capture" && matches!(name, "sessionly" | "sessionly.exe") {
+        return Some(Kind::Machine);
+    }
+    let script = program == ".sessionly/hook.sh" || program.ends_with("/.sessionly/hook.sh");
+    (script && matches!(rest.trim(), "claude" | "cursor")).then_some(Kind::Repo)
+}
+
+/// True for a hook entry that runs our command of this kind.
+pub(crate) fn is_ours(hook: &Value, kind: Kind) -> bool {
+    hook.get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|command| kind_of(command) == Some(kind))
 }
 
 /// `<project>/.claude/settings.json`, or the user-level `~/.claude/settings.json`.
@@ -101,9 +119,9 @@ pub fn settings_path(project: Option<&Path>) -> Result<PathBuf> {
     Ok(base.join(".claude").join("settings.json"))
 }
 
-/// Remove every Sessionly hook. Groups and events are dropped only if removing
-/// our hook is what emptied them.
-pub fn strip_ours(settings: &mut Value) {
+/// Remove every Sessionly hook of one kind. Groups and events are dropped
+/// only if removing our hook is what emptied them.
+pub fn strip_ours(settings: &mut Value, kind: Kind) {
     let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) else {
         return;
     };
@@ -119,7 +137,7 @@ pub fn strip_ours(settings: &mut Value) {
                 return true;
             };
             let before = entries.len();
-            entries.retain(|h| !is_ours(h));
+            entries.retain(|h| !is_ours(h, kind));
             let removed = entries.len() < before;
             removed_any |= removed;
             !(removed && entries.is_empty())
@@ -165,36 +183,39 @@ pub fn add_ours(settings: &mut Value, command: &str) -> Result<()> {
     Ok(())
 }
 
-/// Returns whether the file was changed.
+/// Install `command`, replacing an earlier hook of the same kind. Returns
+/// whether the file was changed.
 pub fn install(path: &Path, command: &str) -> Result<bool> {
+    let kind = kind_of(command).context("not a Sessionly hook command")?;
     let before = load(path)?;
     let mut settings = before.clone();
-    strip_ours(&mut settings);
+    strip_ours(&mut settings, kind);
     add_ours(&mut settings, command)?;
     if settings == before {
         return Ok(false);
     }
-    save(path, &settings)?;
+    // A file in a repository is under version control: no copy is kept.
+    save(path, &settings, kind == Kind::Machine)?;
     Ok(true)
 }
 
 /// Returns whether the file was changed.
-pub fn uninstall(path: &Path) -> Result<bool> {
+pub fn uninstall(path: &Path, kind: Kind) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
     let before = load(path)?;
     let mut settings = before.clone();
-    strip_ours(&mut settings);
+    strip_ours(&mut settings, kind);
     if settings == before {
         return Ok(false);
     }
-    save(path, &settings)?;
+    save(path, &settings, kind == Kind::Machine)?;
     Ok(true)
 }
 
-/// Events that currently have a Sessionly hook in `path`.
-pub fn installed_events(path: &Path) -> Result<Vec<String>> {
+/// Events that currently have a Sessionly hook of this kind in `path`.
+pub fn installed_events(path: &Path, kind: Kind) -> Result<Vec<String>> {
     let settings = load(path)?;
     let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
         return Ok(vec![]);
@@ -207,14 +228,14 @@ pub fn installed_events(path: &Path) -> Result<Vec<String>> {
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
-                    .any(is_ours)
+                    .any(|hook| is_ours(hook, kind))
             })
         })
         .map(|(event, _)| event.clone())
         .collect())
 }
 
-fn load(path: &Path) -> Result<Value> {
+pub(crate) fn load(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(json!({}));
     }
@@ -236,7 +257,9 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
-fn save(path: &Path, settings: &Value) -> Result<()> {
+/// Write `settings` to `path`. With `keep_original`, the file as it was
+/// before our first change is kept next to it.
+pub(crate) fn save(path: &Path, settings: &Value, keep_original: bool) -> Result<()> {
     // Write through a symlink (dotfile managers) instead of replacing it.
     let target = if path.is_symlink() {
         fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()))?
@@ -249,7 +272,7 @@ fn save(path: &Path, settings: &Value) -> Result<()> {
     let mut permissions = None;
     if target.exists() {
         let backup = with_suffix(path, ".sessionly-bak");
-        if !backup.exists() {
+        if keep_original && !backup.exists() {
             fs::copy(&target, &backup)?;
         }
         permissions = Some(fs::metadata(&target)?.permissions());
@@ -286,6 +309,40 @@ mod tests {
         all_events().count()
     }
 
+    fn is_ours_machine(hook: &Value) -> bool {
+        is_ours(hook, Kind::Machine)
+    }
+
+    #[test]
+    fn the_repository_hook_is_told_from_the_machines() {
+        for command in [
+            r#""$CLAUDE_PROJECT_DIR"/.sessionly/hook.sh claude"#,
+            ".sessionly/hook.sh cursor",
+            "/work/repo/.sessionly/hook.sh claude",
+        ] {
+            assert_eq!(kind_of(command), Some(Kind::Repo), "{command}");
+        }
+        assert_eq!(kind_of(CMD), Some(Kind::Machine));
+        for command in [
+            ".sessionly/hook.sh",
+            ".sessionly/hook.sh grok",
+            "tools/not.sessionly/hook.sh claude",
+            "other/hook.sh claude",
+            "echo .sessionly/hook.sh claude",
+        ] {
+            assert_eq!(kind_of(command), None, "{command}");
+        }
+        // Each kind is installed and removed without touching the other.
+        let mut s = json!({});
+        add_ours(&mut s, CMD).unwrap();
+        add_ours(&mut s, ".sessionly/hook.sh claude").unwrap();
+        strip_ours(&mut s, Kind::Repo);
+        assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(s["hooks"]["Stop"][0]["hooks"][0]["command"], CMD);
+        strip_ours(&mut s, Kind::Machine);
+        assert_eq!(s, json!({}));
+    }
+
     fn write(path: &Path, value: &Value) {
         fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
     }
@@ -313,7 +370,7 @@ mod tests {
     fn uninstall_restores_original() {
         let mut s = existing();
         add_ours(&mut s, CMD).unwrap();
-        strip_ours(&mut s);
+        strip_ours(&mut s, Kind::Machine);
         assert_eq!(s, existing());
         // key order is preserved too
         assert_eq!(
@@ -326,7 +383,7 @@ mod tests {
     fn strip_removes_hooks_key_when_only_ours() {
         let mut s = json!({ "theme": "dark" });
         add_ours(&mut s, CMD).unwrap();
-        strip_ours(&mut s);
+        strip_ours(&mut s, Kind::Machine);
         assert_eq!(s, json!({ "theme": "dark" }));
     }
 
@@ -335,21 +392,21 @@ mod tests {
         // Empty lists and groups that have nothing to do with us are left alone.
         let original = json!({ "hooks": { "Notification": [], "Stop": [{ "hooks": [] }] } });
         let mut s = original.clone();
-        strip_ours(&mut s);
+        strip_ours(&mut s, Kind::Machine);
         assert_eq!(s, original);
         let mut untouched = json!({ "hooks": {} });
-        strip_ours(&mut untouched);
+        strip_ours(&mut untouched, Kind::Machine);
         assert_eq!(untouched, json!({ "hooks": {} }));
         // After an install, removing our hook keeps the other tool's group.
         let mut s = original.clone();
         add_ours(&mut s, CMD).unwrap();
-        strip_ours(&mut s);
+        strip_ours(&mut s, Kind::Machine);
         assert_eq!(s["hooks"]["Stop"], original["hooks"]["Stop"]);
     }
 
     #[test]
     fn only_our_exact_command_counts_as_ours() {
-        let ours = |cmd: &str| is_ours(&json!({ "command": cmd }));
+        let ours = |cmd: &str| is_ours_machine(&json!({ "command": cmd }));
         assert!(ours(CMD));
         assert!(ours("\"/usr/local/bin/sessionly\" capture")); // older quoting
         assert!(!ours("'/home/it's me/bin/sessionly' capture")); // unbalanced quote
@@ -362,7 +419,9 @@ mod tests {
         assert!(!ours("/opt/other/capture"));
         assert!(!ours("/usr/local/bin/sessionly capture --verbose"));
         assert!(!ours("/usr/local/bin/sessionly watch"));
-        assert!(!is_ours(&json!({ "type": "http", "url": "http://x" })));
+        assert!(!is_ours_machine(
+            &json!({ "type": "http", "url": "http://x" })
+        ));
     }
 
     #[test]
@@ -375,7 +434,7 @@ mod tests {
             &json!({ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": lookalike }] }] } }),
         );
         install(&path, CMD).unwrap();
-        uninstall(&path).unwrap();
+        uninstall(&path, Kind::Machine).unwrap();
         assert_eq!(
             read(&path)["hooks"]["Stop"][0]["hooks"][0]["command"],
             lookalike
@@ -393,7 +452,7 @@ mod tests {
             let (program, rest) = first_word(&command).unwrap();
             assert_eq!(program, exe, "{command}");
             assert_eq!(rest.trim(), "capture");
-            assert!(is_ours(&json!({ "command": command })));
+            assert!(is_ours_machine(&json!({ "command": command })));
         }
         assert_eq!(
             capture_command(Path::new("/usr/bin/sessionly")),
@@ -410,15 +469,18 @@ mod tests {
         let once = fs::read_to_string(&path).unwrap();
         assert!(!install(&path, CMD).unwrap()); // nothing to change
         assert_eq!(fs::read_to_string(&path).unwrap(), once);
-        assert_eq!(installed_events(&path).unwrap().len(), event_count());
+        assert_eq!(
+            installed_events(&path, Kind::Machine).unwrap().len(),
+            event_count()
+        );
         // a different binary path replaces our hooks instead of adding more
         assert!(install(&path, "/opt/new/sessionly capture").unwrap());
         assert_eq!(read(&path)["hooks"]["Stop"].as_array().unwrap().len(), 1);
 
-        assert!(uninstall(&path).unwrap());
-        assert!(installed_events(&path).unwrap().is_empty());
+        assert!(uninstall(&path, Kind::Machine).unwrap());
+        assert!(installed_events(&path, Kind::Machine).unwrap().is_empty());
         assert_eq!(read(&path), existing());
-        assert!(!uninstall(&path).unwrap());
+        assert!(!uninstall(&path, Kind::Machine).unwrap());
         // the backup is still the file from before the first install
         assert_eq!(
             read(&dir.path().join("settings.json.sessionly-bak")),
@@ -456,7 +518,10 @@ mod tests {
 
         install(&link, CMD).unwrap();
         assert!(link.is_symlink());
-        assert_eq!(installed_events(&real).unwrap().len(), event_count());
+        assert_eq!(
+            installed_events(&real, Kind::Machine).unwrap().len(),
+            event_count()
+        );
         assert_eq!(
             fs::metadata(&real).unwrap().permissions().mode() & 0o777,
             0o600
