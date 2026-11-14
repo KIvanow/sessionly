@@ -117,6 +117,13 @@ impl Builder {
         ));
     }
 
+    /// Add `value` under `key` to the event added last, beside its payload.
+    pub(crate) fn note(&mut self, key: &str, value: Value) {
+        if let Some((_, event)) = self.events.last_mut() {
+            event[key] = value;
+        }
+    }
+
     /// The events in time order, with the session start first among equals.
     /// The sort is stable, so events pushed in order stay in order.
     pub(crate) fn finish(mut self) -> Vec<Value> {

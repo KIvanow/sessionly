@@ -980,6 +980,7 @@ fn a_cloud_session_is_uploaded_at_each_turns_end_for_whoever_started_it() {
     write["tool_input"] = json!({ "file_path": repo.join("hello.py"),
                                   "content": "def greet(name):\n    return name\n" });
     write["tool_response"] = json!({ "type": "create", "structuredPatch": [] });
+    fs::write(repo.join("hello.py"), "def greet(name):\n    return name\n").unwrap();
     hook(write, true);
     let mut stop = event("cl-1", "Stop");
     stop["prompt_id"] = json!("p1");
@@ -1008,16 +1009,65 @@ fn a_cloud_session_is_uploaded_at_each_turns_end_for_whoever_started_it() {
     assert_eq!(sent["lines"][0]["hashes"].as_array().unwrap().len(), 2);
 
     // A second turn straight after is uploaded too: the sandbox may not be
-    // there in five minutes.
+    // there in five minutes. This time the agent edits with the shell, which
+    // tells hooks nothing of what it changed.
     let mut again = event("cl-1", "UserPromptSubmit");
     again["prompt_id"] = json!("p2");
-    again["prompt"] = json!("thanks");
+    again["prompt"] = json!("and a docstring");
     hook(again, true);
+    let shell = |hook_name: &str| {
+        let mut call = event("cl-1", hook_name);
+        call["prompt_id"] = json!("p2");
+        call["tool_use_id"] = json!("t2");
+        call["tool_name"] = json!("Bash");
+        call["tool_input"] = json!({ "command": "sed -i ... hello.py && date > notes.txt" });
+        call
+    };
+    hook(shell("PreToolUse"), true);
+    fs::write(
+        repo.join("hello.py"),
+        "def greet(name):\n    \"\"\"Greet.\"\"\"\n    return name\n",
+    )
+    .unwrap();
+    fs::write(repo.join("notes.txt"), "Sat Nov 14\n").unwrap();
+    hook(shell("PostToolUse"), true);
     stop["prompt_id"] = json!("p2");
     hook(stop, true);
     assert!(wait_for_puts(2), "the second turn was not uploaded");
     let sent: serde_json::Value = serde_json::from_str(&server.puts()[1].body).unwrap();
-    assert_eq!(sent["session"]["counts"]["prompts"], 2);
+    let s = &sent["session"];
+    assert_eq!(s["counts"]["prompts"], 2);
+    let files: Vec<_> = s["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["path"].as_str().unwrap(),
+                f["created"] == true,
+                &f["writes"],
+                &f["lines_added"],
+            )
+        })
+        .collect();
+    assert_eq!(
+        files,
+        [
+            ("hello.py", true, &json!(2), &json!(3)),
+            ("notes.txt", true, &json!(1), &json!(1)),
+        ]
+    );
+    assert_eq!(s["tool_calls"][1]["lines_added"], 2);
+    let hashes = |file: usize| sent["lines"][file]["hashes"].as_array().unwrap().len();
+    assert_eq!((hashes(0), hashes(1)), (3, 1));
+    // Looking at the working tree left the repository as it was: nothing staged.
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert_eq!(stdout(status), "?? hello.py\n?? notes.txt\n");
 
     // The token came from the environment and stays there.
     let config = fs::read_to_string(home.path().join("data/config.json")).unwrap();
@@ -1028,6 +1078,20 @@ fn a_cloud_session_is_uploaded_at_each_turns_end_for_whoever_started_it() {
         shown.contains("the cloud (cse_01probe), started from remote_mobile"),
         "{shown}"
     );
+    assert!(shown.contains("2 changed (+4 -0)"), "{shown}");
+
+    // On a person's own machine the working tree is not looked at: what
+    // changes while a command runs may be the person's own typing.
+    let mut local = shell("PreToolUse");
+    local["session_id"] = json!("local-1");
+    capture(home.path(), local.clone());
+    fs::write(repo.join("notes.txt"), "typed by a person\n").unwrap();
+    local["hook_event_name"] = json!("PostToolUse");
+    capture(home.path(), local);
+    let raw = fs::read_to_string(home.path().join("data/raw/claude-code/local-1.jsonl")).unwrap();
+    assert!(!raw.contains("changes"), "{raw}");
+    assert!(home.path().join("data/snapshots/cl-1").is_dir());
+    assert!(!home.path().join("data/snapshots/local-1").exists());
 }
 
 /// A repository set up with `install --repo`, and a release for its script to

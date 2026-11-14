@@ -591,6 +591,10 @@ pub fn session_from_hooks(capture: &Path) -> Result<(Vec<Value>, Option<Facts>)>
                     out.push(&done, "PostToolUse", payload);
                 }
             }
+            // What a shell command changed stays with its call.
+            if !seen.changed.is_null() {
+                out.note("changes", seen.changed.clone());
+            }
         }
         // An edit no tool call accounts for is a call of its own.
         for edit in loose {
@@ -1216,20 +1220,30 @@ mod tests {
                         7,
                         "preToolUse",
                         "tools-1",
-                        tool("Shell", "s1", json!({ "command": "git push" })),
+                        tool(
+                            "Shell",
+                            "s1",
+                            json!({ "command": "date > notes.txt && git push" }),
+                        ),
                     ),
                     quiet.clone(),
                 ),
-                cloud(
-                    event(
-                        8,
-                        "postToolUseFailure",
-                        "tools-1",
-                        json!({ "tool_use_id": "s1", "duration": 85.6,
-                        "error_message": "rejected", "failure_type": "error" }),
-                    ),
-                    quiet.clone(),
-                ),
+                // The capture saw what the command changed before it failed.
+                {
+                    let mut failed = cloud(
+                        event(
+                            8,
+                            "postToolUseFailure",
+                            "tools-1",
+                            json!({ "tool_use_id": "s1", "duration": 85.6,
+                            "error_message": "rejected", "failure_type": "error" }),
+                        ),
+                        quiet.clone(),
+                    );
+                    failed["changes"] = json!([{ "path": "/workspace/notes.txt", "status": "A",
+                        "lines": ["+first note", "+second note"] }]);
+                    failed
+                },
                 cloud(
                     event(
                         9,
@@ -1292,11 +1306,22 @@ mod tests {
             [
                 ("Read", ToolStatus::Ok, Some("p1"), 0),
                 ("Write", ToolStatus::Ok, Some("p1"), 1),
-                ("Bash", ToolStatus::Failed, Some("p1"), 0),
+                ("Bash", ToolStatus::Failed, Some("p1"), 2),
                 ("Bash", ToolStatus::NoResult, Some("p2"), 0),
             ]
         );
-        assert_eq!(s.files.len(), 1);
+        assert_eq!(s.files.len(), 2);
+        let by_shell = &s.files[1];
+        assert_eq!(
+            (
+                by_shell.path.as_str(),
+                by_shell.created,
+                by_shell.writes,
+                by_shell.lines_added
+            ),
+            ("/workspace/notes.txt", true, 1, 2)
+        );
+        assert_eq!((s.counts.files_changed, s.counts.lines_added), (2, 3));
         let file = &s.files[0];
         assert_eq!(
             (
@@ -1313,7 +1338,7 @@ mod tests {
         // Cursor's cloud reports no tokens, so there is no cost to show.
         assert_eq!(s.cost, None);
 
-        // Where it ran travels with the events, and the line it added is
+        // Where it ran travels with the events, and the lines it added are
         // there for the rewrite rate and for pull requests.
         let seen = crate::runtime::Seen::of(&events).unwrap();
         assert_eq!(seen.id.as_deref(), Some("bc-64f0"));
@@ -1324,8 +1349,9 @@ mod tests {
         assert_eq!(s.user.unwrap().email.as_deref(), Some("ann@example.com"));
         assert_eq!(s.entrypoint.as_deref(), Some("website"));
         let lines = crate::rewrite::added_lines_by_model(&events, &Default::default());
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].path, "/workspace/hello.py");
+        let paths: Vec<_> = lines.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, ["/workspace/hello.py", "/workspace/notes.txt"]);
+        assert_eq!(lines[1].hashes().count(), 2);
     }
 
     #[test]

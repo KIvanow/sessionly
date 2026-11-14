@@ -98,14 +98,13 @@ pub fn file_stem(session_id: Option<&str>) -> String {
 /// `raw_root/<agent>/<session_id>.jsonl`. Returns the file written and the
 /// hook event's name.
 ///
-/// `runtime` is asked, with the agent and the event's name, what a cloud
-/// platform says about the session (see `runtime`); its answer is stored
-/// with the event. On a person's own machine it answers nothing.
+/// `surroundings` may add to the record what only the place it runs in
+/// knows (see [`in_a_sandbox`]). On a person's own machine it adds nothing.
 pub fn capture(
     raw_root: &Path,
     input: &mut impl Read,
     received_at: &str,
-    runtime: impl Fn(&str, &str) -> Option<Value>,
+    surroundings: impl Fn(&mut Value),
 ) -> Result<(PathBuf, String)> {
     let mut bytes = Vec::new();
     input.read_to_end(&mut bytes)?;
@@ -116,15 +115,32 @@ pub fn capture(
         .unwrap_or(crate::paths::CLAUDE_CODE)
         .to_string();
     let source = source.as_str();
-    if let Some(said) = runtime(source, record["hook"].as_str().unwrap_or_default()) {
-        record["runtime"] = said;
-    }
+    surroundings(&mut record);
     let path = raw_root.join(source).join(format!("{stem}.jsonl"));
     let mut line = serde_json::to_string(&record)?;
     line.push('\n');
     append(&path, line.as_bytes())?;
     let hook = record["hook"].as_str().unwrap_or("?").to_string();
     Ok((path, hook))
+}
+
+/// What a cloud agent's sandbox adds to a record: under `runtime`, what the
+/// platform says about the session (see `runtime`), and for a shell command
+/// what it changed in the working tree (see `changes`).
+fn in_a_sandbox(record: &mut Value) {
+    let text = |key: &str| record[key].as_str().unwrap_or_default().to_string();
+    let Some(said) = crate::runtime::describe(&text("source"), &text("hook")) else {
+        return;
+    };
+    record["runtime"] = said;
+    let Ok(data_dir) = crate::paths::data_dir() else {
+        return;
+    };
+    if let Some(Value::Object(seen)) = crate::changes::observe(&data_dir, record) {
+        for (key, value) in seen {
+            record[key] = value;
+        }
+    }
 }
 
 /// Hook entry point. Always returns exit code 0 and never prints.
@@ -136,12 +152,11 @@ pub fn run() -> i32 {
         let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
         return 0;
     };
-    let runtime = crate::runtime::describe;
     match capture(
         &raw_dir,
         &mut std::io::stdin().lock(),
         &received_at,
-        runtime,
+        in_a_sandbox,
     ) {
         Ok((_, hook)) => {
             if let Ok(data_dir) = crate::paths::data_dir() {
@@ -186,16 +201,15 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// A session on a person's own machine: the platform says nothing.
-    fn local(_source: &str, _hook: &str) -> Option<Value> {
-        None
-    }
+    /// A session on a person's own machine: nothing is added.
+    fn local(_record: &mut Value) {}
 
     #[test]
     fn what_a_cloud_platform_says_is_stored_with_the_event() {
         let dir = tempfile::tempdir().unwrap();
-        let cloud = |source: &str, hook: &str| {
-            Some(json!({ "kind": "cloud", "id": format!("{source}/{hook}") }))
+        let cloud = |record: &mut Value| {
+            let id = format!("{}/{}", record["source"], record["hook"]);
+            record["runtime"] = json!({ "kind": "cloud", "id": id });
         };
         let payload = br#"{"session_id":"s1","hook_event_name":"Stop"}"#;
         let (path, _) = capture(dir.path(), &mut &payload[..], "t", cloud).unwrap();
@@ -203,7 +217,7 @@ mod tests {
             serde_json::from_str(fs::read_to_string(&path).unwrap().trim()).unwrap();
         assert_eq!(
             record["runtime"],
-            json!({ "kind": "cloud", "id": "claude-code/Stop" })
+            json!({ "kind": "cloud", "id": "\"claude-code\"/\"Stop\"" })
         );
         assert_eq!(
             record["payload"],

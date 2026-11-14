@@ -11,7 +11,8 @@
 //! share an id: the prompt has one, the tool calls another, the end a third,
 //! so they are taken in the order they came. And `stop` has no tokens. Its
 //! hooks come from the repository's `.cursor/hooks.json`, which can also ask
-//! for `afterFileEdit`: what an edit changed.
+//! for `afterFileEdit`: what an edit changed. What a shell command changed
+//! is not said by any hook: the capture works it out (see `changes`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -33,6 +34,9 @@ pub struct Tool {
     pub duration_ms: Option<u64>,
     /// Set if the call failed.
     pub error: Option<String>,
+    /// What a shell command changed in the working tree, as the capture
+    /// stored it with the call's end (see `changes`). Null if nothing.
+    pub changed: Value,
 }
 
 /// Tokens of one turn. Cursor's `input_tokens` counts cached tokens too;
@@ -170,6 +174,9 @@ pub fn read(capture: &Path) -> Capture {
                     if hook == "posttoolusefailure" {
                         let said = text("error_message").or_else(|| text("error"));
                         tool.error = Some(said.unwrap_or_else(|| "failed".into()));
+                    }
+                    if record["changes"].is_array() {
+                        tool.changed = record["changes"].clone();
                     }
                 }
             }

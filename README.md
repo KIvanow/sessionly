@@ -152,7 +152,8 @@ What it does and doesn't mean:
   it together with the session's age.
 - It measures survival, not quality or cause: code can be rewritten for reasons that have
   nothing to do with how it was written.
-- Only changes made through the agent's file tools are tracked, not edits made by shell commands.
+- Only changes made through the agent's file tools are tracked, not edits made by shell
+  commands. A [session in the cloud](#cloud-sessions) is the exception.
 - If the session's directory no longer exists, the last measurement is kept.
 
 ```
@@ -225,7 +226,8 @@ Limits to know about:
   says so (`captured_from_start: false`): prompts, tools and files cover the captured part, cost
   covers the whole session.
 - File changes made by shell commands (`sed`, `git apply`, generators) are not attributed to
-  files; only the agent's file tools are.
+  files; only the agent's file tools are. A [session in the cloud](#cloud-sessions) is the
+  exception: there what each shell command changed is counted too.
 - User name and email come from git config at sync time. They are a label, not verified identity.
 
 ### Cloud sessions
@@ -275,6 +277,18 @@ What is different about a session from the cloud:
 - **Every turn is sent.** The ledger is brought up to date and uploaded each time a turn ends,
   not at most every five minutes: a sandbox may be gone soon after.
 - **The branch** is the one checked out in the sandbox, which is the one the agent pushes.
+- **Shell commands count.** In a sandbox an agent often edits with the shell (`sed -i`, a
+  heredoc) instead of its file tools, and a shell command tells hooks nothing of what it
+  changed. So the working tree is compared just before and just after each shell command,
+  and what differs is the command's: the files it changed, created or deleted, and the lines.
+  They count toward the session's files and lines, the rewrite rate and pull requests like
+  any other edit. The comparison uses git with an index and objects kept in `~/.sessionly`;
+  the repository's own index, objects and HEAD are not written. Files git ignores are not
+  looked at, and new files over 1 MB are left out. A command that moves to commits it did
+  not make (`git pull`, `git checkout main`, a rebase) is not counted, since what that
+  brings in is other people's work. A command that carries on in the background is counted
+  up to when the call returned. This is not done on a person's machine: whatever the person
+  saved while a command ran would be put down to the agent.
 - **Cursor has no cost.** A Cursor cloud agent keeps no transcript and does not tell hooks how
   many tokens a turn used, so its session has prompts, tool calls with their outcome and
   duration, files and lines changed, and the model, but no tokens and no cost.
@@ -657,7 +671,8 @@ How to read it:
   ran in the cloud counts when it ran on the pull request's branch instead: there the commits
   are the agent's own. Everything else
   counts as not an agent's: people without Sessionly, sessions uploaded without line hashes,
-  changes made by shell commands, generated files. So the agent share is a floor.
+  changes made by shell commands on a person's machine, generated files. So the agent share
+  is a floor.
 - **Survived review** compares the pull request as it was opened with how it ended: of the
   agent's lines it had at the start, how many are still in it. It is only known for pull
   requests the Action saw being opened (or could reconstruct, see `backfill` below). A line

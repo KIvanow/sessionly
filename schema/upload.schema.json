@@ -299,7 +299,7 @@
           "default": []
         },
         "files": {
-          "description": "Files read or changed through the agent's file tools. Changes made by\nshell commands are not tracked here.",
+          "description": "Files read or changed through the agent's file tools. What shell\ncommands changed is known only for a session in the cloud, where the\nworking tree is compared before and after each command.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/FileTouched"

@@ -11,8 +11,9 @@
 //! - Blank lines and lines without a letter or digit (`}`, `);`) are ignored:
 //!   they would match almost anything.
 //! - Whitespace at the ends of a line is ignored, so re-indenting is not a rewrite.
-//! - Only changes made through the agent's file tools are known. The current
-//!   file is whatever is checked out when the measurement runs.
+//! - Only changes made through the agent's file tools are known, and in a
+//!   cloud agent's sandbox what its shell commands changed (see `changes`).
+//!   The current file is whatever is checked out when the measurement runs.
 
 use std::collections::HashMap;
 use std::fs;
@@ -82,10 +83,49 @@ pub fn added_lines_by_model(events: &[Value], models: &HashMap<&str, &str>) -> V
     // Per file and line: the model behind each time the line was added.
     let mut counts: HashMap<String, HashMap<u64, Vec<Option<&str>>>> = HashMap::new();
     for record in events {
-        if record["hook"].as_str() != Some("PostToolUse") {
+        let hook = record["hook"].as_str().unwrap_or_default();
+        if !matches!(hook, "PostToolUse" | "PostToolUseFailure") {
             continue;
         }
         let p = &record["payload"];
+        let model = p["tool_use_id"]
+            .as_str()
+            .and_then(|id| models.get(id).copied());
+        // One file's patch lines: what was added, what was taken out.
+        let mut change = |path: &str, added: Vec<u64>, removed: Vec<u64>| {
+            if !counts.contains_key(path) {
+                order.push(path.to_string());
+            }
+            let file = counts.entry(path.to_string()).or_default();
+            // A line the agent removes again was its own to remove: un-count it.
+            for hash in removed {
+                if let Some(writers) = file.get_mut(&hash) {
+                    writers.pop();
+                }
+            }
+            for hash in added {
+                file.entry(hash).or_default().push(model);
+            }
+        };
+        let hashes = |lines: &mut dyn Iterator<Item = &str>| {
+            let (mut added, mut removed) = (Vec::new(), Vec::new());
+            for line in lines {
+                match line.as_bytes().first() {
+                    Some(b'+') => added.extend(line_hash(&line[1..])),
+                    Some(b'-') => removed.extend(line_hash(&line[1..])),
+                    _ => {}
+                }
+            }
+            (added, removed)
+        };
+        // What a shell command changed, where the capture could tell (see `changes`).
+        for (path, _, mut lines) in crate::changes::of(record) {
+            let (added, removed) = hashes(&mut lines);
+            change(path, added, removed);
+        }
+        if hook != "PostToolUse" {
+            continue;
+        }
         let input = &p["tool_input"];
         let response = &p["tool_response"];
         let Some(path) = ["file_path", "notebook_path"]
@@ -94,49 +134,25 @@ pub fn added_lines_by_model(events: &[Value], models: &HashMap<&str, &str>) -> V
         else {
             continue;
         };
-        let mut added: Vec<u64> = Vec::new();
-        let mut removed: Vec<u64> = Vec::new();
-        match response["structuredPatch"]
+        let (added, removed) = match response["structuredPatch"]
             .as_array()
             .filter(|h| !h.is_empty())
         {
-            Some(hunks) => {
-                let lines = hunks
+            Some(hunks) => hashes(
+                &mut hunks
                     .iter()
                     .filter_map(|h| h["lines"].as_array())
                     .flatten()
-                    .filter_map(Value::as_str);
-                for line in lines {
-                    match line.as_bytes().first() {
-                        Some(b'+') => added.extend(line_hash(&line[1..])),
-                        Some(b'-') => removed.extend(line_hash(&line[1..])),
-                        _ => {}
-                    }
-                }
-            }
+                    .filter_map(Value::as_str),
+            ),
             // A newly created file has no patch: every line is new.
             None if response["type"].as_str() == Some("create") => {
                 let content = input["content"].as_str().unwrap_or_default();
-                added.extend(content.lines().filter_map(line_hash));
+                (content.lines().filter_map(line_hash).collect(), Vec::new())
             }
             None => continue,
-        }
-        if !counts.contains_key(path) {
-            order.push(path.to_string());
-        }
-        let model = p["tool_use_id"]
-            .as_str()
-            .and_then(|id| models.get(id).copied());
-        let file = counts.entry(path.to_string()).or_default();
-        // A line the agent removes again was its own to remove: un-count it.
-        for hash in removed {
-            if let Some(writers) = file.get_mut(&hash) {
-                writers.pop();
-            }
-        }
-        for hash in added {
-            file.entry(hash).or_default().push(model);
-        }
+        };
+        change(path, added, removed);
     }
     order
         .into_iter()

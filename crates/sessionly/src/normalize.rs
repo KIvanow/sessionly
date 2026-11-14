@@ -143,6 +143,8 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
     let mut tool_ix: HashMap<String, usize> = HashMap::new();
     let mut sub_ix: HashMap<String, usize> = HashMap::new();
     let mut created: HashSet<String> = HashSet::new();
+    // What shell commands changed, by the call's place in `tool_calls`.
+    let mut by_shell: HashMap<usize, Vec<FileTouched>> = HashMap::new();
     let mut start_model = None;
     let (mut first, mut last) = (None::<DateTime<Utc>>, None::<DateTime<Utc>>);
 
@@ -184,7 +186,29 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
             }
         }
 
-        match record["hook"].as_str().unwrap_or_default() {
+        let hook = record["hook"].as_str().unwrap_or_default();
+        // A shell command says nothing of what it changed. In a sandbox the
+        // capture looked at the working tree around it (see `changes`).
+        if matches!(hook, "PostToolUse" | "PostToolUseFailure") {
+            let changed: Vec<FileTouched> = crate::changes::of(record)
+                .map(|(path, created, lines)| {
+                    let (added, removed) = count_patch(lines);
+                    FileTouched {
+                        path: path.to_string(),
+                        writes: 1,
+                        created,
+                        lines_added: added,
+                        lines_removed: removed,
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            let id = p["tool_use_id"].as_str().unwrap_or_default();
+            if !changed.is_empty() && tool_call(&mut s, &mut tool_ix, p, at).is_some() {
+                by_shell.entry(tool_ix[id]).or_default().extend(changed);
+            }
+        }
+        match hook {
             "SessionStart" => {
                 start_model = text("model").or(start_model);
                 // A session that starts again is open again.
@@ -306,7 +330,12 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
         .iter()
         .filter_map(|p| Some((p.ended_at? - p.at?).num_milliseconds().max(0)))
         .sum();
-    s.files = files_touched(&s.tool_calls, &created);
+    for (call, changed) in &by_shell {
+        let call = &mut s.tool_calls[*call];
+        call.lines_added += changed.iter().map(|f| f.lines_added).sum::<u64>();
+        call.lines_removed += changed.iter().map(|f| f.lines_removed).sum::<u64>();
+    }
+    s.files = files_touched(&s.tool_calls, &created, &by_shell);
     for sub in &mut s.subagents {
         sub.tool_calls = s
             .tool_calls
@@ -396,21 +425,13 @@ fn input_summary(tool: &str, input: &Value) -> Option<String> {
 fn line_changes(input: &Value, response: &Value) -> (u64, u64) {
     let hunks = response["structuredPatch"].as_array();
     if let Some(hunks) = hunks.filter(|h| !h.is_empty()) {
-        let mut added = 0;
-        let mut removed = 0;
-        for line in hunks
-            .iter()
-            .filter_map(|h| h["lines"].as_array())
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            match line.as_bytes().first() {
-                Some(b'+') => added += 1,
-                Some(b'-') => removed += 1,
-                _ => {}
-            }
-        }
-        return (added, removed);
+        return count_patch(
+            hunks
+                .iter()
+                .filter_map(|h| h["lines"].as_array())
+                .flatten()
+                .filter_map(Value::as_str),
+        );
     }
     // A newly created file has no patch: every line of the content is new.
     if response["type"].as_str() == Some("create") {
@@ -420,10 +441,47 @@ fn line_changes(input: &Value, response: &Value) -> (u64, u64) {
     (0, 0)
 }
 
-fn files_touched(calls: &[ToolCall], created: &HashSet<String>) -> Vec<FileTouched> {
+/// How many of a patch's lines are added (`+`) and removed (`-`).
+fn count_patch<'a>(lines: impl Iterator<Item = &'a str>) -> (u64, u64) {
+    let (mut added, mut removed) = (0, 0);
+    for line in lines {
+        match line.as_bytes().first() {
+            Some(b'+') => added += 1,
+            Some(b'-') => removed += 1,
+            _ => {}
+        }
+    }
+    (added, removed)
+}
+
+/// The files the session read or changed, in the order it first touched
+/// them: through the file tools, and (`by_shell`, by the call's place in
+/// `calls`) through shell commands where that is known.
+fn files_touched(
+    calls: &[ToolCall],
+    created: &HashSet<String>,
+    by_shell: &HashMap<usize, Vec<FileTouched>>,
+) -> Vec<FileTouched> {
     let mut files: Vec<FileTouched> = Vec::new();
     let mut index: HashMap<&str, usize> = HashMap::new();
-    for call in calls.iter().filter(|c| c.status == ToolStatus::Ok) {
+    for (position, call) in calls.iter().enumerate() {
+        // A command that failed may still have changed files.
+        for changed in by_shell.get(&position).into_iter().flatten() {
+            match index.get(changed.path.as_str()) {
+                Some(&i) => {
+                    files[i].writes += 1;
+                    files[i].lines_added += changed.lines_added;
+                    files[i].lines_removed += changed.lines_removed;
+                }
+                None => {
+                    index.insert(&changed.path, files.len());
+                    files.push(changed.clone());
+                }
+            }
+        }
+        if call.status != ToolStatus::Ok {
+            continue;
+        }
         let Some(path) = call.file_path.as_deref() else {
             continue;
         };
@@ -961,6 +1019,108 @@ mod tests {
         // which model made a call is kept with the saved facts
         std::fs::remove_file(&transcript).unwrap();
         check();
+    }
+
+    #[test]
+    fn what_a_shell_command_changed_counts_as_the_sessions() {
+        // Stored with the command's end by a capture in a sandbox.
+        let shell = |second: u32, hook: &str, id: &str, changes: Value| {
+            let input = json!({ "command": "sed -i s/y/x/ a.rs" });
+            let mut ended = tool(second, hook, id, "Bash", input, json!({}));
+            ended["changes"] = changes;
+            ended
+        };
+        let events = [
+            event(
+                0,
+                "SessionStart",
+                json!({ "source": "startup", "model": "m1" }),
+            ),
+            shell(
+                1,
+                "PostToolUse",
+                "b1",
+                json!([{ "path": "/work/repo/a.rs", "status": "M", "lines": ["-y();", "+x();"] },
+                       { "path": "/work/repo/new.txt", "status": "A", "lines": ["+one", "+two"] }]),
+            ),
+            tool(
+                2,
+                "PostToolUse",
+                "e1",
+                "Edit",
+                json!({ "file_path": "/work/repo/a.rs" }),
+                json!({ "tool_response": { "structuredPatch": [{ "lines": ["+z();"] }] } }),
+            ),
+            // A command that failed after taking out a line an earlier one added.
+            shell(
+                3,
+                "PostToolUseFailure",
+                "b2",
+                json!([{ "path": "/work/repo/a.rs", "status": "M", "lines": ["-x();"] }]),
+            ),
+            // One whose change was seen and not counted adds nothing.
+            {
+                let mut skipped = shell(4, "PostToolUse", "b3", Value::Null);
+                skipped["changes_skipped"] = json!("the commit checked out changed");
+                skipped
+            },
+        ];
+        let s = from_events(&events, None, "claude-code").unwrap();
+        let calls: Vec<_> = s
+            .tool_calls
+            .iter()
+            .map(|c| (c.tool.as_str(), c.status, c.lines_added, c.lines_removed))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("Bash", ToolStatus::Ok, 3, 1),
+                ("Edit", ToolStatus::Ok, 1, 0),
+                ("Bash", ToolStatus::Failed, 0, 1),
+                ("Bash", ToolStatus::Ok, 0, 0),
+            ]
+        );
+        let files: Vec<_> = s
+            .files
+            .iter()
+            .map(|f| {
+                (
+                    f.path.as_str(),
+                    f.created,
+                    f.writes,
+                    f.lines_added,
+                    f.lines_removed,
+                )
+            })
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("/work/repo/a.rs", false, 3, 2, 2),
+                ("/work/repo/new.txt", true, 1, 2, 0),
+            ]
+        );
+        assert_eq!(
+            (
+                s.counts.files_changed,
+                s.counts.lines_added,
+                s.counts.lines_removed
+            ),
+            (2, 4, 2)
+        );
+
+        // The line hashes follow: x() was taken out again, y() was never its own.
+        let hash = |line: &str| crate::rewrite::line_hash(line).unwrap();
+        let models = HashMap::from([("b1", "m1"), ("e1", "m2")]);
+        let lines = crate::rewrite::added_lines_by_model(&events, &models);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0].by_model,
+            [(Some("m2".to_string()), vec![hash("z();")])]
+        );
+        let mut new = vec![hash("one"), hash("two")];
+        new.sort_unstable();
+        assert_eq!(lines[1].by_model, [(Some("m1".to_string()), new)]);
     }
 
     #[test]

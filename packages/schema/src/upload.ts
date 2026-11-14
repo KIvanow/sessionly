@@ -123,8 +123,9 @@ export interface Session {
   prompts?: Prompt[];
   tool_calls?: ToolCall[];
   /**
-   * Files read or changed through the agent's file tools. Changes made by
-   * shell commands are not tracked here.
+   * Files read or changed through the agent's file tools. What shell
+   * commands changed is known only for a session in the cloud, where the
+   * working tree is compared before and after each command.
    */
   files?: FileTouched[];
   subagents?: Subagent[];
