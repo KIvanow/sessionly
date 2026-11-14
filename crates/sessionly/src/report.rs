@@ -375,6 +375,12 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
+            // A cloud agent's first prompt may never reach a hook.
+            let preview = if preview.is_empty() && !s.captured_from_start {
+                "(prompt not captured)".to_string()
+            } else {
+                preview
+            };
             let _ = writeln!(
                 out,
                 "  {}  {}{}",

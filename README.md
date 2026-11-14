@@ -291,6 +291,10 @@ What is different about a session from the cloud:
   brings in is other people's work. A command that carries on in the background is counted
   up to when the call returned. This is not done on a person's machine: whatever the person
   saved while a command ran would be put down to the agent.
+- **Cursor's first prompt may be missing.** A Cursor cloud agent does not always run hooks
+  for the prompt it was started with (of two runs on 2026-11-14, one did and one did not).
+  Its tool calls are still captured: the turn is recorded with its prompt unknown, and the
+  session says it was not captured from its start. Later prompts in the same agent arrive.
 - **Cursor has no cost.** A Cursor cloud agent keeps no transcript and does not tell hooks how
   many tokens a turn used, so its session has prompts, tool calls with their outcome and
   duration, files and lines changed, and the model, but no tokens and no cost.
