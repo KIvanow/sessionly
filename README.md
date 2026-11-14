@@ -619,7 +619,8 @@ scripts/dummy-session.sh   # runs a short real Claude Code session that exercise
 ```
 
 The website ([sessionly.dev](https://sessionly.dev)) is the static pages in [`website/`](website/):
-no build step and no JavaScript. `python3 -m http.server -d website` previews it (pages are at
+no build step and no JavaScript, and the two typefaces (Space Grotesk and IBM Plex Mono, both
+under the SIL Open Font License) are served from `website/fonts/`. `python3 -m http.server -d website` previews it (pages are at
 `/privacy.html` and so on locally; the host serves them without the extension, as
 `website/vercel.json` says). After changing the DPA, `scripts/website-dpa-pdf.sh` regenerates
 `website/dpa.pdf`.

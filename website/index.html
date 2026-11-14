@@ -9,8 +9,8 @@
       content="What your coding agents were asked, which tools ran, which files changed, what it cost and how much of it survived. For Claude Code, Cursor and Grok, side by side. Open source; runs on your machine."
     />
     <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#14161a" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#08090b" media="(prefers-color-scheme: dark)" />
     <link rel="canonical" href="https://sessionly.dev/" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/site.css" />
@@ -27,7 +27,7 @@
     <meta property="og:image:height" content="630" />
     <meta
       property="og:image:alt"
-      content="Sessionly: a ledger of AI coding agent sessions, for Claude Code, Cursor and Grok."
+      content="Sessionly: what your agents did, what it cost, what survived. A ledger for Claude Code, Cursor and Grok sessions."
     />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Sessionly: a ledger of AI coding agent sessions" />
@@ -41,31 +41,10 @@
     <header class="top">
       <div class="wrap">
         <a class="brand" href="/">
-          <svg viewBox="0 0 32 32" aria-hidden="true">
-            <rect
-              x="4.5"
-              y="4.5"
-              width="23"
-              height="23"
-              rx="5"
-              fill="none"
-              stroke="var(--accent)"
-              stroke-width="3"
-            />
-            <path
-              d="M10.5 12h11M10.5 16.5h11"
-              fill="none"
-              stroke="var(--accent)"
-              stroke-width="2.5"
-              stroke-linecap="round"
-            />
-            <path
-              d="M10.5 21h6"
-              fill="none"
-              stroke="var(--mark)"
-              stroke-width="2.5"
-              stroke-linecap="round"
-            />
+          <svg viewBox="0 0 30 30" aria-hidden="true">
+            <rect width="30" height="30" rx="4" fill="#f6f5f0" />
+            <path d="M7 8h16v3H7zM7 13.5h11v3H7z" fill="#14161a" />
+            <path d="M7 19h14v3H7z" fill="#1c5cab" />
           </svg>
           Sessionly
         </a>
@@ -98,22 +77,24 @@
     </header>
 
     <main>
-      <section class="hero">
+      <section class="hero band">
         <div class="wrap">
-          <div>
+          <div class="hero-copy">
             <p class="eyebrow">A ledger for AI coding agents</p>
             <h1>
-              What your coding agents did, what it cost,
-              <em>and how much of it survived.</em>
+              <span class="l1">What your agents did.</span>
+              <span class="l2">What it cost.</span>
+              <span>What <em>survived.</em></span>
             </h1>
             <p class="lede">
               Sessionly records every Claude Code, Cursor and Grok session: what was asked, which
-              tools ran, which files changed and what it cost. On each developer's machine first,
-              and for the whole team once you connect a server.
+              tools ran, which files changed and what it cost. Then it counts how many of the
+              agent's lines are still in the file later, and still in the pull request after
+              review.
             </p>
             <div class="actions">
               <a class="btn primary lg" href="#start">Get started</a>
-              <a class="btn lg" href="#how">See how it works</a>
+              <a class="btn link lg" href="#how">See how it works</a>
             </div>
             <p class="fine">
               Open source under Apache-2.0. Nothing leaves a machine until you connect it to a
@@ -122,43 +103,128 @@
           </div>
 
           <div
-            class="term"
-            aria-label="Example: a month of sessions summed per agent, with cost and how many of the agents' lines are still there"
+            class="lines"
+            role="img"
+            aria-label="Example: of eighteen lines one session added, twelve are still in the file and six were rewritten. 67% kept."
           >
-            <header><i></i><i></i><i></i><span>shell</span></header>
-            <pre class="table"><span class="c">$</span> sessionly summary --by tool --since 30d
-<span class="c">TOOL         SESSIONS       COST    ACTIVE  PROMPTS  TOOLS (FAILED)  FILES           LINES      REWRITTEN  LINES KEPT</span>
-Claude Code        64    $412.80   38h 12m      702     15310 (291)    348    +21480 -3112  121/344 (35%)         67%
-Cursor             41     $96.40   11h 05m      389        6204 (0)    183     +7498 -1431   28/178 (16%)         91%
-Grok                9     $18.75    4h 31m       61       1740 (22)     52      +3120 -604    17/52 (33%)         58%
-<span class="c">---------------------------------------------------------------------------------------------------------------------</span>
-total             114    $527.95   53h 48m     1152     23254 (313)    583    +32098 -5147  166/574 (29%)         72%</pre>
+            <div class="lines-head"><span>Lines one session added</span><span>Example</span></div>
+            <div class="lines-rows">
+              <i class="w62"></i><i class="w84"></i><i class="re w71"></i><i class="re w48"></i>
+              <i class="w90"></i><i class="w55"></i><i class="w77"></i><i class="w34"></i>
+              <i class="re w66"></i><i class="re w81"></i><i class="re w43"></i><i class="w88"></i>
+              <i class="w59"></i><i class="w73"></i><i class="re w52"></i><i class="w79"></i>
+              <i class="w40"></i><i class="w68"></i>
+            </div>
+            <div class="lines-foot">
+              <div class="lines-key">
+                <span><i></i>12 still there</span>
+                <span><i class="re"></i>6 rewritten</span>
+              </div>
+              <div class="lines-total"><b>67%</b>kept</div>
+            </div>
           </div>
         </div>
       </section>
 
-      <section class="proof" aria-label="Principles">
+      <section class="ledger">
         <div class="wrap">
-          <div>
-            <b>Local first</b>
-            <span
-              >Capture, parsing and redaction happen on the developer's machine. The command line
-              works without any server.</span
-            >
+          <div class="sheet blue">
+            <div class="sheet-head">
+              <b>$ sessionly summary --by tool --since 30d</b>
+              <span>Example figures</span>
+            </div>
+            <div class="scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Agent</th>
+                    <th scope="col" class="num">Sessions</th>
+                    <th scope="col" class="num">Cost</th>
+                    <th scope="col" class="num">Active</th>
+                    <th scope="col" class="num">Lines added</th>
+                    <th scope="col">Lines still there</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <th scope="row">Claude Code</th>
+                    <td class="num">64</td>
+                    <td class="num">$412.80</td>
+                    <td class="num">38h 12m</td>
+                    <td class="num">+21,480</td>
+                    <td>
+                      <div class="share">
+                        <div class="track"><i class="w67"></i></div>
+                        <b>67%</b>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr>
+                    <th scope="row">Cursor</th>
+                    <td class="num">41</td>
+                    <td class="num">$96.40</td>
+                    <td class="num">11h 05m</td>
+                    <td class="num">+7,498</td>
+                    <td>
+                      <div class="share">
+                        <div class="track"><i class="w91"></i></div>
+                        <b>91%</b>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr>
+                    <th scope="row">Grok</th>
+                    <td class="num">9</td>
+                    <td class="num">$18.75</td>
+                    <td class="num">4h 31m</td>
+                    <td class="num">+3,120</td>
+                    <td>
+                      <div class="share">
+                        <div class="track"><i class="w58"></i></div>
+                        <b>58%</b>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr class="total">
+                    <th scope="row">Total</th>
+                    <td class="num">114</td>
+                    <td class="num">$527.95</td>
+                    <td class="num">53h 48m</td>
+                    <td class="num">+32,098</td>
+                    <td>
+                      <div class="share">
+                        <div class="track"><i class="all w72"></i></div>
+                        <b>72%</b>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
-          <div>
-            <b>Three agents, one record</b>
-            <span
-              >Claude Code, Cursor and Grok sessions sit in the same ledger, so a row means the
-              same thing whichever agent produced it.</span
-            >
-          </div>
-          <div>
-            <b>Survival, not volume</b>
-            <span
-              >Counts how many of an agent's lines are still in the file later, and still in the
-              pull request after review.</span
-            >
+
+          <div class="proof">
+            <div>
+              <h3>Local first</h3>
+              <p>
+                Capture, parsing and redaction happen on the developer's machine. The command line
+                works without any server.
+              </p>
+            </div>
+            <div>
+              <h3>Three agents, one record</h3>
+              <p>
+                Claude Code, Cursor and Grok sessions sit in the same ledger, so a row means the
+                same thing whichever agent produced it.
+              </p>
+            </div>
+            <div>
+              <h3>Survival, not volume</h3>
+              <p>
+                Counts how many of an agent's lines are still in the file later, and still in the
+                pull request after review.
+              </p>
+            </div>
           </div>
         </div>
       </section>
@@ -173,48 +239,71 @@ total             114    $527.95   53h 48m     1152     23254 (313)    583    +3
             uploaded there and shown in a dashboard. What an upload may contain is on the
             <a href="/security">security page</a>.
           </p>
-          <ol class="steps">
-            <li>
-              <h3>Capture</h3>
-              <p>
-                A hook appends each agent event to a local file in 2&ndash;4 ms. It only observes:
-                it cannot block or change a session.
-              </p>
-            </li>
-            <li>
-              <h3>Read</h3>
-              <p>
-                Tokens, models and cost come from the transcripts and session files the agents
-                keep themselves.
-              </p>
-            </li>
-            <li>
-              <h3>Normalize</h3>
-              <p>
-                Both become one record per session in a local SQLite ledger: prompts, tool calls,
-                files, subagents, cost.
-              </p>
-            </li>
-            <li>
-              <h3>Measure</h3>
-              <p>
-                On every sync, the lines each session added are counted again in the files as
-                they are now.
-              </p>
-            </li>
-            <li>
-              <h3>Upload</h3>
-              <p>
-                Only if you connect a server. Paths are made relative and the content level you
-                chose is applied first.
-              </p>
-            </li>
-          </ol>
+          <div class="split stretch">
+            <ol class="steps wide">
+              <li>
+                <h3>Capture</h3>
+                <p>
+                  A hook appends each agent event to a local file in 2–4 ms. It only observes:
+                  it cannot block or change a session.
+                </p>
+              </li>
+              <li>
+                <h3>Read</h3>
+                <p>
+                  Tokens, models and cost come from the transcripts and session files the agents
+                  keep themselves.
+                </p>
+              </li>
+              <li>
+                <h3>Normalize</h3>
+                <p>
+                  Both become one record per session in a local SQLite ledger: prompts, tool calls,
+                  files, subagents, cost.
+                </p>
+              </li>
+              <li>
+                <h3>Measure</h3>
+                <p>
+                  On every sync, the lines each session added are counted again in the files as
+                  they are now.
+                </p>
+              </li>
+              <li>
+                <h3>Upload</h3>
+                <p>
+                  Only if you connect a server. Paths are made relative and the content level you
+                  chose is applied first.
+                </p>
+              </li>
+            </ol>
+            <div class="receipt-stage">
+              <div class="receipt">
+                <header><b>SESSIONLY</b><span>one session · example</span></header>
+                <dl>
+                  <div><dt>Agent</dt><dd>Claude Code</dd></div>
+                  <div><dt>Model</dt><dd>claude-opus-5-5</dd></div>
+                  <div><dt>Prompts</dt><dd>14</dd></div>
+                  <div><dt>Tool calls</dt><dd>212</dd></div>
+                  <div><dt>Files changed</dt><dd>9</dd></div>
+                  <div><dt>Lines added</dt><dd>+486</dd></div>
+                </dl>
+                <dl>
+                  <div class="big"><dt>Cost</dt><dd>$6.42</dd></div>
+                </dl>
+                <dl>
+                  <div><dt>Still there</dt><dd>326 of 486</dd></div>
+                  <div class="big kept"><dt>Lines kept</dt><dd>67%</dd></div>
+                </dl>
+              </div>
+              <p>One record per session, whichever agent wrote it.</p>
+            </div>
+          </div>
           <p class="flow">
-            <code>agent → hook and transcripts → sessionly → ~/.sessionly</code>, then, if
-            connected, <code>upload → Sessionly server → team dashboard</code>.
+            agent → hook and transcripts → sessionly → ~/.sessionly, then, if connected, upload →
+            Sessionly server → team dashboard
           </p>
-          <p class="failnote">
+          <p class="note">
             The ledger is derived data: delete it and <code>sessionly sync --force</code> rebuilds
             it from the raw capture.
           </p>
@@ -225,182 +314,77 @@ total             114    $527.95   53h 48m     1152     23254 (313)    583    +3
         <div class="wrap">
           <p class="eyebrow">What you get</p>
           <h2>The session, the cost, and what became of the code.</h2>
-          <div class="grid">
-            <article class="card">
-              <h3>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  aria-hidden="true"
-                >
-                  <path d="M4 19V5M4 19h16" />
-                  <path d="M8 15l3-4 3 2 5-7" />
-                </svg>
-                Cost you can trace
-              </h3>
+          <div class="cells">
+            <div class="cell">
+              <h3>Cost you can trace</h3>
               <p>
                 Tokens and cost per session, model and subagent, summed per person, repository,
                 model, agent or day. The agent's own recorded figure is used where there is one;
                 an estimate is marked as an estimate.
               </p>
-            </article>
-            <article class="card">
-              <h3>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  aria-hidden="true"
-                >
-                  <path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3" />
-                  <path d="M18 3v4h-4M6 21v-4h4" />
-                </svg>
-                Rewrite rate
-              </h3>
+            </div>
+            <div class="cell">
+              <h3>Rewrite rate</h3>
               <p>
                 For every file a session changed, Sessionly keeps hashes of the lines the agent
                 added and counts how many are still there later. Moved or re-indented code counts
                 as kept.
               </p>
-            </article>
-            <article class="card">
-              <h3>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  aria-hidden="true"
-                >
-                  <rect x="3" y="4" width="18" height="16" rx="2" />
-                  <path d="M7 9l3 3-3 3M12 15h5" />
-                </svg>
-                Search from the terminal
-              </h3>
+            </div>
+            <div class="cell">
+              <h3>Search from the terminal</h3>
               <p>
                 <code>sessionly list</code>, <code>summary</code> and <code>show</code> filter by
                 repository, person, model, agent, file, date and cost, and search prompts and
                 commands. Every command takes <code>--json</code>.
               </p>
-            </article>
-            <article class="card">
-              <h3>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  aria-hidden="true"
-                >
-                  <rect x="3" y="4" width="18" height="16" rx="2" />
-                  <path d="M3 10h18M9 10v10" />
-                </svg>
-                Team dashboard
-              </h3>
+            </div>
+            <div class="cell">
+              <h3>Team dashboard</h3>
               <p>
                 Cost per day; totals by agent, person, repository and model; the files agents
                 changed in each repository; and every session down to its prompts, tools and
                 subagents.
               </p>
-            </article>
-            <article class="card">
-              <h3>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  aria-hidden="true"
-                >
-                  <circle cx="12" cy="12" r="9" />
-                  <path d="M12 7v5l3 2" />
-                </svg>
-                Past sessions
-              </h3>
+            </div>
+            <div class="cell">
+              <h3>Past sessions</h3>
               <p>
                 <code>sessionly import</code> rebuilds sessions from the files the agents still
                 keep, so the ledger does not start empty. On one machine, 100 sessions in 2.5 GB
                 of transcripts took about a minute.
               </p>
-            </article>
-            <article class="card">
-              <h3>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  aria-hidden="true"
-                >
-                  <path d="M3 12h4l3-7 4 14 3-7h4" />
-                </svg>
-                A hook that stays out of the way
-              </h3>
+            </div>
+            <div class="cell">
+              <h3>A hook that stays out of the way</h3>
               <p>
                 The capture hook appends one line and exits. It never prints and always exits 0,
                 whatever its input, so a capture failure cannot block or change your session.
               </p>
-            </article>
-            <article class="card">
-              <h3>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  aria-hidden="true"
-                >
-                  <path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z" />
-                </svg>
-                You choose what is uploaded
-              </h3>
+            </div>
+            <div class="cell">
+              <h3>You choose what is uploaded</h3>
               <p>
                 The default upload has counts, timings and relative paths but no text at all.
                 Previews are opt-in, and <code>sessionly export</code> shows the exact payload
                 before anything is sent.
               </p>
-            </article>
-            <article class="card">
-              <h3>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  aria-hidden="true"
-                >
-                  <circle cx="8" cy="15" r="4" />
-                  <path d="M11 12l9-9M16 7l3 3" />
-                </svg>
-                Tokens and roles
-              </h3>
+            </div>
+            <div class="cell">
+              <h3>Tokens and roles</h3>
               <p>
                 Each token belongs to one person. A member sees their own sessions, an admin sees
                 the team, and a <code>ci</code> token can only report pull requests. Only a hash
                 of each token is stored.
               </p>
-            </article>
-            <article class="card">
-              <h3>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  aria-hidden="true"
-                >
-                  <path d="M4 12h16M4 6h16M4 18h10" />
-                </svg>
-                An open record
-              </h3>
+            </div>
+            <div class="cell">
+              <h3>An open record</h3>
               <p>
                 One session record with a published JSON Schema is the contract between the
                 binary and any server. A test fails if the schema in the repository is stale.
               </p>
-            </article>
+            </div>
           </div>
         </div>
       </section>
@@ -414,43 +398,43 @@ total             114    $527.95   53h 48m     1152     23254 (313)    583    +3
             and each agent's sessions are read from where that agent keeps them. Where an agent
             does not record something, Sessionly says so instead of filling it in.
           </p>
-          <div class="table-wrap">
-            <table>
+          <div class="table-wrap sheet">
+            <table class="cmp">
               <thead>
                 <tr>
-                  <th></th>
-                  <th>Claude Code</th>
-                  <th>Cursor</th>
-                  <th>Grok</th>
+                  <th scope="col"></th>
+                  <th scope="col">Claude Code</th>
+                  <th scope="col">Cursor</th>
+                  <th scope="col">Grok</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
-                  <th>How sessions arrive</th>
+                  <th scope="row">How sessions arrive</th>
                   <td>Hooks as they happen; transcripts for past sessions</td>
                   <td>Its transcript files, plus the hooks, which Cursor also runs</td>
                   <td>Its session files, plus the hooks, which Grok also runs</td>
                 </tr>
                 <tr>
-                  <th>Prompts, tool calls, files and lines changed</th>
+                  <th scope="row">Prompts, tool calls, files and lines changed</th>
                   <td>Yes</td>
                   <td>Yes</td>
                   <td>Yes</td>
                 </tr>
                 <tr>
-                  <th>Subagents</th>
+                  <th scope="row">Subagents</th>
                   <td>Yes</td>
                   <td>Yes</td>
                   <td class="no">Not recorded by Grok</td>
                 </tr>
                 <tr>
-                  <th>Model and tokens</th>
+                  <th scope="row">Model and tokens</th>
                   <td>Per request</td>
                   <td>Per turn, for turns the hooks saw</td>
                   <td>Yes</td>
                 </tr>
                 <tr>
-                  <th>Cost</th>
+                  <th scope="row">Cost</th>
                   <td>Claude Code's recorded total, with an estimate for what it leaves out</td>
                   <td>
                     An estimate at API list prices for turns the hooks saw. Not what Cursor bills
@@ -458,7 +442,7 @@ total             114    $527.95   53h 48m     1152     23254 (313)    583    +3
                   <td>Grok's own figure</td>
                 </tr>
                 <tr>
-                  <th>Rewrite rate</th>
+                  <th scope="row">Rewrite rate</th>
                   <td>Yes</td>
                   <td>Yes</td>
                   <td>Yes</td>
@@ -466,56 +450,82 @@ total             114    $527.95   53h 48m     1152     23254 (313)    583    +3
               </tbody>
             </table>
           </div>
-          <p class="tablenote">
+          <p class="note">
             Checked with Cursor 3.27 and Grok 1.0.77. Sign-in files of either agent are never
             opened.
           </p>
         </div>
       </section>
 
-      <section id="pull-requests">
-        <div class="wrap">
-          <p class="eyebrow">Pull requests</p>
-          <div class="split">
-            <div>
-              <h2>How much of this pull request did an agent write, and how did it fare?</h2>
-              <p class="lede">
-                A GitHub Action reports each pull request to your server, which matches the lines
-                it adds against the lines agents added in uploaded sessions. Both sides send
-                hashes: no source code leaves GitHub or anyone's machine.
-              </p>
-              <ul>
-                <li>
-                  <b>Per pull request</b>: lines added, how many an agent wrote and with which
-                  agent and model, review rounds, and comments by people and by review bots.
-                </li>
-                <li>
-                  <b>By model</b>: the same, summed, so you can see whose lines get through review
-                  as written and whose take several rounds.
-                </li>
-                <li>
-                  <b>A floor, not a guess</b>: a line counts as an agent's only when a session by
-                  someone who committed to the pull request added that line to that file.
-                </li>
-                <li>
-                  <b>Quiet by default</b>: figures go to the run's summary and to a page for
-                  admins. A comment on the pull request is yours to switch on.
-                </li>
-              </ul>
+      <section id="pull-requests" class="pr band">
+        <div class="wrap split center">
+          <div class="wide">
+            <p class="eyebrow">Pull requests</p>
+            <h2>How much of this pull request did an agent write, and how did it fare?</h2>
+            <p class="lede">
+              A GitHub Action reports each pull request to your server, which matches the lines
+              it adds against the lines agents added in uploaded sessions. Both sides send
+              hashes: no source code leaves GitHub or anyone's machine.
+            </p>
+            <ul class="points">
+              <li>
+                <b>Per pull request:</b> lines added, how many an agent wrote and with which
+                agent and model, review rounds, and comments by people and by review bots.
+              </li>
+              <li>
+                <b>By model:</b> the same, summed, so you can see whose lines get through review
+                as written and whose take several rounds.
+              </li>
+              <li>
+                <b>A floor, not a guess:</b> a line counts as an agent's only when a session by
+                someone who committed to the pull request added that line to that file.
+              </li>
+              <li>
+                <b>Quiet by default:</b> figures go to the run's summary and to a page for
+                admins. A comment on the pull request is yours to switch on.
+              </li>
+            </ul>
+          </div>
+          <div class="sheet run">
+            <div class="sheet-head"><b class="caps">Run summary</b><span>Example</span></div>
+            <div class="run-top">
+              <b>78%</b>
+              <span>
+                of the lines this pull request adds were written by a coding agent (1,806 of
+                2,315).
+              </span>
             </div>
-            <div class="term" aria-label="Example: the summary the GitHub Action writes for a run">
-              <header><i></i><i></i><i></i><span>run summary</span></header>
-              <pre><span class="k">Sessionly</span>
-
-78% of the lines this pull request adds were written by a coding agent (1,806 of 2,315).
-
-<span class="c">Tool          Model              Lines</span>
-Claude Code   claude-opus-5-5    1,204
-Cursor        not known            602
-
-Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are still there (92%)</span>.
-
-<span class="c">Counts added lines that have a letter or digit. Everything not matched to an uploaded session, including agents nobody captured, counts as not an agent's.</span></pre>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Tool</th>
+                  <th scope="col">Model</th>
+                  <th scope="col" class="num">Lines</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Claude Code</td>
+                  <td>claude-opus-5-5</td>
+                  <td class="num">1,204</td>
+                </tr>
+                <tr>
+                  <td>Cursor</td>
+                  <td>not known</td>
+                  <td class="num">602</td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="run-foot">
+              <p>Of the 1,790 agent lines it had when it was opened, 1,647 are still there.</p>
+              <div class="share">
+                <div class="track"><i class="w92"></i></div>
+                <b>92%</b>
+              </div>
+              <small>
+                Counts added lines that have a letter or digit. Everything not matched to an
+                uploaded session, including agents nobody captured, counts as not an agent's.
+              </small>
             </div>
           </div>
         </div>
@@ -530,55 +540,55 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
             and <code>sessionly export &lt;session&gt;</code> prints exactly what would be sent,
             connected or not.
           </p>
-          <div class="table-wrap">
-            <table>
+          <div class="table-wrap sheet">
+            <table class="cmp">
               <thead>
                 <tr>
-                  <th></th>
-                  <th>On the machine</th>
-                  <th class="hl">Uploaded: <code>metadata</code> (default)</th>
-                  <th>Uploaded: <code>previews</code> (opt in)</th>
+                  <th scope="col"></th>
+                  <th scope="col">On the machine</th>
+                  <th scope="col" class="hl">Uploaded: <code>metadata</code> (default)</th>
+                  <th scope="col">Uploaded: <code>previews</code> (opt in)</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
-                  <th>Full prompts, file contents, command output</th>
+                  <th scope="row">Full prompts, file contents, command output</th>
                   <td>In the raw capture, readable only by you</td>
-                  <td class="hl">Never</td>
-                  <td>Never</td>
+                  <td class="hl never">Never</td>
+                  <td class="never">Never</td>
                 </tr>
                 <tr>
-                  <th>Prompts</th>
+                  <th scope="row">Prompts</th>
                   <td>Length, hash, first 200 characters</td>
                   <td class="hl">Length only</td>
                   <td>First 200 characters and the hash</td>
                 </tr>
                 <tr>
-                  <th>Commands, search patterns, URLs, errors</th>
+                  <th scope="row">Commands, search patterns, URLs, errors</th>
                   <td>One line each, up to 200 characters</td>
                   <td class="hl">No text</td>
                   <td>One line each, up to 200 characters</td>
                 </tr>
                 <tr>
-                  <th>File paths</th>
+                  <th scope="row">File paths</th>
                   <td>Absolute</td>
                   <td class="hl">Relative to the repository, or to <code>~/</code></td>
                   <td>Relative to the repository, or to <code>~/</code></td>
                 </tr>
                 <tr>
-                  <th>Counts, timings, tool names, models, tokens, cost</th>
+                  <th scope="row">Counts, timings, tool names, models, tokens, cost</th>
                   <td>Yes</td>
                   <td class="hl">Yes</td>
                   <td>Yes</td>
                 </tr>
                 <tr>
-                  <th>Git name, email and remote</th>
+                  <th scope="row">Git name, email and remote</th>
                   <td>Yes</td>
                   <td class="hl">Yes</td>
                   <td>Yes</td>
                 </tr>
                 <tr>
-                  <th>Hashes of the lines an agent added</th>
+                  <th scope="row">Hashes of the lines an agent added</th>
                   <td>Yes</td>
                   <td class="hl">Only if switched on</td>
                   <td>Only if switched on</td>
@@ -586,7 +596,7 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
               </tbody>
             </table>
           </div>
-          <p class="tablenote">
+          <p class="note">
             A preview can contain anything that was typed or run, including a secret. Line hashes
             are what pull request attribution needs; a hash does not give the line back, but a
             short or common line can be guessed and checked against it.
@@ -602,7 +612,7 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
             Everything on this page is in the open-source edition. It never needs a license key.
           </p>
           <div class="plans">
-            <article class="plan featured">
+            <div class="plan sheet featured">
               <h3>Open source</h3>
               <p class="price">Free</p>
               <p class="for">Apache-2.0, on your machines and your server.</p>
@@ -614,8 +624,8 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
                 <li>One Docker Compose file to self-host</li>
               </ul>
               <a class="btn primary" href="#start">Get started</a>
-            </article>
-            <article class="plan">
+            </div>
+            <div class="plan sheet">
               <h3>Business and Enterprise</h3>
               <p class="price">By quote</p>
               <p class="for">A signed license file for your self-hosted server.</p>
@@ -631,8 +641,8 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
               <a class="btn" href="mailto:support@sessionly.dev?subject=Sessionly%20license"
                 >Ask about a license</a
               >
-            </article>
-            <article class="plan">
+            </div>
+            <div class="plan sheet">
               <h3>Hosted</h3>
               <p class="price">Not open yet</p>
               <p class="for">The same server, run for you.</p>
@@ -641,12 +651,12 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
                 <li>The same content levels: metadata by default, previews opt-in</li>
                 <li>Until it opens, self-hosting is how a team runs Sessionly</li>
               </ul>
-              <a class="btn" href="mailto:support@sessionly.dev?subject=Hosted%20Sessionly"
+              <a class="btn" href="mailto:support@sessionly.dev?subject=Sessionly%20hosted"
                 >Tell me when it opens</a
               >
-            </article>
+            </div>
           </div>
-          <p class="plannote">
+          <p class="note">
             Sessionly is early. There are no packaged releases yet (you build the binary with
             Cargo), and sign-in to the dashboard is by token. The
             <a href="https://github.com/KIvanow/sessionly#readme">README</a> says what works today.
@@ -664,7 +674,7 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
                 Build the binary, install the hooks and import the sessions your agents still
                 have. Listing, search, summaries and the rewrite rate all work without a server.
               </p>
-              <ul>
+              <ul class="points">
                 <li>
                   <b>Careful with your settings.</b> Only Sessionly's own hook entries are added
                   or removed, and the settings file as it was is saved beside it.
@@ -679,14 +689,13 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
                 </li>
               </ul>
             </div>
-            <div class="term" aria-label="Commands to install Sessionly on one machine">
-              <header><i></i><i></i><i></i><span>one machine</span></header>
-              <pre><span class="c">$</span> git clone https://github.com/KIvanow/sessionly &amp;&amp; cd sessionly
-<span class="c">$</span> cargo install --path crates/sessionly   <span class="c"># Rust 1.89 or later</span>
-
+            <div class="term wide" aria-label="Commands to install Sessionly on one machine">
+              <header>One machine</header>
+              <pre><span class="c">$</span> git clone https://github.com/KIvanow/sessionly
+<span class="c">$</span> cd sessionly
+<span class="c">$</span> cargo install --path crates/sessionly  <span class="c"># Rust 1.89 or later</span>
 <span class="c">$</span> sessionly install   <span class="c"># adds hooks to ~/.claude/settings.json</span>
 <span class="c">$</span> sessionly import    <span class="c"># past sessions of all three agents</span>
-
 <span class="c">$</span> sessionly list
 <span class="c">$</span> sessionly summary --by tool
 <span class="c">$</span> sessionly show &lt;session&gt;</pre>
@@ -700,7 +709,7 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
                 It starts the server, the dashboard and Postgres. Each developer connects their
                 machine once; after that, sessions upload on their own when a turn ends.
               </p>
-              <ul>
+              <ul class="points">
                 <li>
                   <b>Put it behind HTTPS.</b> The binary refuses plain <code>http://</code> for
                   anything but a server on the same machine.
@@ -713,13 +722,11 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
                 </li>
               </ul>
               <p class="more">
-                <a class="btn" href="https://github.com/KIvanow/sessionly#server"
-                  >Read the server guide</a
-                >
+                <a href="https://github.com/KIvanow/sessionly#server">Read the server guide</a>
               </p>
             </div>
-            <div class="term" aria-label="Commands to run a Sessionly server and connect a machine">
-              <header><i></i><i></i><i></i><span>a team</span></header>
+            <div class="term wide" aria-label="Commands to run a Sessionly server and connect to it">
+              <header>A team</header>
               <pre><span class="c"># on the server</span>
 <span class="c">$</span> SESSIONLY_ADMIN_TOKEN=choose-a-long-secret \
     docker compose up -d
@@ -748,9 +755,8 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
         </div>
       </section>
 
-      <section class="final">
+      <section class="final band">
         <div class="wrap">
-          <p class="eyebrow">Get started</p>
           <h2>Start with one machine. Add the team when the numbers are useful.</h2>
           <p class="lede">
             The code, the session record's schema and the limits of every figure are in the
@@ -758,7 +764,7 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
           </p>
           <div class="actions">
             <a class="btn primary lg" href="#start">Get started</a>
-            <a class="btn lg" href="https://github.com/KIvanow/sessionly">Read the code</a>
+            <a class="btn link lg" href="https://github.com/KIvanow/sessionly">Read the code</a>
           </div>
         </div>
       </section>
@@ -768,31 +774,10 @@ Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are s
       <div class="wrap">
         <div>
           <a class="brand" href="/">
-            <svg viewBox="0 0 32 32" aria-hidden="true">
-              <rect
-                x="4.5"
-                y="4.5"
-                width="23"
-                height="23"
-                rx="5"
-                fill="none"
-                stroke="var(--accent)"
-                stroke-width="3"
-              />
-              <path
-                d="M10.5 12h11M10.5 16.5h11"
-                fill="none"
-                stroke="var(--accent)"
-                stroke-width="2.5"
-                stroke-linecap="round"
-              />
-              <path
-                d="M10.5 21h6"
-                fill="none"
-                stroke="var(--mark)"
-                stroke-width="2.5"
-                stroke-linecap="round"
-              />
+            <svg viewBox="0 0 30 30" aria-hidden="true">
+              <rect width="30" height="30" rx="4" fill="#f6f5f0" />
+              <path d="M7 8h16v3H7zM7 13.5h11v3H7z" fill="#14161a" />
+              <path d="M7 19h14v3H7z" fill="#1c5cab" />
             </svg>
             Sessionly
           </a>
