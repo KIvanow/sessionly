@@ -37,7 +37,7 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
         <a href="#/sessions">← Sessions</a>
       </p>
       <section className="card">
-        <h2>{s.title || (hasText && s.prompts?.[0]?.text?.preview) || `Session ${s.session_id?.slice(0, 8)}`}</h2>
+        <h2>{s.title || (hasText && s.prompts?.find((p) => p.text?.preview)?.text?.preview) || `Session ${s.session_id?.slice(0, 8)}`}</h2>
         <dl className="facts">
           <Fact label="Person" value={found.data.owner_email} />
           <Fact label="Tool" value={toolName(s.source ?? "")} />
@@ -143,7 +143,14 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
                 {(s.prompts ?? []).map((p, i) => (
                   <tr key={i}>
                     <td className="nowrap">{dateTime(p.at)}</td>
-                    <td className="title">{hasText && p.text?.preview ? p.text.preview : `${count(p.text?.chars ?? 0)} characters`}</td>
+                    <td className="title">
+                      {hasText && p.text?.preview
+                        ? p.text.preview
+                        : // A cloud agent's opening prompt may never reach a hook.
+                          i === 0 && s.captured_from_start === false && !p.text?.chars
+                          ? "not captured"
+                          : `${count(p.text?.chars ?? 0)} characters`}
+                    </td>
                     <td className="num">{p.at && p.ended_at ? duration(Date.parse(p.ended_at) - Date.parse(p.at)) : "–"}</td>
                     <td>{p.outcome === "completed" ? "completed" : p.outcome === "api_error" ? `API error${p.error ? `: ${p.error}` : ""}` : noEnd}</td>
                   </tr>

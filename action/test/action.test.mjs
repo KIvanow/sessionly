@@ -173,6 +173,11 @@ test("the figures as text", () => {
   assert.match(render(build(), none), /No lines of this pull request were matched/);
   const empty = { first: { lines: 0, agent_lines: 0 }, now: { lines: 0, agent_lines: 0, by: [] }, by: [] };
   assert.match(render(build(), empty), /adds no lines to track/);
+  // a cloud agent's pull request whose session nobody captured says so
+  const uncaptured = { ...none, cloud: { agents: ["cursor"], sessions: 0 } };
+  assert.match(render(build(), uncaptured), /A cloud agent worked on this pull request \(Cursor\), and no session of it was captured/);
+  assert.doesNotMatch(render(build(), { ...ATTRIBUTION, cloud: { agents: ["cursor"], sessions: 1 } }), /cloud agent/);
+  assert.doesNotMatch(render(build(), { ...ATTRIBUTION, cloud: null }), /cloud agent/);
 });
 
 test("events are named for the server", () => {

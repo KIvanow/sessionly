@@ -126,6 +126,17 @@ export function render(report, attribution) {
       ...now.by.map((b) => `| ${TOOLS[b.tool] ?? b.tool} | ${b.model ?? "not known"} | ${count(b.lines)} |`),
     );
   }
+  // A cloud agent commits under its own name: without its session, what it
+  // wrote cannot be told from what a person wrote.
+  const cloud = attribution.cloud;
+  if (cloud && cloud.sessions === 0 && now.lines > 0) {
+    const agents = cloud.agents.map((tool) => TOOLS[tool] ?? tool).join(" and ");
+    out.push(
+      "",
+      `A cloud agent worked on this pull request (${agents}), and no session of it was captured, ` +
+        "so its lines count as not an agent's. `sessionly install --repo` in the repository captures them.",
+    );
+  }
   const surviving = by.reduce((sum, b) => sum + b.surviving, 0);
   // What review changed is only known for a pull request reported since it was opened.
   const changed = attribution.from_open && report.event !== "opened" && first.agent_lines > 0;

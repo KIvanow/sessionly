@@ -17,7 +17,9 @@ tokens.
 
 ```
 Claude Code ──hooks────────┐
-Cursor, Grok ──their files─┴─▶ sessionly (local Rust binary) ──▶ ~/.sessionly/   (raw + normalized sessions)
+Cursor, Grok ──their files─┼─▶ sessionly (local Rust binary) ──▶ ~/.sessionly/   (raw + normalized sessions)
+cloud agents ──hooks a ────┘             │
+               repository carries        │
                                          │
                                          └──upload──▶ Sessionly server, hosted or self-hosted (TypeScript)
                                                                └─ team dashboard
@@ -25,7 +27,7 @@ Cursor, Grok ──their files─┴─▶ sessionly (local Rust binary) ──�
 
 - **Local binary (Rust, `crates/sessionly`).** Captures hook events, parses transcripts,
   normalizes sessions, keeps the local ledger and, later, uploads to a server. All parsing and
-  redaction happens on the developer's machine.
+  redaction happens on the developer's machine, or for a cloud session in its sandbox.
 - **Server and dashboard (TypeScript, `apps/server` and `apps/web`).** Receives normalized
   sessions, aggregates them per team, and serves the manager view. The same code runs hosted or
   self-hosted.

@@ -34,6 +34,17 @@ pnpm install
 pnpm typecheck && pnpm test && pnpm build
 ```
 
+## Releases
+
+A release is made by pushing a tag: set `version` in `crates/sessionly/Cargo.toml`, commit
+(with the updated `Cargo.lock`), and push the tag `v<version>` on that commit. The Release
+workflow builds the Linux and macOS binaries and publishes them with `SHA256SUMS`; it stops if
+the tag and the version disagree. Run by hand from the Actions page, the workflow builds the
+same archives without publishing, which is a way to try the build.
+
+A published archive is never replaced: the script that `sessionly install --repo` writes into
+other people's repositories carries its checksum. A fix is a new version.
+
 ## Prices
 
 Model prices live in `crates/sessionly/src/pricing.rs`. Never guess one: a model without a

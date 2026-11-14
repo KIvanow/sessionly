@@ -163,6 +163,13 @@ export function Team({ token, onSignOut }: { token: string; onSignOut: () => voi
               Token for <strong>{created.email}</strong>. Copy it now: it is not shown again.
             </p>
             <code>{created.token}</code>
+            {created.role === "env" && (
+              <p>
+                Give it to the cloud environment as the secret <code>SESSIONLY_TOKEN</code>, with{" "}
+                <code>SESSIONLY_URL</code> set to <code>{location.origin}</code>. Anyone holding it can upload a
+                session in anyone's name, so keep it there and nowhere else.
+              </p>
+            )}
             <button onClick={() => navigator.clipboard?.writeText(created.token)}>Copy</button>
             <button className="quiet" onClick={() => setCreated(null)}>Done</button>
           </div>
