@@ -85,6 +85,12 @@
                 requests and nothing else.
               </li>
               <li>
+                Sessions of cloud agents are captured by a script committed to your repository.
+                In a sandbox it fetches one fixed version of the program and runs it only if its
+                checksum matches. Where those sessions are sent is set in the cloud environment,
+                never in the repository.
+              </li>
+              <li>
                 Nothing phones home: no telemetry, no update checks, and licenses are verified
                 offline.
               </li>
@@ -169,9 +175,11 @@
 
           <h2>What leaves the machine</h2>
           <p>
-            Nothing, until you run <code>sessionly connect</code>. The program has one network
-            connection: the upload to the server you connected. It sends no telemetry and does not
-            check for updates. Once connected, before a record is uploaded:
+            Nothing, until you run <code>sessionly connect</code>. The program makes one kind of
+            network connection on its own: the upload to the server you connected. It sends no
+            telemetry and does not check for updates. The one other command that reaches the
+            network is <code>sessionly install --repo</code>, which reads a release's checksums
+            from GitHub unless you give it a file. Once connected, before a record is uploaded:
           </p>
           <ul>
             <li>
@@ -205,6 +213,45 @@
             the <code>Authorization</code> header.
           </p>
 
+          <h2>In a cloud agent's sandbox</h2>
+          <p>
+            A Claude Code session on the web or a Cursor cloud agent runs in a sandbox the platform
+            starts, where nothing from a developer's machine exists. Capture there is set up by
+            <code>sessionly install --repo</code>, which writes a script,
+            <code>.sessionly/hook.sh</code>, and hook entries that run it, for you to commit.
+          </p>
+          <ul>
+            <li>
+              <strong>The script</strong> does nothing on a person's own machine. In a sandbox it
+              downloads the program, of the one version named in the script, from the project's
+              GitHub releases, once per sandbox, and runs it only if the download's SHA-256 is
+              the one written into the script. It prints nothing and always exits 0. As with any
+              hook a repository carries, whoever can change the script can change what runs in
+              the sandbox: review changes to it as you would code.
+            </li>
+            <li>
+              <strong>Where sessions are sent</strong> is not in the repository. The server's
+              address and a token are given to the cloud environment as secrets. The program
+              reads them from the environment and does not write them to disk. Without them the
+              session stays in the sandbox and goes when it does.
+            </li>
+            <li>
+              <strong>Who started the session</strong> is asked of the platform, since git in a
+              sandbox is set up as the agent: Claude Code names the person in the sandbox's
+              environment, Cursor through a socket it serves inside the sandbox. From it the
+              program reads the agent's id, what started it and the person's email address,
+              and nothing else.
+            </li>
+            <li>
+              <strong>What a shell command changed</strong> is found by comparing the working
+              tree before and after the command, with git and an index and object store of the
+              program's own under <code>~/.sessionly</code>. The repository's own index, objects
+              and HEAD are not written. The changed lines are kept in the sandbox's capture like
+              any other edit, and an upload carries of them what it carries of any edit: counts,
+              and hashes only if line hashes are switched on.
+            </li>
+          </ul>
+
           <h2>On the server</h2>
           <ul>
             <li>
@@ -216,12 +263,17 @@
               <strong>Roles.</strong> A <code>member</code> token uploads sessions and reads only
               the sessions filed under its owner. An <code>admin</code> token reads everyone's and
               manages tokens. A <code>ci</code> token, for the GitHub Action, can report pull
-              requests and check that it is accepted; every other request is refused.
+              requests and check that it is accepted; every other request is refused. An
+              <code>env</code> token, for a cloud environment, can upload sessions and check
+              that it is accepted; every other request is refused.
             </li>
             <li>
               <strong>Ownership.</strong> An upload is filed under the owner of the token that
               sent it, whatever name the record carries, and a session uploaded by one person
-              cannot be replaced by another.
+              cannot be replaced by another. The one exception is an <code>env</code> token: a
+              cloud session it uploads is filed under the person the platform named. Whoever
+              holds such a token can therefore upload a session in anyone's name, so it belongs
+              in a cloud environment's secrets and nowhere else.
             </li>
             <li>
               <strong>Validation.</strong> Every upload is checked against the published schema
@@ -314,7 +366,8 @@
             </li>
             <li>
               <strong>Identity is a label.</strong> The name and email in a record come from git
-              configuration and are not verified. The server trusts the token, not the name.
+              configuration, or for a cloud session from the platform, and are not verified. The
+              server trusts the token, not the name.
             </li>
             <li>
               <strong>Anyone with your user account can read the capture.</strong> File

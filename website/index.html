@@ -58,6 +58,7 @@
         <nav aria-label="Sections">
           <a href="#how">How it works</a>
           <a href="#features">Features</a>
+          <a href="#cloud">Cloud</a>
           <a href="#pull-requests">Pull requests</a>
           <a href="#uploads">What is uploaded</a>
           <a href="#editions">Editions</a>
@@ -69,6 +70,7 @@
             <a href="#how">How it works</a>
             <a href="#features">Features</a>
             <a href="#agents">Agents</a>
+            <a href="#cloud">Cloud agents</a>
             <a href="#pull-requests">Pull requests</a>
             <a href="#uploads">What is uploaded</a>
             <a href="#editions">Editions</a>
@@ -381,8 +383,9 @@
               <h3>Tokens and roles</h3>
               <p>
                 Each token belongs to one person. A member sees their own sessions, an admin sees
-                the team, and a <code>ci</code> token can only report pull requests. Only a hash
-                of each token is stored.
+                the team, a <code>ci</code> token can only report pull requests, and an
+                <code>env</code> token, for a cloud environment, can only upload. Only a hash of
+                each token is stored.
               </p>
             </div>
             <div class="cell">
@@ -464,6 +467,119 @@
         </div>
       </section>
 
+      <section id="cloud">
+        <div class="wrap">
+          <p class="eyebrow">Cloud agents</p>
+          <h2>Sessions that run in the cloud are in the ledger too.</h2>
+          <p class="lede">
+            A Claude Code session on the web or a Cursor cloud agent runs in a sandbox the platform
+            starts, with a fresh clone of your repository and nothing from your machine. Both
+            platforms run the hooks a repository carries, so that is where capture goes: one
+            command writes a small script and its hook entries, and you commit them.
+          </p>
+          <div class="split">
+            <div>
+              <ul class="points">
+                <li>
+                  <b>Nothing to set up in the sandbox.</b> The script fetches the
+                  <code>sessionly</code> binary once per sandbox and runs it only if it matches the
+                  SHA-256 checksum written into the script. On a person's own machine the script
+                  does nothing.
+                </li>
+                <li>
+                  <b>Filed under whoever started it.</b> Git in a sandbox is set up as the agent,
+                  so the person is the one the platform names.
+                </li>
+                <li>
+                  <b>Shell edits count.</b> In a sandbox an agent often edits with
+                  <code>sed</code> or a heredoc instead of its file tools. The working tree is
+                  compared before and after each shell command, so those lines are in the session,
+                  the rewrite rate and the pull request figures.
+                </li>
+                <li>
+                  <b>Sent when a turn ends.</b> A sandbox may be gone minutes later. Where sessions
+                  go is set in the cloud environment, not in the repository; without it nothing
+                  leaves the sandbox.
+                </li>
+                <li>
+                  <b>Tied to its pull request by branch.</b> A cloud agent commits under its own
+                  name, so its session is matched to the pull request of the branch it pushed. A
+                  cloud agent's pull request with no captured session is marked as such.
+                </li>
+              </ul>
+              <p class="more">
+                <a href="https://github.com/KIvanow/sessionly#cloud-sessions"
+                  >Read the cloud sessions guide</a
+                >
+              </p>
+            </div>
+            <div class="term wide" aria-label="Commands to capture cloud sessions of a repository">
+              <header>A repository</header>
+              <pre><span class="c"># in the repository's root</span>
+<span class="c">$</span> sessionly install --repo
+<span class="c">$</span> git add .sessionly .claude/settings.json \
+    .cursor/hooks.json
+<span class="c">$</span> git commit -m "Capture cloud agent sessions"
+
+<span class="c"># in the cloud environment, as secrets</span>
+SESSIONLY_URL=https://sessionly.example.com
+SESSIONLY_TOKEN=sly_…   <span class="c"># a token with the env role</span>
+
+<span class="c"># optional: the line hashes pull requests need</span>
+SESSIONLY_LINE_HASHES=on</pre>
+            </div>
+          </div>
+          <div class="table-wrap sheet">
+            <table class="cmp">
+              <thead>
+                <tr>
+                  <th scope="col"></th>
+                  <th scope="col">Claude Code on the web</th>
+                  <th scope="col">Cursor cloud agents</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">How sessions arrive</th>
+                  <td>The repository's hooks, and the transcript Claude Code keeps in the sandbox</td>
+                  <td>The repository's hooks only: Cursor's cloud keeps no transcript</td>
+                </tr>
+                <tr>
+                  <th scope="row">Prompts</th>
+                  <td>Yes</td>
+                  <td>
+                    Yes, except that the prompt an agent is started with does not always reach
+                    the hooks. Its turn is then kept and marked as not captured
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row">Tool calls, files and lines changed</th>
+                  <td>Yes, shell edits included</td>
+                  <td>Yes, shell edits included</td>
+                </tr>
+                <tr>
+                  <th scope="row">Model, tokens and cost</th>
+                  <td>As on a developer's machine</td>
+                  <td class="no">The model only. Cursor's cloud gives hooks no token counts</td>
+                </tr>
+                <tr>
+                  <th scope="row">Reaching your server</th>
+                  <td>Once its host is on the environment's list of allowed domains</td>
+                  <td>As it is</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="note">
+            Capture was checked in real sessions on both platforms on 14 November 2026, with
+            Sessionly 0.3. Shell edits are counted only in a sandbox: on a person's machine,
+            whatever the person saved while a command ran would be put down to the agent. Claude
+            Code's documentation says a repository's hooks are not loaded in sessions over several
+            repositories or started from Slack; that was not tried.
+          </p>
+        </div>
+      </section>
+
       <section id="pull-requests" class="pr band">
         <div class="wrap split center">
           <div class="wide">
@@ -485,7 +601,8 @@
               </li>
               <li>
                 <b>A floor, not a guess:</b> a line counts as an agent's only when a session by
-                someone who committed to the pull request added that line to that file.
+                someone who committed to the pull request added that line to that file. A cloud
+                session counts when it ran on the pull request's branch.
               </li>
               <li>
                 <b>Quiet by default:</b> figures go to the run's summary and to a page for
@@ -627,7 +744,7 @@
                 <li>The <code>sessionly</code> binary: capture, ledger, rewrite rate, upload</li>
                 <li>Server and team dashboard</li>
                 <li>Pull request attribution and the GitHub Action</li>
-                <li>Claude Code, Cursor and Grok</li>
+                <li>Claude Code, Cursor and Grok, on a machine or in the cloud</li>
                 <li>One Docker Compose file to self-host</li>
               </ul>
               <a class="btn primary" href="#start">Get started</a>
@@ -664,8 +781,10 @@
             </div>
           </div>
           <p class="note">
-            Sessionly is early. There are no packaged releases yet (you build the binary with
-            Cargo), and sign-in to the dashboard is by token. The
+            Sessionly is early. A
+            <a href="https://github.com/KIvanow/sessionly/releases">release</a> is a binary for
+            Linux or macOS to unpack, with no installer yet, and sign-in to the dashboard is by
+            token. The
             <a href="https://github.com/KIvanow/sessionly#readme">README</a> says what works today.
           </p>
         </div>
@@ -678,8 +797,11 @@
             <div>
               <h2>On your own machine in a few minutes.</h2>
               <p class="lede">
-                Build the binary, install the hooks and import the sessions your agents still
-                have. Listing, search, summaries and the rewrite rate all work without a server.
+                Unpack the binary from a
+                <a href="https://github.com/KIvanow/sessionly/releases">release</a> (Linux or
+                macOS) or build it with Cargo, install the hooks and import the sessions your
+                agents still have. Listing, search, summaries and the rewrite rate all work
+                without a server.
               </p>
               <ul class="points">
                 <li>
@@ -698,9 +820,9 @@
             </div>
             <div class="term wide" aria-label="Commands to install Sessionly on one machine">
               <header>One machine</header>
-              <pre><span class="c">$</span> git clone https://github.com/KIvanow/sessionly
-<span class="c">$</span> cd sessionly
-<span class="c">$</span> cargo install --path crates/sessionly  <span class="c"># Rust 1.89 or later</span>
+              <pre><span class="c"># a release's archive for your system, from GitHub</span>
+<span class="c">$</span> tar -xzf sessionly-*.tar.gz
+<span class="c">$</span> mv sessionly ~/.local/bin/   <span class="c"># or anywhere on your PATH</span>
 <span class="c">$</span> sessionly install   <span class="c"># adds hooks to ~/.claude/settings.json</span>
 <span class="c">$</span> sessionly import    <span class="c"># past sessions of all three agents</span>
 <span class="c">$</span> sessionly list
@@ -755,8 +877,8 @@
               Cost is the agent's own recorded figure where there is one and an estimate from
               token counts elsewhere; it is not an invoice. The rewrite rate measures whether
               lines survived, not whether they were good or why they changed. The agent share of
-              a pull request is a floor. Names and emails come from git config: a label, not a
-              verified identity.
+              a pull request is a floor. Names and emails come from git config, or for a cloud
+              session from the platform: a label, not a verified identity.
             </p>
           </div>
         </div>

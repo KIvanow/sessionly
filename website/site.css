@@ -276,6 +276,13 @@ footer :focus-visible {
     display: none;
   }
 }
+/* Six links need a little less room each until the window is wider. */
+@media (min-width: 1020px) and (max-width: 1179px) {
+  .top nav a {
+    padding: 8px 7px;
+    font-size: 14px;
+  }
+}
 
 /* Buttons */
 .btn {
