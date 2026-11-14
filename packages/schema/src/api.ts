@@ -12,6 +12,8 @@ export type Role = "admin" | "member" | "ci" | "env";
 
 export interface Me {
   ok: true;
+  /** The organisation the token belongs to: "default" on a self-hosted install. */
+  org: string;
   email: string;
   name: string | null;
   role: Role;

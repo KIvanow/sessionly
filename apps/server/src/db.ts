@@ -46,7 +46,7 @@ async function enter(tx: Queryable, orgId: string): Promise<OrgDb> {
  * `postgres://…` connects to a Postgres server. `memory://` is an in-memory
  * database for tests. Anything else is a folder for an embedded database.
  */
-export async function openDb(url: string): Promise<Db> {
+export async function openDb(url: string, options: { migrations?: number } = {}): Promise<Db> {
   let db: Db;
   if (/^postgres(ql)?:\/\//.test(url)) {
     const pool = new pg.Pool({ connectionString: url, max: Number(process.env.SESSIONLY_DB_POOL ?? 10) });
@@ -107,7 +107,9 @@ export async function openDb(url: string): Promise<Db> {
       close: () => lite.close(),
     };
   }
-  await runMigrations(db, "migrations", MIGRATIONS);
+  // `migrations` stops short of the newest ones: how a test gets a database
+  // as an older server left it.
+  await runMigrations(db, "migrations", MIGRATIONS.slice(0, options.migrations));
   return db;
 }
 
@@ -254,6 +256,9 @@ const MIGRATIONS: string[] = [
   ...["tokens", "sessions", "pull_requests"].flatMap((table) => rowLevelSecurity(table)),
   ...rowLevelSecurity("orgs", "id"),
 ];
+
+/** Where the migrations that brought organisations begin. */
+export const FIRST_ORG_MIGRATION = MIGRATIONS.findIndex((sql) => sql.startsWith("CREATE TABLE orgs"));
 
 /**
  * The statements that confine a table to the organisation of the transaction.

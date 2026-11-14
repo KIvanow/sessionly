@@ -166,40 +166,37 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
   api.get("/ping", (c) => c.json(whoami(c.get("principal"))));
   api.get("/me", (c) => c.json(whoami(c.get("principal"))));
 
-  api.put(
-    "/sessions/:machine/:source/:session",
-    async (c) => {
-      let body: unknown;
-      try {
-        body = await c.req.json();
-      } catch {
-        return c.json({ error: "the body is not JSON" }, 400);
-      }
-      const problems = uploadProblems(body);
-      if (problems) return c.json({ error: "the upload does not match the schema", problems }, 422);
-      const upload = body as Upload;
-      const s = upload.session ?? {};
-      const { machine, source, session } = c.req.param();
-      if (!s.machine_id || !s.source || !s.session_id) {
-        return c.json({ error: "session.machine_id, source and session_id are required" }, 422);
-      }
-      if (s.machine_id !== machine || s.source !== source || s.session_id !== session) {
-        return c.json({ error: "the address does not match the session in the body" }, 422);
-      }
-      if (s.content === "local") {
-        return c.json({ error: "local records are not for upload; send previews or metadata" }, 422);
-      }
-      let stored: boolean;
-      try {
-        stored = await storeUpload(c.get("db"), upload, c.get("principal"));
-      } catch (err) {
-        if (err instanceof Conflict) return c.json({ error: err.message }, 409);
-        throw err;
-      }
-      // Not stored: the server already has more of this cloud session.
-      return c.json({ stored });
-    },
-  );
+  api.put("/sessions/:machine/:source/:session", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "the body is not JSON" }, 400);
+    }
+    const problems = uploadProblems(body);
+    if (problems) return c.json({ error: "the upload does not match the schema", problems }, 422);
+    const upload = body as Upload;
+    const s = upload.session ?? {};
+    const { machine, source, session } = c.req.param();
+    if (!s.machine_id || !s.source || !s.session_id) {
+      return c.json({ error: "session.machine_id, source and session_id are required" }, 422);
+    }
+    if (s.machine_id !== machine || s.source !== source || s.session_id !== session) {
+      return c.json({ error: "the address does not match the session in the body" }, 422);
+    }
+    if (s.content === "local") {
+      return c.json({ error: "local records are not for upload; send previews or metadata" }, 422);
+    }
+    let stored: boolean;
+    try {
+      stored = await storeUpload(c.get("db"), upload, c.get("principal"));
+    } catch (err) {
+      if (err instanceof Conflict) return c.json({ error: err.message }, 409);
+      throw err;
+    }
+    // Not stored: the server already has more of this cloud session.
+    return c.json({ stored });
+  });
 
   api.get("/summary", async (c) => {
     const query = c.req.query();
@@ -248,21 +245,18 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
     }
     return { repo: query.repo || undefined, state, since: time(query.since, "since") };
   };
-  api.put(
-    "/prs",
-    async (c) => {
-      if (c.get("principal").role === "member") {
-        return c.json({ error: "reporting pull requests needs a ci or admin token" }, 403);
-      }
-      let body: unknown;
-      try {
-        body = await c.req.json();
-      } catch {
-        return c.json({ error: "the body is not JSON" }, 400);
-      }
-      return c.json({ stored: true, attribution: await storePull(c.get("db"), body) });
-    },
-  );
+  api.put("/prs", async (c) => {
+    if (c.get("principal").role === "member") {
+      return c.json({ error: "reporting pull requests needs a ci or admin token" }, 403);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "the body is not JSON" }, 400);
+    }
+    return c.json({ stored: true, attribution: await storePull(c.get("db"), body) });
+  });
   api.get("/prs/summary", async (c) => {
     adminsOnly(c.get("principal"));
     return c.json(await summarizePulls(c.get("db"), pullFilters(c.req.query())));

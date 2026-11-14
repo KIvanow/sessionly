@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { createApp, openDb, type Db } from "@sessionly/server";
+import { createHash } from "node:crypto";
+import { createApp, testDb, type Db } from "@sessionly/server";
 import { eeApi } from "../src/api.ts";
 import { Entitlements } from "../src/entitlements.ts";
 import { GRACE_MS, signLicense } from "../src/license/license.ts";
@@ -14,7 +15,7 @@ const ADMIN = "admin-secret";
 let member = "";
 
 before(async () => {
-  db = await openDb("memory://");
+  db = await testDb();
   await migrateEe(db);
   await migrateEe(db); // running it again changes nothing
   const ent = new Entitlements(() => clock.now, issuer.publicKey, 0);
@@ -81,6 +82,40 @@ test("only a valid license for this org, installed by an admin, is accepted", as
   assert.equal(ok.body.license.seats, 25);
   assert.deepEqual(ok.body.license.features, ["content_policy"]);
   assert.equal(ok.body.readOnlyAt, new Date(Date.parse("2027-01-01T00:00:00Z") + GRACE_MS).toISOString());
+});
+
+test("a license and a content policy are one organisation's", async () => {
+  // Another organisation on the same server, with an admin of its own.
+  const OTHER = "other-admin";
+  await db.query(`INSERT INTO orgs (id, name) VALUES ('other', 'Other')`);
+  await db.query(
+    `INSERT INTO tokens (org_id, id, token_hash, email, role) VALUES ('other', 't-other', $1, 'boss@other.example', 'admin')`,
+    [createHash("sha256").update(OTHER).digest("hex")],
+  );
+  // The license installed above is not theirs, and nor is the count of people.
+  const theirs = await call(OTHER, "GET", "/license");
+  assert.equal(theirs.body.status, "missing");
+  assert.equal(theirs.body.people, 1);
+  assert.equal((await call(OTHER, "GET", "/policy")).body.code, "license_required");
+  // With a license of their own, their policy is theirs alone.
+  assert.equal((await install(signed({ id: "lic_other" }), OTHER)).status, 201);
+  assert.equal((await call(OTHER, "PUT", "/policy", { content: "previews" })).status, 200);
+  assert.equal((await call(OTHER, "GET", "/policy")).body.updated_by, "boss@other.example");
+  assert.deepEqual((await call(member, "GET", "/policy")).body, { content: "metadata", updated_by: null, updated_at: null });
+  assert.equal((await call(member, "GET", "/license")).body.license.id, "lic_test");
+
+  const unsecured = await db.query<{ name: string }>(
+    `SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity
+       AND EXISTS (SELECT 1 FROM pg_attribute a
+                   WHERE a.attrelid = c.oid AND a.attname = 'org_id' AND NOT a.attisdropped)`,
+  );
+  assert.deepEqual(unsecured, []);
+  // Gone with their organisation, and the first one's untouched.
+  await db.query(`DELETE FROM orgs WHERE id = 'other'`);
+  const [left] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM ee_licenses WHERE org_id = 'other'`);
+  assert.equal(Number(left?.n), 0);
+  assert.equal((await call(member, "GET", "/license")).body.status, "active");
 });
 
 test("a licensed feature works, then turns read-only after expiry and grace", async () => {

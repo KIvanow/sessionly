@@ -25,6 +25,8 @@ jobs:
           fi
       - name: Nothing outside ee/ imports from ee/
         run: node scripts/check-ee-imports.mjs
+      - name: Only the allowed files see the database unscoped
+        run: node scripts/check-unscoped.mjs
 
   rust:
     strategy:
@@ -54,6 +56,16 @@ jobs:
   # The TypeScript side: server and shared types.
   node:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 2s --health-retries 30
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -64,4 +76,15 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      # The same tests on a real Postgres, connected as a role that is not a
+      # superuser, like the one a managed database gives: row-level security
+      # and the switch of role have to hold there too.
+      - name: The server's tests on Postgres
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -qc "CREATE ROLE managed LOGIN PASSWORD 'managed' CREATEDB CREATEROLE"
+          export TEST_DATABASE_URL=postgres://managed:managed@localhost:5432/postgres
+          pnpm --filter @sessionly/server test
+          pnpm --filter @sessionly/ee test
       - run: pnpm build
