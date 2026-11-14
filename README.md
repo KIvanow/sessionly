@@ -8,8 +8,10 @@ event, reads tokens and cost from transcripts, normalizes both into one session 
 local SQLite ledger, measures how much of each session's changes survive, and lists, searches
 and summarizes sessions from the command line. Sessions from Cursor and Grok are read from the
 files those agents keep (see [Cursor and Grok](#cursor-and-grok)). It can upload to a server,
-which shows the same figures for a whole team in a web dashboard. Not done yet: packaged
-releases and sign-in other than tokens.
+which shows the same figures for a whole team in a web dashboard. Sessions that run in the
+cloud (Claude Code's cloud sessions, Cursor's cloud agents) are captured through hooks a
+repository carries (see [Cloud sessions](#cloud-sessions)). Not done yet: sign-in other than
+tokens.
 
 ## How it fits together
 
@@ -30,10 +32,18 @@ Cursor, Grok ──their files─┴─▶ sessionly (local Rust binary) ──�
 
 ## Install
 
-Requires Rust 1.89 or later.
+Each [release](https://github.com/KIvanow/sessionly/releases) has a binary for Linux (x86_64
+and arm64, statically linked) and macOS (Apple silicon and Intel), as
+`sessionly-<target>.tar.gz`, with their SHA-256 checksums in `SHA256SUMS`. Unpack one and put
+`sessionly` on your `PATH`. Or build it, which needs Rust 1.89 or later:
 
 ```sh
 cargo install --path crates/sessionly   # or: cargo build --release
+```
+
+Then:
+
+```sh
 sessionly install                        # adds hooks to ~/.claude/settings.json
 sessionly status
 ```
@@ -218,6 +228,79 @@ Limits to know about:
   files; only the agent's file tools are.
 - User name and email come from git config at sync time. They are a label, not verified identity.
 
+### Cloud sessions
+
+A Claude Code cloud session or a Cursor cloud agent runs in a sandbox the platform starts, with
+a fresh clone of the repository. Nothing from your home directory is there, so the hooks that
+`sessionly install` writes are not there either. Both platforms do run the hooks a repository
+carries, so that is where capture for them goes:
+
+```sh
+sessionly install --repo          # in the repository's root; --repo DIR for another one
+git add .sessionly .claude/settings.json .cursor/hooks.json
+git commit -m "Capture cloud agent sessions"
+```
+
+That writes three files, and only adds to the two that may already exist:
+
+- **`.sessionly/hook.sh`**, a script. On a person's own machine it does nothing: sessions there
+  are captured by that person's own `sessionly install`, if they have one. In a sandbox it
+  fetches the sessionly binary of the version that wrote the script, once per sandbox, checks
+  it against the SHA-256 checksum written into the script, and hands it the event. It prints
+  nothing and always exits 0.
+- **Entries in `.claude/settings.json`** (for Claude Code) **and `.cursor/hooks.json`** (for
+  Cursor) that run the script.
+
+Where a sandbox sends its sessions is not in the repository. It is given to the cloud
+environment, as secrets:
+
+| Variable | Meaning |
+|---|---|
+| `SESSIONLY_URL`, `SESSIONLY_TOKEN` | The server and a token for it. Use a token with the `env` role (see [Server](#server)). Without these the session is captured inside the sandbox and sent nowhere. |
+| `SESSIONLY_LINE_HASHES=on` | Optional. Send line hashes, which [pull request](#pull-requests) figures need. |
+| `SESSIONLY_CONTENT=previews` | Optional. Send previews instead of metadata only. |
+
+Claude Code's cloud sessions reach only the hosts on the environment's allowed list, so add
+the server's host there. Cursor's cloud agents can reach it as they are.
+
+What is different about a session from the cloud:
+
+- **Who.** Git in a sandbox is set up as the agent (`Claude <noreply@anthropic.com>`,
+  `Cursor Agent <cursoragent@cursor.com>`), so the person is the one the platform names:
+  Claude Code in the sandbox's environment, Cursor through a socket it serves there.
+  `sessionly show` says `Ran in  the cloud`, with the platform's own id for the session and
+  what started it.
+- **One machine.** A sandbox is new each time, so every sandbox uploads as the machine `cloud`,
+  and a session that moves to another sandbox stays one session.
+- **Every turn is sent.** The ledger is brought up to date and uploaded each time a turn ends,
+  not at most every five minutes: a sandbox may be gone soon after.
+- **The branch** is the one checked out in the sandbox, which is the one the agent pushes.
+- **Cursor has no cost.** A Cursor cloud agent keeps no transcript and does not tell hooks how
+  many tokens a turn used, so its session has prompts, tool calls with their outcome and
+  duration, files and lines changed, and the model, but no tokens and no cost.
+
+What to know:
+
+- The first hook in a fresh sandbox waits for the download (a few seconds, once). If the
+  download fails or does not match its checksum, nothing is captured, the reason is in
+  `~/.sessionly/bootstrap.log` in the sandbox, and it is tried again ten minutes later.
+- The rewrite rate is measured while the sandbox exists. After that, what survived shows
+  only through [pull requests](#pull-requests).
+- If a session outlives its sandbox, the next one captures only what happens from then on.
+  For Claude Code the rest is read from the transcript when the platform brings it along.
+  For Cursor it is not there, and the server keeps the fuller copy it already has.
+- Claude Code does not load a repository's hooks in sessions over several repositories, or
+  in ones started from Slack (its documentation, not tried here).
+- `sessionly status --repo` shows what is installed, `sessionly uninstall --repo` removes it,
+  and running `install --repo` with a newer sessionly updates the script.
+- The script downloads from this project's GitHub releases. To use a copy of your own, set
+  `SESSIONLY_RELEASE_BASE` when running `install --repo`; `--checksums FILE` reads the
+  release's `SHA256SUMS` from a file instead of downloading it.
+
+The platforms' side of this was checked with one real session on each (2026-11-14): which
+hooks fire and from which files, what they carry, where the person and the session id are
+to be found, and what a sandbox can reach.
+
 ### Past sessions
 
 ```sh
@@ -335,7 +418,8 @@ names of the files.
 Each installation has a random `machine_id` (in `~/.sessionly/config.json`, created on first
 use). A session is identified by machine id, agent and session id, so uploading it again
 replaces the earlier copy. The git name and email in a record are a label taken from git
-config, not a verified identity.
+config, not a verified identity. A session that ran in the cloud has the machine id `cloud`,
+a `runtime` block, and as its user the person the platform named.
 
 Fields with a fixed set of values (`status`, `outcome`, `cost.source`, `content`,
 `captured_by`) are enums in the schema. A reader maps a value it doesn't know to `unknown`, and
@@ -366,8 +450,8 @@ sessionly disconnect                               # stop uploading, forget the 
 
 ### Automatic sync
 
-When a turn ends (at most every five minutes) and when a session ends, the capture hook starts a
-background `sessionly` process and returns immediately. That process brings the ledger up to
+When a turn ends (at most every five minutes; in a cloud sandbox, every time) and when a
+session ends, the capture hook starts a background `sessionly` process and returns immediately. That process brings the ledger up to
 date, re-measures rewrite rates, and uploads if a server is connected. It prints nothing; each
 run adds a line to `~/.sessionly/auto.log`, and `sessionly status` shows when the last one
 started.
@@ -490,10 +574,14 @@ for anything but localhost.
 | `SESSIONLY_ADMIN_TOKEN` | An admin token that always works, for first use. |
 | `SESSIONLY_ADMIN_EMAIL` | Who uploads made with that token belong to. |
 
-**People and tokens.** Each token belongs to one person and is `member`, `admin` or `ci`.
-Uploads are filed under the token's owner, whatever name the record carries. A member sees their
-own sessions; an admin sees everyone's. A `ci` token is for the GitHub Action: it can report
-pull requests and nothing else. An admin creates and revokes tokens through
+**People and tokens.** Each token belongs to one person and is `member`, `admin`, `ci` or
+`env`. Uploads are filed under the token's owner, whatever name the record carries. A member
+sees their own sessions; an admin sees everyone's. A `ci` token is for the GitHub Action: it can
+report pull requests and nothing else. An `env` token is for a cloud agent's environment (see
+[Cloud sessions](#cloud-sessions)): it can upload sessions and nothing else, and a cloud session
+it uploads is filed under the person the platform says started it, since several people start
+sessions in one environment. Whoever holds it can therefore upload a session in anyone's name,
+so give it only to those environments. An admin creates and revokes tokens through
 `POST /api/v1/tokens`, `GET /api/v1/tokens` and `DELETE /api/v1/tokens/{id}`, or from the command
 line with `pnpm token create --email ann@example.com` (with the embedded database, stop the
 server first). Only a hash of each token is stored.
@@ -510,7 +598,8 @@ Sign in with a token. An admin sees the whole team; a member sees their own sess
   sessions, lines added and removed, how many of the agents' lines are still there, and when it
   was last changed.
 - **Sessions:** a searchable, paged list. Period, person, repository, tool and model filters
-  apply to both pages; a session counts under its most used model.
+  apply to both pages; a session counts under its most used model. Once a session from the
+  cloud has been uploaded, a further filter separates those from sessions on people's machines.
 - **One session:** cost and tokens per model, prompts with how long each took and how it ended,
   files changed with how much of each survives, tools, and subagents.
 - **Team** (admins): create a token for someone and revoke tokens.
@@ -564,7 +653,9 @@ How to read it:
 
 - **A line is an agent's** when a session added that line to that file, the session is by
   someone who committed to the pull request (the email git is set up with is the one commits
-  carry), and it started at most 90 days before the pull request was opened. Everything else
+  carry), and it started at most 90 days before the pull request was opened. A session that
+  ran in the cloud counts when it ran on the pull request's branch instead: there the commits
+  are the agent's own. Everything else
   counts as not an agent's: people without Sessionly, sessions uploaded without line hashes,
   changes made by shell commands, generated files. So the agent share is a floor.
 - **Survived review** compares the pull request as it was opened with how it ended: of the
@@ -573,6 +664,10 @@ How to read it:
   that was reformatted counts as changed.
 - **A review round** is review feedback (a review that comments or asks for changes, or a
   comment on the diff, from anyone but the author) followed by a new commit.
+- **A cloud agent's pull request** is recognised by who made its commits and what its branch
+  is called. If no session was captured for it, the page says so next to it: its lines then
+  count as not an agent's, which is wrong in a way worth knowing about.
+  [`sessionly install --repo`](#cloud-sessions) in the repository fixes it for later ones.
 - **By model is a description, not a ranking.** Harder work goes to stronger models, a pull
   request with two models counts under both, and a handful of pull requests says little.
 - The model is known per line for Claude Code, and for Cursor turns the hooks saw; otherwise
@@ -589,9 +684,9 @@ from its commits) and `pr-number` (to report one from a manually started workflo
 
 **API behind it:** `PUT /api/v1/prs` (the Action's report; `ci` or `admin`), `GET /api/v1/prs`
 and `GET /api/v1/prs/summary` (admins; filters `repo`, `state`, `since`). For sessions:
-`GET /api/v1/summary?by=user|repo|model|tool|day`, `GET /api/v1/sessions`
-(filters `user`, `repo`, `model`, `model_is`, `tool`, `q`, `since`, `until`, paging `limit`,
-`offset`),
+`GET /api/v1/summary?by=user|repo|model|tool|day|runtime`, `GET /api/v1/sessions`
+(filters `user`, `repo`, `model`, `model_is`, `tool`, `runtime` (`local` or `cloud`), `q`,
+`since`, `until`, paging `limit`, `offset`),
 `GET /api/v1/sessions/{machine_id}/{source}/{session_id}`, `GET /api/v1/files` (files agents
 changed, with `repo_is` for one repository) and `GET /api/v1/filters`.
 
@@ -649,4 +744,5 @@ under the SIL Open Font License) are served from `website/fonts/`. `python3 -m h
 6. ✅ Aggregation on one machine (`summary`), upload, server and team dashboard
 7. ✅ Cursor and Grok sessions beside Claude Code's
 8. ✅ Pull requests: how much agents wrote, with which models, and how it fared in review
-9. Polish, docs, example data
+9. ✅ Sessions in the cloud: Claude Code's cloud sessions and Cursor's cloud agents
+10. Polish, docs, example data

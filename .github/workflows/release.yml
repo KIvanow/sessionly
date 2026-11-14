@@ -1,0 +1,94 @@
+name: Release
+
+# Pushing a tag v<version> builds the binaries and publishes them as a GitHub
+# release, with their checksums. `sessionly install --repo` writes those
+# checksums into the script a repository commits, so an archive is never
+# replaced once it is published.
+#
+# Run by hand, it builds the same archives and keeps them as artifacts of the
+# run, without publishing anything: a way to try the build.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Statically linked: runs on any Linux, which is what a cloud
+          # agent's sandbox needs.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install the musl C compiler
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: The tag is the version being built
+        if: github.ref_type == 'tag'
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "sessionly") | .version')"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "The tag is $GITHUB_REF_NAME but Cargo.toml says $version." >&2
+            exit 1
+          fi
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: The binary runs
+        # The Intel build cannot run on the Apple silicon machine that builds it.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: target/${{ matrix.target }}/release/sessionly --version
+      - name: The Linux binary needs nothing from the system
+        if: contains(matrix.target, 'musl')
+        run: |
+          file target/${{ matrix.target }}/release/sessionly
+          ! ldd target/${{ matrix.target }}/release/sessionly
+      - name: Pack
+        run: tar -czf sessionly-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release sessionly
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sessionly-${{ matrix.target }}
+          path: sessionly-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          sha256sum sessionly-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "Sessionly ${GITHUB_REF_NAME#v}" \
+            --notes "Binaries for Linux (statically linked) and macOS, each as \`sessionly-<target>.tar.gz\`, with their SHA-256 checksums in \`SHA256SUMS\`. See the README for how to install." \
+            sessionly-*.tar.gz SHA256SUMS
