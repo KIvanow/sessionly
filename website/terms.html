@@ -230,7 +230,8 @@
           <h2 id="s3">3. The People in Your Sessions</h2>
           <p>
             <strong>Sessions describe the work of people.</strong> A session record names the
-            person whose machine it came from (their git name and email address) and shows when
+            person whose machine it came from (their git name and email address), or for a
+            session that ran in the cloud the person the platform says started it, and shows when
             they worked with an agent, on which repository and files, for how long, at what cost
             and, if previews are on, the start of what they typed. Where you collect sessions from
             anyone other than yourself, you:
@@ -272,7 +273,8 @@
             each belongs to; the session records your machines upload; and the pull request reports
             the GitHub Action sends. With the default content level a session record contains
             counts, timings, tool names, relative file paths, models, tokens, cost, rewrite
-            figures and the git name, email and remote, and no text from prompts, commands or
+            figures and the git name, email and remote (or, for a session that ran in the cloud,
+            the email address the platform gives), and no text from prompts, commands or
             files. Previews and line hashes are stored only if the uploading machine switched them
             on. It never stores full prompts, file contents, command output or source code. The
             <a href="/privacy">Privacy Policy</a> has the details.
@@ -331,8 +333,10 @@
             </li>
             <li>
               <strong>Identity is a label.</strong> The name and email on a session come from git
-              configuration on the machine and are not verified. On a server, uploads are filed
-              under the owner of the token that sent them.
+              configuration on the machine, or for a session that ran in the cloud from the
+              platform, and are not verified. On a server, uploads are filed under the owner of
+              the token that sent them, or, for a cloud session sent with a cloud environment's
+              token, under the person the platform named.
             </li>
             <li>
               <strong>Coverage depends on the agents.</strong> Sessionly reads what the coding
