@@ -60,8 +60,10 @@ jobs:
       - name: The Linux binary needs nothing from the system
         if: contains(matrix.target, 'musl')
         run: |
-          file target/${{ matrix.target }}/release/sessionly
-          ! ldd target/${{ matrix.target }}/release/sessionly
+          # ldd cannot be asked: it answers differently for a static binary
+          # on each architecture.
+          file target/${{ matrix.target }}/release/sessionly | tee /dev/stderr |
+            grep -Eq 'static(ally|-pie) linked'
       - name: Pack
         run: tar -czf sessionly-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release sessionly
       - uses: actions/upload-artifact@v4
