@@ -460,7 +460,7 @@ impl AgentHomes {
 
 /// Raised when an importer reads more, or differently, from the same files,
 /// so that sessions imported by an older binary are imported again.
-const IMPORT_VERSION: u64 = 4;
+const IMPORT_VERSION: u64 = 5;
 
 /// The source file, its size and the importer's version recorded in an
 /// import file's first record.
@@ -510,6 +510,8 @@ struct Found {
     session_id: String,
     /// The main file of the session: what an import records as its origin.
     path: PathBuf,
+    /// A Cursor session with no transcript yet: `path` is its hook capture.
+    hooks_only: bool,
 }
 
 /// The raw hook capture of a session, which a Cursor import also reads.
@@ -527,6 +529,7 @@ fn source_bytes(found: &Found, data_dir: &Path) -> u64 {
     let size = |path: &Path| fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     match found.source {
         GROK => crate::import_grok::session_bytes(&found.path),
+        CURSOR if found.hooks_only => size(&found.path),
         CURSOR => {
             crate::import_cursor::session_bytes(&found.path) + size(&capture_of(found, data_dir))
         }
@@ -548,6 +551,7 @@ fn import_one(found: &Found, data_dir: &Path, report: &mut Report) {
     }
     let built: Result<(Vec<Value>, Option<Facts>)> = match found.source {
         GROK => crate::import_grok::session(&found.path),
+        CURSOR if found.hooks_only => crate::import_cursor::session_from_hooks(&found.path),
         CURSOR => {
             let capture = capture_of(found, data_dir);
             crate::import_cursor::session(&found.path, capture.exists().then_some(&*capture))
@@ -602,8 +606,9 @@ fn name_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Every session the installed agents have files for.
-fn find_sessions(homes: &AgentHomes) -> Vec<Found> {
+/// Every session the installed agents have files for, and every Cursor
+/// session the hooks have captured that Cursor has no transcript for yet.
+fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
     let mut found = Vec::new();
     // Claude Code: <projects>/<project>/<session>.jsonl
     for project in homes.claude_projects.iter().flat_map(|d| subdirs(d)) {
@@ -624,6 +629,7 @@ fn find_sessions(homes: &AgentHomes) -> Vec<Found> {
                 source: CLAUDE_CODE,
                 session_id,
                 path,
+                hooks_only: false,
             });
         }
     }
@@ -636,6 +642,7 @@ fn find_sessions(homes: &AgentHomes) -> Vec<Found> {
                     source: GROK,
                     session_id: name_of(&session),
                     path,
+                    hooks_only: false,
                 });
             }
         }
@@ -650,8 +657,37 @@ fn find_sessions(homes: &AgentHomes) -> Vec<Found> {
                     source: CURSOR,
                     session_id,
                     path,
+                    hooks_only: false,
                 });
             }
+        }
+    }
+    // Cursor writes a transcript when a turn ends. A session the hooks have
+    // captured and that has none yet is read from its capture alone.
+    let captures = fs::read_dir(data_dir.join("raw").join(CURSOR));
+    let mut captures: Vec<PathBuf> = captures
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .collect();
+    captures.sort();
+    for path in captures {
+        let session_id = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let has_transcript = found.iter().any(|f| {
+            f.source == CURSOR && crate::capture::file_stem(Some(&f.session_id)) == session_id
+        });
+        if !has_transcript {
+            found.push(Found {
+                source: CURSOR,
+                session_id,
+                path,
+                hooks_only: true,
+            });
         }
     }
     found
@@ -666,7 +702,7 @@ pub fn import_all(
     only: &[String],
 ) -> Report {
     let mut report = Report::default();
-    for found in find_sessions(homes) {
+    for found in find_sessions(homes, data_dir) {
         let wanted_agent = agents.is_empty() || agents.iter().any(|a| a == found.source);
         let wanted_id = only.is_empty()
             || only
@@ -684,7 +720,7 @@ pub fn import_all(
 /// captured, when its files have changed.
 pub fn refresh(homes: &AgentHomes, data_dir: &Path) -> Report {
     let mut report = Report::default();
-    for found in find_sessions(homes) {
+    for found in find_sessions(homes, data_dir) {
         let file = format!(
             "{}.jsonl",
             crate::capture::file_stem(Some(&found.session_id))
@@ -1007,6 +1043,58 @@ mod tests {
         let data = dir.path().join("data");
         assert_eq!(refresh(&claude_only(dir.path()), &data), Report::default());
         assert!(!data.join("imported").exists());
+    }
+
+    #[test]
+    fn a_cursor_session_is_read_from_its_capture_until_it_has_a_transcript() {
+        use crate::cursor_hooks::tests::{event, write};
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let homes = AgentHomes {
+            cursor_projects: Some(dir.path().join("projects")),
+            ..Default::default()
+        };
+        write(
+            &data.join("raw/cursor/k5.jsonl"),
+            &[
+                event(1, "beforeSubmitPrompt", "g1", json!({ "prompt": "first" })),
+                event(
+                    2,
+                    "preToolUse",
+                    "g1",
+                    json!({ "tool_use_id": "c1", "tool_name": "Shell", "tool_input": { "command": "ls" } }),
+                ),
+            ],
+        );
+        // the blank chat Cursor announces before anyone types
+        write(
+            &data.join("raw/cursor/empty-state-draft.jsonl"),
+            &[event(1, "sessionStart", "", json!({}))],
+        );
+        let report = refresh(&homes, &data);
+        assert_eq!((report.imported, report.empty), (1, 1));
+        let imported = data.join("imported/cursor/k5.jsonl");
+        let prompts = |path: &Path| {
+            fs::read_to_string(path)
+                .unwrap()
+                .matches("UserPromptSubmit")
+                .count()
+        };
+        assert_eq!(prompts(&imported), 2); // the hook's name appears twice per event
+        assert_eq!(refresh(&homes, &data).up_to_date, 1);
+
+        // the turn ends and Cursor writes the transcript: it takes over
+        let transcript = dir.path().join("projects/p/agent-transcripts/k5/k5.jsonl");
+        write_rows(
+            &transcript,
+            &[
+                json!({ "role": "user", "message": { "content": [{ "type": "text", "text": "first" }] } }),
+                json!({ "role": "user", "message": { "content": [{ "type": "text", "text": "second" }] } }),
+            ],
+        );
+        assert_eq!(refresh(&homes, &data).imported, 1);
+        assert_eq!(prompts(&imported), 4);
+        assert_eq!(imported_from(&imported).unwrap().0, transcript);
     }
 
     #[test]

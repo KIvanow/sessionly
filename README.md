@@ -185,7 +185,8 @@ Claude Code deletes old transcripts, so after each read Sessionly saves what it 
 (cost, usage, models, branch) under `~/.sessionly/transcript-facts/`. The ledger itself is
 derived data: delete it and `sessionly sync --force` rebuilds it from the raw capture and those
 saved facts. A normal sync never removes a session; `--force` also drops sessions whose raw
-capture has been deleted. A session is rebuilt when its capture, its transcript or a subagent transcript
+capture has been deleted. An agent that was opened and closed again, with nothing asked and no
+tool run, is not a session and is left out. A session is rebuilt when its capture, its transcript or a subagent transcript
 grows, or when Sessionly or its price table changes.
 
 The record is the contract between this binary and any server it later uploads to. Its JSON
@@ -265,7 +266,13 @@ whichever agent produced it. Sign-in files of either agent are never opened.
 
 Both agents also run the hooks in `~/.claude/settings.json`, so after `sessionly install` their
 sessions are noticed as they happen and brought in at the next sync without running `import`.
-Checked with Grok 1.0.77 and Cursor 3.27.
+Claude Code does not have to be installed for that: `sessionly install` writes the file either
+way, and both agents read it. Checked with Grok 1.0.77 and the Cursor editor 3.27, each run from
+an empty home directory with `claude` off the `PATH`.
+
+Cursor here means the editor. Its command-line agent (`cursor-agent`) keeps its chats in a
+different format and did not run the hooks when tried (build 2025.11.06), so its sessions are
+not in the ledger.
 
 | | Read from | Has | Does not have |
 |---|---|---|---|
@@ -274,7 +281,14 @@ Checked with Grok 1.0.77 and Cursor 3.27.
 
 What Cursor's transcripts leave out, it tells the hooks: when a prompt was sent and its turn
 ended, the model, and the tokens the turn used. A turn the hooks saw is paired with its prompt
-in the transcript (same text, same minute) and gets those. So for a Cursor session:
+in the transcript (same text, same minute) and gets those.
+
+Cursor writes a session's transcript when a turn ends. While the first turn is still running,
+or if the editor was closed before it ended, the session is built from the hooks alone: it has
+its prompts, tool calls and times, but the lines an edit changed are counted only once the
+transcript is there.
+
+So for a Cursor session:
 
 - **Cost is an estimate, and only for the turns the hooks saw.** It is those turns' tokens at
   API list prices, which is a measure of the work done, not what Cursor bills. `show` says how

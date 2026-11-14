@@ -16,6 +16,10 @@
 //! failures, model and tokens. The transcript stays the record of what
 //! happened; the hooks add to the turns they saw.
 //!
+//! Cursor writes a session's transcript when a turn ends. Until then, and
+//! for a session closed before its first turn ended, the hook capture is all
+//! there is, and the session is built from that alone (`session_from_hooks`).
+//!
 //! Cursor's tools are mapped to the names used for Claude Code's (Read, Edit,
 //! Write, Bash, Grep, Glob) so sessions from different agents can be compared.
 
@@ -175,6 +179,22 @@ fn canonical(name: &str, input: &Value) -> (String, Value, Value) {
     }
 }
 
+/// Whether a tool call the hooks saw (`seen`) is the one the transcript calls
+/// `name`. The hooks name some tools differently: finding files by name is
+/// reported as a search, and a tool of an MCP server under its own name.
+fn same_tool(seen: &str, name: &str) -> bool {
+    match name {
+        "Glob" => seen == "Grep" || seen == "Glob",
+        "CallDynamicTool" => seen.starts_with("MCP:"),
+        _ => seen == name,
+    }
+}
+
+/// Calls in the transcript that the hooks are never told about.
+fn unseen_by_hooks(name: &str) -> bool {
+    name == "GetDynamicTools"
+}
+
 /// Read one transcript file into events, taking times and outcomes from the
 /// turns the hooks saw (`hooked`; none for a subagent's file). Returns how
 /// many tool calls and prompts it had.
@@ -260,10 +280,13 @@ fn read_file(
                     // The hooks saw the turn's calls in the same order. A call
                     // that does not line up ends the pairing for the turn.
                     let seen = current
+                        .filter(|_| !unseen_by_hooks(name))
                         .and_then(|i| hooked[i].tools.get(next_tool))
-                        .filter(|seen| seen.name == name);
+                        .filter(|seen| same_tool(&seen.name, name));
                     let Some(seen) = seen else {
-                        next_tool = usize::MAX;
+                        if !unseen_by_hooks(name) {
+                            next_tool = usize::MAX;
+                        }
                         out.push("", "PreToolUse", payload.clone());
                         // No result is recorded; the call is taken as done.
                         payload["tool_response"] = result;
@@ -392,6 +415,123 @@ pub fn session(transcript: &Path, capture: Option<&Path>) -> Result<(Vec<Value>,
     let facts = Facts {
         first_at: created,
         last_at: modified,
+        version: hooked.cursor_version,
+        cost,
+        usage,
+        ..Default::default()
+    };
+    Ok((all, Some(facts)))
+}
+
+/// A tool call as the hooks describe it, under the names used for Claude
+/// Code's tools. The hooks' inputs are not the transcript's: a file is
+/// `file_path`, and finding files by name is a search with no pattern.
+fn canonical_hooked(name: &str, input: &Value) -> (String, Value) {
+    let field = |key: &str| input.get(key).cloned().unwrap_or(Value::Null);
+    let has = |key: &str| input[key].as_str().is_some_and(|v| !v.is_empty());
+    match name {
+        "Read" => ("Read".into(), json!({ "file_path": field("file_path") })),
+        "Shell" => ("Bash".into(), json!({ "command": field("command") })),
+        "Grep" if !has("pattern") && has("glob") => {
+            ("Glob".into(), json!({ "pattern": field("glob") }))
+        }
+        "Grep" => (
+            "Grep".into(),
+            json!({ "pattern": field("pattern"), "path": field("file_path"), "glob": field("glob") }),
+        ),
+        _ => (name.to_string(), slim_input(input)),
+    }
+}
+
+/// The session as the hooks alone saw it, for a session Cursor has written
+/// no transcript for: `capture` is its raw hook capture. It has the prompts,
+/// the tool calls with their times and outcome, the model and tokens, but
+/// not what an edit changed, so no lines are counted until the transcript
+/// is there.
+pub fn session_from_hooks(capture: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
+    let session_id = capture
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let hooked = cursor_hooks::read(capture);
+    let mut out = Builder::new(CURSOR, &session_id);
+    let (mut prompts, mut calls) = (0u64, 0u64);
+    for turn in &hooked.turns {
+        // A turn taken up again after it was cut short comes without its
+        // prompt: its calls belong to the prompt before.
+        let own_prompt = !turn.prompt.trim().is_empty() || prompts == 0;
+        if turn.prompt.trim().is_empty() && turn.tools.is_empty() {
+            continue;
+        }
+        if own_prompt {
+            prompts += 1;
+            out.push(
+                &exact(turn.at),
+                "UserPromptSubmit",
+                json!({ "prompt_id": format!("p{prompts}"), "prompt": turn.prompt.trim() }),
+            );
+        }
+        for seen in &turn.tools {
+            calls += 1;
+            let (tool, input) = canonical_hooked(&seen.name, &seen.input);
+            let id = if seen.id.is_empty() {
+                format!("{session_id}-{calls}")
+            } else {
+                // Cursor repeats a call's id when a turn is taken up again.
+                format!("{}-{calls}", seen.id)
+            };
+            let mut payload = json!({
+                "prompt_id": format!("p{prompts}"),
+                "tool_use_id": id,
+                "tool_name": tool,
+                "tool_input": input,
+            });
+            if let Some(model) = turn.model.as_deref() {
+                payload["model"] = json!(model);
+            }
+            out.push(&exact(seen.at), "PreToolUse", payload.clone());
+            // A call the hooks never saw finish stays open.
+            let Some(ms) = seen.duration_ms else { continue };
+            let done = exact(seen.at + chrono::Duration::milliseconds(ms as i64));
+            payload["duration_ms"] = json!(ms);
+            match &seen.error {
+                Some(error) => {
+                    payload["error"] = json!(error);
+                    out.push(&done, "PostToolUseFailure", payload);
+                }
+                None => {
+                    payload["tool_response"] = json!({});
+                    out.push(&done, "PostToolUse", payload);
+                }
+            }
+        }
+        if own_prompt {
+            end_turn(&mut out, turn, format!("p{prompts}"));
+        }
+    }
+    let events = out.in_order();
+    if events.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+
+    let mut start = json!({ "source": "startup" });
+    if let Some(cwd) = &hooked.cwd {
+        start["cwd"] = json!(cwd);
+    }
+    let mut out = Builder::new(CURSOR, &session_id);
+    out.push(
+        &hooked.first_at.map(exact).unwrap_or_default(),
+        "SessionStart",
+        start,
+    );
+    let mut all = out.in_order();
+    all.extend(events);
+
+    let (usage, cost) = cursor_hooks::usage(&hooked.turns, prompts);
+    let facts = Facts {
+        first_at: hooked.first_at,
+        last_at: hooked.last_at,
         version: hooked.cursor_version,
         cost,
         usage,
@@ -731,6 +871,211 @@ mod tests {
         assert_eq!(resolve("home-me-a-b"), Some("home/me/a_b".into()));
         assert_eq!(resolve("home-me-gone"), None);
         assert_eq!(resolve("home-m"), None);
+    }
+
+    #[test]
+    fn a_session_without_a_transcript_is_built_from_the_hooks() {
+        use crate::cursor_hooks::tests::{event, write};
+        use crate::session::{Outcome, ToolStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("raw/cursor/k3.jsonl");
+        let tool = |name: &str, id: &str, input: Value| json!({ "tool_use_id": id, "tool_name": name, "tool_input": input });
+        write(
+            &capture,
+            &[
+                event(1, "sessionStart", "", json!({ "workspace_roots": [] })),
+                event(
+                    2,
+                    "beforeSubmitPrompt",
+                    "g1",
+                    json!({ "prompt": "add a docstring", "model_id": "claude-opus-5-5",
+                    "workspace_roots": ["/w/repo"] }),
+                ),
+                event(
+                    3,
+                    "preToolUse",
+                    "g1",
+                    tool(
+                        "Grep",
+                        "c1",
+                        json!({ "pattern": "", "glob": "**/hello.py" }),
+                    ),
+                ),
+                event(
+                    4,
+                    "postToolUse",
+                    "g1",
+                    json!({ "tool_use_id": "c1", "duration": 35.8, "tool_output": "secret output" }),
+                ),
+                event(
+                    5,
+                    "preToolUse",
+                    "g1",
+                    tool("Read", "c2", json!({ "file_path": "hello.py" })),
+                ),
+                event(
+                    6,
+                    "postToolUseFailure",
+                    "g1",
+                    json!({ "tool_use_id": "c2", "error_message": "no such file" }),
+                ),
+                // the editor was closed here; the turn was taken up again later,
+                // without its prompt and with the same call id
+                event(20, "beforeSubmitPrompt", "g2", json!({ "prompt": "" })),
+                event(
+                    21,
+                    "preToolUse",
+                    "g2",
+                    tool("Shell", "c2", json!({ "command": "ls", "cwd": "/w/repo" })),
+                ),
+                event(
+                    22,
+                    "postToolUse",
+                    "g2",
+                    json!({ "tool_use_id": "c2", "duration": 500.0 }),
+                ),
+                // still running
+                event(
+                    23,
+                    "preToolUse",
+                    "g2",
+                    tool("MCP:move", "c3", json!({ "rootPath": "/w/repo" })),
+                ),
+                event(24, "stop", "g2", json!({ "status": "aborted" })),
+                event(
+                    30,
+                    "beforeSubmitPrompt",
+                    "g3",
+                    json!({ "prompt": "thanks" }),
+                ),
+                event(
+                    33,
+                    "stop",
+                    "g3",
+                    json!({ "status": "completed", "model_id": "claude-opus-5-5",
+                    "input_tokens": 1_000_000, "output_tokens": 0 }),
+                ),
+            ],
+        );
+        let (events, facts) = session_from_hooks(&capture).unwrap();
+        assert!(!serde_json::to_string(&events).unwrap().contains("secret"));
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CURSOR).unwrap();
+
+        assert_eq!(s.cwd.as_deref(), Some("/w/repo"));
+        let prompts: Vec<_> = s
+            .prompts
+            .iter()
+            .map(|p| (p.text.preview.as_str(), p.outcome))
+            .collect();
+        assert_eq!(
+            prompts,
+            [
+                ("add a docstring", None),
+                ("thanks", Some(Outcome::Completed))
+            ]
+        );
+        // only the turn the hooks saw end counts as time worked
+        assert_eq!(s.active_ms, 3_000);
+        let calls: Vec<_> = s
+            .tool_calls
+            .iter()
+            .map(|c| {
+                (
+                    c.tool.as_str(),
+                    c.status,
+                    c.duration_ms,
+                    c.prompt_id.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("Glob", ToolStatus::Ok, Some(36), Some("p1")),
+                ("Read", ToolStatus::Failed, Some(1_000), Some("p1")),
+                ("Bash", ToolStatus::Ok, Some(500), Some("p1")),
+                ("MCP:move", ToolStatus::NoResult, None, Some("p1")),
+            ]
+        );
+        assert_eq!(s.models, ["claude-opus-5-5"]);
+        assert_eq!(s.agent_version.as_deref(), Some("3.27.22"));
+        assert_eq!(s.cost.unwrap().total_usd, 4.0);
+        assert_eq!(s.started_at.unwrap().format("%S").to_string(), "01");
+
+        // a blank chat, or a turn with nothing in it, is no session
+        write(
+            &capture,
+            &[
+                event(1, "sessionStart", "", json!({})),
+                event(2, "beforeSubmitPrompt", "g1", json!({ "prompt": "" })),
+            ],
+        );
+        let (events, facts) = session_from_hooks(&capture).unwrap();
+        assert!(events.is_empty() && facts.is_none());
+    }
+
+    #[test]
+    fn pairs_calls_the_hooks_name_differently() {
+        use crate::cursor_hooks::tests::{event, write};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("projects/p/agent-transcripts/k4/k4.jsonl");
+        write_rows(
+            &path,
+            &[
+                user("<user_query>\nfind it\n</user_query>"),
+                uses(&[
+                    ("Glob", json!({ "glob_pattern": "**/hello.py" })),
+                    // the hooks are not told about this one
+                    ("GetDynamicTools", json!({ "toolName": "move" })),
+                    ("Read", json!({ "path": "hello.py" })),
+                    ("CallDynamicTool", json!({ "toolName": "move" })),
+                ]),
+            ],
+        );
+        let capture = dir.path().join("raw/cursor/k4.jsonl");
+        let call = |second: u32, id: &str, name: &str| {
+            [
+                event(
+                    second,
+                    "preToolUse",
+                    "g1",
+                    json!({ "tool_use_id": id, "tool_name": name }),
+                ),
+                event(
+                    second,
+                    "postToolUse",
+                    "g1",
+                    json!({ "tool_use_id": id, "duration": 100.0 }),
+                ),
+            ]
+        };
+        let mut events = vec![event(
+            1,
+            "beforeSubmitPrompt",
+            "g1",
+            json!({ "prompt": "find it" }),
+        )];
+        events.extend(call(2, "c1", "Grep"));
+        events.extend(call(3, "c2", "Read"));
+        events.extend(call(4, "c3", "MCP:move"));
+        write(&capture, &events);
+
+        let (events, facts) = session(&path, Some(&capture)).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CURSOR).unwrap();
+        let calls: Vec<_> = s
+            .tool_calls
+            .iter()
+            .map(|c| (c.tool.as_str(), c.duration_ms))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("Glob", Some(100)),
+                ("GetDynamicTools", None),
+                ("Read", Some(100)),
+                ("CallDynamicTool", Some(100)),
+            ]
+        );
     }
 
     #[test]

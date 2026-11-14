@@ -12,6 +12,7 @@ use std::path::Path;
 use crate::pricing;
 use crate::session::{Cost, CostSource, ModelUsage};
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 
 /// One tool call as the hooks saw it.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -19,6 +20,8 @@ pub struct Tool {
     pub id: String,
     /// Cursor's own name for the tool, as in its transcripts.
     pub name: String,
+    /// What it was called with, as the hooks were told.
+    pub input: Value,
     pub at: DateTime<Utc>,
     pub duration_ms: Option<u64>,
     /// Set if the call failed.
@@ -57,6 +60,12 @@ pub struct Capture {
     /// In the order the prompts were sent.
     pub turns: Vec<Turn>,
     pub cursor_version: Option<String>,
+    /// The folder the session worked in. A chat in a window with no folder
+    /// open has none.
+    pub cwd: Option<String>,
+    /// When the hooks first and last heard from the session.
+    pub first_at: Option<DateTime<Utc>>,
+    pub last_at: Option<DateTime<Utc>>,
 }
 
 /// Read a raw hook capture. A turn whose prompt the hooks did not see (they
@@ -72,12 +81,19 @@ pub fn read(capture: &Path) -> Capture {
             .as_str()
             .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
             .map(|t| t.with_timezone(&Utc));
-        let (Some(at), Some(generation)) = (at, text("generation_id")) else {
-            return;
-        };
+        let Some(at) = at else { return };
+        out.first_at = Some(out.first_at.map_or(at, |first| first.min(at)));
+        out.last_at = Some(out.last_at.map_or(at, |last| last.max(at)));
         if let Some(version) = text("cursor_version") {
             out.cursor_version = Some(version);
         }
+        if out.cwd.is_none() {
+            out.cwd = p["workspace_roots"][0].as_str().map(String::from);
+        }
+        // The events of a turn carry its generation; a session starting has none.
+        let Some(generation) = text("generation_id") else {
+            return;
+        };
         let model = text("model_id").or_else(|| text("model"));
         let hook = record["hook"].as_str().unwrap_or_default().to_lowercase();
         if hook == "beforesubmitprompt" {
@@ -100,6 +116,7 @@ pub fn read(capture: &Path) -> Capture {
             "pretooluse" => turn.tools.push(Tool {
                 id: text("tool_use_id").unwrap_or_default(),
                 name: text("tool_name").unwrap_or_default(),
+                input: p["tool_input"].clone(),
                 at,
                 ..Default::default()
             }),
@@ -337,6 +354,44 @@ pub(crate) mod tests {
 
         // a missing capture is no capture
         assert_eq!(read(&dir.path().join("none.jsonl")), Capture::default());
+    }
+
+    #[test]
+    fn reads_the_folder_the_times_and_what_tools_were_called_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonl");
+        write(
+            &path,
+            &[
+                // a session starting belongs to no turn, and a chat in a window
+                // with no folder open names no folder
+                event(1, "sessionStart", "", json!({ "workspace_roots": [] })),
+                event(
+                    2,
+                    "beforeSubmitPrompt",
+                    "g1",
+                    json!({ "prompt": "find it", "workspace_roots": ["/w/repo"] }),
+                ),
+                event(
+                    3,
+                    "preToolUse",
+                    "g1",
+                    json!({ "tool_use_id": "t1", "tool_name": "Read", "tool_input": { "file_path": "a.rs" } }),
+                ),
+            ],
+        );
+        let capture = read(&path);
+        assert_eq!(capture.cwd.as_deref(), Some("/w/repo"));
+        let second = |t: Option<DateTime<Utc>>| t.unwrap().format("%S").to_string();
+        assert_eq!(
+            (second(capture.first_at), second(capture.last_at)),
+            ("01".to_string(), "03".to_string())
+        );
+        assert_eq!(capture.turns.len(), 1);
+        assert_eq!(
+            capture.turns[0].tools[0].input,
+            json!({ "file_path": "a.rs" })
+        );
     }
 
     #[test]

@@ -369,7 +369,7 @@ fn run(command: Command) -> Result<()> {
             );
             if report.removed > 0 {
                 println!(
-                    "Removed: {} sessions whose capture no longer exists",
+                    "Removed: {} sessions whose capture is gone or has nothing in it",
                     report.removed
                 );
             }

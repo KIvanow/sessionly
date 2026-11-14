@@ -57,6 +57,12 @@ pub fn build_from_raw(raw_path: &Path, facts_dir: &Path, source: &str) -> Result
     let Some(mut session) = from_events(&events, facts.as_ref(), source) else {
         return Ok(None);
     };
+    // Nothing was asked and no tool ran: an agent that was opened and closed
+    // again, or the blank chat Cursor announces before anyone types.
+    let spent = session.cost.as_ref().is_some_and(|c| c.total_usd > 0.0);
+    if session.prompts.is_empty() && session.tool_calls.is_empty() && !spent {
+        return Ok(None);
+    }
     add_local_context(&mut session, facts.as_ref());
     // A call whose model is not known is put down to the session's main one.
     let main = session.models.first();

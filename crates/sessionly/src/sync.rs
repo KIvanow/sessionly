@@ -412,20 +412,27 @@ mod tests {
         );
 
         // Import only.
-        fs::write(
-            imported.join("s2.jsonl"),
-            event(
-                "SessionStart",
-                Some("transcript"),
-                json!({ "session_id": "s2" }),
-            ),
-        )
-        .unwrap();
+        let start = event(
+            "SessionStart",
+            Some("transcript"),
+            json!({ "session_id": "s2" }),
+        );
+        let asked = event(
+            "UserPromptSubmit",
+            Some("transcript"),
+            json!({ "session_id": "s2", "prompt_id": "p1", "prompt": "x" }),
+        );
+        fs::write(imported.join("s2.jsonl"), start.clone() + &asked).unwrap();
         env.sync(false);
         assert_eq!(
             env.ledger.get("s2").unwrap().unwrap().captured_by,
             Transcript
         );
+
+        // An agent opened and closed again, with nothing asked, is no session.
+        fs::write(imported.join("s3.jsonl"), start.replace("s2", "s3")).unwrap();
+        assert_eq!(env.sync(false).empty, 1);
+        assert!(env.ledger.get("s3").unwrap().is_none());
     }
 
     #[test]

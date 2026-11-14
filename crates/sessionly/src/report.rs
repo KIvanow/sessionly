@@ -247,7 +247,7 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
         None if s.source == crate::paths::CURSOR => field(
             &mut out,
             "Cost",
-            "unknown (Cursor reports usage only to hooks, and they saw none of this session)"
+            "unknown (Cursor reports usage to hooks when a turn ends, and they saw no turn of this session end)"
                 .into(),
         ),
         None => field(&mut out, "Cost", "unknown (no transcript found)".into()),
