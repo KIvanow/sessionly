@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Privacy Policy - Sessionly</title>
+    <meta
+      name="description"
+      content="How Sessionly handles personal information: what stays on your machine, what an upload contains, and the service providers involved."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)" />
+    <link rel="canonical" href="https://sessionly.dev/privacy" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <a class="brand" href="/">
+          <svg viewBox="0 0 32 32" aria-hidden="true">
+            <rect
+              x="4.5"
+              y="4.5"
+              width="23"
+              height="23"
+              rx="5"
+              fill="none"
+              stroke="var(--accent)"
+              stroke-width="3"
+            />
+            <path
+              d="M10.5 12h11M10.5 16.5h11"
+              fill="none"
+              stroke="var(--accent)"
+              stroke-width="2.5"
+              stroke-linecap="round"
+            />
+            <path
+              d="M10.5 21h6"
+              fill="none"
+              stroke="var(--mark)"
+              stroke-width="2.5"
+              stroke-linecap="round"
+            />
+          </svg>
+          Sessionly
+        </a>
+        <nav aria-label="Sections">
+          <a href="/#how">How it works</a>
+          <a href="/#uploads">What is uploaded</a>
+          <a href="/#editions">Editions</a>
+        </nav>
+        <div class="menu" id="menu">
+          <a class="toggle open" href="#menu">Menu</a>
+          <a class="toggle close" href="#close" aria-label="Close menu">Close</a>
+          <nav aria-label="Sections (menu)">
+            <a href="/#how">How it works</a>
+            <a href="/#uploads">What is uploaded</a>
+            <a href="/#editions">Editions</a>
+            <a href="/#start">Get started</a>
+            <a href="https://github.com/KIvanow/sessionly">GitHub</a>
+          </nav>
+        </div>
+        <div class="cta">
+          <a class="btn ghost" href="https://github.com/KIvanow/sessionly">GitHub</a>
+          <a class="btn primary" href="/#start">Get started</a>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="legal">
+        <div class="wrap">
+          <h1>Privacy Policy</h1>
+          <p class="meta">Effective as of 14 November 2026</p>
+
+          <div class="summary">
+            <h2>In short</h2>
+            <ul>
+              <li>Sessionly is run by me, Kristiyan Ivanov, an individual, not a company.</li>
+              <li>
+                The <code>sessionly</code> program keeps what it captures on your own machine. It
+                sends nothing to me. It uploads only to a server you connect it to, and by default
+                only metadata: no text from prompts, commands or files.
+              </li>
+              <li>A self-hosted Sessionly server sends nothing to me either.</li>
+              <li>
+                The hosted service is not open yet. This policy already says what it will store,
+                because it runs the same published code; where it runs and which providers it uses
+                will be added here before it opens.
+              </li>
+              <li>
+                This website sets no cookies and runs no analytics and no scripts. It is served by
+                Vercel, which keeps request logs.
+              </li>
+              <li>I do not sell personal information.</li>
+            </ul>
+          </div>
+
+          <p>
+            Sessionly (&ldquo;Sessionly,&rdquo; &ldquo;I,&rdquo; &ldquo;me,&rdquo; or
+            &ldquo;we&rdquo;) is a ledger of AI coding agent sessions: what was asked, which tools
+            ran, which files changed and what it cost. It is operated by Kristiyan Ivanov, an
+            individual (&ldquo;the operator&rdquo;). This Privacy Policy describes how I process
+            personal information collected through the website at
+            <a href="https://sessionly.dev">sessionly.dev</a>, the hosted Sessionly service when I
+            offer it (the &ldquo;Hosted Service&rdquo;), the sale of licenses, and emails you and I
+            exchange (collectively, the &ldquo;Service&rdquo;).
+          </p>
+          <p>
+            The Service is intended for businesses and developers. When an organization
+            (&ldquo;org&rdquo;) uses Sessionly for its team, that org decides whose sessions are
+            collected, what an upload contains and who may see it. If you are an engineer whose
+            sessions your employer or client collects with Sessionly, they are responsible for
+            that collection; please direct questions about it to them first.
+          </p>
+          <p>
+            <strong>The software on your machine, and self-hosted installs.</strong> The
+            <code>sessionly</code> program stores what it captures in a folder on your own machine
+            (<code>~/.sessionly</code>). It does not report usage, telemetry or account data to me
+            and does not check for updates. Its only network connection is the upload to the
+            server you connect it to with <code>sessionly connect</code>; until you do that,
+            nothing leaves the machine. If you run the Sessionly server yourself, everything
+            described below is stored on your infrastructure, not mine, and license files are
+            verified offline. This policy therefore applies to local and self-hosted use only to
+            the extent you contact me, buy a license, or use the website.
+          </p>
+
+          <h2>Personal Information I Collect</h2>
+
+          <h3>Information you provide</h3>
+          <ul>
+            <li>
+              <strong>Communications data</strong> from our exchanges, such as when you email me
+              for support, to ask about a license or to be told when the Hosted Service opens:
+              your email address, your name if you give it, and what you write.
+            </li>
+            <li>
+              <strong>License data</strong>. If you buy a Business or Enterprise license: the name
+              and identifier of your org, the edition, the number of people it covers, its dates,
+              a contact email address, and the billing details needed to issue an invoice. The
+              license file itself contains the org identifier, edition, features, seats and dates,
+              and no personal information.
+            </li>
+            <li>
+              <strong>Account data on the Hosted Service</strong>: for each access token, the
+              email address it is issued to (stored lower-case), an optional name, its role
+              (admin, member or ci), and when it was created, last used and revoked. Only a hash
+              of the token is stored. There are no passwords.
+            </li>
+          </ul>
+
+          <h3>Information uploaded to the Hosted Service</h3>
+          <p>
+            A machine connected to the Hosted Service uploads one <strong>session record</strong>
+            for each coding agent session. With the default content level
+            (<code>metadata</code>) a record contains:
+          </p>
+          <ul>
+            <li>
+              a random identifier of the machine, which agent ran the session (Claude Code, Cursor
+              or Grok), the session's identifier, and when it started and ended;
+            </li>
+            <li>
+              the git user name and email address and the repository's remote address, as set in
+              git on that machine. They are a label, not a verified identity;
+            </li>
+            <li>
+              counts and timings: prompts and how long each turn took, tool calls with the tool's
+              name, status, duration and the size of its output, subagents, permission requests;
+            </li>
+            <li>
+              the files the agent read or changed, as paths relative to the repository or to the
+              home directory, with lines added and removed;
+            </li>
+            <li>models, token counts and cost;</li>
+            <li>
+              the rewrite measurement: how many of the lines the agent added are still in each
+              file.
+            </li>
+          </ul>
+          <p>Two things are added only if the person uploading switches them on:</p>
+          <ul>
+            <li>
+              <strong>Previews</strong> (<code>sessionly settings --content previews</code>): the
+              first 200 characters of each prompt, a one-line summary of each tool call (the shell
+              command, search pattern or URL, cut to 200 characters), the first 200 characters of
+              an error, the session's title, and SHA-256 hashes of prompts and tool inputs. A
+              preview can contain anything that was typed or run, including personal information
+              or a secret.
+            </li>
+            <li>
+              <strong>Line hashes</strong> (<code>sessionly settings --line-hashes on</code>): for
+              each changed file and model, a short one-way hash of every line the agent added. A
+              hash does not give the line back, but a short or common line can be guessed and
+              checked against it.
+            </li>
+          </ul>
+          <p>
+            If an org adds the Sessionly GitHub Action to a repository, the Action sends a
+            <strong>pull request report</strong> when a pull request is opened, pushed to,
+            reviewed and closed: the repository's name, the pull request's number, title and
+            address, its author's GitHub user name, its state, branch names and dates, counts of
+            commits, reviews, review comments and review rounds, and, per changed file, hashes of
+            the lines the pull request adds. The email addresses on the pull request's commits are
+            sent with each report so that lines are matched only to sessions by the people who
+            committed; they are used for that comparison and are not stored.
+          </p>
+          <p>
+            <strong>What is never uploaded:</strong> full prompts, the agent's replies, file
+            contents, the output of commands, the raw capture kept on the machine, and absolute
+            paths under a home directory. No source code is uploaded, by the program or by the
+            Action.
+          </p>
+
+          <h3>Automatic data collection</h3>
+          <ul>
+            <li>
+              <strong>This website</strong> (sessionly.dev) is static. It sets no cookies, loads
+              no scripts and uses no analytics. Vercel, which serves it, keeps its own request
+              logs (including IP addresses) under
+              <a
+                href="https://vercel.com/legal/privacy-policy"
+                target="_blank"
+                rel="noopener noreferrer"
+                >Vercel's Privacy Policy</a
+              >.
+            </li>
+            <li>
+              <strong>The dashboard</strong> keeps your access token in your browser's local
+              storage so you stay signed in. It sets no cookies and has no analytics.
+            </li>
+            <li>
+              <strong>Server logs.</strong> The Sessionly server does not write a log of requests.
+              The infrastructure in front of the Hosted Service will keep ordinary connection logs
+              (IP address, time, address requested, status); how long they are kept will be stated
+              here before the Hosted Service opens.
+            </li>
+            <li>
+              <strong>Email.</strong> I do not embed tracking pixels, and I do not use open or
+              click tracking.
+            </li>
+          </ul>
+
+          <h2>How I Use Personal Information</h2>
+          <h3>Service delivery and operations</h3>
+          <ul>
+            <li>
+              Provide, operate and maintain the Service, including storing uploaded sessions and
+              pull request reports and showing them to the people in the org who are allowed to
+              see them;
+            </li>
+            <li>Issue access tokens and license files;</li>
+            <li>Issue invoices and keep the records the law requires;</li>
+            <li>Keep the Service secure and prevent abuse;</li>
+            <li>
+              Communicate with you about the Service: security notices, changes to these policies,
+              support and administrative messages;
+            </li>
+            <li>Respond to your requests, questions and feedback.</li>
+          </ul>
+          <h3>Compliance and protection</h3>
+          <ul>
+            <li>Comply with applicable laws, lawful requests and legal process;</li>
+            <li>
+              Protect my, your or others' rights, privacy, safety or property, including by making
+              and defending legal claims;
+            </li>
+            <li>Enforce the <a href="/terms">Terms of Service</a>;</li>
+            <li>
+              Prevent, identify, investigate and deter fraudulent, harmful, unauthorized or illegal
+              activity.
+            </li>
+          </ul>
+          <p>
+            I do not use your data to train models, to build advertising profiles, or for marketing
+            to third parties. I do not use uploaded sessions to assess the people in them; what an
+            org does with its own sessions is that org's decision and responsibility.
+          </p>
+
+          <h2>How I Share Personal Information</h2>
+          <p>I do not sell personal information. I share it only as follows:</p>
+          <ul>
+            <li>
+              <strong>Service providers</strong> that work on my behalf and may process personal
+              information only to provide their service to me:
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Provider</th>
+                      <th>Purpose</th>
+                      <th>What they see</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>Vercel</td>
+                      <td>Hosting this website</td>
+                      <td>Web request logs for sessionly.dev</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              The Hosted Service is not open yet, so no provider hosts session data for me today.
+              The provider that will host it, and any payment or email provider it uses, will be
+              added to this table before it opens. Email you send me is handled by my mailbox
+              provider.
+            </li>
+            <li>
+              <strong>Your org.</strong> An admin of an org can see every session and pull request
+              report uploaded to that org, and the list of its tokens. A member sees their own
+              sessions.
+            </li>
+            <li>
+              <strong>Professional advisors</strong>, such as an accountant or lawyer, where
+              necessary in the course of their services to me.
+            </li>
+            <li>
+              <strong>Authorities and others</strong>, where I believe in good faith it is necessary
+              to comply with applicable law or to protect the rights, privacy, safety or property of
+              myself or others.
+            </li>
+            <li>
+              <strong>A successor operator.</strong> If I transfer Sessionly to a company I form or
+              to another operator, or if the Service is otherwise sold or merged, personal
+              information may be transferred to the successor, who will be bound by this policy
+              until it is changed with notice to you.
+            </li>
+          </ul>
+
+          <h2>Data Retention</h2>
+          <ul>
+            <li>
+              <strong>Uploaded sessions and pull request reports</strong> are kept while the org's
+              account on the Hosted Service exists, and deleted when the org asks me to delete
+              them or closes its account. Uploading a session again replaces the earlier copy.
+            </li>
+            <li>
+              <strong>Tokens</strong> are kept while the account exists. A revoked token stops
+              working at once; its entry (email, role, dates, never the token) is kept so the org
+              can see who had access.
+            </li>
+            <li>
+              <strong>License and invoice records</strong> are kept as long as tax and accounting
+              law requires.
+            </li>
+            <li>
+              <strong>Emails</strong> are kept as long as they are needed to answer you and to
+              keep a record of what was agreed.
+            </li>
+          </ul>
+          <p>
+            When I no longer need personal information, I delete or anonymize it. To delete your
+            account and its data, email me (see below). What the
+            <code>sessionly</code> program keeps on your own machine is yours to delete: remove
+            <code>~/.sessionly</code>.
+          </p>
+
+          <h2>Security</h2>
+          <p>
+            Only a hash of each access token is stored. The program refuses to upload over plain
+            HTTP to anything but a server on the same machine. A member's token reads only that
+            person's sessions, and a token for the GitHub Action can report pull requests and
+            nothing else. The <a href="/security">security page</a> describes these measures and
+            their limits. Still, security risk is inherent in all internet and information
+            technologies, and I cannot guarantee the security of your personal information.
+          </p>
+
+          <h2>International Data Transfers</h2>
+          <p>
+            I am based in Bulgaria. Vercel is a United States company and serves this website from
+            its network worldwide, so the request logs for your visit may be processed in the
+            United States and elsewhere. Where the Hosted Service runs will be stated here before
+            it opens.
+          </p>
+          <p>
+            If you are located in the European Economic Area, the United Kingdom or Switzerland, I
+            will ensure that any transfer of your personal information is carried out in accordance
+            with applicable data protection law, including by relying on standard contractual
+            clauses approved by the European Commission or other appropriate safeguards offered by
+            the service providers above.
+          </p>
+
+          <h2>Information for European Users (GDPR)</h2>
+          <p>
+            If you are located in the EEA, the United Kingdom or Switzerland, the following
+            additional provisions apply.
+          </p>
+          <p>
+            <strong>Data controller.</strong> Kristiyan Ivanov, a self-employed individual
+            registered in Bulgaria (BULSTAT 180490275), is the controller for website, license,
+            billing and communications data, and for the email address an account is opened with.
+            For the sessions and pull request reports an org uploads to the Hosted Service, the
+            org is the controller and I act as its processor under the
+            <a href="/dpa">Data Processing Agreement</a>, which forms part of the
+            <a href="/terms">Terms of Service</a>.
+          </p>
+          <p><strong>Legal bases for processing.</strong></p>
+          <ul>
+            <li>
+              <strong>Performance of a contract</strong>: processing needed to provide the Service
+              to you under the Terms of Service, including issuing tokens and licenses.
+            </li>
+            <li>
+              <strong>Legitimate interests</strong>: operating and securing the Service, preventing
+              abuse, and communicating with you, where those interests are not overridden by your
+              rights.
+            </li>
+            <li>
+              <strong>Compliance with legal obligations</strong>: for example keeping invoice
+              records.
+            </li>
+            <li>
+              <strong>Consent</strong>: where you have given it for a specific purpose, such as
+              asking to be told when the Hosted Service opens. You may withdraw consent at any time
+              by contacting me.
+            </li>
+          </ul>
+          <p>
+            <strong>Your rights under GDPR.</strong> In addition to the rights below, you may lodge
+            a complaint with your local data protection supervisory authority if you believe my
+            processing of your personal information violates applicable law.
+          </p>
+
+          <h2>Your Rights and Choices</h2>
+          <p>Regardless of where you are located, you may:</p>
+          <ul>
+            <li>Access the personal information I hold about you;</li>
+            <li>Update or correct inaccurate personal information;</li>
+            <li>Delete your personal information, including your account;</li>
+            <li>Export your personal information in a portable format;</li>
+            <li>Object to or restrict certain processing of your personal information.</li>
+          </ul>
+          <p>
+            Some of this you can do yourself: <code>sessionly export</code> shows exactly what
+            your machine would upload for a session, <code>sessionly disconnect</code> stops
+            uploads, and an org's admins can revoke tokens. If your sessions were uploaded by or
+            for an org, ask that org first, since it decides what happens to them. For anything
+            else, email <a href="mailto:kristiyan@sessionly.dev">kristiyan@sessionly.dev</a>. I
+            will respond in accordance with applicable law and within a reasonable time.
+          </p>
+          <p>
+            <strong>Emails.</strong> I send service emails only: replies to what you wrote, tokens
+            and license files you asked for, invoices, and notices about the Service or these
+            policies. I do not currently run a marketing list; if I start one, it will be opt-in
+            with an unsubscribe link in every message.
+          </p>
+          <p>
+            <strong>Cookies and tracking.</strong> Neither this website nor the dashboard sets
+            cookies. The dashboard uses your browser's local storage only to keep you signed in;
+            signing out or clearing it removes the token. There are no analytics, advertising or
+            cross-site trackers, so there is no cookie banner.
+          </p>
+          <p>
+            <strong>Declining to provide information.</strong> I need certain information, such as
+            an email address for a token or the name of your org for a license, to provide the
+            Service. If you do not provide it, I may not be able to provide the Service to you.
+          </p>
+
+          <h2>Other Sites and Services</h2>
+          <p>
+            Sessionly reads sessions recorded by coding agents made by third parties (Claude Code,
+            Cursor, Grok) and its Action runs on GitHub. The website links to GitHub, where the
+            code is published. These links and integrations are not an endorsement of, or a
+            representation that I am affiliated with, any third party. I do not control those
+            services and am not responsible for their actions. Please read their privacy policies.
+          </p>
+
+          <h2>Children</h2>
+          <p>
+            The Service is not intended for anyone under 16 years of age, and I do not knowingly
+            collect personal information from children under 16. If you believe a child has provided
+            me with personal information, please contact me and I will delete it as the law
+            requires.
+          </p>
+
+          <h2>Changes to This Privacy Policy</h2>
+          <p>
+            I may modify this Privacy Policy at any time. If I make material changes, I will notify
+            you by updating the date at the top, posting the new version on the website and, where
+            the change affects account holders, emailing the address on your account. Changes take
+            effect when posted unless stated otherwise. Your use of the Service after the effective
+            date of a modified policy means you accept it.
+          </p>
+
+          <h2 id="contact-us">How to Contact Me</h2>
+          <ul>
+            <li>Email: <a href="mailto:kristiyan@sessionly.dev">kristiyan@sessionly.dev</a></li>
+            <li>
+              Operator: Kristiyan Ivanov, ul. Vasil Petleshkov 31-33, apt. 17, 1510 Sofia, Bulgaria
+            </li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <div>
+          <a class="brand" href="/">
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+              <rect
+                x="4.5"
+                y="4.5"
+                width="23"
+                height="23"
+                rx="5"
+                fill="none"
+                stroke="var(--accent)"
+                stroke-width="3"
+              />
+              <path
+                d="M10.5 12h11M10.5 16.5h11"
+                fill="none"
+                stroke="var(--accent)"
+                stroke-width="2.5"
+                stroke-linecap="round"
+              />
+              <path
+                d="M10.5 21h6"
+                fill="none"
+                stroke="var(--mark)"
+                stroke-width="2.5"
+                stroke-linecap="round"
+              />
+            </svg>
+            Sessionly
+          </a>
+          <p>
+            A ledger of AI coding agent sessions. Open source under Apache-2.0 and
+            <a href="https://github.com/KIvanow/sessionly#server">self-hosted</a>. Claude Code,
+            Cursor, Grok and GitHub are trademarks of their owners; Sessionly is not affiliated
+            with them.
+          </p>
+          <p>Email <a href="mailto:support@sessionly.dev">support@sessionly.dev</a>.</p>
+        </div>
+        <nav aria-label="Legal and contact">
+          <a href="/privacy">Privacy</a>
+          <a href="/terms">Terms</a>
+          <a href="/dpa">DPA</a>
+          <a href="/security">Security</a>
+          <a href="https://github.com/KIvanow/sessionly">GitHub</a>
+          <a href="https://github.com/KIvanow/sessionly#readme">Docs</a>
+          <a href="https://github.com/KIvanow/sessionly/tree/main/action">GitHub Action</a>
+          <a href="https://github.com/KIvanow/sessionly#server">Self-hosting</a>
+        </nav>
+      </div>
+    </footer>
+  </body>
+</html>

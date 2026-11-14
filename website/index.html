@@ -1,0 +1,820 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sessionly: a ledger of AI coding agent sessions</title>
+    <meta
+      name="description"
+      content="What your coding agents were asked, which tools ran, which files changed, what it cost and how much of it survived. For Claude Code, Cursor and Grok, side by side. Open source; runs on your machine."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)" />
+    <link rel="canonical" href="https://sessionly.dev/" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/site.css" />
+    <meta property="og:title" content="Sessionly: a ledger of AI coding agent sessions" />
+    <meta
+      property="og:description"
+      content="What your coding agents did, what it cost, and how much of it survived. Claude Code, Cursor and Grok in one ledger, on your machine first."
+    />
+    <meta property="og:url" content="https://sessionly.dev/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Sessionly" />
+    <meta property="og:image" content="https://sessionly.dev/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Sessionly: a ledger of AI coding agent sessions, for Claude Code, Cursor and Grok."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Sessionly: a ledger of AI coding agent sessions" />
+    <meta
+      name="twitter:description"
+      content="What your coding agents did, what it cost, and how much of it survived. Claude Code, Cursor and Grok in one ledger, on your machine first."
+    />
+    <meta name="twitter:image" content="https://sessionly.dev/og.png" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <a class="brand" href="/">
+          <svg viewBox="0 0 32 32" aria-hidden="true">
+            <rect
+              x="4.5"
+              y="4.5"
+              width="23"
+              height="23"
+              rx="5"
+              fill="none"
+              stroke="var(--accent)"
+              stroke-width="3"
+            />
+            <path
+              d="M10.5 12h11M10.5 16.5h11"
+              fill="none"
+              stroke="var(--accent)"
+              stroke-width="2.5"
+              stroke-linecap="round"
+            />
+            <path
+              d="M10.5 21h6"
+              fill="none"
+              stroke="var(--mark)"
+              stroke-width="2.5"
+              stroke-linecap="round"
+            />
+          </svg>
+          Sessionly
+        </a>
+        <nav aria-label="Sections">
+          <a href="#how">How it works</a>
+          <a href="#features">Features</a>
+          <a href="#pull-requests">Pull requests</a>
+          <a href="#uploads">What is uploaded</a>
+          <a href="#editions">Editions</a>
+        </nav>
+        <div class="menu" id="menu">
+          <a class="toggle open" href="#menu">Menu</a>
+          <a class="toggle close" href="#close" aria-label="Close menu">Close</a>
+          <nav aria-label="Sections (menu)">
+            <a href="#how">How it works</a>
+            <a href="#features">Features</a>
+            <a href="#agents">Agents</a>
+            <a href="#pull-requests">Pull requests</a>
+            <a href="#uploads">What is uploaded</a>
+            <a href="#editions">Editions</a>
+            <a href="#start">Get started</a>
+            <a href="https://github.com/KIvanow/sessionly">GitHub</a>
+          </nav>
+        </div>
+        <div class="cta">
+          <a class="btn ghost" href="https://github.com/KIvanow/sessionly">GitHub</a>
+          <a class="btn primary" href="#start">Get started</a>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="wrap">
+          <div>
+            <p class="eyebrow">A ledger for AI coding agents</p>
+            <h1>
+              What your coding agents did, what it cost,
+              <em>and how much of it survived.</em>
+            </h1>
+            <p class="lede">
+              Sessionly records every Claude Code, Cursor and Grok session: what was asked, which
+              tools ran, which files changed and what it cost. On each developer's machine first,
+              and for the whole team once you connect a server.
+            </p>
+            <div class="actions">
+              <a class="btn primary lg" href="#start">Get started</a>
+              <a class="btn lg" href="#how">See how it works</a>
+            </div>
+            <p class="fine">
+              Open source under Apache-2.0. Nothing leaves a machine until you connect it to a
+              server, and the default upload contains no text from prompts, commands or files.
+            </p>
+          </div>
+
+          <div
+            class="term"
+            aria-label="Example: a month of sessions summed per agent, with cost and how many of the agents' lines are still there"
+          >
+            <header><i></i><i></i><i></i><span>shell</span></header>
+            <pre class="table"><span class="c">$</span> sessionly summary --by tool --since 30d
+<span class="c">TOOL         SESSIONS       COST    ACTIVE  PROMPTS  TOOLS (FAILED)  FILES           LINES      REWRITTEN  LINES KEPT</span>
+Claude Code        64    $412.80   38h 12m      702     15310 (291)    348    +21480 -3112  121/344 (35%)         67%
+Cursor             41     $96.40   11h 05m      389        6204 (0)    183     +7498 -1431   28/178 (16%)         91%
+Grok                9     $18.75    4h 31m       61       1740 (22)     52      +3120 -604    17/52 (33%)         58%
+<span class="c">---------------------------------------------------------------------------------------------------------------------</span>
+total             114    $527.95   53h 48m     1152     23254 (313)    583    +32098 -5147  166/574 (29%)         72%</pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="proof" aria-label="Principles">
+        <div class="wrap">
+          <div>
+            <b>Local first</b>
+            <span
+              >Capture, parsing and redaction happen on the developer's machine. The command line
+              works without any server.</span
+            >
+          </div>
+          <div>
+            <b>Three agents, one record</b>
+            <span
+              >Claude Code, Cursor and Grok sessions sit in the same ledger, so a row means the
+              same thing whichever agent produced it.</span
+            >
+          </div>
+          <div>
+            <b>Survival, not volume</b>
+            <span
+              >Counts how many of an agent's lines are still in the file later, and still in the
+              pull request after review.</span
+            >
+          </div>
+        </div>
+      </section>
+
+      <section id="how">
+        <div class="wrap">
+          <p class="eyebrow">How it works</p>
+          <h2>A small local program does the work. A server is optional.</h2>
+          <p class="lede">
+            The <code>sessionly</code> binary sits beside your agents and keeps a ledger in
+            <code>~/.sessionly</code>. If your team runs a Sessionly server, the same records are
+            uploaded there and shown in a dashboard. What an upload may contain is on the
+            <a href="/security">security page</a>.
+          </p>
+          <ol class="steps">
+            <li>
+              <h3>Capture</h3>
+              <p>
+                A hook appends each agent event to a local file in 2&ndash;4 ms. It only observes:
+                it cannot block or change a session.
+              </p>
+            </li>
+            <li>
+              <h3>Read</h3>
+              <p>
+                Tokens, models and cost come from the transcripts and session files the agents
+                keep themselves.
+              </p>
+            </li>
+            <li>
+              <h3>Normalize</h3>
+              <p>
+                Both become one record per session in a local SQLite ledger: prompts, tool calls,
+                files, subagents, cost.
+              </p>
+            </li>
+            <li>
+              <h3>Measure</h3>
+              <p>
+                On every sync, the lines each session added are counted again in the files as
+                they are now.
+              </p>
+            </li>
+            <li>
+              <h3>Upload</h3>
+              <p>
+                Only if you connect a server. Paths are made relative and the content level you
+                chose is applied first.
+              </p>
+            </li>
+          </ol>
+          <p class="flow">
+            <code>agent → hook and transcripts → sessionly → ~/.sessionly</code>, then, if
+            connected, <code>upload → Sessionly server → team dashboard</code>.
+          </p>
+          <p class="failnote">
+            The ledger is derived data: delete it and <code>sessionly sync --force</code> rebuilds
+            it from the raw capture.
+          </p>
+        </div>
+      </section>
+
+      <section id="features">
+        <div class="wrap">
+          <p class="eyebrow">What you get</p>
+          <h2>The session, the cost, and what became of the code.</h2>
+          <div class="grid">
+            <article class="card">
+              <h3>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  aria-hidden="true"
+                >
+                  <path d="M4 19V5M4 19h16" />
+                  <path d="M8 15l3-4 3 2 5-7" />
+                </svg>
+                Cost you can trace
+              </h3>
+              <p>
+                Tokens and cost per session, model and subagent, summed per person, repository,
+                model, agent or day. The agent's own recorded figure is used where there is one;
+                an estimate is marked as an estimate.
+              </p>
+            </article>
+            <article class="card">
+              <h3>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  aria-hidden="true"
+                >
+                  <path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3" />
+                  <path d="M18 3v4h-4M6 21v-4h4" />
+                </svg>
+                Rewrite rate
+              </h3>
+              <p>
+                For every file a session changed, Sessionly keeps hashes of the lines the agent
+                added and counts how many are still there later. Moved or re-indented code counts
+                as kept.
+              </p>
+            </article>
+            <article class="card">
+              <h3>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  aria-hidden="true"
+                >
+                  <rect x="3" y="4" width="18" height="16" rx="2" />
+                  <path d="M7 9l3 3-3 3M12 15h5" />
+                </svg>
+                Search from the terminal
+              </h3>
+              <p>
+                <code>sessionly list</code>, <code>summary</code> and <code>show</code> filter by
+                repository, person, model, agent, file, date and cost, and search prompts and
+                commands. Every command takes <code>--json</code>.
+              </p>
+            </article>
+            <article class="card">
+              <h3>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  aria-hidden="true"
+                >
+                  <rect x="3" y="4" width="18" height="16" rx="2" />
+                  <path d="M3 10h18M9 10v10" />
+                </svg>
+                Team dashboard
+              </h3>
+              <p>
+                Cost per day; totals by agent, person, repository and model; the files agents
+                changed in each repository; and every session down to its prompts, tools and
+                subagents.
+              </p>
+            </article>
+            <article class="card">
+              <h3>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  aria-hidden="true"
+                >
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M12 7v5l3 2" />
+                </svg>
+                Past sessions
+              </h3>
+              <p>
+                <code>sessionly import</code> rebuilds sessions from the files the agents still
+                keep, so the ledger does not start empty. On one machine, 100 sessions in 2.5 GB
+                of transcripts took about a minute.
+              </p>
+            </article>
+            <article class="card">
+              <h3>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  aria-hidden="true"
+                >
+                  <path d="M3 12h4l3-7 4 14 3-7h4" />
+                </svg>
+                A hook that stays out of the way
+              </h3>
+              <p>
+                The capture hook appends one line and exits. It never prints and always exits 0,
+                whatever its input, so a capture failure cannot block or change your session.
+              </p>
+            </article>
+            <article class="card">
+              <h3>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  aria-hidden="true"
+                >
+                  <path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z" />
+                </svg>
+                You choose what is uploaded
+              </h3>
+              <p>
+                The default upload has counts, timings and relative paths but no text at all.
+                Previews are opt-in, and <code>sessionly export</code> shows the exact payload
+                before anything is sent.
+              </p>
+            </article>
+            <article class="card">
+              <h3>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  aria-hidden="true"
+                >
+                  <circle cx="8" cy="15" r="4" />
+                  <path d="M11 12l9-9M16 7l3 3" />
+                </svg>
+                Tokens and roles
+              </h3>
+              <p>
+                Each token belongs to one person. A member sees their own sessions, an admin sees
+                the team, and a <code>ci</code> token can only report pull requests. Only a hash
+                of each token is stored.
+              </p>
+            </article>
+            <article class="card">
+              <h3>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  aria-hidden="true"
+                >
+                  <path d="M4 12h16M4 6h16M4 18h10" />
+                </svg>
+                An open record
+              </h3>
+              <p>
+                One session record with a published JSON Schema is the contract between the
+                binary and any server. A test fails if the schema in the repository is stale.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="agents">
+        <div class="wrap">
+          <p class="eyebrow">Agents</p>
+          <h2>Claude Code, Cursor and Grok, side by side.</h2>
+          <p class="lede">
+            Each agent's tools are mapped to common names (Read, Edit, Write, Bash, Grep, Glob),
+            and each agent's sessions are read from where that agent keeps them. Where an agent
+            does not record something, Sessionly says so instead of filling it in.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>Claude Code</th>
+                  <th>Cursor</th>
+                  <th>Grok</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th>How sessions arrive</th>
+                  <td>Hooks as they happen; transcripts for past sessions</td>
+                  <td>Its transcript files, plus the hooks, which Cursor also runs</td>
+                  <td>Its session files, plus the hooks, which Grok also runs</td>
+                </tr>
+                <tr>
+                  <th>Prompts, tool calls, files and lines changed</th>
+                  <td>Yes</td>
+                  <td>Yes</td>
+                  <td>Yes</td>
+                </tr>
+                <tr>
+                  <th>Subagents</th>
+                  <td>Yes</td>
+                  <td>Yes</td>
+                  <td class="no">Not recorded by Grok</td>
+                </tr>
+                <tr>
+                  <th>Model and tokens</th>
+                  <td>Per request</td>
+                  <td>Per turn, for turns the hooks saw</td>
+                  <td>Yes</td>
+                </tr>
+                <tr>
+                  <th>Cost</th>
+                  <td>Claude Code's recorded total, with an estimate for what it leaves out</td>
+                  <td>
+                    An estimate at API list prices for turns the hooks saw. Not what Cursor bills
+                  </td>
+                  <td>Grok's own figure</td>
+                </tr>
+                <tr>
+                  <th>Rewrite rate</th>
+                  <td>Yes</td>
+                  <td>Yes</td>
+                  <td>Yes</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="tablenote">
+            Checked with Cursor 3.27 and Grok 1.0.77. Sign-in files of either agent are never
+            opened.
+          </p>
+        </div>
+      </section>
+
+      <section id="pull-requests">
+        <div class="wrap">
+          <p class="eyebrow">Pull requests</p>
+          <div class="split">
+            <div>
+              <h2>How much of this pull request did an agent write, and how did it fare?</h2>
+              <p class="lede">
+                A GitHub Action reports each pull request to your server, which matches the lines
+                it adds against the lines agents added in uploaded sessions. Both sides send
+                hashes: no source code leaves GitHub or anyone's machine.
+              </p>
+              <ul>
+                <li>
+                  <b>Per pull request</b>: lines added, how many an agent wrote and with which
+                  agent and model, review rounds, and comments by people and by review bots.
+                </li>
+                <li>
+                  <b>By model</b>: the same, summed, so you can see whose lines get through review
+                  as written and whose take several rounds.
+                </li>
+                <li>
+                  <b>A floor, not a guess</b>: a line counts as an agent's only when a session by
+                  someone who committed to the pull request added that line to that file.
+                </li>
+                <li>
+                  <b>Quiet by default</b>: figures go to the run's summary and to a page for
+                  admins. A comment on the pull request is yours to switch on.
+                </li>
+              </ul>
+            </div>
+            <div class="term" aria-label="Example: the summary the GitHub Action writes for a run">
+              <header><i></i><i></i><i></i><span>run summary</span></header>
+              <pre><span class="k">Sessionly</span>
+
+78% of the lines this pull request adds were written by a coding agent (1,806 of 2,315).
+
+<span class="c">Tool          Model              Lines</span>
+Claude Code   claude-opus-5-5    1,204
+Cursor        not known            602
+
+Of the 1,790 agent lines it had when it was opened, <span class="ok">1,647 are still there (92%)</span>.
+
+<span class="c">Counts added lines that have a letter or digit. Everything not matched to an uploaded session, including agents nobody captured, counts as not an agent's.</span></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="uploads">
+        <div class="wrap">
+          <p class="eyebrow">What is uploaded</p>
+          <h2>Full content stays on the machine. The default upload carries no text.</h2>
+          <p class="lede">
+            Each developer's machine decides what a server receives. There are two content levels,
+            and <code>sessionly export &lt;session&gt;</code> prints exactly what would be sent,
+            connected or not.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>On the machine</th>
+                  <th class="hl">Uploaded: <code>metadata</code> (default)</th>
+                  <th>Uploaded: <code>previews</code> (opt in)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th>Full prompts, file contents, command output</th>
+                  <td>In the raw capture, readable only by you</td>
+                  <td class="hl">Never</td>
+                  <td>Never</td>
+                </tr>
+                <tr>
+                  <th>Prompts</th>
+                  <td>Length, hash, first 200 characters</td>
+                  <td class="hl">Length only</td>
+                  <td>First 200 characters and the hash</td>
+                </tr>
+                <tr>
+                  <th>Commands, search patterns, URLs, errors</th>
+                  <td>One line each, up to 200 characters</td>
+                  <td class="hl">No text</td>
+                  <td>One line each, up to 200 characters</td>
+                </tr>
+                <tr>
+                  <th>File paths</th>
+                  <td>Absolute</td>
+                  <td class="hl">Relative to the repository, or to <code>~/</code></td>
+                  <td>Relative to the repository, or to <code>~/</code></td>
+                </tr>
+                <tr>
+                  <th>Counts, timings, tool names, models, tokens, cost</th>
+                  <td>Yes</td>
+                  <td class="hl">Yes</td>
+                  <td>Yes</td>
+                </tr>
+                <tr>
+                  <th>Git name, email and remote</th>
+                  <td>Yes</td>
+                  <td class="hl">Yes</td>
+                  <td>Yes</td>
+                </tr>
+                <tr>
+                  <th>Hashes of the lines an agent added</th>
+                  <td>Yes</td>
+                  <td class="hl">Only if switched on</td>
+                  <td>Only if switched on</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="tablenote">
+            A preview can contain anything that was typed or run, including a secret. Line hashes
+            are what pull request attribution needs; a hash does not give the line back, but a
+            short or common line can be guessed and checked against it.
+          </p>
+        </div>
+      </section>
+
+      <section id="editions">
+        <div class="wrap">
+          <p class="eyebrow">Editions</p>
+          <h2>Open source at the core. Self-hosted today.</h2>
+          <p class="lede">
+            Everything on this page is in the open-source edition. It never needs a license key.
+          </p>
+          <div class="plans">
+            <article class="plan featured">
+              <h3>Open source</h3>
+              <p class="price">Free</p>
+              <p class="for">Apache-2.0, on your machines and your server.</p>
+              <ul>
+                <li>The <code>sessionly</code> binary: capture, ledger, rewrite rate, upload</li>
+                <li>Server and team dashboard</li>
+                <li>Pull request attribution and the GitHub Action</li>
+                <li>Claude Code, Cursor and Grok</li>
+                <li>One Docker Compose file to self-host</li>
+              </ul>
+              <a class="btn primary" href="#start">Get started</a>
+            </article>
+            <article class="plan">
+              <h3>Business and Enterprise</h3>
+              <p class="price">By quote</p>
+              <p class="for">A signed license file for your self-hosted server.</p>
+              <ul>
+                <li>Everything in the open-source edition</li>
+                <li>
+                  Content policy: the organisation sets what uploads from its engineers should
+                  contain. The server stores and serves it; the binary does not apply it yet
+                </li>
+                <li>Checked offline: the license never phones home</li>
+                <li>After expiry, 14 days of grace, then read-only. The core never stops</li>
+              </ul>
+              <a class="btn" href="mailto:support@sessionly.dev?subject=Sessionly%20license"
+                >Ask about a license</a
+              >
+            </article>
+            <article class="plan">
+              <h3>Hosted</h3>
+              <p class="price">Not open yet</p>
+              <p class="for">The same server, run for you.</p>
+              <ul>
+                <li>The same code as the self-hosted server</li>
+                <li>The same content levels: metadata by default, previews opt-in</li>
+                <li>Until it opens, self-hosting is how a team runs Sessionly</li>
+              </ul>
+              <a class="btn" href="mailto:support@sessionly.dev?subject=Hosted%20Sessionly"
+                >Tell me when it opens</a
+              >
+            </article>
+          </div>
+          <p class="plannote">
+            Sessionly is early. There are no packaged releases yet (you build the binary with
+            Cargo), and sign-in to the dashboard is by token. The
+            <a href="https://github.com/KIvanow/sessionly#readme">README</a> says what works today.
+          </p>
+        </div>
+      </section>
+
+      <section id="start" class="start">
+        <div class="wrap">
+          <p class="eyebrow">Get started</p>
+          <div class="split">
+            <div>
+              <h2>On your own machine in a few minutes.</h2>
+              <p class="lede">
+                Build the binary, install the hooks and import the sessions your agents still
+                have. Listing, search, summaries and the rewrite rate all work without a server.
+              </p>
+              <ul>
+                <li>
+                  <b>Careful with your settings.</b> Only Sessionly's own hook entries are added
+                  or removed, and the settings file as it was is saved beside it.
+                </li>
+                <li>
+                  <b>Easy to undo.</b> <code>sessionly uninstall</code> takes the hooks out again.
+                </li>
+                <li>
+                  <b>Try it on one project.</b>
+                  <code>sessionly install --project DIR</code> writes to that project's settings
+                  only.
+                </li>
+              </ul>
+            </div>
+            <div class="term" aria-label="Commands to install Sessionly on one machine">
+              <header><i></i><i></i><i></i><span>one machine</span></header>
+              <pre><span class="c">$</span> git clone https://github.com/KIvanow/sessionly &amp;&amp; cd sessionly
+<span class="c">$</span> cargo install --path crates/sessionly   <span class="c"># Rust 1.89 or later</span>
+
+<span class="c">$</span> sessionly install   <span class="c"># adds hooks to ~/.claude/settings.json</span>
+<span class="c">$</span> sessionly import    <span class="c"># past sessions of all three agents</span>
+
+<span class="c">$</span> sessionly list
+<span class="c">$</span> sessionly summary --by tool
+<span class="c">$</span> sessionly show &lt;session&gt;</pre>
+            </div>
+          </div>
+
+          <div class="split">
+            <div>
+              <h2>For a team, one Docker Compose file.</h2>
+              <p class="lede">
+                It starts the server, the dashboard and Postgres. Each developer connects their
+                machine once; after that, sessions upload on their own when a turn ends.
+              </p>
+              <ul>
+                <li>
+                  <b>Put it behind HTTPS.</b> The binary refuses plain <code>http://</code> for
+                  anything but a server on the same machine.
+                </li>
+                <li>
+                  <b>One token per person.</b> An admin creates and revokes them on the Team page.
+                </li>
+                <li>
+                  <b>Nothing phones home.</b> A self-hosted install sends no data to Sessionly.
+                </li>
+              </ul>
+              <p class="more">
+                <a class="btn" href="https://github.com/KIvanow/sessionly#server"
+                  >Read the server guide</a
+                >
+              </p>
+            </div>
+            <div class="term" aria-label="Commands to run a Sessionly server and connect a machine">
+              <header><i></i><i></i><i></i><span>a team</span></header>
+              <pre><span class="c"># on the server</span>
+<span class="c">$</span> SESSIONLY_ADMIN_TOKEN=choose-a-long-secret \
+    docker compose up -d
+
+<span class="c"># on each developer's machine</span>
+<span class="c">$</span> sessionly connect https://sessionly.example.com
+<span class="c">$</span> sessionly upload --dry-run   <span class="c"># count what would be sent</span>
+<span class="c">$</span> sessionly upload
+
+<span class="c"># optional: send previews, or the line hashes pull requests need</span>
+<span class="c">$</span> sessionly settings --content previews
+<span class="c">$</span> sessionly settings --line-hashes on</pre>
+            </div>
+          </div>
+
+          <div class="honest">
+            <h3>Read the numbers for what they are.</h3>
+            <p>
+              Cost is the agent's own recorded figure where there is one and an estimate from
+              token counts elsewhere; it is not an invoice. The rewrite rate measures whether
+              lines survived, not whether they were good or why they changed. The agent share of
+              a pull request is a floor. Names and emails come from git config: a label, not a
+              verified identity.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="final">
+        <div class="wrap">
+          <p class="eyebrow">Get started</p>
+          <h2>Start with one machine. Add the team when the numbers are useful.</h2>
+          <p class="lede">
+            The code, the session record's schema and the limits of every figure are in the
+            repository.
+          </p>
+          <div class="actions">
+            <a class="btn primary lg" href="#start">Get started</a>
+            <a class="btn lg" href="https://github.com/KIvanow/sessionly">Read the code</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <div>
+          <a class="brand" href="/">
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+              <rect
+                x="4.5"
+                y="4.5"
+                width="23"
+                height="23"
+                rx="5"
+                fill="none"
+                stroke="var(--accent)"
+                stroke-width="3"
+              />
+              <path
+                d="M10.5 12h11M10.5 16.5h11"
+                fill="none"
+                stroke="var(--accent)"
+                stroke-width="2.5"
+                stroke-linecap="round"
+              />
+              <path
+                d="M10.5 21h6"
+                fill="none"
+                stroke="var(--mark)"
+                stroke-width="2.5"
+                stroke-linecap="round"
+              />
+            </svg>
+            Sessionly
+          </a>
+          <p>
+            A ledger of AI coding agent sessions. Open source under Apache-2.0 and
+            <a href="https://github.com/KIvanow/sessionly#server">self-hosted</a>. Claude Code,
+            Cursor, Grok and GitHub are trademarks of their owners; Sessionly is not affiliated
+            with them.
+          </p>
+          <p>Email <a href="mailto:support@sessionly.dev">support@sessionly.dev</a>.</p>
+        </div>
+        <nav aria-label="Legal and contact">
+          <a href="/privacy">Privacy</a>
+          <a href="/terms">Terms</a>
+          <a href="/dpa">DPA</a>
+          <a href="/security">Security</a>
+          <a href="https://github.com/KIvanow/sessionly">GitHub</a>
+          <a href="https://github.com/KIvanow/sessionly#readme">Docs</a>
+          <a href="https://github.com/KIvanow/sessionly/tree/main/action">GitHub Action</a>
+          <a href="https://github.com/KIvanow/sessionly#server">Self-hosting</a>
+        </nav>
+      </div>
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Security - Sessionly</title>
+    <meta
+      name="description"
+      content="What Sessionly keeps on a developer's machine, what an upload contains, how tokens and roles work on the server, and how to report a vulnerability."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)" />
+    <link rel="canonical" href="https://sessionly.dev/security" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <a class="brand" href="/">
+          <svg viewBox="0 0 32 32" aria-hidden="true">
+            <rect
+              x="4.5"
+              y="4.5"
+              width="23"
+              height="23"
+              rx="5"
+              fill="none"
+              stroke="var(--accent)"
+              stroke-width="3"
+            />
+            <path
+              d="M10.5 12h11M10.5 16.5h11"
+              fill="none"
+              stroke="var(--accent)"
+              stroke-width="2.5"
+              stroke-linecap="round"
+            />
+            <path
+              d="M10.5 21h6"
+              fill="none"
+              stroke="var(--mark)"
+              stroke-width="2.5"
+              stroke-linecap="round"
+            />
+          </svg>
+          Sessionly
+        </a>
+        <nav aria-label="Sections">
+          <a href="/#how">How it works</a>
+          <a href="/#uploads">What is uploaded</a>
+          <a href="/#editions">Editions</a>
+        </nav>
+        <div class="menu" id="menu">
+          <a class="toggle open" href="#menu">Menu</a>
+          <a class="toggle close" href="#close" aria-label="Close menu">Close</a>
+          <nav aria-label="Sections (menu)">
+            <a href="/#how">How it works</a>
+            <a href="/#uploads">What is uploaded</a>
+            <a href="/#editions">Editions</a>
+            <a href="/#start">Get started</a>
+            <a href="https://github.com/KIvanow/sessionly">GitHub</a>
+          </nav>
+        </div>
+        <div class="cta">
+          <a class="btn ghost" href="https://github.com/KIvanow/sessionly">GitHub</a>
+          <a class="btn primary" href="/#start">Get started</a>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="legal">
+        <div class="wrap">
+          <h1>Security</h1>
+          <p class="meta">Last updated 14 November 2026</p>
+
+          <div class="summary">
+            <h2>In short</h2>
+            <ul>
+              <li>
+                Full prompts, file contents and command output stay on the developer's machine, in
+                files only that user can read. Nothing leaves the machine until it is connected to
+                a server.
+              </li>
+              <li>
+                The default upload contains no text from prompts, commands or files, and no
+                absolute paths. Previews and line hashes are separate switches, off by default,
+                and <code>sessionly export</code> prints exactly what would be sent.
+              </li>
+              <li>
+                The capture hook only observes. It cannot block or change an agent's session, and
+                it never opens the sign-in files of Cursor or Grok.
+              </li>
+              <li>
+                Access to a server is by token. Tokens are stored as SHA-256 hashes; a member reads
+                only their own sessions, and the token the GitHub Action uses can report pull
+                requests and nothing else.
+              </li>
+              <li>
+                Nothing phones home: no telemetry, no update checks, and licenses are verified
+                offline.
+              </li>
+              <li>
+                Found a problem? Email
+                <a href="mailto:kristiyan@sessionly.dev">kristiyan@sessionly.dev</a>. The code is
+                public at
+                <a href="https://github.com/KIvanow/sessionly">github.com/KIvanow/sessionly</a>.
+              </li>
+            </ul>
+          </div>
+
+          <p>
+            Sessionly is operated by Kristiyan Ivanov, an individual. This page describes what the
+            software does to protect the sessions it records, as it is built today. It is written
+            from the code, which you can read yourself; where this page and the code disagree, the
+            code is right and I would like to hear about it. It is not a certification: Sessionly
+            has no SOC 2 or ISO 27001 audit.
+          </p>
+          <p>
+            Sessionly is self-hosted today: hosting, TLS and backups of a server are yours to
+            arrange. A hosted service is planned and not open yet; how it is hosted and backed up
+            will be described here before it opens.
+          </p>
+
+          <h2>On the developer's machine</h2>
+          <h3>What is kept, and who can read it</h3>
+          <p>
+            The <code>sessionly</code> program keeps everything under <code>~/.sessionly</code>:
+          </p>
+          <ul>
+            <li>
+              <strong>The raw capture</strong>: every hook event as the agent sent it, including
+              full prompts, file contents and command output. Files are created with mode 0600 and
+              directories with 0700, so only your user can read them. The raw capture is never
+              uploaded.
+            </li>
+            <li>
+              <strong>The ledger</strong>: one record per session in a local SQLite file, also
+              0600. A record holds metadata and short previews, not content: for a prompt, its
+              length, SHA-256 and first 200 characters; for a tool call, its tool, status,
+              duration, file path, a hash of its input, the size of its output and a one-line
+              summary.
+            </li>
+            <li>
+              <strong>The configuration</strong>, including the server's address and your token,
+              in a file readable only by you. The token is never printed.
+            </li>
+          </ul>
+          <p>
+            There is no retention limit yet: the raw capture grows until you delete it. Deleting
+            <code>~/.sessionly</code> removes everything Sessionly has kept on that machine.
+          </p>
+
+          <h3>The capture hook</h3>
+          <ul>
+            <li>
+              <strong>It only observes.</strong> <code>sessionly install</code> registers 20
+              events that report what happened. Events that change the agent's behaviour when
+              hooked (creating and removing worktrees, switching models) are left out on purpose.
+            </li>
+            <li>
+              <strong>It cannot get in the way.</strong> The hook appends one line under a file
+              lock, never prints, and always exits 0, whatever its input or arguments, so a
+              capture failure cannot block or alter a session. If another capture holds the file
+              for more than 1.5 seconds, it writes anyway instead of waiting.
+            </li>
+            <li>
+              <strong>It is careful with your settings.</strong> Install adds, and uninstall
+              removes, only hook entries whose command is exactly Sessionly's own. Other hooks and
+              settings, file permissions and a symlinked location are kept; the file as it was
+              before the first change is saved beside it and never overwritten; a settings file
+              that is not valid JSON is left untouched.
+            </li>
+          </ul>
+
+          <h3>Other agents' files</h3>
+          <p>
+            Sessions from Cursor and Grok are read from the transcript and session files those
+            agents keep. Their sign-in files are never opened.
+          </p>
+
+          <h2>What leaves the machine</h2>
+          <p>
+            Nothing, until you run <code>sessionly connect</code>. The program has one network
+            connection: the upload to the server you connected. It sends no telemetry and does not
+            check for updates. Once connected, before a record is uploaded:
+          </p>
+          <ul>
+            <li>
+              <strong>Paths are made relative</strong>: to the repository for files inside it,
+              otherwise to the home directory (<code>~/…</code>). No absolute path under your home
+              directory is sent.
+            </li>
+            <li>
+              <strong>The content level is applied.</strong> The default,
+              <code>metadata</code>, sends counts, sizes, timings, tool names, statuses, relative
+              file paths, models, tokens, cost, rewrite figures and the git user and remote. It
+              sends no text from prompts, commands, search patterns, URLs, errors or titles, and
+              no content hashes. <code>previews</code>, which you switch on yourself, adds the
+              200-character previews and the hashes.
+            </li>
+            <li>
+              <strong>Line hashes are a separate switch</strong>, off by default. When on, the
+              upload includes, per changed file and model, the first 8 bytes of the SHA-256 of
+              each line the agent added, without the whitespace at its ends. Blank lines and lines
+              with no letter or digit are left out.
+            </li>
+          </ul>
+          <p>
+            <code>sessionly export &lt;session&gt;</code> prints the exact payload for any session,
+            connected or not, and <code>sessionly schema upload</code> prints its JSON Schema.
+          </p>
+          <h3>In transit</h3>
+          <p>
+            The program refuses plain <code>http://</code> for any server that is not on the same
+            machine, so an upload to a remote server always goes over HTTPS. The token travels in
+            the <code>Authorization</code> header.
+          </p>
+
+          <h2>On the server</h2>
+          <ul>
+            <li>
+              <strong>Tokens</strong> (<code>sly_…</code>, 24 random bytes) are shown once when
+              created. The server stores their SHA-256 hash and looks them up by it. A token can be
+              revoked at any time, and when it was last used is recorded. There are no passwords.
+            </li>
+            <li>
+              <strong>Roles.</strong> A <code>member</code> token uploads sessions and reads only
+              the sessions filed under its owner. An <code>admin</code> token reads everyone's and
+              manages tokens. A <code>ci</code> token, for the GitHub Action, can report pull
+              requests and check that it is accepted; every other request is refused.
+            </li>
+            <li>
+              <strong>Ownership.</strong> An upload is filed under the owner of the token that
+              sent it, whatever name the record carries, and a session uploaded by one person
+              cannot be replaced by another.
+            </li>
+            <li>
+              <strong>Validation.</strong> Every upload is checked against the published schema
+              and refused if it does not match; a record marked as local-only is refused; a body
+              over 32 MB is refused.
+            </li>
+            <li>
+              <strong>The first admin token</strong> comes from the server's environment, for use
+              before any token exists. It is compared in constant time and never stored.
+            </li>
+            <li>
+              <strong>Logs.</strong> The server does not write a log of requests. Unexpected
+              errors are written to its standard error.
+            </li>
+            <li>
+              <strong>The dashboard</strong> keeps the token in the browser's local storage and
+              sends it as a header. It sets no cookies and loads nothing from other sites.
+            </li>
+          </ul>
+          <h3>Self-hosting defaults</h3>
+          <p>
+            Started directly, the server listens on <code>127.0.0.1</code> only. The Docker Compose
+            file publishes the server's port and keeps Postgres inside the Compose network, with a
+            fixed database password that is not reachable from outside it. Put the server behind
+            HTTPS before anyone outside the machine uses it; the program will not upload to it
+            otherwise.
+          </p>
+
+          <h2>Pull requests</h2>
+          <p>
+            The GitHub Action and the program both send hashes of lines, never the lines. The
+            server compares them to tell which lines of a pull request an agent added. No source
+            code leaves GitHub or anyone's machine for this.
+          </p>
+          <ul>
+            <li>
+              The Action is plain JavaScript with no dependencies. It needs
+              <code>pull-requests: read</code> and nothing else unless you ask it to comment.
+            </li>
+            <li>
+              It authenticates with a <code>ci</code> token kept as a repository secret. If that
+              token leaks, it can submit pull request reports; it cannot read sessions, reports or
+              tokens.
+            </li>
+            <li>
+              GitHub does not give secrets to workflows run from forks, so pull requests from
+              forks are not reported.
+            </li>
+            <li>
+              The commit email addresses the Action sends are used to pick the sessions to compare
+              with and are not stored.
+            </li>
+          </ul>
+
+          <h2>Licenses</h2>
+          <p>
+            A Business or Enterprise license is a JSON file with an Ed25519 signature over its
+            contents. The server verifies it against a public key built into the code, when it is
+            installed and each time it is loaded, and accepts it only if it names the install's
+            own org. Nothing is sent anywhere to check it. The private key is not in the
+            repository.
+          </p>
+
+          <h2>This website</h2>
+          <p>
+            The website is static HTML and one stylesheet. It runs no scripts, sets no cookies and
+            has no analytics. It is served with a Content Security Policy of
+            <code>default-src 'none'</code> that allows only its own stylesheet and images, and
+            sends <code>X-Content-Type-Options</code>, <code>X-Frame-Options</code> and
+            <code>Referrer-Policy</code> headers. It is hosted by Vercel, which keeps request logs.
+          </p>
+
+          <h2>What Sessionly cannot protect you from</h2>
+          <ul>
+            <li>
+              <strong>A preview can contain a secret.</strong> The first 200 characters of a
+              prompt or a shell command are whatever was typed. They are kept in the local ledger,
+              and uploaded if previews are on. Sessionly does not scan for secrets.
+            </li>
+            <li>
+              <strong>Paths and hashes still say something.</strong> A relative path names files
+              in your repository. A line hash is 64 bits of a SHA-256: it does not give the line
+              back, but a short or common line can be guessed and checked against it. Treat line
+              hashes as you would the names of your files.
+            </li>
+            <li>
+              <strong>A token is the whole key.</strong> Anyone holding an admin token can read
+              every session in the org. Tokens do not expire on their own; revoke them when people
+              leave.
+            </li>
+            <li>
+              <strong>Identity is a label.</strong> The name and email in a record come from git
+              configuration and are not verified. The server trusts the token, not the name.
+            </li>
+            <li>
+              <strong>Anyone with your user account can read the capture.</strong> File
+              permissions keep other users out, not other programs running as you, and the files
+              are not encrypted.
+            </li>
+          </ul>
+
+          <h2 id="report">Reporting a vulnerability</h2>
+          <p>
+            If you believe you have found a security problem in Sessionly or this website, please
+            email <a href="mailto:kristiyan@sessionly.dev">kristiyan@sessionly.dev</a> with enough
+            detail to reproduce it. I read that address myself. Please give me a reasonable window
+            to fix the issue before you publish it, and do not access, change or delete other
+            people's data while demonstrating it. There is no bug bounty.
+          </p>
+          <p>
+            The whole codebase, including the capture program, the server, the dashboard and the
+            GitHub Action, is public at
+            <a href="https://github.com/KIvanow/sessionly">github.com/KIvanow/sessionly</a>, with
+            everything outside <code>ee/</code> under Apache-2.0. Run it yourself and read what it
+            does.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <div>
+          <a class="brand" href="/">
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+              <rect
+                x="4.5"
+                y="4.5"
+                width="23"
+                height="23"
+                rx="5"
+                fill="none"
+                stroke="var(--accent)"
+                stroke-width="3"
+              />
+              <path
+                d="M10.5 12h11M10.5 16.5h11"
+                fill="none"
+                stroke="var(--accent)"
+                stroke-width="2.5"
+                stroke-linecap="round"
+              />
+              <path
+                d="M10.5 21h6"
+                fill="none"
+                stroke="var(--mark)"
+                stroke-width="2.5"
+                stroke-linecap="round"
+              />
+            </svg>
+            Sessionly
+          </a>
+          <p>
+            A ledger of AI coding agent sessions. Open source under Apache-2.0 and
+            <a href="https://github.com/KIvanow/sessionly#server">self-hosted</a>. Claude Code,
+            Cursor, Grok and GitHub are trademarks of their owners; Sessionly is not affiliated
+            with them.
+          </p>
+          <p>Email <a href="mailto:support@sessionly.dev">support@sessionly.dev</a>.</p>
+        </div>
+        <nav aria-label="Legal and contact">
+          <a href="/privacy">Privacy</a>
+          <a href="/terms">Terms</a>
+          <a href="/dpa">DPA</a>
+          <a href="/security">Security</a>
+          <a href="https://github.com/KIvanow/sessionly">GitHub</a>
+          <a href="https://github.com/KIvanow/sessionly#readme">Docs</a>
+          <a href="https://github.com/KIvanow/sessionly/tree/main/action">GitHub Action</a>
+          <a href="https://github.com/KIvanow/sessionly#server">Self-hosting</a>
+        </nav>
+      </div>
+    </footer>
+  </body>
+</html>
