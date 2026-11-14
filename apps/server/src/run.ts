@@ -15,7 +15,7 @@ export interface RunOptions {
   /** Runs after the core's migrations and before the server listens. */
   prepare?: (db: Db) => Promise<void>;
   /** Extra routes for the authenticated API. */
-  extensions?: (db: Db) => Extension[];
+  extensions?: () => Extension[];
   /** Shown in the start-up line, e.g. "Business and Enterprise features". */
   edition?: string;
 }
@@ -56,7 +56,7 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   const webRoot = existsSync(webDist) ? webDist : undefined;
   const app = createApp(db, {
     webRoot,
-    extensions: options.extensions?.(db),
+    extensions: options.extensions?.(),
     bootstrap: adminToken
       ? { token: adminToken, email: process.env.SESSIONLY_ADMIN_EMAIL ?? "admin@localhost" }
       : undefined,

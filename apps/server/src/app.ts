@@ -24,13 +24,22 @@ import {
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
-import { BadReport, listPulls, storePull, summarizePulls, type PullFilters } from "./pulls.ts";
+import type { PullReport } from "@sessionly/schema";
+import { BadReport, checkReport, listPulls, storePull, summarizePulls, type PullFilters } from "./pulls.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
 /** A record lists every tool call, so a long session is several megabytes. */
 const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
 
-export type Env = { Variables: { principal: Principal; db: OrgDb } };
+export type Env = {
+  Variables: {
+    principal: Principal;
+    db: OrgDb;
+    /** An upload or a pull request report, already parsed and checked. */
+    upload?: Upload;
+    report?: PullReport;
+  };
+};
 
 /**
  * The authenticated API router. Every route on it has `c.get("principal")`,
@@ -41,10 +50,10 @@ export type Api = Hono<Env>;
 
 /**
  * Adds routes to the authenticated API. This is how optional parts plug in
- * without the core depending on them. Routes read `c.get("db")`; the `db`
- * here is the owner's and is for setting up, not for answering requests.
+ * without the core depending on them. A route reaches data through
+ * `c.get("db")` and nothing else: an extension is not given the database.
  */
-export type Extension = (api: Api, ctx: { db: Db }) => void;
+export type Extension = (api: Api) => void;
 
 class BadRequest extends Error {}
 
@@ -104,11 +113,16 @@ export interface Options {
   extensions?: Extension[];
 }
 
-export function createApp(db: Db, options: Options = {}): Hono<Env> {
+/**
+ * `ownerDb` sees every organisation's rows. Here it only finds whose token a
+ * request carries and opens that organisation's transaction; no route below
+ * may touch it (`scripts/check-unscoped.mjs` checks each line it is on).
+ */
+export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
 
   api.use("*", async (c, next) => {
-    const principal = await authenticate(db, c.req.header("authorization"), options.bootstrap);
+    const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap);
     if (!principal) return c.json({ error: "missing or unknown token" }, 401);
     // A ci token reports pull requests and does nothing else.
     if (principal.role === "ci") {
@@ -136,13 +150,54 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
     }),
   );
 
+  // The two large bodies are parsed and checked before the transaction
+  // below begins, so that no database connection (or the embedded database,
+  // which is a single one) is held while megabytes of JSON are read through.
+  api.put("/sessions/:machine/:source/:session", async (c, next) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "the body is not JSON" }, 400);
+    }
+    const problems = uploadProblems(body);
+    if (problems) return c.json({ error: "the upload does not match the schema", problems }, 422);
+    const upload = body as Upload;
+    const s = upload.session ?? {};
+    const { machine, source, session } = c.req.param();
+    if (!s.machine_id || !s.source || !s.session_id) {
+      return c.json({ error: "session.machine_id, source and session_id are required" }, 422);
+    }
+    if (s.machine_id !== machine || s.source !== source || s.session_id !== session) {
+      return c.json({ error: "the address does not match the session in the body" }, 422);
+    }
+    if (s.content === "local") {
+      return c.json({ error: "local records are not for upload; send previews or metadata" }, 422);
+    }
+    c.set("upload", upload);
+    await next();
+  });
+  api.put("/prs", async (c, next) => {
+    if (c.get("principal").role === "member") {
+      return c.json({ error: "reporting pull requests needs a ci or admin token" }, 403);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "the body is not JSON" }, 400);
+    }
+    c.set("report", checkReport(body));
+    await next();
+  });
+
   // The rest of the request runs in one transaction, as the organisation of
   // its token: `c.get("db")` sees that organisation's rows and no others.
   api.use("*", async (c, next) => {
-    // The body is read first, so that a slow sender holds no database connection.
+    // Any other body is read first too, so that a slow sender holds no connection.
     if (c.req.raw.body) await c.req.arrayBuffer();
     try {
-      await db.asOrg(c.get("principal").orgId, async (orgDb) => {
+      await ownerDb.asOrg(c.get("principal").orgId, async (orgDb) => {
         c.set("db", orgDb);
         await next();
         // A handler that threw has been answered for already (see onError).
@@ -167,26 +222,8 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
   api.get("/me", (c) => c.json(whoami(c.get("principal"))));
 
   api.put("/sessions/:machine/:source/:session", async (c) => {
-    let body: unknown;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ error: "the body is not JSON" }, 400);
-    }
-    const problems = uploadProblems(body);
-    if (problems) return c.json({ error: "the upload does not match the schema", problems }, 422);
-    const upload = body as Upload;
-    const s = upload.session ?? {};
-    const { machine, source, session } = c.req.param();
-    if (!s.machine_id || !s.source || !s.session_id) {
-      return c.json({ error: "session.machine_id, source and session_id are required" }, 422);
-    }
-    if (s.machine_id !== machine || s.source !== source || s.session_id !== session) {
-      return c.json({ error: "the address does not match the session in the body" }, 422);
-    }
-    if (s.content === "local") {
-      return c.json({ error: "local records are not for upload; send previews or metadata" }, 422);
-    }
+    const upload = c.get("upload");
+    if (!upload) throw new Error("the upload was not checked");
     let stored: boolean;
     try {
       stored = await storeUpload(c.get("db"), upload, c.get("principal"));
@@ -246,16 +283,9 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
     return { repo: query.repo || undefined, state, since: time(query.since, "since") };
   };
   api.put("/prs", async (c) => {
-    if (c.get("principal").role === "member") {
-      return c.json({ error: "reporting pull requests needs a ci or admin token" }, 403);
-    }
-    let body: unknown;
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ error: "the body is not JSON" }, 400);
-    }
-    return c.json({ stored: true, attribution: await storePull(c.get("db"), body) });
+    const report = c.get("report");
+    if (!report) throw new Error("the report was not checked");
+    return c.json({ stored: true, attribution: await storePull(c.get("db"), report) });
   });
   api.get("/prs/summary", async (c) => {
     adminsOnly(c.get("principal"));
@@ -298,7 +328,7 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
   );
   api.route("/tokens", admin);
 
-  for (const extend of options.extensions ?? []) extend(api, { db });
+  for (const extend of options.extensions ?? []) extend(api);
 
   const app = new Hono<Env>();
   app.route("/api/v1", api);

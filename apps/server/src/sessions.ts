@@ -106,12 +106,19 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   const updates = names
     .filter((name) => !["org_id", "machine_id", "source", "session_id"].includes(name))
     .map((name) => `${name} = EXCLUDED.${name}`);
-  await db.query(
+  // The check above read the row a moment ago. If someone else stored this
+  // very session in between, it is theirs: the update is skipped, not won by
+  // whoever came last.
+  const mayRefile = uploader.role === "env" ? uploader.email : null;
+  const stored = await db.query(
     `INSERT INTO sessions (${names.join(", ")}) VALUES (${placeholders.join(", ")})
      ON CONFLICT (org_id, machine_id, source, session_id)
-     DO UPDATE SET ${updates.join(", ")}, updated_at = now()`,
-    Object.values(columns),
+     DO UPDATE SET ${updates.join(", ")}, updated_at = now()
+     WHERE sessions.owner_email = EXCLUDED.owner_email OR sessions.owner_email = $${names.length + 1}
+     RETURNING 1`,
+    [...Object.values(columns), mayRefile],
   );
+  if (stored.length === 0) throw new Conflict("this session was uploaded by someone else");
   return true;
 }
 

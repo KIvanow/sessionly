@@ -149,7 +149,8 @@ export function attribute(
   };
 }
 
-function checked(body: unknown): PullReport {
+/** A report as the Action sends it, checked; throws `BadReport` saying what is wrong with it. */
+export function checkReport(body: unknown): PullReport {
   const r = body as Record<string, unknown>;
   const fail = (what: string): never => {
     throw new BadReport(what);
@@ -304,8 +305,7 @@ async function claimsFor(db: OrgDb, report: PullReport): Promise<Claim[]> {
  * which of its lines agents wrote. The lines of the first report are kept
  * for good: they are what review started from.
  */
-export async function storePull(db: OrgDb, body: unknown): Promise<PullAttribution> {
-  const report = checked(body);
+export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttribution> {
   const [existing] = await db.query<{ first_files: unknown; first_event: string }>(
     `SELECT first_files, first_event FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
     [db.orgId, report.repo, report.number],

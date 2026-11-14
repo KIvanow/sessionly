@@ -76,15 +76,27 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
-      # The same tests on a real Postgres, connected as a role that is not a
-      # superuser, like the one a managed database gives: row-level security
-      # and the switch of role have to hold there too.
-      - name: The server's tests on Postgres
+      # The same tests on a real Postgres, where row-level security and the
+      # switch of role have to hold too. Twice, for the two kinds of user a
+      # server meets, neither a superuser:
+      - name: The tests on Postgres, as a user who may create roles
         env:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -U postgres -qc "CREATE ROLE managed LOGIN PASSWORD 'managed' CREATEDB CREATEROLE"
           export TEST_DATABASE_URL=postgres://managed:managed@localhost:5432/postgres
+          pnpm --filter @sessionly/server test
+          pnpm --filter @sessionly/ee test
+      # ...and as the kind a managed database's panel creates, who may not:
+      # an admin makes each database and the role its requests run as, which
+      # is the one-time step such a database needs.
+      - name: The tests on Postgres, as a user who may not
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -qc "CREATE ROLE plain LOGIN PASSWORD 'plain'"
+          export TEST_DATABASE_URL=postgres://plain:plain@localhost:5432/postgres
+          export TEST_DATABASE_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres
           pnpm --filter @sessionly/server test
           pnpm --filter @sessionly/ee test
       - run: pnpm build

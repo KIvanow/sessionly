@@ -9,9 +9,10 @@ import { ApiError, createApp, type Env } from "../src/app.ts";
 import { createToken } from "../src/auth.ts";
 import { FIRST_ORG_MIGRATION, openDb, type Db } from "../src/db.ts";
 import { hostedProblems } from "../src/run.ts";
-import { newOrg, testDb, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
+import { newOrg, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
 
 let db: Db;
+let dbUrl: string;
 let app: Hono<Env>;
 type Tokens = { admin: string; member: string; memberId: string; ci: string; env: string };
 const a = {} as Tokens;
@@ -29,7 +30,8 @@ async function people(org: string, domain: string): Promise<Tokens> {
 }
 
 before(async () => {
-  db = await testDb();
+  dbUrl = await testDbUrl();
+  db = await openDb(dbUrl);
   app = createApp(db, {
     extensions: [
       // A route that writes and then fails, to see that nothing of it stays.
@@ -141,10 +143,30 @@ test("another organisation sees none of an organisation's sessions, pull request
   assert.equal((await call(b.admin, "DELETE", `/tokens/${a.memberId}`)).status, 404);
   assert.equal((await call(b.admin, "GET", "/summary")).body.total.sessions, 0);
   assert.equal((await call(b.admin, "GET", "/prs/summary")).body.total.pulls, 0);
+  assert.equal((await call(b.admin, "GET", "/sessions")).body.total, 0);
   assert.deepEqual(
     (await call(b.admin, "GET", "/tokens")).body.tokens.map((t: any) => t.email).sort(),
     ["ann@b.example", "boss@b.example", "ci@b.example", "cloud@b.example"],
   );
+  // Its tokens for CI and for a cloud environment read nothing at all,
+  // of anyone's.
+  for (const token of [b.ci, b.env]) {
+    for (const [method, path, body] of asked) {
+      const answer = await call(token, method, path, body);
+      assert.equal(answer.status, 403, `${method} ${path}`);
+      assert.doesNotMatch(answer.text, ofA, `${method} ${path}`);
+    }
+  }
+  // What they do write lands in their own organisation, beside org a's of
+  // the same name, and is told nothing of it.
+  const same = await put(b.env, session("s1", { user: { name: null, email: "eve@b.example" } }));
+  assert.deepEqual(same.body, { stored: true });
+  const reported = await call(b.ci, "PUT", "/prs", pull(1, { title: "b's own" }));
+  assert.equal(reported.body.attribution.now.agent_lines, 0);
+  assert.doesNotMatch(reported.text, ofA);
+  assert.equal((await call(a.admin, "GET", "/sessions/m1/claude-code/s1")).body.owner_email, "ann@a.example");
+  assert.equal((await call(a.admin, "GET", "/prs")).body.pulls[0].title, "The pull request of org a");
+
   // And nothing org b did changed what org a has: the token it tried to
   // revoke still works.
   assert.equal((await call(a.member, "GET", "/ping")).body.org, "org-a");
@@ -234,14 +256,91 @@ test("the database itself confines a request to its organisation", async () => {
     assert.equal((await scoped.query(`DELETE FROM tokens WHERE org_id = 'org-b' RETURNING 1`)).length, 0);
   });
   // With no organisation set there is nothing to see.
+  const [{ role } = { role: "" }] = await db.query<{ role: string }>(
+    `SELECT left('sessionly_app_' || current_database(), 63) AS role`,
+  );
   const unset = await db.transaction(async (tx) => {
-    await tx.query(`SET LOCAL ROLE sessionly_app`);
+    await tx.query(`SET LOCAL ROLE "${role}"`);
     return tx.query<{ n: unknown }>(`SELECT count(*) AS n FROM sessions`);
   });
   assert.equal(Number(unset[0]?.n), 0);
-  // And the role does not outlive its transaction.
-  const [after] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM sessions`);
-  assert.ok(Number(after?.n) >= 4);
+
+  // The role and the organisation do not outlive their transaction. Asked
+  // on the very connection it ran on: a pool of one has no other.
+  const one = dbUrl === "memory://" ? db : await openDb(dbUrl, { pool: 1 });
+  try {
+    const during = await one.asOrg("org-a", (scoped) =>
+      scoped.query<{ who: string; org: string }>(`SELECT current_user AS who, current_setting('sessionly.org_id', true) AS org`),
+    );
+    assert.deepEqual(during, [{ who: role, org: "org-a" }]);
+    const [after] = await one.query<{ who: string; org: string | null; n: unknown }>(
+      `SELECT current_user AS who, current_setting('sessionly.org_id', true) AS org,
+              (SELECT count(*) FROM sessions) AS n`,
+    );
+    assert.notEqual(after?.who, role);
+    assert.ok(!after?.org, `organisation still set: ${after?.org}`);
+    assert.ok(Number(after?.n) >= 4);
+    // A transaction that fails leaves nothing set either.
+    await assert.rejects(one.asOrg("org-a", (scoped) => scoped.query(`SELECT 1 / 0`)));
+    const [then] = await one.query<{ who: string; org: string | null }>(
+      `SELECT current_user AS who, current_setting('sessionly.org_id', true) AS org`,
+    );
+    assert.notEqual(then?.who, role);
+    assert.ok(!then?.org);
+  } finally {
+    if (one !== db) await one.close();
+  }
+});
+
+test("requests are granted exactly the tables they must reach", async () => {
+  const granted = await db.query<{ name: string; can: string }>(
+    `SELECT c.relname AS name,
+            concat_ws(',',
+              CASE WHEN has_table_privilege(r.role, c.oid, 'SELECT') THEN 'select' END,
+              CASE WHEN has_table_privilege(r.role, c.oid, 'INSERT') THEN 'insert' END,
+              CASE WHEN has_table_privilege(r.role, c.oid, 'UPDATE') THEN 'update' END,
+              CASE WHEN has_table_privilege(r.role, c.oid, 'DELETE') THEN 'delete' END) AS can
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace,
+          (SELECT left('sessionly_app_' || current_database(), 63) AS role) r
+     WHERE n.nspname = 'public' AND c.relkind = 'r' ORDER BY 1`,
+  );
+  const can = Object.fromEntries(granted.map((t) => [t.name, t.can]));
+  // Everything an organisation owns: all of it, behind row-level security.
+  for (const table of ["tokens", "sessions", "pull_requests"]) assert.equal(can[table], "select,insert,update,delete", table);
+  // Its own row of the organisations, to read.
+  assert.equal(can.orgs, "select");
+  // And nothing else: not the record of migrations.
+  assert.equal(can.migrations, "");
+  // A table with an org column that requests cannot reach was forgotten.
+  const scoped = await db.query<{ name: string }>(
+    `SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relkind = 'r'
+       AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'org_id' AND NOT a.attisdropped)`,
+  );
+  for (const { name } of scoped) assert.match(can[name] ?? "", /select/, name);
+});
+
+test("two people storing the same new session at once: one has it, the other is told", async () => {
+  const ann = await tokenFor(db, { email: "ann@a.example", role: "member" }, "org-a");
+  const bob = await tokenFor(db, { email: "bob@a.example", role: "member" }, "org-a");
+  for (let round = 0; round < 5; round++) {
+    const id = `raced-${round}`;
+    const answers = await Promise.all([put(ann, session(id)), put(bob, session(id))]);
+    assert.deepEqual(answers.map((r) => r.status).sort(), [200, 409], id);
+    const winner = answers[0]?.status === 200 ? "ann@a.example" : "bob@a.example";
+    assert.equal((await call(a.admin, "GET", `/sessions/m1/claude-code/${id}`)).body.owner_email, winner);
+  }
+});
+
+test("a database user who may not make roles is told what its admin must run", async (t) => {
+  if (!process.env.TEST_DATABASE_ADMIN_URL) return t.skip("needs TEST_DATABASE_ADMIN_URL and a user without CREATEROLE");
+  const url = await testDbUrl({ provision: false });
+  const name = new URL(url).pathname.slice(1);
+  await assert.rejects(openDb(url), (err: Error) => {
+    assert.match(err.message, new RegExp(`CREATE ROLE "sessionly_app_${name}" NOLOGIN;`));
+    assert.match(err.message, new RegExp(`GRANT "sessionly_app_${name}" TO "`));
+    return true;
+  });
 });
 
 test("every table that belongs to an organisation has row-level security on", async () => {
@@ -282,9 +381,11 @@ test("an expired token, and a token of an organisation being deleted, are nobody
 });
 
 test("a database from before organisations lands in the default one", async () => {
-  const dir = join(mkdtempSync(join(tmpdir(), "sessionly-upgrade-")), "db");
+  // On Postgres where the tests run on one; else a folder for the embedded database.
+  const fresh = await testDbUrl();
+  const dir = fresh === "memory://" ? `file:${join(mkdtempSync(join(tmpdir(), "sessionly-upgrade-")), "db")}` : fresh;
   // As a server before this one left it, with a token, a session and a pull request.
-  const old = await openDb(`file:${dir}`, { migrations: FIRST_ORG_MIGRATION });
+  const old = await openDb(dir, { migrations: FIRST_ORG_MIGRATION });
   const hash = await import("node:crypto").then((c) => c.createHash("sha256").update("old-token").digest("hex"));
   await old.query(
     `INSERT INTO tokens (id, token_hash, email, role) VALUES ('t1', $1, 'boss@example.com', 'admin')`,
@@ -301,7 +402,7 @@ test("a database from before organisations lands in the default one", async () =
   );
   await old.close();
 
-  const upgraded = await openDb(`file:${dir}`);
+  const upgraded = await openDb(dir);
   try {
     const now = createApp(upgraded, { bootstrap: { token: "from-the-environment", email: "root@example.com" } });
     const ask = async (token: string, path: string) =>
@@ -316,7 +417,7 @@ test("a database from before organisations lands in the default one", async () =
   } finally {
     await upgraded.close();
   }
-  await (await openDb(`file:${dir}`)).close();
+  await (await openDb(dir)).close();
 });
 
 test("several copies of the server starting at once migrate once", async (t) => {

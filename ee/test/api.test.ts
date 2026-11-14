@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { createHash } from "node:crypto";
-import { createApp, testDb, type Db } from "@sessionly/server";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createApp, FIRST_ORG_MIGRATION, openDb, testDb, testDbUrl, type Db } from "@sessionly/server";
 import { eeApi } from "../src/api.ts";
 import { Entitlements } from "../src/entitlements.ts";
 import { GRACE_MS, signLicense } from "../src/license/license.ts";
-import { migrateEe } from "../src/migrate.ts";
+import { FIRST_EE_ORG_MIGRATION, migrateEe } from "../src/migrate.ts";
 import { issuer, license } from "./harness.ts";
 
 let db: Db;
@@ -160,4 +163,55 @@ test("a license without the feature does not unlock it", async () => {
   const bare = await install(signed({ id: "lic_bare", features: [] }));
   assert.equal(bare.body.status, "active");
   assert.equal((await call(member, "GET", "/policy")).body.code, "license_required");
+});
+
+test("a hosted service installs no licenses", async () => {
+  const hosted = createApp(db, {
+    bootstrap: { token: ADMIN, email: "boss@example.com" },
+    extensions: [eeApi({ entitlements: new Entitlements(() => clock.now, issuer.publicKey, 0), org: "acme", hosted: true })],
+  });
+  const refused = await hosted.request("/api/v1/license", {
+    method: "POST",
+    headers: { authorization: `Bearer ${ADMIN}`, "content-type": "application/json" },
+    body: JSON.stringify({ license: signed({ id: "lic_hosted" }) }),
+  });
+  assert.equal(refused.status, 403);
+  assert.equal(((await refused.json()) as { code: string }).code, "no_licenses_here");
+  const [stored] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM ee_licenses WHERE id = 'lic_hosted'`);
+  assert.equal(Number(stored?.n), 0);
+});
+
+test("a license and a policy from before organisations land in the default one", async () => {
+  const fresh = await testDbUrl();
+  const url = fresh === "memory://" ? `file:${join(mkdtempSync(join(tmpdir(), "sessionly-ee-upgrade-")), "db")}` : fresh;
+  // As the server before organisations left it.
+  const old = await openDb(url, { migrations: FIRST_ORG_MIGRATION });
+  await migrateEe(old, FIRST_EE_ORG_MIGRATION);
+  const raw = signed({ id: "lic_old" });
+  await old.query(
+    `INSERT INTO ee_licenses (id, org, raw, expires_at, installed_by, installed_at)
+     VALUES ('lic_old', 'acme', $1, '2027-01-01T00:00:00Z', 'boss@example.com', '2026-01-01T00:00:00Z')`,
+    [raw],
+  );
+  await old.query(
+    `INSERT INTO ee_content_policy (id, content, updated_by, updated_at)
+     VALUES (1, 'previews', 'boss@example.com', '2026-01-02T00:00:00Z')`,
+  );
+  await old.close();
+
+  const upgraded = await openDb(url);
+  try {
+    await migrateEe(upgraded);
+    await migrateEe(upgraded);
+    const now = createApp(upgraded, {
+      bootstrap: { token: ADMIN, email: "boss@example.com" },
+      extensions: [eeApi({ entitlements: new Entitlements(() => new Date("2026-06-01T00:00:00Z"), issuer.publicKey, 0), org: "acme" })],
+    });
+    const ask = async (path: string) =>
+      (await now.request(`/api/v1${path}`, { headers: { authorization: `Bearer ${ADMIN}` } })).json() as Promise<any>;
+    assert.equal((await ask("/license")).license.id, "lic_old");
+    assert.deepEqual((await ask("/policy")).content, "previews");
+  } finally {
+    await upgraded.close();
+  }
 });

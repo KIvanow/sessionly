@@ -14,7 +14,13 @@ import {
  * short cache keeps it off the request path). Nothing here can stop capture, upload or the
  * dashboard: it only gates ee/. Each method takes the request's database, which is where the
  * organisation comes from.
+ *
+ * The cache is this process's own. Another copy of the server learns of a newly installed
+ * license when its own entry runs out, at most `ttlMs` later.
  */
+/** Organisations remembered at once. */
+const MAX_CACHED = 1000;
+
 export class Entitlements {
   private readonly cached = new Map<string, { until: number; license: License | null }>();
   private readonly now: () => Date;
@@ -32,6 +38,8 @@ export class Entitlements {
     let known = this.cached.get(db.orgId);
     if (!known || known.until <= Date.now()) {
       known = { until: Date.now() + this.ttlMs, license: await this.load(db) };
+      // Bounded: entries are cheap to read again.
+      if (this.cached.size >= MAX_CACHED) this.cached.clear();
       this.cached.set(db.orgId, known);
     }
     return licenseState(known.license, at);

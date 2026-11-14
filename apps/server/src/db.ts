@@ -11,9 +11,10 @@ export interface Queryable {
 }
 
 /**
- * The database as one organisation sees it. Every statement runs as the role
- * `sessionly_app`, for which row-level security hides and refuses the rows
- * of any other organisation. This is what request handlers get.
+ * The database as one organisation sees it. Every statement runs as the
+ * database's app role (see `APP_ROLE`), for which row-level security hides
+ * and refuses the rows of any other organisation. This is what request
+ * handlers get.
  */
 export interface OrgDb extends Queryable {
   readonly orgId: string;
@@ -26,46 +27,86 @@ export interface OrgDb extends Queryable {
  * list short.
  */
 export interface Db extends Queryable {
-  /** Run `fn` as `sessionly_app` with row-level security set to `orgId`, in one transaction. */
+  /** Run `fn` as the app role with row-level security set to `orgId`, in one transaction. */
   asOrg<T>(orgId: string, fn: (db: OrgDb) => Promise<T>): Promise<T>;
   /** Run `fn` in one transaction, as the owner. */
   transaction<T>(fn: (tx: Queryable) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
 
+/**
+ * The name of the role requests run as, as SQL. Each database has its own:
+ * roles belong to the whole cluster, and one shared name would let the user
+ * of another database on it (a staging copy, say) take this one's role too.
+ */
+const APP_ROLE = `left('sessionly_app_' || current_database(), 63)`;
+
+/** A name as SQL may spell it, whatever is in it. */
+const quoted = (name: string) => `"${name.replace(/"/g, '""')}"`;
+
 /** What turns a transaction into one organisation's view. `SET LOCAL` ends with it. */
-async function enter(tx: Queryable, orgId: string): Promise<OrgDb> {
-  await tx.query(`SET LOCAL ROLE sessionly_app`);
+async function enter(tx: Queryable, role: string, orgId: string): Promise<OrgDb> {
+  await tx.query(`SET LOCAL ROLE ${quoted(role)}`);
   await tx.query(`SELECT set_config('sessionly.org_id', $1, true)`, [orgId]);
   return { orgId, query: tx.query };
+}
+
+/** A whole number from a setting, or `fallback` if it is not one. */
+function setting(value: string | undefined, fallback: number): number {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
 /**
  * `postgres://…` connects to a Postgres server. `memory://` is an in-memory
  * database for tests. Anything else is a folder for an embedded database.
  */
-export async function openDb(url: string, options: { migrations?: number } = {}): Promise<Db> {
+export async function openDb(
+  url: string,
+  options: {
+    /** Stop short of the newest migrations: how a test gets a database as an older server left it. */
+    migrations?: number;
+    /** Connections kept at most (Postgres only). Default: SESSIONLY_DB_POOL, or 10. */
+    pool?: number;
+  } = {},
+): Promise<Db> {
   let db: Db;
+  // Known once the migrations have run.
+  let appRole = "";
   if (/^postgres(ql)?:\/\//.test(url)) {
-    const pool = new pg.Pool({ connectionString: url, max: Number(process.env.SESSIONLY_DB_POOL ?? 10) });
+    const max = options.pool ?? setting(process.env.SESSIONLY_DB_POOL, 10);
+    const pool = new pg.Pool({ connectionString: url, max });
     const transaction: Db["transaction"] = async (fn) => {
       const client = await pool.connect();
+      // Set if the connection may still be inside the transaction: it is
+      // then thrown away, not handed to the next request with a role and an
+      // organisation still set on it.
+      let unsure: Error | undefined;
       try {
         await client.query("BEGIN");
         const out = await fn({ query: async (text, params) => (await client.query(text, params as unknown[])).rows });
-        await client.query("COMMIT");
+        try {
+          await client.query("COMMIT");
+        } catch (err) {
+          unsure = err as Error;
+          throw err;
+        }
         return out;
       } catch (err) {
-        await client.query("ROLLBACK").catch(() => {});
+        if (!unsure) {
+          await client.query("ROLLBACK").catch((failed: Error) => {
+            unsure = failed;
+          });
+        }
         throw err;
       } finally {
-        client.release();
+        client.release(unsure);
       }
     };
     db = {
       query: async (text, params) => (await pool.query(text, params as unknown[])).rows,
       transaction,
-      asOrg: (orgId, fn) => transaction(async (tx) => fn(await enter(tx, orgId))),
+      asOrg: (orgId, fn) => transaction(async (tx) => fn(await enter(tx, appRole, orgId))),
       close: () => pool.end(),
     };
   } else {
@@ -84,13 +125,18 @@ export async function openDb(url: string, options: { migrations?: number } = {})
     db = {
       query: async (text, params) => (await lite.query(text, params as unknown[])).rows as never[],
       transaction,
-      asOrg: (orgId, fn) => transaction(async (tx) => fn(await enter(tx, orgId))),
+      asOrg: (orgId, fn) => transaction(async (tx) => fn(await enter(tx, appRole, orgId))),
       close: () => lite.close(),
     };
   }
-  // `migrations` stops short of the newest ones: how a test gets a database
-  // as an older server left it.
-  await runMigrations(db, "migrations", MIGRATIONS.slice(0, options.migrations));
+  try {
+    await runMigrations(db, "migrations", MIGRATIONS.slice(0, options.migrations));
+  } catch (err) {
+    const explained = await roleProblem(db, err);
+    await db.close().catch(() => {});
+    throw explained ?? err;
+  }
+  appRole = (await db.query<{ role: string }>(`SELECT ${APP_ROLE} AS role`))[0]?.role ?? "";
   return db;
 }
 
@@ -221,22 +267,63 @@ const MIGRATIONS: string[] = [
   `CREATE INDEX tokens_org ON tokens (org_id)`,
   // A token from signing in by email lasts a week.
   `ALTER TABLE tokens ADD COLUMN expires_at timestamptz`,
-  // Row-level security. Requests run as sessionly_app, which sees and writes
-  // only the rows of the organisation set for its transaction; with none
-  // set, no rows at all. The owner of the tables (who runs these migrations)
-  // is not subject to the policies. Roles belong to the whole cluster, so
-  // another database in it may have made this one already.
-  `DO $$ BEGIN
-     CREATE ROLE sessionly_app NOLOGIN;
-   EXCEPTION WHEN duplicate_object THEN NULL;
+  // Row-level security. Requests run as the database's app role, which sees
+  // and writes only the rows of the organisation set for its transaction;
+  // with none set, no rows at all. The owner of the tables (who runs these
+  // migrations) is not subject to the policies.
+  //
+  // The role is made here if this user may make roles. A user who may not
+  // (the kind a managed database's panel creates) needs its admin to make
+  // the role and grant it once; then both steps find nothing left to do.
+  `DO $$
+   DECLARE app text := ${APP_ROLE};
+   BEGIN
+     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = app) THEN
+       EXECUTE format('CREATE ROLE %I NOLOGIN', app);
+     END IF;
+     -- being able to switch to it is what is needed; before Postgres 16 membership meant that
+     IF NOT pg_has_role(current_user::name, app::name,
+          CASE WHEN current_setting('server_version_num')::int >= 160000 THEN 'SET' ELSE 'MEMBER' END) THEN
+       EXECUTE format('GRANT %I TO %I', app, current_user);
+     END IF;
    END $$`,
-  `GRANT sessionly_app TO CURRENT_USER`,
-  `GRANT USAGE ON SCHEMA public TO sessionly_app`,
-  `GRANT SELECT, INSERT, UPDATE, DELETE ON tokens, sessions, pull_requests TO sessionly_app`,
-  `GRANT SELECT ON orgs TO sessionly_app`,
+  toApp(`USAGE ON SCHEMA public`),
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON tokens, sessions, pull_requests`),
+  toApp(`SELECT ON orgs`),
   ...["tokens", "sessions", "pull_requests"].flatMap((table) => rowLevelSecurity(table)),
   ...rowLevelSecurity("orgs", "id"),
 ];
+
+/**
+ * A statement granting `privileges` (as `SELECT, INSERT ON a, b`) to the
+ * database's app role. A table requests must reach gets this in the
+ * migration that makes it; a test fails for one that has not.
+ */
+export function toApp(privileges: string): string {
+  return `DO $$ BEGIN EXECUTE format('GRANT ${privileges} TO %I', ${APP_ROLE}); END $$`;
+}
+
+/**
+ * If migrating failed because this user may not make or grant the app role,
+ * the error that says what the database's admin has to run.
+ */
+async function roleProblem(db: Db, err: unknown): Promise<Error | null> {
+  const e = err as { code?: string; message?: string };
+  if (e.code !== "42501" || !/permission denied to (create|grant) role/.test(e.message ?? "")) return null;
+  const [who] = await db
+    .query<{ role: string; me: string; name: string }>(
+      `SELECT ${APP_ROLE} AS role, current_user AS me, current_database() AS name`,
+    )
+    .catch(() => []);
+  if (!who) return null;
+  return new Error(
+    `The database user ${quoted(who.me)} may not create the role requests run as, or was not granted it.\n` +
+      `Have the database's admin run this once, connected to the database ${quoted(who.name)}, then start again:\n` +
+      `  CREATE ROLE ${quoted(who.role)} NOLOGIN;\n` +
+      `  GRANT ${quoted(who.role)} TO ${quoted(who.me)};`,
+    { cause: err },
+  );
+}
 
 /** Where the migrations that brought organisations begin. */
 export const FIRST_ORG_MIGRATION = MIGRATIONS.findIndex((sql) => sql.startsWith("CREATE TABLE orgs"));
@@ -278,10 +365,9 @@ export async function runMigrations(db: Db, table: string, list: string[]): Prom
         await tx.query(`INSERT INTO ${table} (id) VALUES ($1)`, [id]);
       }
     });
-  // The lock is this database's. Roles are the whole cluster's: two
-  // databases of one cluster set up at the same moment (as tests do) can
-  // both be making sessionly_app, and one is then told the name is taken.
-  // Nothing of its transaction stays, so it starts over and finds the role there.
+  // The lock is this database's. Roles are the whole cluster's, and changing
+  // them at the same moment from two databases of one cluster (as tests do)
+  // can fail in one. Nothing of its transaction stays, so it starts over.
   for (let attempt = 1; ; attempt++) {
     try {
       return await migrate();

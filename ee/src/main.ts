@@ -12,5 +12,7 @@ const env = loadEeEnv();
 await runServer({
   edition: "Business and Enterprise features",
   prepare: migrateEe,
-  extensions: () => [eeApi({ entitlements: new Entitlements(), org: env.org })],
+  extensions: () => [
+    eeApi({ entitlements: new Entitlements(), org: env.org, hosted: process.env.SESSIONLY_HOSTED === "true" }),
+  ],
 });

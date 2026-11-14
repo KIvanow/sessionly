@@ -1,4 +1,4 @@
-import { rowLevelSecurity, runMigrations, type Db } from "@sessionly/server";
+import { rowLevelSecurity, runMigrations, toApp, type Db } from "@sessionly/server";
 
 // Tables of the Business / Enterprise features, tracked apart from the core's migrations.
 // Add to the end; never edit an entry that has shipped.
@@ -30,11 +30,15 @@ const MIGRATIONS: string[] = [
   // The one row had id 1; now there is one row per organisation.
   `ALTER TABLE ee_content_policy DROP COLUMN id`,
   `ALTER TABLE ee_content_policy ADD PRIMARY KEY (org_id)`,
-  `GRANT SELECT, INSERT, UPDATE, DELETE ON ee_licenses, ee_content_policy TO sessionly_app`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON ee_licenses, ee_content_policy`),
   ...rowLevelSecurity("ee_licenses"),
   ...rowLevelSecurity("ee_content_policy"),
 ];
 
-export async function migrateEe(db: Db): Promise<void> {
-  await runMigrations(db, "migrations_ee", MIGRATIONS);
+/** `upTo` stops short of the newest entries: how a test gets the tables as an older server left them. */
+export async function migrateEe(db: Db, upTo?: number): Promise<void> {
+  await runMigrations(db, "migrations_ee", MIGRATIONS.slice(0, upTo));
 }
+
+/** Where the entries that brought organisations begin. */
+export const FIRST_EE_ORG_MIGRATION = MIGRATIONS.findIndex((sql) => sql.includes("ee_licenses ADD COLUMN org_id"));

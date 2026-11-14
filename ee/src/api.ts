@@ -6,6 +6,12 @@ export interface EeDeps {
   entitlements: Entitlements;
   /** The org id a license must name (SESSIONLY_ORG), or null if it is not set. */
   org: string | null;
+  /**
+   * A service many organisations share. Licenses are for a single install:
+   * the one org id a license is checked against is the whole server's, so
+   * there no organisation may install one.
+   */
+  hosted?: boolean;
   now?: () => Date;
 }
 
@@ -41,6 +47,9 @@ export function eeApi(deps: EeDeps): Extension {
 
     requireAdmin(api, "/license", ["POST"]);
     api.post("/license", async (c) => {
+      if (deps.hosted) {
+        throw new ApiError(403, "no_licenses_here", "Licenses are for a self-hosted server. Here, features come with the plan.");
+      }
       const body = (await c.req.json().catch(() => ({}))) as { license?: unknown };
       if (typeof body.license !== "string" || !body.license || body.license.length > 16_384) {
         throw new ApiError(400, "license_malformed", "Send the license file's text as `license`.");
@@ -73,7 +82,11 @@ export function eeApi(deps: EeDeps): Extension {
         [db.orgId, license.id, license.org, body.license, license.expiresAt, c.get("principal").email, now().toISOString()],
       );
       ent.forget(db.orgId);
-      return c.json(await view(db), 201);
+      const installed = await view(db);
+      // What was just read is not committed yet. If the commit fails, the
+      // next request must not find it remembered.
+      ent.forget(db.orgId);
+      return c.json(installed, 201);
     });
 
     // --- Content policy (feature: content_policy) --------------------------
