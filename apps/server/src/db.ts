@@ -30,8 +30,6 @@ export interface Db extends Queryable {
   asOrg<T>(orgId: string, fn: (db: OrgDb) => Promise<T>): Promise<T>;
   /** Run `fn` in one transaction, as the owner. */
   transaction<T>(fn: (tx: Queryable) => Promise<T>): Promise<T>;
-  /** Run `fn` while no other process connected to this database runs one under the same `key`. */
-  locked<T>(key: string, fn: () => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -68,21 +66,6 @@ export async function openDb(url: string, options: { migrations?: number } = {})
       query: async (text, params) => (await pool.query(text, params as unknown[])).rows,
       transaction,
       asOrg: (orgId, fn) => transaction(async (tx) => fn(await enter(tx, orgId))),
-      // An advisory lock belongs to a connection, so it gets one of its own:
-      // the pool could send the unlock down another.
-      locked: async (key, fn) => {
-        const client = await pool.connect();
-        try {
-          await client.query(`SELECT pg_advisory_lock(hashtext($1))`, [key]);
-          try {
-            return await fn();
-          } finally {
-            await client.query(`SELECT pg_advisory_unlock(hashtext($1))`, [key]);
-          }
-        } finally {
-          client.release();
-        }
-      },
       close: () => pool.end(),
     };
   } else {
@@ -102,8 +85,6 @@ export async function openDb(url: string, options: { migrations?: number } = {})
       query: async (text, params) => (await lite.query(text, params as unknown[])).rows as never[],
       transaction,
       asOrg: (orgId, fn) => transaction(async (tx) => fn(await enter(tx, orgId))),
-      // One process has the embedded database to itself.
-      locked: (_key, fn) => fn(),
       close: () => lite.close(),
     };
   }
@@ -280,18 +261,20 @@ export function rowLevelSecurity(table: string, column = "org_id"): string[] {
  */
 export async function runMigrations(db: Db, table: string, list: string[]): Promise<void> {
   if (!/^[a-z_]+$/.test(table)) throw new Error("migration table names are lower-case words");
-  // Several copies of the server may start at once: one migrates, the rest
-  // wait and then find nothing left to do.
-  await db.locked(table, async () => {
-    await db.query(`CREATE TABLE IF NOT EXISTS ${table} (id integer PRIMARY KEY)`);
-    const done = new Set((await db.query<{ id: number }>(`SELECT id FROM ${table}`)).map((r) => r.id));
+  // Everything that is pending runs in one transaction: all of it lands, or
+  // none. Several copies of the server may start at once, so the transaction
+  // first takes a lock: one migrates, the rest wait and then find nothing
+  // left to do. The lock ends with the transaction, which is what makes it
+  // hold through a connection pooler that hands out a connection per
+  // transaction.
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-${table}`]);
+    await tx.query(`CREATE TABLE IF NOT EXISTS ${table} (id integer PRIMARY KEY)`);
+    const done = new Set((await tx.query<{ id: number }>(`SELECT id FROM ${table}`)).map((r) => r.id));
     for (const [id, sql] of list.entries()) {
       if (done.has(id)) continue;
-      // An entry and the note that it ran succeed or fail together.
-      await db.transaction(async (tx) => {
-        await tx.query(sql);
-        await tx.query(`INSERT INTO ${table} (id) VALUES ($1)`, [id]);
-      });
+      await tx.query(sql);
+      await tx.query(`INSERT INTO ${table} (id) VALUES ($1)`, [id]);
     }
   });
 }

@@ -9,7 +9,7 @@ import { ApiError, createApp, type Env } from "../src/app.ts";
 import { createToken } from "../src/auth.ts";
 import { FIRST_ORG_MIGRATION, openDb, type Db } from "../src/db.ts";
 import { hostedProblems } from "../src/run.ts";
-import { newOrg, testDb, tokenFor, tokenWithId } from "./helpers.ts";
+import { newOrg, testDb, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
 
 let db: Db;
 let app: Hono<Env>;
@@ -317,6 +317,21 @@ test("a database from before organisations lands in the default one", async () =
     await upgraded.close();
   }
   await (await openDb(`file:${dir}`)).close();
+});
+
+test("several copies of the server starting at once migrate once", async (t) => {
+  const url = await testDbUrl();
+  // The embedded database belongs to one process.
+  if (url === "memory://") return t.skip("needs a Postgres server (TEST_DATABASE_URL)");
+  const copies = await Promise.all([openDb(url), openDb(url), openDb(url), openDb(url)]);
+  try {
+    const [ran] = await copies[0]!.query<{ n: unknown }>(`SELECT count(*) AS n FROM migrations`);
+    const [orgs] = await copies[0]!.query<{ n: unknown }>(`SELECT count(*) AS n FROM orgs`);
+    assert.ok(Number(ran?.n) > FIRST_ORG_MIGRATION);
+    assert.equal(Number(orgs?.n), 1);
+  } finally {
+    await Promise.all(copies.map((copy) => copy.close()));
+  }
 });
 
 test("a hosted service refuses what only a single install may have", () => {

@@ -2,7 +2,7 @@
 import { createToken, DEFAULT_ORG, type Role } from "../src/auth.ts";
 import type { Db } from "../src/db.ts";
 
-export { testDb } from "../src/testing.ts";
+export { testDb, testDbUrl } from "../src/testing.ts";
 
 /** An organisation beside the default one. */
 export async function newOrg(db: Db, id: string, name = id): Promise<void> {
