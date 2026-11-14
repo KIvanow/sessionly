@@ -18,8 +18,34 @@ on:
 permissions:
   contents: read
 
+# Actions are named by the commit they were at when this was written, not by a
+# tag that can be moved: this workflow publishes what people run.
 jobs:
+  # A tag must be the version the code says it is. Everything waits for this,
+  # so that a mistyped tag publishes nothing.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      # A tag like v0.4.0-rc.1 is tried by those who ask for it, and is not "latest".
+      stable: ${{ steps.check.outputs.stable }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: check
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/sessionly/Cargo.toml | head -1)"
+            if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+              echo "The tag is $GITHUB_REF_NAME but Cargo.toml says $version." >&2
+              exit 1
+            fi
+          fi
+          case "$GITHUB_REF_NAME" in
+            *-*) echo "stable=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "stable=true" >> "$GITHUB_OUTPUT" ;;
+          esac
+
   build:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -36,25 +62,17 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: ${{ matrix.target }}
       - name: Install the musl C compiler
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: The tag is the version being built
-        if: github.ref_type == 'tag'
-        run: |
-          version="$(cargo metadata --no-deps --format-version 1 |
-            jq -r '.packages[] | select(.name == "sessionly") | .version')"
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "The tag is $GITHUB_REF_NAME but Cargo.toml says $version." >&2
-            exit 1
-          fi
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: The binary runs
         # The Intel build cannot run on the Apple silicon machine that builds it.
@@ -69,7 +87,7 @@ jobs:
             grep -Eq 'static(ally|-pie) linked'
       - name: Pack
         run: tar -czf sessionly-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release sessionly
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sessionly-${{ matrix.target }}
           path: sessionly-${{ matrix.target }}.tar.gz
@@ -78,39 +96,41 @@ jobs:
   # The server as a container image, for hosting it (infra/). A tag pushes
   # it; a run by hand only builds it.
   image:
+    needs: version
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         if: github.ref_type == 'tag'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           # with the Business and Enterprise features; without a license it behaves like the core
           target: ee
           push: ${{ github.ref_type == 'tag' }}
+          # "latest" follows releases only, not a release candidate.
           tags: |
             ghcr.io/kivanow/sessionly-server:${{ github.ref_name }}
-            ghcr.io/kivanow/sessionly-server:latest
+            ${{ needs.version.outputs.stable == 'true' && 'ghcr.io/kivanow/sessionly-server:latest' || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   publish:
-    needs: build
+    needs: [version, build]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           merge-multiple: true
       - name: Checksums
@@ -122,6 +142,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --title "Sessionly ${GITHUB_REF_NAME#v}" \
+          gh release create "$GITHUB_REF_NAME" ${{ needs.version.outputs.stable == 'true' && ' ' || '--prerelease' }} \
+            --title "Sessionly ${GITHUB_REF_NAME#v}" \
             --notes "Binaries for Linux (statically linked) and macOS, each as \`sessionly-<target>.tar.gz\`, with their SHA-256 checksums in \`SHA256SUMS\`. See the README for how to install." \
             sessionly-*.tar.gz SHA256SUMS

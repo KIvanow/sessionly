@@ -540,6 +540,9 @@ test("the environment sets how people get in", () => {
   const accounts = accountsFrom(env);
   assert.deepEqual(offers(accounts), { hosted: true, emailSignIn: true, signup: true, inviteCode: false });
   assert.equal(accounts.ratePerMinute, 600);
+  assert.equal(accounts.signupsPerHour, undefined);
+  assert.equal(accountsFrom({ ...env, SESSIONLY_SIGNUPS_PER_HOUR: "20" }).signupsPerHour, 20);
+  assert.equal(accountsFrom({ ...env, SESSIONLY_SIGNUPS_PER_HOUR: "lots" }).signupsPerHour, undefined);
   assert.equal(offers(accountsFrom({ ...env, SESSIONLY_SIGNUP: "off" })).signup, false);
   assert.equal(offers(accountsFrom({ ...env, SESSIONLY_SIGNUP_CODE: "x" })).inviteCode, true);
   // A hosted service that could send no links is refused at the start.

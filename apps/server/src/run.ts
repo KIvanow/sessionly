@@ -15,6 +15,7 @@
 //   SESSIONLY_SIGNUP_CODE  if set, signing up needs this code too
 //   SESSIONLY_TRUST_PROXY  "true" behind a proxy of your own, to count requests by its X-Forwarded-For
 //   SESSIONLY_RATE_PER_MINUTE  requests a token may make a minute (hosted default: 600)
+//   SESSIONLY_SIGNUPS_PER_HOUR links to finish signing up sent an hour, in all (default 100)
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
@@ -85,6 +86,7 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
     signupCode: env.SESSIONLY_SIGNUP_CODE?.trim() || undefined,
     trustProxy: env.SESSIONLY_TRUST_PROXY === "true",
     ratePerMinute: Number.isFinite(rate) && rate > 0 ? rate : undefined,
+    signupsPerHour: Number(env.SESSIONLY_SIGNUPS_PER_HOUR) > 0 ? Number(env.SESSIONLY_SIGNUPS_PER_HOUR) : undefined,
   };
 }
 

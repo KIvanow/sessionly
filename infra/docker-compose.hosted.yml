@@ -9,8 +9,10 @@
 # docker-compose.yml at the top of the repository instead.
 services:
   server:
-    # The published image of a release; `--build` builds this checkout instead.
-    image: ghcr.io/kivanow/sessionly-server:${SESSIONLY_VERSION:-latest}
+    # The published image of a release, by its tag; `--build` builds this
+    # checkout under that name instead. Always a named version: what runs
+    # should not change because something else was released.
+    image: ghcr.io/kivanow/sessionly-server:${SESSIONLY_VERSION:?set SESSIONLY_VERSION in .env}
     build:
       context: ..
       target: ee
@@ -28,6 +30,7 @@ services:
       SESSIONLY_SIGNUP: ${SESSIONLY_SIGNUP:-open}
       SESSIONLY_SIGNUP_CODE: ${SESSIONLY_SIGNUP_CODE:-}
       SESSIONLY_RATE_PER_MINUTE: ${SESSIONLY_RATE_PER_MINUTE:-600}
+      SESSIONLY_SIGNUPS_PER_HOUR: ${SESSIONLY_SIGNUPS_PER_HOUR:-100}
     volumes:
       # The certificate authority of the managed database, if DATABASE_URL names it.
       - ${DATABASE_CA_FILE:-/dev/null}:/etc/sessionly/db-ca.crt:ro
@@ -47,7 +50,7 @@ services:
     stop_grace_period: 30s
 
   caddy:
-    image: caddy:2
+    image: caddy:2.11
     ports:
       - "80:80"
       - "443:443"
