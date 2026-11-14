@@ -519,6 +519,45 @@ const MIGRATIONS: string[] = [
   toApp(`SELECT ON orgs`),
   ...["tokens", "sessions", "pull_requests"].flatMap((table) => rowLevelSecurity(table)),
   ...rowLevelSecurity("orgs", "id"),
+  // People. A person is a user of an organisation; one address can be a user
+  // of several. Tokens made by signing in, or for a person's machines, are
+  // tied to the user, so removing someone stops them.
+  `CREATE TABLE users (
+     id         text PRIMARY KEY,
+     org_id     text NOT NULL REFERENCES orgs ON DELETE CASCADE,
+     email      text NOT NULL,
+     role       text NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+     created_at timestamptz NOT NULL DEFAULT now(),
+     removed_at timestamptz
+   )`,
+  `CREATE UNIQUE INDEX users_org_email ON users (org_id, email)`,
+  // signing in looks an address up across organisations
+  `CREATE INDEX users_email ON users (email)`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON users`),
+  ...rowLevelSecurity("users"),
+  `ALTER TABLE tokens ADD COLUMN user_id text REFERENCES users ON DELETE CASCADE`,
+  `ALTER TABLE tokens ADD COLUMN sign_in text CHECK (sign_in IN ('email'))`,
+  // Links sent by email: to sign in, or to finish signing up. Only a hash is
+  // kept, and a link works once. No organisation and no row-level security:
+  // these are read before anyone is known, by the owner alone. A request may
+  // add one (an invitation) and nothing more.
+  `CREATE TABLE login_codes (
+     code_hash  text PRIMARY KEY,
+     purpose    text NOT NULL CHECK (purpose IN ('sign_in', 'signup')),
+     user_id    text REFERENCES users ON DELETE CASCADE,
+     -- for signing up, before there is a user or an organisation
+     email      text,
+     org_name   text,
+     expires_at timestamptz NOT NULL
+   )`,
+  toApp(`INSERT ON login_codes`),
+  // How often something was asked for lately, to say no to too much of it.
+  `CREATE TABLE rate_counters (
+     key          text NOT NULL,
+     window_start timestamptz NOT NULL,
+     n            integer NOT NULL,
+     PRIMARY KEY (key, window_start)
+   )`,
 ];
 
 /**

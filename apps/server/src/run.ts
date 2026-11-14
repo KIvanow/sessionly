@@ -7,12 +7,23 @@
 //   SESSIONLY_ADMIN_TOKEN  an admin token that always works (for first use)
 //   SESSIONLY_ADMIN_EMAIL  whose sessions uploads with that token belong to
 //   SESSIONLY_HOSTED       "true" for a service that many organisations share
+// Signing in by email (and, hosted, signing up) needs these two and the next:
+//   SMTP_URL               smtp://user:pass@host:port, or smtps://… for TLS from the start
+//   SESSIONLY_EMAIL_FROM   the address the links come from, e.g. "Sessionly <sign-in@example.com>"
+//   SESSIONLY_PUBLIC_URL   where people reach the dashboard, e.g. https://app.example.com
+//   SESSIONLY_SIGNUP       hosted only: "open" (the default) or "off"
+//   SESSIONLY_SIGNUP_CODE  if set, signing up needs this code too
+//   SESSIONLY_TRUST_PROXY  "true" behind a proxy of your own, to count requests by its X-Forwarded-For
+//   SESSIONLY_RATE_PER_MINUTE  requests a token may make a minute (hosted default: 600)
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { DB_COUNTS, misset } from "./db.ts";
 import { createApp, type Extension } from "./app.ts";
 import { openDb, runMigrations, type Migrations } from "./db.ts";
+import { tidy } from "./limits.ts";
+import { smtpMailer } from "./mail.ts";
+import { offers, type Accounts } from "./signup.ts";
 
 export interface RunOptions {
   /**
@@ -40,6 +51,9 @@ export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
   if (!/^postgres(ql)?:\/\//.test(env.DATABASE_URL ?? "")) {
     problems.push("DATABASE_URL must be a postgres:// address: the embedded database is for one install.");
   }
+  for (const name of ["SMTP_URL", "SESSIONLY_EMAIL_FROM", "SESSIONLY_PUBLIC_URL"]) {
+    if (!env[name]) problems.push(`${name} is not set: nobody could sign in or sign up.`);
+  }
   return problems;
 }
 
@@ -53,6 +67,25 @@ export function reason(err: unknown): string {
   const each = err instanceof AggregateError ? err.errors.map(reason).filter(Boolean) : [];
   const code = (err as { code?: unknown }).code;
   return err.message || [...new Set(each)].join("; ") || (typeof code === "string" ? code : err.name);
+}
+
+/** How people get in, as the environment sets it. */
+export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
+  const hosted = env.SESSIONLY_HOSTED === "true";
+  const rate = Number(env.SESSIONLY_RATE_PER_MINUTE ?? (hosted ? 600 : 0));
+  const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim() || undefined;
+  if (publicUrl && !/^https?:\/\/[^/]+\/?$/.test(publicUrl)) {
+    throw new Error("SESSIONLY_PUBLIC_URL must be an address like https://app.example.com, with no path");
+  }
+  return {
+    hosted,
+    mailer: env.SMTP_URL && env.SESSIONLY_EMAIL_FROM ? smtpMailer(env.SMTP_URL, env.SESSIONLY_EMAIL_FROM) : undefined,
+    publicUrl,
+    signup: env.SESSIONLY_SIGNUP === "off" ? "off" : "open",
+    signupCode: env.SESSIONLY_SIGNUP_CODE?.trim() || undefined,
+    trustProxy: env.SESSIONLY_TRUST_PROXY === "true",
+    ratePerMinute: Number.isFinite(rate) && rate > 0 ? rate : undefined,
+  };
 }
 
 export async function runServer(options: RunOptions = {}): Promise<void> {
@@ -83,8 +116,13 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   // The dashboard, if it has been built (pnpm build).
   const webDist = fileURLToPath(new URL("../../web/dist", import.meta.url));
   const webRoot = existsSync(webDist) ? webDist : undefined;
+  const accounts = accountsFrom(process.env);
+  // Old counters and links that ran out are cleared away now and then.
+  const tidying = setInterval(() => void tidy(db).catch((err) => console.error("tidying failed:", err)), 15 * 60_000);
+  tidying.unref();
   const app = createApp(db, {
     webRoot,
+    accounts,
     extensions: options.extensions?.(),
     bootstrap: adminToken
       ? { token: adminToken, email: process.env.SESSIONLY_ADMIN_EMAIL ?? "admin@localhost" }
@@ -100,6 +138,10 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
     const edition = options.edition ? `, ${options.edition}` : "";
     console.log(`sessionly server on http://${hostname}:${info.port} (${where}${edition})`);
     if (!webRoot) console.log("The dashboard is not built; run `pnpm build` to serve it here.");
+    const offered = offers(accounts);
+    if (offered.emailSignIn) {
+      console.log(`Signing in by email is on${offered.signup ? ", and anyone may sign up" : ""}${offered.inviteCode ? " with the invitation code" : ""}.`);
+    }
     if (!adminToken && !hosted) {
       console.log(
         "No SESSIONLY_ADMIN_TOKEN set: create tokens with `pnpm token create --email you@example.com --role admin`",

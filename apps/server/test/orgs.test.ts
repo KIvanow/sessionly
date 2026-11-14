@@ -1023,9 +1023,14 @@ test("why the database could not be opened is said, whatever shape the error has
 });
 
 test("a hosted service refuses what only a single install may have", () => {
-  const postgres = "postgres://app@db.internal/sessionly";
-  assert.deepEqual(hostedProblems({ DATABASE_URL: postgres }), []);
-  assert.match(hostedProblems({ DATABASE_URL: postgres, SESSIONLY_ADMIN_TOKEN: "x" }).join(), /no admin of every organisation/);
+  const set = {
+    DATABASE_URL: "postgres://app@db.internal/sessionly",
+    SMTP_URL: "smtp://mail.example:2587",
+    SESSIONLY_EMAIL_FROM: "sign-in@example.com",
+    SESSIONLY_PUBLIC_URL: "https://app.example.com",
+  };
+  assert.deepEqual(hostedProblems(set), []);
+  assert.match(hostedProblems({ ...set, SESSIONLY_ADMIN_TOKEN: "x" }).join(), /no admin of every organisation/);
   assert.match(hostedProblems({}).join(), /postgres:\/\//);
-  assert.match(hostedProblems({ DATABASE_URL: "file:/data" }).join(), /postgres:\/\//);
+  assert.match(hostedProblems({ ...set, DATABASE_URL: "file:/data" }).join(), /postgres:\/\//);
 });

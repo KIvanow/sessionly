@@ -11,7 +11,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ALLOWED = {
-  "apps/server/src": ["db.ts", "auth.ts", "cli.ts", "run.ts", "app.ts", "lib.ts", "testing.ts"],
+  "apps/server/src": ["db.ts", "auth.ts", "cli.ts", "run.ts", "app.ts", "lib.ts", "testing.ts", "signup.ts"],
   "ee/src": ["migrate.ts"],
 };
 // `import … from` and `export … from`: named, `* as`, `*`, or default. No

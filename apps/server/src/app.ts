@@ -13,6 +13,10 @@ import {
   type Role,
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
+import { allowed } from "./limits.ts";
+import { inviteMail } from "./mail.ts";
+import { newLink, newUserId, openRoutes, type Accounts } from "./signup.ts";
+import { addUser, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
 import {
   Conflict,
   filterOptions,
@@ -177,7 +181,25 @@ export interface Options {
   /** Folder with the built dashboard, served at the root if given. */
   webRoot?: string;
   extensions?: Extension[];
+  /** Signing in and signing up by email, and what limits them. */
+  accounts?: Accounts;
 }
+
+/**
+ * What the dashboard may load and talk to: itself. Its token is kept in the
+ * browser's storage, so a script from anywhere else must never run there.
+ */
+const DASHBOARD_POLICY = [
+  "default-src 'none'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
 
 /**
  * `ownerDb` sees every organisation's rows. Here it only finds whose token a
@@ -186,10 +208,15 @@ export interface Options {
  */
 export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
+  const accounts = options.accounts ?? {};
 
   api.use("*", async (c, next) => {
     const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap);
     if (!principal) return c.json({ error: "missing or unknown token" }, 401);
+    if (accounts.ratePerMinute) {
+      const within = await allowed(ownerDb, `token:${principal.tokenId ?? "environment"}`, 60, accounts.ratePerMinute);
+      if (!within) return c.json({ error: "too many requests; try again in a minute", code: "rate_limited" }, 429);
+    }
     // A ci token reports pull requests and does nothing else.
     if (principal.role === "ci") {
       const reporting = c.req.method === "PUT" && c.req.path.endsWith("/prs");
@@ -282,13 +309,66 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     if (err instanceof BadRequest) return c.json({ error: err.message }, 400);
     if (err instanceof BadReport) return c.json({ error: err.message }, 422);
     if (err instanceof ApiError) return c.json({ error: err.message, code: err.code }, err.status);
+    if (err instanceof UserProblem) return c.json({ error: err.message, code: err.code }, err.status);
     failed(err);
     return c.json({ error: "internal error" }, 500);
   });
 
   const whoami = (p: Principal) => ({ ok: true, org: p.orgId, email: p.email, name: p.name, role: p.role });
   api.get("/ping", (c) => c.json(whoami(c.get("principal"))));
-  api.get("/me", (c) => c.json(whoami(c.get("principal"))));
+  api.get("/me", async (c) => {
+    const p = c.get("principal");
+    return c.json({ ...whoami(p), org_name: await orgName(c.get("db")), signed_in: p.userId !== null });
+  });
+
+  // Sign out: the token someone got by signing in stops working.
+  api.delete("/auth/session", async (c) => {
+    const p = c.get("principal");
+    const db = c.get("db");
+    if (p.tokenId) {
+      await db.query(
+        `UPDATE tokens SET revoked_at = now() WHERE org_id = $1 AND id = $2 AND sign_in IS NOT NULL`,
+        [db.orgId, p.tokenId],
+      );
+    }
+    return c.json({ signed_out: true });
+  });
+
+  // A person's own tokens, for their machines: what `sessionly connect` is given.
+  const mine = new Hono<Env>();
+  mine.use("*", async (c, next) => {
+    const role = c.get("principal").role;
+    if (role !== "admin" && role !== "member") return c.json({ error: "this token is not a person's" }, 403);
+    await next();
+  });
+  mine.get("/", async (c) => {
+    const db = c.get("db");
+    const tokens = await db.query(
+      `SELECT id, email, name, role, created_at, last_used_at, revoked_at FROM tokens
+       WHERE org_id = $1 AND email = $2 AND role = 'member' AND sign_in IS NULL ORDER BY created_at`,
+      [db.orgId, c.get("principal").email],
+    );
+    return c.json({ tokens });
+  });
+  mine.post("/", async (c) => {
+    const p = c.get("principal");
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const name = typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 80) : null;
+    // Always a member's: it uploads this person's sessions and reads only those.
+    const created = await createToken(c.get("db"), { email: p.email, name, role: "member", userId: p.userId });
+    return c.json({ ...created, email: p.email, name, role: "member" }, 201);
+  });
+  mine.delete("/:id", async (c) => {
+    const db = c.get("db");
+    const rows = await db.query(
+      `UPDATE tokens SET revoked_at = now()
+       WHERE org_id = $1 AND id = $2 AND email = $3 AND role = 'member' AND sign_in IS NULL AND revoked_at IS NULL
+       RETURNING id`,
+      [db.orgId, c.req.param("id"), c.get("principal").email],
+    );
+    return rows.length ? c.json({ revoked: true }) : c.json({ error: "no such active token" }, 404);
+  });
+  api.route("/me/tokens", mine);
 
   api.put("/sessions/:machine/:source/:session", async (c) => {
     const upload = c.get("upload");
@@ -397,12 +477,63 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   );
   api.route("/tokens", admin);
 
+  // The people of the organisation, for admins. Adding someone sends them a
+  // link to sign in with.
+  const users = new Hono<Env>();
+  users.use("*", async (c, next) => {
+    if (c.get("principal").role !== "admin") return c.json({ error: "admins only" }, 403);
+    await next();
+  });
+  users.get("/", async (c) => c.json({ users: await listUsers(c.get("db")) }));
+  users.post("/", async (c) => {
+    const { mailer, publicUrl } = accounts;
+    if (!mailer || !publicUrl) {
+      return c.json({ error: "signing in by email is not set up here; create a token instead", code: "no_email" }, 409);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    const role = body.role ?? "member";
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new BadRequest("email is required");
+    if (role !== "admin" && role !== "member") throw new BadRequest("role must be admin or member");
+    const db = c.get("db");
+    const user = await addUser(db, newUserId(), email, role);
+    const link = await newLink(db, publicUrl, { purpose: "sign_in", userId: user.id });
+    const mail = inviteMail(email, await orgName(db), c.get("principal").email, link);
+    mailer.send(mail).catch((err: unknown) => {
+      console.error("an invitation was not sent:", err instanceof Error ? err.message : err);
+    });
+    return c.json(user, 201);
+  });
+  users.delete("/:id", async (c) => {
+    await removeUser(c.get("db"), c.req.param("id"), c.get("principal"));
+    return c.json({ removed: true });
+  });
+  api.route("/users", users);
+
   for (const extend of options.extensions ?? []) extend(api);
 
   const app = new Hono<Env>();
+  // For whatever keeps the server running: alive, and able to reach its database.
+  app.get("/healthz", (c) => c.json({ ok: true }));
+  app.get("/readyz", async (c) => {
+    try {
+      await ownerDb.query(`SELECT 1`);
+      return c.json({ ok: true });
+    } catch {
+      return c.json({ ok: false }, 503);
+    }
+  });
+  // Signing in and signing up need no token, so they come before the API that does.
+  app.route("/api/v1/auth", openRoutes(ownerDb, accounts));
   app.route("/api/v1", api);
   app.all("/api/*", (c) => c.json({ error: "not found" }, 404));
   if (options.webRoot) {
+    app.use("/*", async (c, next) => {
+      await next();
+      c.header("Content-Security-Policy", DASHBOARD_POLICY);
+      c.header("X-Content-Type-Options", "nosniff");
+      c.header("Referrer-Policy", "no-referrer");
+    });
     app.use("/*", serveStatic({ root: options.webRoot }));
   }
   return app;
