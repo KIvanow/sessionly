@@ -267,14 +267,36 @@ export async function runMigrations(db: Db, table: string, list: string[]): Prom
   // left to do. The lock ends with the transaction, which is what makes it
   // hold through a connection pooler that hands out a connection per
   // transaction.
-  await db.transaction(async (tx) => {
-    await tx.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-${table}`]);
-    await tx.query(`CREATE TABLE IF NOT EXISTS ${table} (id integer PRIMARY KEY)`);
-    const done = new Set((await tx.query<{ id: number }>(`SELECT id FROM ${table}`)).map((r) => r.id));
-    for (const [id, sql] of list.entries()) {
-      if (done.has(id)) continue;
-      await tx.query(sql);
-      await tx.query(`INSERT INTO ${table} (id) VALUES ($1)`, [id]);
+  const migrate = () =>
+    db.transaction(async (tx) => {
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-${table}`]);
+      await tx.query(`CREATE TABLE IF NOT EXISTS ${table} (id integer PRIMARY KEY)`);
+      const done = new Set((await tx.query<{ id: number }>(`SELECT id FROM ${table}`)).map((r) => r.id));
+      for (const [id, sql] of list.entries()) {
+        if (done.has(id)) continue;
+        await tx.query(sql);
+        await tx.query(`INSERT INTO ${table} (id) VALUES ($1)`, [id]);
+      }
+    });
+  // The lock is this database's. Roles are the whole cluster's: two
+  // databases of one cluster set up at the same moment (as tests do) can
+  // both be making sessionly_app, and one is then told the name is taken.
+  // Nothing of its transaction stays, so it starts over and finds the role there.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await migrate();
+    } catch (err) {
+      if (attempt >= 8 || !rolesRace(err)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 40 * attempt + Math.random() * 40));
     }
-  });
+  }
+}
+
+/** Whether an error is two transactions changing the cluster's roles at once. */
+function rolesRace(err: unknown): boolean {
+  const e = err as { code?: string; table?: string; message?: string };
+  return (
+    (e.code === "23505" && /^pg_(authid|auth_members)$/.test(e.table ?? "")) ||
+    /tuple concurrently updated/.test(e.message ?? "")
+  );
 }
