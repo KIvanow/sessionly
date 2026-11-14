@@ -115,14 +115,20 @@ pub fn read(capture: &Path) -> Capture {
         if out.cwd.is_none() {
             out.cwd = p["workspace_roots"][0].as_str().map(String::from);
         }
-        // The events of a turn carry its generation; a session starting has none.
-        let Some(generation) = text("generation_id") else {
+        // The events of a turn carry its generation; a session starting has
+        // none. In the cloud the events of a turn carry ids of their own, so
+        // there they are not gone by: an event belongs to the prompt before it.
+        let in_cloud = record["runtime"]["kind"] == "cloud";
+        let generation = text("generation_id");
+        if generation.is_none() && !in_cloud {
             return;
-        };
+        }
         let model = text("model_id").or_else(|| text("model"));
         let hook = record["hook"].as_str().unwrap_or_default().to_lowercase();
         if hook == "beforesubmitprompt" {
-            by_generation.insert(generation, out.turns.len());
+            if let Some(generation) = generation {
+                by_generation.insert(generation, out.turns.len());
+            }
             out.turns.push(Turn {
                 prompt: text("prompt").unwrap_or_default(),
                 at,
@@ -131,11 +137,18 @@ pub fn read(capture: &Path) -> Capture {
             });
             return;
         }
-        // In the cloud the events of a turn carry ids of their own: they
-        // belong to the prompt before them.
+        let known = generation.and_then(|id| by_generation.get(&id).copied());
+        // A cloud agent's hooks are all there is of its session. If its
+        // prompt was not captured (the hook that carried it did not get to
+        // finish), what followed is still a turn, with its prompt unknown.
+        if in_cloud && out.turns.is_empty() {
+            out.turns.push(Turn {
+                at,
+                model: model.clone(),
+                ..Default::default()
+            });
+        }
         let latest = out.turns.len().checked_sub(1);
-        let in_cloud = record["runtime"]["kind"] == "cloud";
-        let known = by_generation.get(&generation).copied();
         let Some(turn) = known
             .or(latest.filter(|_| in_cloud))
             .and_then(|i| out.turns.get_mut(i))

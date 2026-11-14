@@ -621,7 +621,13 @@ pub fn session_from_hooks(capture: &Path) -> Result<(Vec<Value>, Option<Facts>)>
         return Ok((Vec::new(), None));
     }
 
-    let mut start = json!({ "source": "startup" });
+    // A first turn whose prompt the hooks did not see began before they
+    // were listening.
+    let from_start = hooked
+        .turns
+        .first()
+        .is_some_and(|turn| !turn.prompt.trim().is_empty());
+    let mut start = json!({ "source": if from_start { "startup" } else { "resume" } });
     if let Some(cwd) = &hooked.cwd {
         start["cwd"] = json!(cwd);
     }
@@ -1352,6 +1358,59 @@ mod tests {
         let paths: Vec<_> = lines.iter().map(|file| file.path.as_str()).collect();
         assert_eq!(paths, ["/workspace/hello.py", "/workspace/notes.txt"]);
         assert_eq!(lines[1].hashes().count(), 2);
+    }
+
+    #[test]
+    fn a_cloud_agent_whose_prompt_was_not_captured_is_still_a_session() {
+        use crate::cursor_hooks::tests::{event, write};
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("raw/cursor/bc-77aa.jsonl");
+        // The first hook was cut off while the binary was being fetched, and
+        // one event came with no generation at all.
+        let cloud = |mut event: Value| {
+            event["payload"]["workspace_roots"] = json!(["/workspace"]);
+            event["runtime"] = json!({ "kind": "cloud" });
+            event
+        };
+        let mut shell_start = cloud(event(
+            2,
+            "preToolUse",
+            "tools-1",
+            json!({ "tool_use_id": "s1", "tool_name": "Shell", "model": "cursor-grok-4.6-high-fast",
+                    "tool_input": { "command": "sed -i s/a/b/ hello.py" } }),
+        ));
+        shell_start["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("generation_id");
+        let mut shell_end = cloud(event(
+            3,
+            "postToolUse",
+            "tools-1",
+            json!({ "tool_use_id": "s1", "duration": 12.0 }),
+        ));
+        shell_end["changes"] = json!([{ "path": "/workspace/hello.py", "status": "M",
+            "lines": ["-a", "+b"] }]);
+        let stop = cloud(event(4, "stop", "run-1", json!({ "status": "completed" })));
+        write(&capture, &[shell_start, shell_end, stop]);
+
+        let (events, facts) = session_from_hooks(&capture).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CURSOR).unwrap();
+        // The turn is there with its prompt unknown, and the session says
+        // that it was not captured from its start.
+        assert_eq!(s.prompts.len(), 1);
+        assert_eq!(s.prompts[0].text.preview, "");
+        assert!(!s.captured_from_start);
+        assert_eq!(s.tool_calls.len(), 1);
+        assert_eq!(s.models, ["cursor-grok-4.6-high-fast"]);
+        assert_eq!(
+            (
+                s.counts.files_changed,
+                s.counts.lines_added,
+                s.counts.lines_removed
+            ),
+            (1, 1, 1)
+        );
     }
 
     #[test]
