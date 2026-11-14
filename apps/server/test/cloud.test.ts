@@ -201,11 +201,18 @@ test("a cloud agent's pull request with no session is marked as such", async () 
     report({ number: 24, commit_emails: ["ann@example.com"], head_ref: "claude/fix-login" }),
   );
   assert.deepEqual(mixed.body.attribution.cloud, { agents: ["claude-code"], sessions: 0 });
+  const other = await call(
+    tokens.ci,
+    "PUT",
+    "/prs",
+    report({ number: 25, commit_emails: ["ann@example.com"], head_ref: "ccr-2d637c03-n5ayp2" }),
+  );
+  assert.deepEqual(other.body.attribution.cloud, { agents: ["claude-code"], sessions: 0 });
 
   const summary = await call(tokens.admin, "GET", "/prs/summary");
-  assert.equal(summary.body.total.cloud_pulls, 3);
-  assert.equal(summary.body.total.cloud_pulls_without_session, 2);
+  assert.equal(summary.body.total.cloud_pulls, 4);
+  assert.equal(summary.body.total.cloud_pulls_without_session, 3);
   const listed = await call(tokens.admin, "GET", "/prs");
   const cloud = Object.fromEntries(listed.body.pulls.map((p: any) => [p.number, p.attribution.cloud?.sessions ?? null]));
-  assert.deepEqual(cloud, { 21: 1, 22: null, 23: 0, 24: 0 });
+  assert.deepEqual(cloud, { 21: 1, 22: null, 23: 0, 24: 0, 25: 0 });
 });

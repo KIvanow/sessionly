@@ -228,7 +228,8 @@ const CLOUD_COMMITTERS: Record<string, string> = {
 };
 const CLOUD_BRANCHES: [RegExp, string][] = [
   [/^cursor\//, "cursor"],
-  [/^claude\//, "claude-code"],
+  // Its cloud sessions name their branch either way.
+  [/^(claude\/|ccr-[0-9a-f]{8}-)/, "claude-code"],
 ];
 
 /**
