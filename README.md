@@ -576,7 +576,7 @@ is enough to try it or for a small team. Open that address and sign in with the 
 server. Then, on a developer's machine:
 
 ```sh
-sessionly connect http://127.0.0.1:8080   # paste the token
+sessionly connect http://127.0.0.1:8080   # paste the token, or pass it with --token
 sessionly upload
 ```
 
@@ -597,6 +597,8 @@ for anything but localhost.
 | `SESSIONLY_DB_QUERY_SECONDS` | Postgres only: how long a statement may take. Default 30, and a day (86400) at most. |
 | `SESSIONLY_ADMIN_TOKEN` | An admin token that always works, for first use. |
 | `SESSIONLY_ADMIN_EMAIL` | Who uploads made with that token belong to. |
+| `SMTP_URL`, `SESSIONLY_EMAIL_FROM`, `SESSIONLY_PUBLIC_URL` | Optional, all three together: people then sign in by a link sent to their address (see below). `SMTP_URL` is `smtp://user:pass@host:port`; the last is where people reach the dashboard, e.g. `https://sessionly.example.com`. |
+| `SESSIONLY_HOSTED` | `true` for a service many organisations sign up to. See [`infra/`](infra/README.md). |
 
 **The database's user.** On Postgres, requests run as a second role that cannot log in, which
 the server makes at its first start; its name comes from the database's name. If the
@@ -632,9 +634,22 @@ so give it only to those environments. An admin creates and revokes tokens throu
 line with `pnpm token create --email ann@example.com` (with the embedded database, stop the
 server first). Only a hash of each token is stored.
 
+**Signing in by email.** With the mail settings above, an admin adds people on the Team page
+(`POST /api/v1/users`), and each gets a link to sign in with. A link works once, for 15
+minutes; signing in lasts a week. People then make the tokens for their own machines on the
+Connect page (`POST /api/v1/me/tokens`), and removing a person ends their sign-in and every
+token of theirs. Without the mail settings there are only tokens, as above.
+
+**Organisations.** Every token, session and pull request belongs to an organisation, and a
+request sees only its own organisation's: each query names it, and in Postgres row-level
+security enforces it underneath. A server you host for your team has one, `default`, and you
+never see the word. A hosted service has one per sign-up: [`infra/`](infra/README.md) is how
+to run one.
+
 ### Dashboard
 
-Sign in with a token. An admin sees the whole team; a member sees their own sessions.
+Sign in with a token, or by a link sent to your address where the server is set up to send
+them. An admin sees the whole team; a member sees their own sessions.
 
 - **Overview:** total cost, sessions, active time, prompts, tool calls and failure rate, files
   changed, the share of files rewritten since and of agent lines still there; cost per day (per
@@ -648,7 +663,10 @@ Sign in with a token. An admin sees the whole team; a member sees their own sess
   cloud has been uploaded, a further filter separates those from sessions on people's machines.
 - **One session:** cost and tokens per model, prompts with how long each took and how it ended,
   files changed with how much of each survives, tools, and subagents.
-- **Team** (admins): create a token for someone and revoke tokens.
+- **Team** (admins): add and remove people where they sign in by email, and create and
+  revoke tokens for what cannot sign in: a cloud environment, CI, or a machine set up for
+  someone.
+- **Connect:** a token of your own for each of your machines, with the commands to run.
 
 What it shows depends on what was uploaded. With the default `metadata` level there is no text:
 sessions are listed by id and prompts show only their length. Sessions uploaded with `previews`

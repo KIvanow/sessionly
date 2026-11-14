@@ -1,0 +1,69 @@
+# The hosted service: copies of the server behind Caddy, which gets and
+# renews the certificate. The database is a managed Postgres, named in .env:
+# nothing here keeps data.
+#
+#   cd infra && cp .env.example .env    # then fill it in
+#   docker compose --env-file .env -f docker-compose.hosted.yml up -d --wait
+#
+# See infra/README.md. A single team hosting for itself wants the
+# docker-compose.yml at the top of the repository instead.
+services:
+  server:
+    # The published image of a release; `--build` builds this checkout instead.
+    image: ghcr.io/kivanow/sessionly-server:${SESSIONLY_VERSION:-latest}
+    build:
+      context: ..
+      target: ee
+    environment:
+      SESSIONLY_HOSTED: "true"
+      # Caddy is the only way in, so the address it reports is the caller's.
+      SESSIONLY_TRUST_PROXY: "true"
+      HOST: 0.0.0.0
+      PORT: "8080"
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      SESSIONLY_DB_POOL: ${SESSIONLY_DB_POOL:-8}
+      SMTP_URL: ${SMTP_URL:?set SMTP_URL in .env}
+      SESSIONLY_EMAIL_FROM: ${SESSIONLY_EMAIL_FROM:?set SESSIONLY_EMAIL_FROM in .env}
+      SESSIONLY_PUBLIC_URL: https://${SESSIONLY_DOMAIN:?set SESSIONLY_DOMAIN in .env}
+      SESSIONLY_SIGNUP: ${SESSIONLY_SIGNUP:-open}
+      SESSIONLY_SIGNUP_CODE: ${SESSIONLY_SIGNUP_CODE:-}
+      SESSIONLY_RATE_PER_MINUTE: ${SESSIONLY_RATE_PER_MINUTE:-600}
+    volumes:
+      # The certificate authority of the managed database, if DATABASE_URL names it.
+      - ${DATABASE_CA_FILE:-/dev/null}:/etc/sessionly/db-ca.crt:ro
+    deploy:
+      replicas: ${SESSIONLY_REPLICAS:-2}
+      resources:
+        limits:
+          memory: 768M
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+    # Stopping waits for requests in flight.
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SESSIONLY_DOMAIN: ${SESSIONLY_DOMAIN:?set SESSIONLY_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # certificates: keep these, or every restart asks for new ones
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
+  caddy-config:
