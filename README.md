@@ -810,4 +810,6 @@ under the SIL Open Font License) are served from `website/fonts/`. `python3 -m h
 7. ✅ Cursor and Grok sessions beside Claude Code's
 8. ✅ Pull requests: how much agents wrote, with which models, and how it fared in review
 9. ✅ Sessions in the cloud: Claude Code's cloud sessions and Cursor's cloud agents
-10. Polish, docs, example data
+10. ✅ Organisations, signing in by email, and a hosted mode anyone can sign up to
+11. Plans and billing for the hosted service; deleting and exporting an organisation's data
+12. Polish, docs, example data
