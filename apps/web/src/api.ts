@@ -33,6 +33,11 @@ export function keepSession(session: Saved): void {
   saveSessions([...savedSessions().filter((s) => s.org !== session.org), session]);
 }
 
+/** Forget every session: what signing out on a shared computer has to mean. */
+export function clearSessions(): void {
+  saveSessions([]);
+}
+
 /** Forget the session a token belongs to. Returns the ones that are left. */
 export function dropSession(token: string): Saved[] {
   const left = savedSessions().filter((s) => s.token !== token);

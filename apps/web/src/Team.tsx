@@ -119,7 +119,8 @@ function People({ token, onSignOut }: { token: string; onSignOut: () => void }) 
 
   async function remove(user: UserInfo) {
     const sure = window.confirm(
-      `Remove ${user.email}? They can no longer sign in, and uploads from their machines stop. Their sessions stay.`,
+      `Remove ${user.email}? They can no longer sign in, and uploads from their machines stop. Their sessions stay. ` +
+        "Tokens made under their address for CI or a cloud environment keep working: revoke those below if they should stop too.",
     );
     if (!sure) return;
     try {

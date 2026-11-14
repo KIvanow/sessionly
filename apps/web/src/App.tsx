@@ -1,6 +1,17 @@
 import type { AuthOptions, FilterOptions, Me, SignedIn } from "@sessionly/schema";
 import { useEffect, useMemo, useState } from "react";
-import { api, ApiError, dropSession, keepSession, open, savedSessions, savedToken, saveToken, type Saved } from "./api.ts";
+import {
+  api,
+  ApiError,
+  clearSessions,
+  dropSession,
+  keepSession,
+  open,
+  savedSessions,
+  savedToken,
+  saveToken,
+  type Saved,
+} from "./api.ts";
 import { Connect } from "./Connect.tsx";
 import { Login } from "./Login.tsx";
 import { Overview } from "./Overview.tsx";
@@ -56,27 +67,43 @@ function linkCode(): string | null {
   return /^#login=([\w-]+)$/.exec(window.location.hash)?.[1] ?? null;
 }
 
+/** A link someone arrived by, and what the server says it is for. */
+interface Link {
+  code: string;
+  purpose: "sign_in" | "signup";
+  email: string;
+  org_name: string;
+}
+
 export function App() {
   const [token, setToken] = useState<string | null>(savedToken);
   const [me, setMe] = useState<Me | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [options, setOptions] = useState<AuthOptions | null>(null);
   const [arriving, setArriving] = useState(() => linkCode() !== null);
+  const [link, setLink] = useState<Link | null>(null);
 
   const use = (value: string | null) => {
     saveToken(value);
     setMe(null);
     setToken(value);
   };
-  /** This session is over. If there is one in another organisation, that one is next. */
+  /** The server no longer accepts this session. If there is one in another organisation, that one is next. */
   const signOut = () => {
     const left = token ? dropSession(token) : savedSessions();
     use(left[0]?.token ?? null);
   };
-  /** Sign out on purpose: the session stops working on the server too. */
+  /**
+   * Sign out on purpose: of every organisation this browser is signed in to,
+   * and on the server too. Leaving one and landing in another would be the
+   * wrong thing on a computer someone else uses next.
+   */
   const leave = () => {
-    if (token && me?.signed_in) void api(token, "/auth/session", { method: "DELETE" }).catch(() => {});
-    signOut();
+    const all = new Set(savedSessions().map((s) => s.token));
+    if (token && me?.signed_in) all.add(token);
+    for (const each of all) void api(each, "/auth/session", { method: "DELETE" }).catch(() => {});
+    clearSessions();
+    use(null);
   };
 
   useEffect(() => {
@@ -86,8 +113,10 @@ export function App() {
       .catch(() => setOptions({ hosted: false, emailSignIn: false, signup: false, inviteCode: false }));
   }, []);
 
-  // Arriving by a link: trade its code for a session, once. The link may
-  // open a new page or only change the address of this one.
+  // Arriving by a link. It may open a new page or only change the address of
+  // this one. The link is not used yet: first the server is asked what it is
+  // for, and the person is shown and asked. A link is whatever its sender
+  // made it, and must not sign anyone in to a place they did not choose.
   useEffect(() => {
     const arrive = () => {
       const code = linkCode();
@@ -95,13 +124,8 @@ export function App() {
       setArriving(true);
       // The code leaves the address bar and the history straight away.
       window.history.replaceState(null, "", window.location.pathname);
-      open<SignedIn>("/auth/verify", { code })
-        .then((signed) => {
-          keepSession({ org: signed.org.id, name: signed.org.name, token: signed.token });
-          setProblem(null);
-          use(signed.token);
-          window.location.hash = signed.created ? "#/connect" : "#/";
-        })
+      open<Omit<Link, "code">>("/auth/check", { code })
+        .then((what) => (setProblem(null), setLink({ code, ...what })))
         .catch((err: Error) => setProblem(err.message))
         .finally(() => setArriving(false));
     };
@@ -109,6 +133,21 @@ export function App() {
     window.addEventListener("hashchange", arrive);
     return () => window.removeEventListener("hashchange", arrive);
   }, []);
+
+  /** The person said yes: now the link is used. */
+  const follow = (chosen: Link) => {
+    setArriving(true);
+    setLink(null);
+    open<SignedIn>("/auth/verify", { code: chosen.code })
+      .then((signed) => {
+        keepSession({ org: signed.org.id, name: signed.org.name, token: signed.token });
+        setProblem(null);
+        use(signed.token);
+        window.location.hash = signed.created ? "#/connect" : "#/";
+      })
+      .catch((err: Error) => setProblem(err.message))
+      .finally(() => setArriving(false));
+  };
 
   useEffect(() => {
     if (!token) return;
@@ -132,7 +171,33 @@ export function App() {
   if (arriving) {
     return (
       <main className="center">
-        <p>Signing you in…</p>
+        <p>Opening the link…</p>
+      </main>
+    );
+  }
+  if (link) {
+    const creating = link.purpose === "signup";
+    return (
+      <main className="center">
+        <div className="card login">
+          <h1>{creating ? "Create this organisation?" : "Sign in here?"}</h1>
+          <dl className="facts">
+            <dt>Organisation</dt>
+            <dd>{link.org_name}</dd>
+            <dt>{creating ? "Its owner" : "As"}</dt>
+            <dd>{link.email}</dd>
+          </dl>
+          <p className="muted">
+            {creating
+              ? "The organisation is created now, with this address as its owner."
+              : "Sessions you upload after signing in here belong to this organisation."}{" "}
+            If this is not what you expected, or the address is not yours, do not go on.
+          </p>
+          <button onClick={() => follow(link)}>{creating ? "Create it" : "Sign in"}</button>
+          <button className="quiet" onClick={() => setLink(null)}>
+            Not now
+          </button>
+        </div>
       </main>
     );
   }

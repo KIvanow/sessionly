@@ -94,7 +94,14 @@ export function Login({
           <>
             <label>
               Organisation
-              <input required maxLength={80} value={orgName} onChange={(e) => setOrgName(e.target.value)} autoComplete="organization" />
+              <input
+                required
+                minLength={2}
+                maxLength={60}
+                value={orgName}
+                onChange={(e) => setOrgName(e.target.value)}
+                autoComplete="organization"
+              />
             </label>
             {options?.inviteCode && (
               <label>
@@ -117,7 +124,8 @@ export function Login({
         {mode === "email" && <p className="muted">No password: a link is sent to your address.</p>}
         {mode === "signup" && (
           <p className="muted">
-            Nothing is created until you use the link sent to your address. You become the organisation's owner.
+            Letters, digits, spaces and & ' , ( ) + - in the name. Nothing is created until you use the link sent to
+            your address; you then become the organisation's owner.
           </p>
         )}
         {mode === "token" && (
