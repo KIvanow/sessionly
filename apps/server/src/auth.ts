@@ -1,6 +1,8 @@
 // Access tokens. A token belongs to one person (an email) and has a role:
 // a member uploads sessions and sees their own; an admin sees everyone's.
-// Only a hash of each token is stored.
+// Two roles are for machines: `ci` reports pull requests, and `env` uploads
+// the sessions of a cloud agent's environment. Only a hash of each token is
+// stored.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Db } from "./db.ts";
 

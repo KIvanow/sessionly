@@ -19,6 +19,8 @@ export interface Scope {
   tool: string;
   /** A model id, or "" for all. */
   model: string;
+  /** Where sessions ran: "local", "cloud", or "" for both. */
+  where: string;
 }
 
 /** The scope as query parameters for the API. */
@@ -34,6 +36,7 @@ export function scopeParams(scope: Scope): Record<string, string | undefined> {
     repo: scope.repo || undefined,
     tool: scope.tool || undefined,
     model_is: scope.model || undefined,
+    runtime: scope.where || undefined,
   };
 }
 
@@ -107,7 +110,7 @@ export function App() {
 
 function Shell({ token, me, onSignOut }: { token: string; me: Me; onSignOut: () => void }) {
   const route = useHash();
-  const [scope, setScope] = useState<Scope>({ period: "30", user: "", repo: "", tool: "", model: "" });
+  const [scope, setScope] = useState<Scope>({ period: "30", user: "", repo: "", tool: "", model: "", where: "" });
   const options = useApi<FilterOptions>(token, "/filters", onSignOut);
   const [page, ...rest] = route.split("/");
   const isAdmin = me.role === "admin";
@@ -188,6 +191,16 @@ function Shell({ token, me, onSignOut }: { token: string; me: Me; onSignOut: () 
                       {toolName(t)}
                     </option>
                   ))}
+                </select>
+              </label>
+            )}
+            {(options.data?.runtimes?.length ?? 0) > 1 && (
+              <label>
+                Ran
+                <select value={scope.where} onChange={(e) => setScope({ ...scope, where: e.target.value })}>
+                  <option value="">Anywhere</option>
+                  <option value="local">On people's machines</option>
+                  <option value="cloud">In the cloud</option>
                 </select>
               </label>
             )}

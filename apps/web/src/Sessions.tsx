@@ -95,7 +95,10 @@ function Row({ s }: { s: SessionRow }) {
       <td className="title">
         <a href={sessionHref(s)}>{name}</a>
       </td>
-      <td className="nowrap">{toolName(s.source)}</td>
+      <td className="nowrap">
+        {toolName(s.source)}
+        {s.runtime === "cloud" && ", cloud"}
+      </td>
       <td className="nowrap">{s.primary_model ? modelName(s.primary_model) : "–"}</td>
       <td className="num">{activeTime(s.active_ms)}</td>
       <td className="num" title={s.cost_source === "recorded" ? undefined : "An estimate, or includes one"}>

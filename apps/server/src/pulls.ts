@@ -6,6 +6,7 @@ import type {
   FileHashes,
   LinesBy,
   PullAttribution,
+  PullCloud,
   PullList,
   PullReport,
   PullRow,
@@ -106,7 +107,7 @@ export function attribute(
   first: FileHashes[],
   now: FileHashes[],
   claims: Claim[],
-): Omit<PullAttribution, "from_open"> {
+): Omit<PullAttribution, "from_open" | "cloud"> {
   const count = (files: FileHashes[]) => files.reduce((sum, f) => sum + f.hashes.length, 0);
 
   const nowBy = new Map<string, LinesBy>();
@@ -211,19 +212,72 @@ function checked(body: unknown): PullReport {
   };
 }
 
+/**
+ * The names a session may know the pull request's repository by: a session
+ * names it by its clone's origin, which is the repository itself, a fork the
+ * branch is in, or a name it used to have.
+ */
+const repoNames = (report: PullReport): string[] => [
+  ...new Set([report.repo, report.head_repo ?? report.repo, ...(report.aliases ?? [])]),
+];
+
+/** The identities cloud agents commit with, and the branches they make. */
+const CLOUD_COMMITTERS: Record<string, string> = {
+  "noreply@anthropic.com": "claude-code",
+  "cursoragent@cursor.com": "cursor",
+};
+const CLOUD_BRANCHES: [RegExp, string][] = [
+  [/^cursor\//, "cursor"],
+  [/^claude\//, "claude-code"],
+];
+
+/**
+ * Whether a cloud agent worked on the pull request, going by who made its
+ * commits and what its branch is called, and how many cloud sessions were
+ * uploaded for that branch. Null if nothing points to one.
+ */
+async function cloudOf(db: Db, report: PullReport): Promise<PullCloud | null> {
+  const agents = new Set<string>();
+  for (const email of report.commit_emails ?? []) {
+    const agent = CLOUD_COMMITTERS[email];
+    if (agent) agents.add(agent);
+  }
+  const branch = report.head_ref ?? "";
+  for (const [pattern, agent] of CLOUD_BRANCHES) {
+    if (pattern.test(branch)) agents.add(agent);
+  }
+  let sessions = 0;
+  if (branch) {
+    const params: unknown[] = [branch];
+    const names = repoNames(report).map((name) => `$${params.push(name)}`).join(", ");
+    const rows = await db.query<{ source: string; n: unknown }>(
+      `SELECT source, count(*) AS n FROM sessions
+       WHERE runtime = 'cloud' AND branch = $1 AND repo IN (${names}) GROUP BY source`,
+      params,
+    );
+    for (const row of rows) {
+      sessions += num(row.n);
+      agents.add(String(row.source));
+    }
+  }
+  return agents.size ? { agents: [...agents].sort(), sessions } : null;
+}
+
 /** What agents added in the repository around the time of a pull request. */
 async function claimsFor(db: Db, report: PullReport): Promise<Claim[]> {
   const since = new Date(Date.parse(report.created_at) - LOOK_BACK_DAYS * 86_400_000).toISOString();
-  // A session names the repository by its clone's origin: the repository
-  // itself, a fork the branch is in, or a name it used to have.
-  const names = [...new Set([report.repo, report.head_repo ?? report.repo, ...(report.aliases ?? [])])];
+  const names = repoNames(report);
   const params: unknown[] = [since];
   const list = (values: string[]) => values.map((value) => `$${params.push(value)}`).join(", ");
   // The same line turns up in more than one person's work. Only sessions of
-  // the people who committed to the pull request are taken to have written it.
+  // the people who committed to the pull request are taken to have written
+  // it. A cloud agent commits as itself, so its session is known by where it
+  // worked instead: the pull request's own branch.
   const emails = report.commit_emails ?? [];
   // A session without a git email is its uploader's.
-  const by = emails.length ? `AND lower(coalesce(user_email, owner_email)) IN (${list(emails)})` : "";
+  const people = `lower(coalesce(user_email, owner_email)) IN (${list(emails)})`;
+  const onBranch = report.head_ref ? ` OR (runtime = 'cloud' AND branch = $${params.push(report.head_ref)})` : "";
+  const by = emails.length ? `AND (${people}${onBranch})` : "";
   const rows = await db.query(
     `SELECT source, primary_model, started_at, payload->'lines' AS lines
      FROM sessions
@@ -257,6 +311,7 @@ export async function storePull(db: Db, body: unknown): Promise<PullAttribution>
   const attribution: PullAttribution = {
     ...attribute(first, report.files, await claimsFor(db, report)),
     from_open: (existing?.first_event ?? report.event) === "opened",
+    cloud: await cloudOf(db, report),
   };
   const columns: Record<string, unknown> = {
     repo: report.repo,
@@ -375,6 +430,8 @@ export async function summarizePulls(db: Db, filters: PullFilters): Promise<Pull
     pulls_from_open: 0,
     opened_agent_lines: 0,
     agent_lines_surviving: 0,
+    cloud_pulls: 0,
+    cloud_pulls_without_session: 0,
   };
   const rowFor = (by: LinesBy) =>
     tally(byModel, by, () => ({
@@ -394,6 +451,10 @@ export async function summarizePulls(db: Db, filters: PullFilters): Promise<Pull
     total.lines += a.now.lines;
     total.agent_lines += a.now.agent_lines;
     if (a.now.agent_lines > 0) total.pulls_with_agent_lines += 1;
+    if (a.cloud) {
+      total.cloud_pulls += 1;
+      if (a.cloud.sessions === 0) total.cloud_pulls_without_session += 1;
+    }
     for (const by of a.now.by) {
       const row = rowFor(by);
       row.pulls += 1;

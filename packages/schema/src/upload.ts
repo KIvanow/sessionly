@@ -58,9 +58,15 @@ export interface Session {
   session_id?: string;
   title?: string | null;
   /**
-   * Who ran the session, from git config on the machine that captured it.
+   * Who ran the session: from git config on the machine that captured it,
+   * or, for a session that ran in the cloud, the person the platform says
+   * started it (git there is set up as the agent).
    */
   user?: User | null;
+  /**
+   * Where the session ran, if not on a person's own machine.
+   */
+  runtime?: Runtime | null;
   started_at?: string | null;
   ended_at?: string | null;
   /**
@@ -93,7 +99,8 @@ export interface Session {
    */
   agent_version?: string | null;
   /**
-   * How the agent was started, e.g. "cli" or "sdk-cli".
+   * How the agent was started, e.g. "cli" or "sdk-cli"; for a cloud
+   * session, what the platform says started it ("remote_mobile", "website").
    */
   entrypoint?: string | null;
   /**
@@ -129,6 +136,19 @@ export interface Session {
 export interface User {
   name?: string | null;
   email?: string | null;
+}
+/**
+ * A session that a cloud platform ran in a sandbox of its own: a Claude Code
+ * cloud session or a Cursor cloud agent. Such a record's `machine_id` is
+ * "cloud", since the sandbox is new each time.
+ */
+export interface Runtime {
+  kind?: "cloud" | "unknown";
+  /**
+   * The platform's own id for the session (`cse_…`, `bc-…`), which is
+   * what its web pages and API go by.
+   */
+  id?: string | null;
 }
 export interface Repo {
   /**

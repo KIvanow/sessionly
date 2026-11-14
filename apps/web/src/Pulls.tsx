@@ -112,6 +112,13 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
               <tbody>{list.data.pulls.map((p) => <Row key={`${p.repo}#${p.number}`} p={p} />)}</tbody>
             </table>
           </div>
+          {total && total.cloud_pulls_without_session > 0 && (
+            <p className="muted hint">
+              {count(total.cloud_pulls_without_session)} of these pull requests were worked on by a cloud agent
+              whose session was not captured, so its lines count as not an agent's. Running{" "}
+              <code>sessionly install --repo</code> in the repository captures them.
+            </p>
+          )}
           <div className="pager">
             <span className="muted">
               {count(offset + 1)}–{count(Math.min(offset + PAGE, list.data.total))} of {count(list.data.total)}
@@ -218,7 +225,18 @@ function Row({ p }: { p: PullRow }) {
       <td className="num">
         {a.now.agent_lines > 0 ? `${percent(share(a.now.agent_lines, a.now.lines))} (${count(a.now.agent_lines)})` : "–"}
       </td>
-      <td className="names"><Names list={a.now.by.map(writer)} /></td>
+      <td className="names">
+        {a.cloud && a.cloud.sessions === 0 ? (
+          <>
+            {a.now.by.length > 0 && <Names list={a.now.by.map(writer)} />}{" "}
+            <span className="muted">
+              {a.cloud.agents.map(toolName).join(", ")} in the cloud, session not captured
+            </span>
+          </>
+        ) : (
+          <Names list={a.now.by.map(writer)} />
+        )}
+      </td>
       <td className="num" title={p.first_event === "opened" ? undefined : "Not known: first reported after it was opened"}>
         {p.first_event === "opened" && a.first.agent_lines > 0
           ? `${shareOf(surviving, a.first.agent_lines)} of ${count(a.first.agent_lines)}`

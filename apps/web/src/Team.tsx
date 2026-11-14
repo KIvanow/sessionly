@@ -151,6 +151,7 @@ export function Team({ token, onSignOut }: { token: string; onSignOut: () => voi
               <option value="member">Member</option>
               <option value="admin">Admin</option>
               <option value="ci">CI (reports pull requests, nothing else)</option>
+              <option value="env">Cloud environment (uploads its sessions, nothing else)</option>
             </select>
           </label>
           <button type="submit">Create token</button>

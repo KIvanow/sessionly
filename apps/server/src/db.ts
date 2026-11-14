@@ -133,6 +133,11 @@ const MIGRATIONS: string[] = [
      PRIMARY KEY (repo, number)
    )`,
   `CREATE INDEX sessions_repo ON sessions (repo)`,
+  // Sessions that ran in the cloud, and a kind of token for where they run.
+  `ALTER TABLE sessions ADD COLUMN runtime text`,
+  `ALTER TABLE sessions ADD COLUMN runtime_id text`,
+  `ALTER TABLE tokens DROP CONSTRAINT tokens_role_check`,
+  `ALTER TABLE tokens ADD CONSTRAINT tokens_role_check CHECK (role IN ('admin', 'member', 'ci', 'env'))`,
 ];
 
 /**

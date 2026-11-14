@@ -41,6 +41,12 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
         <dl className="facts">
           <Fact label="Person" value={found.data.owner_email} />
           <Fact label="Tool" value={toolName(s.source ?? "")} />
+          {s.runtime && (
+            <Fact
+              label="Ran in"
+              value={`the cloud${s.runtime.id ? ` (${s.runtime.id})` : ""}${s.entrypoint ? `, started from ${s.entrypoint}` : ""}`}
+            />
+          )}
           <Fact label="Repository" value={`${repoName(s.repo?.remote ?? s.repo?.root ?? s.cwd ?? null)}${s.repo?.branch ? ` (${s.repo.branch})` : ""}`} />
           <Fact label="Started" value={dateTime(s.started_at)} />
           <Fact label="Time" value={`${(s.active_ms ?? 0) > 0 ? `${duration(s.active_ms ?? 0)} active, ` : ""}${duration(s.duration_ms ?? 0)} from first to last activity`} />
@@ -49,9 +55,11 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
             value={
               s.cost
                 ? `${cost(s.cost.total_usd ?? 0, s.cost.source ?? null)} (${(s.cost.source ?? "").replaceAll("_", " ")}${covered})`
-                : s.source === "cursor"
-                  ? "unknown: Cursor reports usage only to hooks, and they saw none of this session"
-                  : "unknown"
+                : s.source === "cursor" && s.runtime
+                  ? "unknown: Cursor's cloud agents do not report usage to hooks"
+                  : s.source === "cursor"
+                    ? "unknown: Cursor reports usage only to hooks, and they saw none of this session"
+                    : "unknown"
             }
           />
           <Fact label="Models" value={(s.models ?? []).join(", ") || "–"} />

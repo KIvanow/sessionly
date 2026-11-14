@@ -4,9 +4,11 @@ import type { Upload } from "./upload.ts";
 
 /**
  * `ci` is for the GitHub Action: it can report pull requests and nothing
- * else.
+ * else. `env` is for a cloud agent's environment, which several people start
+ * sessions in: it can upload sessions and nothing else, and a cloud session
+ * it uploads is filed under the person the platform says started it.
  */
-export type Role = "admin" | "member" | "ci";
+export type Role = "admin" | "member" | "ci" | "env";
 
 export interface Me {
   ok: true;
@@ -48,7 +50,8 @@ export interface Totals {
   rewrite: RewriteTotals;
 }
 
-export type GroupBy = "user" | "repo" | "model" | "tool" | "day";
+/** `runtime` groups by where sessions ran: `local` or `cloud`. */
+export type GroupBy = "user" | "repo" | "model" | "tool" | "day" | "runtime";
 
 export interface Summary {
   /** Largest cost first; days oldest first. */
@@ -61,8 +64,13 @@ export interface SessionRow {
   /** The agent the session ran in: `claude-code`, `cursor` or `grok`. */
   source: string;
   session_id: string;
-  /** Who uploaded it: the owner of the token. */
+  /**
+   * Whose session it is: the owner of the token that uploaded it, or for a
+   * cloud session uploaded with an `env` token, the person who started it.
+   */
   owner_email: string;
+  /** `cloud` for a session a cloud platform ran in its own sandbox, else null. */
+  runtime: string | null;
   repo: string | null;
   branch: string | null;
   title: string | null;
@@ -134,6 +142,8 @@ export interface FilterOptions {
   repos: string[];
   models: string[];
   tools: string[];
+  /** Where the sessions ran: `local`, `cloud`, or both. */
+  runtimes: string[];
 }
 
 export interface TokenInfo {
@@ -178,9 +188,10 @@ export interface PullReport {
   /**
    * Email addresses its commits were made with. Sessions count toward the
    * pull request only if they are by one of these people (a session records
-   * the email git is set up with, which is the one commits carry). Used for
-   * matching and not stored. Without any, every session in the repository
-   * is looked at.
+   * the email git is set up with, which is the one commits carry), or ran in
+   * the cloud on the pull request's branch (there the commits are the
+   * agent's). Used for matching and not stored. Without any, every session
+   * in the repository is looked at.
    */
   commit_emails?: string[];
   number: number;
@@ -238,6 +249,26 @@ export interface PullAttribution {
   now: { lines: number; agent_lines: number; by: LinesBy[] };
   /** The agent lines at first report, and how many are still there now. */
   by: (LinesBy & { surviving: number })[];
+  /**
+   * Set when a cloud agent worked on the pull request. Absent on reports
+   * stored before this was recorded.
+   */
+  cloud?: PullCloud | null;
+}
+
+/**
+ * A pull request a cloud agent worked on: its commits are made as the agent
+ * (`Claude <noreply@anthropic.com>`, `Cursor Agent <cursoragent@cursor.com>`),
+ * or its branch is one a cloud session ran on.
+ */
+export interface PullCloud {
+  /** The agents recognised by their commits or branch: `claude-code`, `cursor`. */
+  agents: string[];
+  /**
+   * Cloud sessions uploaded for this repository and branch. With none, the
+   * agent's lines cannot be told apart and count as not an agent's.
+   */
+  sessions: number;
 }
 
 export interface PullRow {
@@ -304,5 +335,8 @@ export interface PullSummary {
     /** Agent lines those had when opened, and how many are still there. */
     opened_agent_lines: number;
     agent_lines_surviving: number;
+    /** Pull requests a cloud agent worked on, and how many of those have no session. */
+    cloud_pulls: number;
+    cloud_pulls_without_session: number;
   };
 }

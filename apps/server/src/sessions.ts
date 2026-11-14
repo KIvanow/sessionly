@@ -15,25 +15,56 @@ const strings = (value: unknown): string[] => {
   return Array.isArray(list) ? list.map(String) : [];
 };
 
-/** Store one session, replacing an earlier upload of the same session. */
-export async function storeUpload(db: Db, upload: Upload, owner: Principal): Promise<void> {
+/**
+ * Whose session an upload is. A token belongs to one person and its uploads
+ * are theirs, whatever name the record carries. The exception is a cloud
+ * session uploaded with an `env` token: that token sits in an environment
+ * several people start sessions in, so the session is filed under the person
+ * the platform named, and under the token's own address only if it named
+ * nobody.
+ */
+export function ownerOf(upload: Upload, uploader: Principal): string {
   const s: Session = upload.session ?? {};
+  const named = s.user?.email?.trim().toLowerCase() ?? "";
+  const cloud = s.runtime?.kind === "cloud";
+  return uploader.role === "env" && cloud && /^\S+@\S+$/.test(named) ? named : uploader.email;
+}
+
+/**
+ * Store one session, replacing an earlier upload of the same session.
+ * Returns false if what the server has was kept instead.
+ */
+export async function storeUpload(db: Db, upload: Upload, uploader: Principal): Promise<boolean> {
+  const s: Session = upload.session ?? {};
+  const owner = { email: ownerOf(upload, uploader) };
+  const cloud = s.runtime?.kind === "cloud";
+  const counts = s.counts ?? {};
   const key = [s.machine_id, s.source, s.session_id];
-  const existing = await db.query<{ owner_email: string }>(
-    `SELECT owner_email FROM sessions WHERE machine_id = $1 AND source = $2 AND session_id = $3`,
+  const [existing] = await db.query<{ owner_email: string; runtime: string | null; prompts: number }>(
+    `SELECT owner_email, runtime, prompts FROM sessions
+     WHERE machine_id = $1 AND source = $2 AND session_id = $3`,
     key,
   );
-  if (existing[0] && existing[0].owner_email !== owner.email) {
-    throw new Conflict("this session was uploaded by someone else");
+  if (existing && existing.owner_email !== owner.email) {
+    // A session first filed under the environment's own address (the
+    // platform had not named anyone yet) moves to its person.
+    const refiled = uploader.role === "env" && existing.owner_email === uploader.email;
+    if (!refiled) throw new Conflict("this session was uploaded by someone else");
+  }
+  // A cloud session can outlive its sandbox. The next sandbox has seen only
+  // what happened since it started: what it sends must not replace more.
+  if (existing?.runtime === "cloud" && cloud && (counts.prompts ?? 0) < Number(existing.prompts)) {
+    return false;
   }
   const usage = s.usage ?? [];
-  const counts = s.counts ?? {};
   const rewrite = upload.rewrite ?? null;
   const columns: Record<string, unknown> = {
     machine_id: s.machine_id,
     source: s.source,
     session_id: s.session_id,
     owner_email: owner.email,
+    runtime: s.runtime?.kind ?? null,
+    runtime_id: s.runtime?.id ?? null,
     user_email: s.user?.email ?? null,
     user_name: s.user?.name ?? null,
     repo: s.repo?.remote ?? s.repo?.root ?? s.cwd ?? null,
@@ -80,6 +111,7 @@ export async function storeUpload(db: Db, upload: Upload, owner: Principal): Pro
      DO UPDATE SET ${updates.join(", ")}, updated_at = now()`,
     Object.values(columns),
   );
+  return true;
 }
 
 export type { GroupBy };
@@ -97,6 +129,8 @@ export interface Filters {
   model_is?: string;
   /** The agent exactly: `claude-code`, `cursor` or `grok`. */
   tool?: string;
+  /** Where it ran: `cloud`, or `local` for a person's own machine. */
+  runtime?: string;
   /** Substring of the title, repository, branch, or anything in the record. */
   q?: string;
   since?: string;
@@ -118,6 +152,8 @@ function where(viewer: Principal, filters: Filters): { sql: string; params: unkn
   if (filters.model_is === UNKNOWN) conditions.push(`primary_model IS NULL`);
   else if (filters.model_is) conditions.push(`primary_model = ${bind(filters.model_is)}`);
   if (filters.tool) conditions.push(`source = ${bind(filters.tool)}`);
+  if (filters.runtime === "local") conditions.push(`runtime IS NULL`);
+  else if (filters.runtime) conditions.push(`runtime = ${bind(filters.runtime)}`);
   if (filters.q) {
     const p = like(filters.q);
     conditions.push(
@@ -136,6 +172,7 @@ const GROUP_KEY: Record<GroupBy, string> = {
   repo: `coalesce(repo, '${UNKNOWN}')`,
   model: `coalesce(primary_model, '${UNKNOWN}')`,
   tool: `source`,
+  runtime: `coalesce(runtime, 'local')`,
   day: `coalesce(to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), '${UNKNOWN}')`,
 };
 
@@ -209,7 +246,7 @@ export async function listSessions(
 ): Promise<{ sessions: SessionRow[]; total: number }> {
   const { sql, params } = where(viewer, filters);
   const rows = await db.query(
-    `SELECT machine_id, source, session_id, owner_email, repo, branch, title,
+    `SELECT machine_id, source, session_id, owner_email, runtime, repo, branch, title,
             payload->'session'->'prompts'->0->'text'->>'preview' AS first_prompt,
             started_at, duration_ms, active_ms, cost_usd, cost_source, primary_model, prompts,
             tool_calls, tool_failures, files_changed, lines_added, lines_removed, content,
@@ -228,6 +265,7 @@ export async function listSessions(
       source: String(r.source),
       session_id: String(r.session_id),
       owner_email: String(r.owner_email),
+      runtime: (r.runtime as string) ?? null,
       repo: (r.repo as string) ?? null,
       branch: (r.branch as string) ?? null,
       title: (r.title as string) ?? null,
@@ -347,7 +385,7 @@ export async function listFiles(
 export async function filterOptions(
   db: Db,
   viewer: Principal,
-): Promise<{ users: string[]; repos: string[]; models: string[]; tools: string[] }> {
+): Promise<{ users: string[]; repos: string[]; models: string[]; tools: string[]; runtimes: string[] }> {
   const { sql, params } = where(viewer, {});
   const column = async (expr: string) =>
     (
@@ -363,5 +401,6 @@ export async function filterOptions(
     repos: await column("repo"),
     models: await column("primary_model"),
     tools: await column("source"),
+    runtimes: await column("coalesce(runtime, 'local')"),
   };
 }

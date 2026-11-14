@@ -212,6 +212,8 @@ test("the Action reports a pull request through review; admins read how the agen
     pulls_from_open: 1,
     opened_agent_lines: 5,
     agent_lines_surviving: 3,
+    cloud_pulls: 0,
+    cloud_pulls_without_session: 0,
   });
   assert.deepEqual(summary.by_model.find((m: any) => m.model === "claude-opus-5-5"), {
     tool: "claude-code",

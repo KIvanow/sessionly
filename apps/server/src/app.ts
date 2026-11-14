@@ -69,10 +69,17 @@ function filtersFrom(query: Record<string, string>): Filters {
     model: query.model || undefined,
     model_is: query.model_is || undefined,
     tool: query.tool || undefined,
+    runtime: whereItRan(query.runtime),
     q: query.q || undefined,
     since: time(query.since, "since"),
     until: time(query.until, "until"),
   };
+}
+
+function whereItRan(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  if (value !== "local" && value !== "cloud") throw new BadRequest("runtime must be local or cloud");
+  return value;
 }
 
 function wholeNumber(value: string | undefined, fallback: number, max: number, name: string): number {
@@ -100,6 +107,13 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
       const reporting = c.req.method === "PUT" && c.req.path.endsWith("/prs");
       if (!reporting && !c.req.path.endsWith("/ping")) {
         return c.json({ error: "this token only reports pull requests" }, 403);
+      }
+    }
+    // An env token uploads the sessions of a cloud environment and does nothing else.
+    if (principal.role === "env") {
+      const uploading = c.req.method === "PUT" && /\/sessions\/[^/]+\/[^/]+\/[^/]+$/.test(c.req.path);
+      if (!uploading && !c.req.path.endsWith("/ping")) {
+        return c.json({ error: "this token only uploads sessions" }, 403);
       }
     }
     c.set("principal", principal);
@@ -145,21 +159,23 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
       if (s.content === "local") {
         return c.json({ error: "local records are not for upload; send previews or metadata" }, 422);
       }
+      let stored: boolean;
       try {
-        await storeUpload(db, upload, c.get("principal"));
+        stored = await storeUpload(db, upload, c.get("principal"));
       } catch (err) {
         if (err instanceof Conflict) return c.json({ error: err.message }, 409);
         throw err;
       }
-      return c.json({ stored: true });
+      // Not stored: the server already has more of this cloud session.
+      return c.json({ stored });
     },
   );
 
   api.get("/summary", async (c) => {
     const query = c.req.query();
     const by = (query.by ?? "user") as GroupBy;
-    if (!["user", "repo", "model", "tool", "day"].includes(by)) {
-      throw new BadRequest("by must be user, repo, model, tool or day");
+    if (!["user", "repo", "model", "tool", "day", "runtime"].includes(by)) {
+      throw new BadRequest("by must be user, repo, model, tool, day or runtime");
     }
     return c.json(await summarize(db, c.get("principal"), by, filtersFrom(query)));
   });
@@ -247,8 +263,8 @@ export function createApp(db: Db, options: Options = {}): Hono<Env> {
     const email = typeof body.email === "string" ? body.email.trim() : "";
     const role = (body.role ?? "member") as Role;
     if (!/^\S+@\S+$/.test(email)) throw new BadRequest("email is required");
-    if (role !== "admin" && role !== "member" && role !== "ci") {
-      throw new BadRequest("role must be admin, member or ci");
+    if (role !== "admin" && role !== "member" && role !== "ci" && role !== "env") {
+      throw new BadRequest("role must be admin, member, ci or env");
     }
     const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : null;
     const created = await createToken(db, { email, name, role });
