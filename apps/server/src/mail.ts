@@ -41,22 +41,28 @@ export function signInMail(to: string, links: { org: string; url: string }[]): M
   return { to, subject: "Sign in to Sessionly", text: `${body}\n\n${FOOTER}\n` };
 }
 
+// The two messages below go to addresses nobody has confirmed, on the word of
+// whoever asked. So they say nothing their asker chose: no organisation's
+// name, no one's address. The page the link opens says where it leads, and
+// asks before going there.
+
 /** The link that creates the organisation someone asked for. */
-export function signUpMail(to: string, orgName: string, url: string): Mail {
+export function signUpMail(to: string, url: string): Mail {
   return {
     to,
     subject: "Finish setting up Sessionly",
-    text: `Confirm this address to create ${orgName} on Sessionly:\n\n${url}\n\n${FOOTER}\n`,
+    text: `Confirm this address to create your organisation on Sessionly:\n\n${url}\n\n${FOOTER}\n`,
   };
 }
 
 /** The link that lets an invited person in. */
-export function inviteMail(to: string, orgName: string, invitedBy: string, url: string): Mail {
+export function inviteMail(to: string, url: string): Mail {
   return {
     to,
-    subject: `You were added to ${orgName} on Sessionly`,
+    subject: "You were added to an organisation on Sessionly",
     text:
-      `${invitedBy} added you to ${orgName} on Sessionly.\n\nSign in:\n\n${url}\n\n` +
-      `The link works once, for ${LINK_MINUTES} minutes. After that, ask for a new one on the sign-in page with this address.\n`,
+      `Someone added this address to their organisation on Sessionly. The link shows which, and asks before signing you in:\n\n${url}\n\n` +
+      `The link works once, for ${LINK_MINUTES} minutes. After that, ask for a new one on the sign-in page with this address. ` +
+      `If you were not expecting this, ignore it: nothing happens without the link.\n`,
   };
 }

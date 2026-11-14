@@ -36,6 +36,11 @@ export function hash(secret: string): string {
   return createHash("sha256").update(secret).digest("hex");
 }
 
+/** Whether two secrets are the same, taking as long to say no as to say yes. */
+export function sameSecret(a: string, b: string): boolean {
+  return timingSafeEqual(Buffer.from(hash(a)), Buffer.from(hash(b)));
+}
+
 export interface NewToken {
   email: string;
   name?: string | null;
@@ -141,6 +146,10 @@ export async function authenticate(
      WHERE token_hash = $1 AND revoked_at IS NULL
        AND (expires_at IS NULL OR expires_at > now())
        AND EXISTS (SELECT 1 FROM orgs WHERE orgs.id = tokens.org_id AND orgs.deleted_at IS NULL)
+       -- a person's token is nothing once they are removed, even one that
+       -- was being issued at that very moment
+       AND (tokens.user_id IS NULL OR EXISTS (
+         SELECT 1 FROM users WHERE users.id = tokens.user_id AND users.removed_at IS NULL))
      RETURNING id, org_id, email, name, role, user_id`,
     [digest],
   );

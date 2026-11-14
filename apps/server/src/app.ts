@@ -15,7 +15,7 @@ import {
 import type { Db, OrgDb } from "./db.ts";
 import { allowed } from "./limits.ts";
 import { inviteMail } from "./mail.ts";
-import { newLink, newUserId, openRoutes, type Accounts } from "./signup.ts";
+import { LINKS_PER_HOUR, newLink, newUserId, openRoutes, type Accounts } from "./signup.ts";
 import { addUser, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
 import {
   Conflict,
@@ -42,6 +42,8 @@ export type Env = {
     /** An upload or a pull request report, already parsed and checked. */
     upload?: Upload;
     report?: PullReport;
+    /** What to do once the request's transaction has been committed, and only then. */
+    after: (() => void)[];
   };
 };
 
@@ -61,8 +63,13 @@ export type Extension = (api: Api) => void;
 
 class BadRequest extends Error {}
 
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 /** Thrown to undo what a request wrote, once its answer is already decided. */
 class Undo extends Error {}
+
+/** People an organisation may add an hour: each is a message to an address nobody confirmed. */
+const INVITES_PER_HOUR = 30;
 
 /** An error an extension wants answered with a given status and a stable code. */
 export class ApiError extends Error {
@@ -284,6 +291,27 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     await next();
   });
 
+  // Adding a person sends a message to an address on an admin's word, and
+  // anyone can be the admin of an organisation they just made. So it is
+  // limited per organisation and per address written to, and counted here,
+  // outside the transaction: an attempt counts whether or not it goes through.
+  api.post("/users", async (c, next) => {
+    const p = c.get("principal");
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    // Anything else is refused further on, uncounted.
+    if (p.role === "admin" && EMAIL.test(email)) {
+      const limited = (error: string) => c.json({ error, code: "rate_limited" }, 429);
+      if (!(await allowed(ownerDb, `invites:${p.orgId}`, 3600, INVITES_PER_HOUR))) {
+        return limited(`an organisation can add ${INVITES_PER_HOUR} people an hour; try again later`);
+      }
+      if (!(await allowed(ownerDb, `invite:${email}`, 3600, LINKS_PER_HOUR))) {
+        return limited("that address has been sent enough invitations for now; try again in an hour");
+      }
+    }
+    await next();
+  });
+
   // The rest of the request runs in one transaction, as the organisation of
   // its token: `c.get("db")` sees that organisation's rows and no others.
   api.use("*", async (c, next) => {
@@ -291,6 +319,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     // connection. As text, which is what an upload or a report was parsed
     // from and is kept: asking for bytes would make a second copy of it.
     if (c.req.raw.body) await c.req.text();
+    c.set("after", []);
     try {
       await ownerDb.asOrg(c.get("principal").orgId, async (orgDb) => {
         c.set("db", orgDb);
@@ -301,7 +330,11 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       });
     } catch (err) {
       if (!(err instanceof Undo)) throw err;
+      return;
     }
+    // Committed: now what depended on it, such as a message with a link to
+    // a row that had to exist first.
+    for (const act of c.get("after")) act();
   });
 
   const failed = failureLog();
@@ -493,14 +526,16 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
     const role = body.role ?? "member";
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new BadRequest("email is required");
+    if (!EMAIL.test(email)) throw new BadRequest("email is required");
     if (role !== "admin" && role !== "member") throw new BadRequest("role must be admin or member");
     const db = c.get("db");
     const user = await addUser(db, newUserId(), email, role);
-    const link = await newLink(db, publicUrl, { purpose: "sign_in", userId: user.id });
-    const mail = inviteMail(email, await orgName(db), c.get("principal").email, link);
-    mailer.send(mail).catch((err: unknown) => {
-      console.error("an invitation was not sent:", err instanceof Error ? err.message : err);
+    const mail = inviteMail(email, await newLink(db, publicUrl, { purpose: "sign_in", userId: user.id }));
+    // Sent once the person and their link are really there.
+    c.get("after").push(() => {
+      mailer.send(mail).catch((err: unknown) => {
+        console.error("an invitation was not sent:", err instanceof Error ? err.message : err);
+      });
     });
     return c.json(user, 201);
   });
