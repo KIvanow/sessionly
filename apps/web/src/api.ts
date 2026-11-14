@@ -1,5 +1,44 @@
 // Talking to the server. The access token lives in this browser's storage.
 const STORAGE_KEY = "sessionly.token";
+/** The sessions someone has in other organisations, to switch between. */
+const SESSIONS_KEY = "sessionly.sessions";
+
+/** A session someone got by signing in: one per organisation. */
+export interface Saved {
+  org: string;
+  name: string;
+  token: string;
+}
+
+export function savedSessions(): Saved[] {
+  try {
+    const list = JSON.parse(localStorage.getItem(SESSIONS_KEY) ?? "[]") as Saved[];
+    return Array.isArray(list) ? list.filter((s) => s && s.org && s.token) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSessions(list: Saved[]): void {
+  try {
+    if (list.length) localStorage.setItem(SESSIONS_KEY, JSON.stringify(list));
+    else localStorage.removeItem(SESSIONS_KEY);
+  } catch {
+    // storage unavailable: nothing to switch between after a reload
+  }
+}
+
+/** Remember a session, in place of an earlier one for the same organisation. */
+export function keepSession(session: Saved): void {
+  saveSessions([...savedSessions().filter((s) => s.org !== session.org), session]);
+}
+
+/** Forget the session a token belongs to. Returns the ones that are left. */
+export function dropSession(token: string): Saved[] {
+  const left = savedSessions().filter((s) => s.token !== token);
+  saveSessions(left);
+  return left;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -44,6 +83,23 @@ export async function api<T>(
     });
   } catch (err) {
     if ((err as Error).name === "AbortError") throw err;
+    throw new ApiError(0, "The server could not be reached.");
+  }
+  const data = (await response.json().catch(() => ({}))) as { error?: string };
+  if (!response.ok) throw new ApiError(response.status, data.error ?? `HTTP ${response.status}`);
+  return data as T;
+}
+
+/** Ask something that needs no token: signing in, signing up, what the server offers. */
+export async function open<T>(path: string, body?: unknown): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`/api/v1${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: body === undefined ? {} : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
     throw new ApiError(0, "The server could not be reached.");
   }
   const data = (await response.json().catch(() => ({}))) as { error?: string };

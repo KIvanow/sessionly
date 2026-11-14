@@ -17,6 +17,42 @@ export interface Me {
   email: string;
   name: string | null;
   role: Role;
+  /** The organisation's name. From `/me` only. */
+  org_name?: string;
+  /** Whether the token is a person's own: they signed in, or it is for their machines. */
+  signed_in?: boolean;
+}
+
+/** What a server offers someone who is not signed in (`/auth/options`). */
+export interface AuthOptions {
+  /** A service many organisations share. */
+  hosted: boolean;
+  /** People can ask for a link to sign in with. */
+  emailSignIn: boolean;
+  /** Anyone can create an organisation. */
+  signup: boolean;
+  /** Signing up needs an invitation code. */
+  inviteCode: boolean;
+}
+
+/** What using a link gives (`/auth/verify`). */
+export interface SignedIn {
+  token: string;
+  org: { id: string; name: string };
+  email: string;
+  role: Role;
+  expires_at: string;
+  /** True if the link created the organisation. */
+  created: boolean;
+}
+
+/** A person of an organisation (`/users`). */
+export interface UserInfo {
+  id: string;
+  email: string;
+  role: "owner" | "admin" | "member";
+  created_at: string;
+  removed_at: string | null;
 }
 
 /** How much of what the agent wrote is still in the files. */

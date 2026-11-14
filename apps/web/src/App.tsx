@@ -1,6 +1,7 @@
-import type { FilterOptions, Me } from "@sessionly/schema";
+import type { AuthOptions, FilterOptions, Me, SignedIn } from "@sessionly/schema";
 import { useEffect, useMemo, useState } from "react";
-import { api, ApiError, savedToken, saveToken } from "./api.ts";
+import { api, ApiError, dropSession, keepSession, open, savedSessions, savedToken, saveToken, type Saved } from "./api.ts";
+import { Connect } from "./Connect.tsx";
 import { Login } from "./Login.tsx";
 import { Overview } from "./Overview.tsx";
 import { Pulls } from "./Pulls.tsx";
@@ -50,16 +51,64 @@ function useHash(): string {
   return hash.replace(/^#\/?/, "");
 }
 
+/** The code of a link someone signed in or signed up with: `#login=<code>`. */
+function linkCode(): string | null {
+  return /^#login=([\w-]+)$/.exec(window.location.hash)?.[1] ?? null;
+}
+
 export function App() {
   const [token, setToken] = useState<string | null>(savedToken);
   const [me, setMe] = useState<Me | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [options, setOptions] = useState<AuthOptions | null>(null);
+  const [arriving, setArriving] = useState(() => linkCode() !== null);
 
-  const signOut = () => {
-    saveToken(null);
-    setToken(null);
+  const use = (value: string | null) => {
+    saveToken(value);
     setMe(null);
+    setToken(value);
   };
+  /** This session is over. If there is one in another organisation, that one is next. */
+  const signOut = () => {
+    const left = token ? dropSession(token) : savedSessions();
+    use(left[0]?.token ?? null);
+  };
+  /** Sign out on purpose: the session stops working on the server too. */
+  const leave = () => {
+    if (token && me?.signed_in) void api(token, "/auth/session", { method: "DELETE" }).catch(() => {});
+    signOut();
+  };
+
+  useEffect(() => {
+    open<AuthOptions>("/auth/options")
+      .then(setOptions)
+      // An older server, or none: a token is the way in.
+      .catch(() => setOptions({ hosted: false, emailSignIn: false, signup: false, inviteCode: false }));
+  }, []);
+
+  // Arriving by a link: trade its code for a session, once. The link may
+  // open a new page or only change the address of this one.
+  useEffect(() => {
+    const arrive = () => {
+      const code = linkCode();
+      if (!code) return;
+      setArriving(true);
+      // The code leaves the address bar and the history straight away.
+      window.history.replaceState(null, "", window.location.pathname);
+      open<SignedIn>("/auth/verify", { code })
+        .then((signed) => {
+          keepSession({ org: signed.org.id, name: signed.org.name, token: signed.token });
+          setProblem(null);
+          use(signed.token);
+          window.location.hash = signed.created ? "#/connect" : "#/";
+        })
+        .catch((err: Error) => setProblem(err.message))
+        .finally(() => setArriving(false));
+    };
+    arrive();
+    window.addEventListener("hashchange", arrive);
+    return () => window.removeEventListener("hashchange", arrive);
+  }, []);
 
   useEffect(() => {
     if (!token) return;
@@ -80,14 +129,21 @@ export function App() {
     };
   }, [token]);
 
+  if (arriving) {
+    return (
+      <main className="center">
+        <p>Signing you in…</p>
+      </main>
+    );
+  }
   if (!token) {
     return (
       <Login
+        options={options}
         problem={problem}
         onToken={(value) => {
-          saveToken(value);
           setProblem(null);
-          setToken(value);
+          use(value);
         }}
       />
     );
@@ -97,7 +153,7 @@ export function App() {
       <main className="center">
         {problem ? (
           <p role="alert">
-            {problem} <button onClick={signOut}>Use another token</button>
+            {problem} <button onClick={signOut}>Sign in again</button>
           </p>
         ) : (
           <p>Loading…</p>
@@ -105,10 +161,44 @@ export function App() {
       </main>
     );
   }
-  return <Shell token={token} me={me} onSignOut={signOut} />;
+  return (
+    <Shell
+      token={token}
+      me={me}
+      emailSignIn={options?.emailSignIn === true}
+      hosted={options?.hosted === true}
+      sessions={savedSessions()}
+      onSwitch={use}
+      onSignOut={signOut}
+      onLeave={leave}
+    />
+  );
 }
 
-function Shell({ token, me, onSignOut }: { token: string; me: Me; onSignOut: () => void }) {
+function Shell({
+  token,
+  me,
+  emailSignIn,
+  hosted,
+  sessions,
+  onSwitch,
+  onSignOut,
+  onLeave,
+}: {
+  token: string;
+  me: Me;
+  /** Whether people can be added to sign in by email. */
+  emailSignIn: boolean;
+  /** A service many organisations share: no license files there. */
+  hosted: boolean;
+  /** Sessions in other organisations, to switch to. */
+  sessions: Saved[];
+  onSwitch: (token: string) => void;
+  /** The server no longer accepts the token. */
+  onSignOut: () => void;
+  /** The person chose to sign out. */
+  onLeave: () => void;
+}) {
   const route = useHash();
   const [scope, setScope] = useState<Scope>({ period: "30", user: "", repo: "", tool: "", model: "", where: "" });
   const options = useApi<FilterOptions>(token, "/filters", onSignOut);
@@ -120,14 +210,15 @@ function Shell({ token, me, onSignOut }: { token: string; me: Me; onSignOut: () 
     if (page === "session" && rest.length === 3) {
       return <SessionView token={token} address={rest.join("/")} onSignOut={onSignOut} />;
     }
-    if (page === "team" && isAdmin) return <Team token={token} onSignOut={onSignOut} />;
+    if (page === "team" && isAdmin) return <Team token={token} emailSignIn={emailSignIn} hosted={hosted} onSignOut={onSignOut} />;
+    if (page === "connect") return <Connect token={token} me={me} onSignOut={onSignOut} />;
     if (page === "pulls" && isAdmin) {
       return (
         <Pulls token={token} scope={scope} setScope={setScope} repos={options.data?.repos ?? []} onSignOut={onSignOut} />
       );
     }
     return <Overview token={token} scope={scope} showUsers={isAdmin} onSignOut={onSignOut} />;
-  }, [page, rest.join("/"), token, scope, isAdmin, options.data]);
+  }, [page, rest.join("/"), token, scope, isAdmin, options.data, emailSignIn, hosted, me]);
 
   const scoped = page === "" || page === "sessions";
   const link = (target: string, label: string) => (
@@ -145,10 +236,24 @@ function Shell({ token, me, onSignOut }: { token: string; me: Me; onSignOut: () 
           {link("sessions", "Sessions")}
           {isAdmin && link("pulls", "Pull requests")}
           {isAdmin && link("team", "Team")}
+          {link("connect", "Connect")}
         </nav>
         <span className="who">
-          {me.email} · {me.role}
-          <button className="quiet" onClick={onSignOut}>
+          {sessions.length > 1 ? (
+            <select aria-label="Organisation" value={token} onChange={(e) => onSwitch(e.target.value)}>
+              {sessions.map((s) => (
+                <option key={s.org} value={s.token}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            me.org !== "default" && me.org_name
+          )}
+          <span>
+            {me.email} · {me.role}
+          </span>
+          <button className="quiet" onClick={onLeave}>
             Sign out
           </button>
         </span>

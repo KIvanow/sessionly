@@ -155,3 +155,9 @@ textarea { font: 0.85rem ui-monospace, SFMono-Regular, Menlo, monospace; color: 
 .created { margin-top: 14px; padding: 12px; border: 1px solid var(--axis); border-radius: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .created p { margin: 0; flex-basis: 100%; }
 .created code { overflow-wrap: anywhere; }
+
+/* Signing in, and connecting machines */
+.login .ways { display: flex; flex-wrap: wrap; gap: 0 6px; margin-left: -6px; }
+.who select { max-width: 14rem; }
+pre.command { margin: 0; flex-basis: 100%; padding: 10px 12px; border-radius: 6px; background: var(--page); font: 0.85rem ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x: auto; }
+ol.steps { margin: 10px 0 0; padding-left: 1.3rem; display: grid; gap: 6px; }
