@@ -247,7 +247,10 @@ export async function listSessions(
   const { sql, params } = where(viewer, filters);
   const rows = await db.query(
     `SELECT machine_id, source, session_id, owner_email, runtime, repo, branch, title,
-            payload->'session'->'prompts'->0->'text'->>'preview' AS first_prompt,
+            (SELECT p->'text'->>'preview'
+               FROM jsonb_array_elements(payload->'session'->'prompts') WITH ORDINALITY AS t(p, n)
+              WHERE coalesce(p->'text'->>'preview', '') <> ''
+              ORDER BY n LIMIT 1) AS first_prompt,
             started_at, duration_ms, active_ms, cost_usd, cost_source, primary_model, prompts,
             tool_calls, tool_failures, files_changed, lines_added, lines_removed, content,
             captured_by, rw_files_measured, rw_files_rewritten, rw_lines_added,

@@ -430,7 +430,12 @@ impl Ledger {
                 user.and_then(|u| u.name.as_ref()),
                 user.and_then(|u| u.email.as_ref()),
                 s.title,
-                s.prompts.first().map(|p| &p.text.preview),
+                // The first one there is text of: a cloud agent's opening
+                // prompt may never have reached a hook.
+                s.prompts
+                    .iter()
+                    .map(|p| &p.text.preview)
+                    .find(|text| !text.trim().is_empty()),
                 s.models.join(","),
                 s.models.first(),
                 s.cost.as_ref().map(|c| c.total_usd),

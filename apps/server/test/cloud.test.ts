@@ -216,3 +216,16 @@ test("a cloud agent's pull request with no session is marked as such", async () 
   const cloud = Object.fromEntries(listed.body.pulls.map((p: any) => [p.number, p.attribution.cloud?.sessions ?? null]));
   assert.deepEqual(cloud, { 21: 1, 22: null, 23: 0, 24: 0, 25: 0 });
 });
+
+test("a session whose opening prompt was not captured is listed by its next one", async () => {
+  // Cursor's cloud does not always run hooks for the prompt an agent starts with.
+  const upload = session("c-unseen", { source: "cursor" });
+  const text = (preview: string) => ({ preview, chars: preview.length, sha256: "0".repeat(64) });
+  Object.assign(upload.session, {
+    content: "previews",
+    prompts: [{ text: text("") }, { text: text("and now run the tests") }],
+  });
+  assert.equal((await put(tokens.env, upload)).status, 200);
+  const listed = await call(tokens.admin, "GET", "/sessions?tool=cursor");
+  assert.equal(listed.body.sessions[0].first_prompt, "and now run the tests");
+});
