@@ -70,9 +70,28 @@ function linkCode(): string | null {
 /** A link someone arrived by, and what the server says it is for. */
 interface Link {
   code: string;
-  purpose: "sign_in" | "signup";
+  /** Asked for by the person, sent on being added, or to create an organisation. */
+  purpose: "sign_in" | "invite" | "signup";
   email: string;
   org_name: string;
+  /** The organisation's id, which unlike its name is its own. None yet when creating one. */
+  org_id: string | null;
+  /** The person has not signed in to this organisation before. */
+  first_time: boolean;
+  /** Who added them to it, if they have not signed in to it before. */
+  invited_by: string | null;
+}
+
+/** Names as people read them: the same if they differ only in case, spacing or the form of a letter. */
+const reads = (name: string) => name.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+
+/**
+ * An organisation this browser is signed in to that has the name a link
+ * shows and is not the one the link is for. Anyone can make an organisation
+ * with any name, so a name alone does not say which one this is.
+ */
+function sameNameElsewhere(link: Link): Saved | undefined {
+  return savedSessions().find((s) => s.org !== link.org_id && reads(s.name) === reads(link.org_name));
 }
 
 export function App() {
@@ -82,6 +101,9 @@ export function App() {
   const [options, setOptions] = useState<AuthOptions | null>(null);
   const [arriving, setArriving] = useState(() => linkCode() !== null);
   const [link, setLink] = useState<Link | null>(null);
+  const [leaving, setLeaving] = useState(false);
+  /** Sessions the server could not be told to end, kept (not stored) to try again. */
+  const [unended, setUnended] = useState<string[]>([]);
 
   const use = (value: string | null) => {
     saveToken(value);
@@ -93,17 +115,45 @@ export function App() {
     const left = token ? dropSession(token) : savedSessions();
     use(left[0]?.token ?? null);
   };
+  /** Tell the server to end these sessions. Returns the ones it could not be told about. */
+  const end = async (tokens: string[]): Promise<string[]> => {
+    const answers = await Promise.allSettled(tokens.map((each) => api(each, "/auth/session", { method: "DELETE" })));
+    return tokens.filter((_, i) => {
+      const answer = answers[i];
+      // A session the server no longer accepts is ended already.
+      return answer?.status === "rejected" && !(answer.reason instanceof ApiError && answer.reason.status === 401);
+    });
+  };
+  const notEnded = (left: string[]) =>
+    left.length
+      ? `This browser has forgotten its sessions, but the server could not be told to end ${
+          left.length === 1 ? "one of them" : `${left.length} of them`
+        }. Until it is, a copy of that session would still work, for up to a week.`
+      : null;
   /**
    * Sign out on purpose: of every organisation this browser is signed in to,
    * and on the server too. Leaving one and landing in another would be the
-   * wrong thing on a computer someone else uses next.
+   * wrong thing on a computer someone else uses next. The browser forgets
+   * the sessions whatever the server answers, and says so if the server did
+   * not hear.
    */
-  const leave = () => {
+  const leave = async () => {
     const all = new Set(savedSessions().map((s) => s.token));
     if (token && me?.signed_in) all.add(token);
-    for (const each of all) void api(each, "/auth/session", { method: "DELETE" }).catch(() => {});
+    setLeaving(true);
     clearSessions();
+    const left = await end([...all]);
     use(null);
+    setUnended(left);
+    setProblem(notEnded(left));
+    setLeaving(false);
+  };
+  const endAgain = async () => {
+    setLeaving(true);
+    const left = await end(unended);
+    setUnended(left);
+    setProblem(notEnded(left));
+    setLeaving(false);
   };
 
   useEffect(() => {
@@ -168,15 +218,16 @@ export function App() {
     };
   }, [token]);
 
-  if (arriving) {
+  if (arriving || leaving) {
     return (
       <main className="center">
-        <p>Opening the link…</p>
+        <p>{leaving ? "Signing out…" : "Opening the link…"}</p>
       </main>
     );
   }
   if (link) {
     const creating = link.purpose === "signup";
+    const twin = sameNameElsewhere(link);
     return (
       <main className="center">
         <div className="card login">
@@ -184,9 +235,37 @@ export function App() {
           <dl className="facts">
             <dt>Organisation</dt>
             <dd>{link.org_name}</dd>
+            {link.org_id && (
+              <>
+                <dt>Its id</dt>
+                <dd>
+                  <code>{link.org_id}</code>
+                </dd>
+              </>
+            )}
             <dt>{creating ? "Its owner" : "As"}</dt>
             <dd>{link.email}</dd>
+            {!creating && link.first_time && (
+              <>
+                <dt>Added by</dt>
+                <dd>{link.invited_by ?? "not recorded"}</dd>
+              </>
+            )}
           </dl>
+          {twin && (
+            <p role="alert">
+              {creating
+                ? `This browser is already signed in to an organisation called ${twin.name} (${twin.org}). This creates a second, separate one with the same name.`
+                : `This is not the ${twin.name} this browser is signed in to: that one is ${twin.org}. Anyone can give an organisation any name. Go on only if you know who ${
+                    link.invited_by ?? "sent this"
+                  } is and expected this.`}
+            </p>
+          )}
+          {!creating && link.first_time && !twin && (
+            <p className="muted">
+              You have not signed in to this organisation before. A name can be anyone's choice: check who added you.
+            </p>
+          )}
           <p className="muted">
             {creating
               ? "The organisation is created now, with this address as its owner."
@@ -206,6 +285,7 @@ export function App() {
       <Login
         options={options}
         problem={problem}
+        onRetry={unended.length ? endAgain : undefined}
         onToken={(value) => {
           setProblem(null);
           use(value);

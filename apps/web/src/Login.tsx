@@ -12,10 +12,13 @@ type Mode = "email" | "token" | "signup";
 export function Login({
   options,
   problem,
+  onRetry,
   onToken,
 }: {
   options: AuthOptions | null;
   problem: string | null;
+  /** Something to try again about `problem`, if there is. */
+  onRetry?: () => void;
   onToken: (token: string) => void;
 }) {
   const byEmail = options?.emailSignIn === true;
@@ -46,7 +49,9 @@ export function Login({
     try {
       if (mode === "email") {
         await open("/auth/email", { email });
-        setSent(`If ${email.trim()} has an account here, a link to sign in is on its way.`);
+        setSent(
+          `If ${email.trim()} has an account here, a link to sign in is on its way. If one was sent in the last 15 minutes it still works, and no second one is sent.`,
+        );
       } else {
         await open("/auth/signup", { email, org_name: orgName, invite_code: invite || undefined });
         setSent(`A link to finish creating ${orgName.trim()} is on its way to ${email.trim()}.`);
@@ -118,6 +123,11 @@ export function Login({
           </label>
         )}
         {(failed ?? problem) && <p role="alert">{failed ?? problem}</p>}
+        {!failed && problem && onRetry && (
+          <button type="button" className="quiet" onClick={onRetry}>
+            Try again to end them
+          </button>
+        )}
         <button type="submit" disabled={busy || (mode === "token" ? !token.trim() : !email.trim())}>
           {mode === "email" ? "Email me a link" : mode === "signup" ? "Create it" : "Sign in"}
         </button>
