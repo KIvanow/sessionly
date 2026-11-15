@@ -21,9 +21,8 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
-import { DB_COUNTS, misset } from "./db.ts";
 import { createApp, type Extension } from "./app.ts";
-import { openDb, runMigrations, type Migrations } from "./db.ts";
+import { count, DB_COUNTS, misset, openDb, runMigrations, type Migrations } from "./db.ts";
 import { tidy } from "./limits.ts";
 import { resendMailer, SEND_MS } from "./mail.ts";
 import { offers, type Accounts } from "./signup.ts";
@@ -72,24 +71,13 @@ export function reason(err: unknown): string {
   return err.message || [...new Set(each)].join("; ") || (typeof code === "string" ? code : err.name);
 }
 
-/** The settings that are a count of something. */
+/** The settings that are a count of something: `count` in db.ts says what one is. */
 const COUNTS = [
   "SESSIONLY_RATE_PER_MINUTE",
   "SESSIONLY_SIGNUPS_PER_HOUR",
   "SESSIONLY_SIGNUPS_PER_NETWORK",
-  "SESSIONLY_DB_POOL",
+  ...DB_COUNTS,
 ] as const;
-
-/**
- * A setting that is a count: a whole number above 0, no larger than the
- * database's integers go. Undefined if it is not set, or set to anything
- * else: "0.5" or "1e12" given to the database as a count would fail every
- * request that is counted.
- */
-function count(value: string | undefined): number | undefined {
-  const n = value?.trim() ? Number(value) : NaN;
-  return Number.isInteger(n) && n > 0 && n <= 2_147_483_647 ? n : undefined;
-}
 
 /** How people get in, as the environment sets it. */
 export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
@@ -120,12 +108,7 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
  * since the server otherwise runs as if they were not there.
  */
 export function unheeded(env: NodeJS.ProcessEnv): string[] {
-  const notes: string[] = [];
-  for (const name of COUNTS) {
-    if (env[name]?.trim() && count(env[name]) === undefined) {
-      notes.push(`${name} is "${env[name]}", which is not a whole number above 0: it is left out, and the default applies.`);
-    }
-  }
+  const notes = misset(env, COUNTS);
   if (env.SMTP_URL && !env.RESEND_API_KEY) {
     notes.push(
       "SMTP_URL is set, but email is sent through Resend now and not over SMTP: signing in by email is off until RESEND_API_KEY is set.",
@@ -166,8 +149,7 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       process.exit(1);
     }
   }
-  // A setting that is not what it was meant to be is said, since the server runs as if it were not there.
-  for (const note of misset(process.env, DB_COUNTS)) console.warn(note);
+  for (const note of unheeded(process.env)) console.warn(note);
   // The embedded database lives next to the server's code, wherever it is started from.
   const embedded = fileURLToPath(new URL("../data/pglite", import.meta.url));
   const databaseUrl = process.env.DATABASE_URL ?? `file:${embedded}`;
@@ -187,7 +169,6 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   const webRoot = existsSync(webDist) ? webDist : undefined;
   const after = background();
   const accounts = { ...accountsFrom(process.env), defer: after.defer };
-  for (const note of unheeded(process.env)) console.warn(note);
   // Old counters and links that ran out are cleared away now and then.
   const tidying = setInterval(() => void tidy(db).catch((err) => console.error("tidying failed:", err)), 15 * 60_000);
   tidying.unref();

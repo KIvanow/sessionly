@@ -865,9 +865,10 @@ test("the environment sets how people get in", () => {
   assert.equal(accounts.signupsPerHour, undefined);
   assert.equal(accountsFrom({ ...env, SESSIONLY_SIGNUPS_PER_HOUR: "20" }).signupsPerHour, 20);
   assert.equal(accountsFrom({ ...env, SESSIONLY_SIGNUPS_PER_HOUR: "lots" }).signupsPerHour, undefined);
-  // A count is a whole number above 0. Anything else is as if it were not
-  // set: given to the database as a count, it would fail every request.
-  for (const odd of ["0", "-3", "2.5", "1e12", "Infinity", "NaN", "0x", "12 an hour", " ", ""]) {
+  // A count is a whole number above 0, in plain digits. Anything else is
+  // as if it were not set: given to the database as a count, it would fail
+  // every request, and "1e2" or "0x10" may not be the number that was meant.
+  for (const odd of ["0", "-3", "2.5", "1e12", "1e2", "0x10", "Infinity", "NaN", "0x", "12 an hour", " ", ""]) {
     const set = accountsFrom({
       ...env,
       SESSIONLY_RATE_PER_MINUTE: odd,
@@ -881,7 +882,7 @@ test("the environment sets how people get in", () => {
     ...env,
     SESSIONLY_RATE_PER_MINUTE: "50",
     SESSIONLY_SIGNUPS_PER_HOUR: " 7 ",
-    SESSIONLY_SIGNUPS_PER_NETWORK: "1e2",
+    SESSIONLY_SIGNUPS_PER_NETWORK: "100",
   });
   assert.deepEqual([counts.ratePerMinute, counts.signupsPerHour, counts.signupsPerNetwork], [50, 7, 100]);
   assert.equal(offers(accountsFrom({ ...env, SESSIONLY_SIGNUP: "off" })).signup, false);
