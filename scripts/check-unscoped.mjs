@@ -2,7 +2,8 @@
 // organisation sees it. The owner's view, `Db`, sees every organisation's
 // rows, so only the few files that must run before an organisation is known
 // may import it. This fails if any other file does, however it spells the
-// import (comments between its words, a `?query`, a %-escape), if `app.ts`
+// import (comments between its words, no spaces at all, a name in quotes,
+// a `?query`, a %-escape) and whichever kind of source file it is, if `app.ts`
 // uses the owner's database anywhere but where it finds a request's
 // organisation, and if starting the server hands the owner's database to
 // anything an edition supplies.
@@ -13,18 +14,24 @@ const ALLOWED = {
   "apps/server/src": ["db.ts", "auth.ts", "cli.ts", "run.ts", "app.ts", "lib.ts", "testing.ts"],
   "ee/src": ["migrate.ts"],
 };
-// `import … from` and `export … from`: named, `* as`, `*`, or default.
-const FROM =
-  /\b(?:import|export)\s+(?:type\s+)?(\*(?:\s+as\s+\w+)?|\w+|\{[^}]*\})(?:\s*,\s*(?:\{[^}]*\}|\*\s+as\s+\w+))?\s+from\s+["']([^"']+)["']/g;
+// `import … from` and `export … from`: named, `* as`, `*`, or default. No
+// space is needed around braces, `*` or the module's quotes, and a name may
+// be written as a string (`{ "openDb" as open }`), which may hold a `}`.
+const NAMED = String.raw`\{(?:[^}"']|"[^"]*"|'[^']*')*\}`;
+const STAR = String.raw`\*(?:\s*as\s*(?:\w+|"[^"]*"|'[^']*'))?`;
+const FROM = new RegExp(
+  String.raw`\b(?:import|export)\s*(?:type\b\s*)?(${STAR}|\w+|${NAMED})(?:\s*,\s*(?:${NAMED}|${STAR}))?\s*from\s*["']([^"']+)["']`,
+  "g",
+);
 // `import("…")`: awaited for the module, or written as a type.
 const CALLED = /(?<![.\w])import\s*\(\s*(?:["'`]([^"'`]*)["'`]\s*\))?/g;
 // The database module, and the two that pass its names on: the package's
 // own front door (also what `@sessionly/server` is) and the tests' helpers.
-const DATABASE = /(?:^|\/)(?:db|lib|testing)(?:\.(?:ts|js|mts|mjs))?$|^@sessionly\/server$/;
+const DATABASE = /(?:^|\/)(?:db|lib|testing)(?:\.(?:[cm]?[jt]s|[jt]sx))?$|^@sessionly\/server$/;
 // Another way to load a module, which nothing here needs.
 const REQUIRE = /\bcreateRequire\b|(?<![.\w])require\s*\(\s*["'`]/;
 // The names that are, or hand out, the owner's view.
-const OWNER = /(?:^|[\s,{])(?:type\s+)?(?:Db|openDb|testDb)(?:$|[\s,}])/;
+const OWNER = /(?:^|[\s,{])(?:type\s+)?["']?(?:Db|openDb|testDb)["']?(?:$|[\s,}])/;
 // Where app.ts may use the owner's database: these and nothing else. The
 // organisation of a transaction is the one of the request's token.
 const IN_APP = [
@@ -90,6 +97,8 @@ function importsAsWritten(text) {
     const module = moduleOf(from);
     if (module === null) found.push(unread(whole));
     if (module === null || !DATABASE.test(module)) continue;
+    // A name written as a string can be spelled with escapes, which are not read here.
+    if (names.includes("\\")) found.push(`${whole.replace(/\s+/g, " ")}: what is imported is named plainly, without \\ escapes`);
     // A whole module is everything in it, the owner's view included.
     if (!names.startsWith("{") || OWNER.test(whole)) found.push(whole.replace(/\s+/g, " "));
   }
@@ -172,6 +181,21 @@ const MUST_FAIL = [
   ["imports", `import { testDb } from "./%74esting.ts?a#b";`],
   ["imports", `import { openDb } from "./d\\u0062.ts";`],
   ["imports", `const { openDb } = await import("./d\\x62.ts");`],
+  ["imports", `import { openDb } from"./db.ts";`],
+  ["imports", `import{openDb}from"./db.ts";`],
+  ["imports", `import type{Db}from'./db.ts';`],
+  ["imports", `import*as server from"./db.ts";`],
+  ["imports", `import server from"./db.ts";`],
+  ["imports", `export{openDb}from"./db.ts";`],
+  ["imports", `export*from"./db.ts";`],
+  ["imports", `export * as "all" from "./db.ts";`],
+  ["imports", `import { "openDb" as open } from "./db.ts";`],
+  ["imports", `import { 'testDb' as fresh } from "./testing.ts";`],
+  ["imports", `import { "}" as brace, openDb } from "./db.ts";`],
+  ["imports", `import { "open\\u0044b" as open } from "./db.ts";`],
+  ["imports", `import { openDb } from "./db.cts";`],
+  ["imports", `import { openDb } from "../db.tsx";`],
+  ["imports", `import { openDb } from "./db.cjs";`],
   ["inApp", `${APP}\n  api.get("/all", async (c) => c.json(await ownerDb.query("SELECT * FROM sessions")));`],
   ["inApp", `${APP}\n  await ownerDb.asOrg(c.req.query("org"), async (orgDb) => {});`],
   ["inApp", `${APP}\n  const db = ownerDb;`],
@@ -185,6 +209,8 @@ const MUST_PASS = [
   ["imports", `import { rowLevelSecurity, toApp, type OrgDb } from "@sessionly/server";`],
   ["imports", `import type { OrgDb, Queryable } from "./db.ts";\nexport { toApp } from "./db.ts";`],
   ["imports", `const fs = await import("node:fs");`],
+  ["imports", `import{toApp}from"./db.ts";\nimport { "toApp" as grant, type OrgDb } from "./db.ts";`],
+  ["imports", `const important = 1; // comes from "./db.ts"`],
   ["imports", `import { toApp } from "./lib.ts";\nawait ent.require(db, "content_policy", "read");\nclass E {\n  async require(db, feature) {}\n}`],
   ["imports", `// More at https://example.com/db.ts\nimport { toApp } /* not the owner's */ from "./db.ts?again";`],
   ["imports", `const docs = "https://example.com//db.ts";\nimport { helper } from "./other.ts?from=db.ts";`],
@@ -206,7 +232,7 @@ const found = [];
 for (const [dir, allowed] of Object.entries(ALLOWED)) {
   for (const entry of readdirSync(dir, { recursive: true })) {
     const file = String(entry);
-    if (!/\.(ts|mts)$/.test(file)) continue;
+    if (!/\.(?:[cm]?[jt]s|[jt]sx)$/.test(file) || /(?:^|\/)node_modules\//.test(file)) continue;
     const text = readFileSync(join(dir, file), "utf8");
     const at = `${dir}/${file}`;
     if (!allowed.includes(file)) found.push(...imports(text).map((what) => `${at}: ${what}`));
