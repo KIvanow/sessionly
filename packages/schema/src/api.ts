@@ -43,6 +43,19 @@ export interface AuthOptions {
   publicUrl?: string | null;
 }
 
+/**
+ * Where the dashboard counts which of its pages are opened (`/telemetry`),
+ * or null when whoever runs the server has turned that off.
+ */
+export interface Telemetry {
+  /** A PostHog project's public key. */
+  key: string;
+  /** PostHog's address for events, e.g. `https://eu.i.posthog.com`. */
+  host: string;
+  /** A service many organisations share, rather than a team's own server. */
+  hosted: boolean;
+}
+
 /** An organisation someone who has signed in can go on to (`/auth/check`). */
 export interface Membership {
   user_id: string;

@@ -28,7 +28,7 @@ import {
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
-import type { PullReport } from "@sessionly/schema";
+import type { PullReport, Telemetry } from "@sessionly/schema";
 import { BadReport, checkReport, listPulls, storePull, summarizePulls, type PullFilters } from "./pulls.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
@@ -198,23 +198,29 @@ export interface Options {
   extensions?: Extension[];
   /** Signing in and signing up with Google or GitHub, and what limits them. */
   accounts?: Accounts;
+  /** Where the dashboard counts which of its pages are opened; none: it counts nothing. */
+  telemetry?: Telemetry | null;
 }
 
 /**
- * What the dashboard may load and talk to: itself. Its token is kept in the
- * browser's storage, so a script from anywhere else must never run there.
+ * What the dashboard may load and talk to: itself, and the address it counts
+ * its pages at if it does. Its token is kept in the browser's storage, so a
+ * script from anywhere else must never run there: the counting is part of the
+ * dashboard's own code, and only sends.
  */
-const DASHBOARD_POLICY = [
-  "default-src 'none'",
-  "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data:",
-  "font-src 'self'",
-  "connect-src 'self'",
-  "base-uri 'none'",
-  "form-action 'self'",
-  "frame-ancestors 'none'",
-].join("; ");
+export function dashboardPolicy(telemetry?: Telemetry | null): string {
+  return [
+    "default-src 'none'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self'",
+    telemetry ? `connect-src 'self' ${new URL(telemetry.host).origin}` : "connect-src 'self'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}
 
 /**
  * `ownerDb` sees every organisation's rows. Here it only finds whose token a
@@ -586,12 +592,16 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   }
   // Signing in and signing up need no token, so they come before the API that does.
   app.route("/api/v1/auth", openRoutes(ownerDb, accounts));
+  // Asked before anyone signs in, so that a page is counted whoever opens it.
+  const telemetry = options.telemetry ?? null;
+  app.get("/api/v1/telemetry", (c) => c.json(telemetry));
   app.route("/api/v1", api);
   app.all("/api/*", (c) => c.json({ error: "not found" }, 404));
   if (options.webRoot) {
+    const policy = dashboardPolicy(telemetry);
     app.use("/*", async (c, next) => {
       await next();
-      c.header("Content-Security-Policy", DASHBOARD_POLICY);
+      c.header("Content-Security-Policy", policy);
       c.header("X-Content-Type-Options", "nosniff");
       c.header("Referrer-Policy", "no-referrer");
     });
