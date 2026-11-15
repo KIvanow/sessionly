@@ -1224,8 +1224,9 @@ fn the_repository_script_captures_in_a_sandbox_and_nowhere_else() {
         "second hook",
     );
     assert_eq!(repo.captured("sandbox", "claude-code", "s1").len(), 2);
-    let log = fs::read_to_string(repo.home("sandbox").join(".sessionly/bootstrap.log")).unwrap();
-    assert_eq!(log.lines().count(), 1, "{log}");
+    let after = fs::read_to_string(repo.home("sandbox").join(".sessionly/bootstrap.log")).unwrap();
+    assert_eq!(after, log, "the second hook had nothing to note");
+    assert_eq!(log.matches("installed sessionly").count(), 1, "{log}");
 
     // Cursor's cloud runs both hook files: only its own entry captures.
     let socket = repo.home("cursor-vm").join("api.sock");
@@ -1289,6 +1290,14 @@ fn hooks_arriving_together_share_one_download() {
         (1..=2).contains(&downloads),
         "{downloads} downloads:\n{log}"
     );
+    // The script notes who took and released the lock, and when. The log of
+    // a run with two downloads is kept where CI prints it, so that the next
+    // one shows the reason.
+    if downloads == 2 {
+        let kept = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("two-downloads-{}.log", std::process::id()));
+        fs::write(kept, &log).unwrap();
+    }
 }
 
 #[cfg(target_os = "linux")]

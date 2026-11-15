@@ -165,7 +165,7 @@ download() {
   elif tar -xzf "$tmp/sessionly.tar.gz" -C "$tmp" sessionly && chmod 755 "$tmp/sessionly" &&
     mv "$tmp/sessionly" "$bin"; then
     rm -rf "$tmp" "$failed"
-    note "installed sessionly $VERSION"
+    note "installed sessionly $VERSION ($$)"
     return 0
   else
     note "could not unpack the download"
@@ -176,23 +176,42 @@ download() {
 }
 
 # Hooks run in parallel: one downloads while the others wait for it.
+#
+# Each step is noted with the process it was, in bootstrap.log. Rarely two
+# hooks have each downloaded, one after the other, and the log of the next
+# time that happens is how the reason will be found. It is a few lines, once
+# per sandbox.
 fetch() {
   mkdir -p "$home/bin" && chmod 700 "$home" || return 1
   lock="$home/bin/fetching"
   waited=0
   until mkdir "$lock" 2> /dev/null; do
-    [ -x "$bin" ] && return 0
+    if [ -x "$bin" ]; then
+      note "$$ stopped waiting for the lock after $waited waits: the binary is there"
+      return 0
+    fi
     waited=$((waited + 1))
     if [ "$waited" -gt 300 ]; then
       # Half a minute: whoever is downloading was killed, or is too slow to
       # wait for. This event is not captured; the next hook may try.
       rmdir "$lock" 2> /dev/null
+      note "$$ waited half a minute for the lock, removed it and gave up"
       return 1
     fi
     sleep 0.1
   done
-  [ -x "$bin" ] || download
-  rmdir "$lock" 2> /dev/null
+  if [ -x "$bin" ]; then
+    note "$$ took the lock after $waited waits: the binary is there"
+  else
+    note "$$ took the lock after $waited waits: no binary yet, downloading"
+    download
+    note "$$ finished downloading ($?)"
+  fi
+  if rmdir "$lock" 2> /dev/null; then
+    note "$$ released the lock"
+  else
+    note "$$ found the lock gone when releasing it"
+  fi
 }
 
 [ -x "$bin" ] || fetch > /dev/null 2>&1
