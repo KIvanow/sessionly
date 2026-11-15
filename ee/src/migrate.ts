@@ -1,4 +1,4 @@
-import { rowLevelSecurity, runMigrations, toApp, type Db } from "@sessionly/server";
+import { rowLevelSecurity, runMigrations, toApp, type Db, type Migrations } from "@sessionly/server";
 
 // Tables of the Business / Enterprise features, tracked apart from the core's migrations.
 // Add to the end; never edit an entry that has shipped.
@@ -35,9 +35,15 @@ const MIGRATIONS: string[] = [
   ...rowLevelSecurity("ee_content_policy"),
 ];
 
-/** `upTo` stops short of the newest entries: how a test gets the tables as an older server left them. */
+/** What the server is started with: it runs these after its own. */
+export const EE_MIGRATIONS: Migrations = { table: "migrations_ee", list: MIGRATIONS };
+
+/**
+ * The same, on a database a test opened. `upTo` stops short of the newest
+ * entries: how a test gets the tables as an older server left them.
+ */
 export async function migrateEe(db: Db, upTo?: number): Promise<void> {
-  await runMigrations(db, "migrations_ee", MIGRATIONS.slice(0, upTo));
+  await runMigrations(db, EE_MIGRATIONS.table, MIGRATIONS.slice(0, upTo));
 }
 
 /** Where the entries that brought organisations begin. */

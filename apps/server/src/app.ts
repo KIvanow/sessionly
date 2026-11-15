@@ -194,8 +194,10 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   // The rest of the request runs in one transaction, as the organisation of
   // its token: `c.get("db")` sees that organisation's rows and no others.
   api.use("*", async (c, next) => {
-    // Any other body is read first too, so that a slow sender holds no connection.
-    if (c.req.raw.body) await c.req.arrayBuffer();
+    // Any other body is read first too, so that a slow sender holds no
+    // connection. As text, which is what an upload or a report was parsed
+    // from and is kept: asking for bytes would make a second copy of it.
+    if (c.req.raw.body) await c.req.text();
     try {
       await ownerDb.asOrg(c.get("principal").orgId, async (orgDb) => {
         c.set("db", orgDb);

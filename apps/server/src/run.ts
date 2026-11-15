@@ -9,11 +9,15 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp, type Extension } from "./app.ts";
-import { openDb, type Db } from "./db.ts";
+import { openDb, runMigrations, type Migrations } from "./db.ts";
 
 export interface RunOptions {
-  /** Runs after the core's migrations and before the server listens. */
-  prepare?: (db: Db) => Promise<void>;
+  /**
+   * Tables of its own that an edition adds, each list recorded under its own
+   * table name. They run after the core's migrations and before the server
+   * listens. An edition names them and is never handed the database itself.
+   */
+  migrations?: Migrations[];
   /** Extra routes for the authenticated API. */
   extensions?: () => Extension[];
   /** Shown in the start-up line, e.g. "Business and Enterprise features". */
@@ -49,7 +53,7 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   const embedded = fileURLToPath(new URL("../data/pglite", import.meta.url));
   const databaseUrl = process.env.DATABASE_URL ?? `file:${embedded}`;
   const db = await openDb(databaseUrl);
-  await options.prepare?.(db);
+  for (const { table, list } of options.migrations ?? []) await runMigrations(db, table, list);
   const adminToken = process.env.SESSIONLY_ADMIN_TOKEN;
   // The dashboard, if it has been built (pnpm build).
   const webDist = fileURLToPath(new URL("../../web/dist", import.meta.url));
