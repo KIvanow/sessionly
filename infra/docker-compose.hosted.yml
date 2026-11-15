@@ -3,7 +3,10 @@
 # nothing here keeps data.
 #
 #   cd infra && cp .env.example .env    # then fill it in
-#   docker compose --env-file .env -f docker-compose.hosted.yml up -d --wait
+#   ./update.sh                         # starts it, and later updates it
+#
+# Start it with update.sh and not with `docker compose up`: Caddy sends to
+# the copies of the server that script writes down (caddy/copies).
 #
 # See infra/README.md. A single team hosting for itself wants the
 # docker-compose.yml at the top of the repository instead.
@@ -50,7 +53,10 @@ services:
     stop_grace_period: 30s
 
   caddy:
-    image: caddy:2.11
+    # A named release and the digest of its image, so that what runs in front
+    # of everything is what was looked at. To move on: the new tag, and the
+    # digest `docker buildx imagetools inspect caddy:<tag>` prints for it.
+    image: caddy:2.11.9@sha256:4e2425f6009577e7c651010f16679c28f7d12df3e7b1914f941a7a3370746b3c
     ports:
       - "80:80"
       - "443:443"
@@ -58,7 +64,9 @@ services:
     environment:
       SESSIONLY_DOMAIN: ${SESSIONLY_DOMAIN:?set SESSIONLY_DOMAIN in .env}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # The folder, not the file: a file mounted alone stays the one it was
+      # when the container started, however it is edited or replaced since.
+      - ./caddy:/etc/caddy:ro
       # certificates: keep these, or every restart asks for new ones
       - caddy-data:/data
       - caddy-config:/config

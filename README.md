@@ -636,7 +636,9 @@ server first). Only a hash of each token is stored.
 
 **Signing in by email.** With the mail settings above, an admin adds people on the Team page
 (`POST /api/v1/users`), and each gets a link to sign in with. A link works once, for 15
-minutes; signing in lasts a week. People then make the tokens for their own machines on the
+minutes; signing in lasts a week. The page a link opens says which organisation it is for
+and who added the address, and asks before signing in. While a link someone asked for still
+works, asking again sends no second one. People then make the tokens for their own machines on the
 Connect page (`POST /api/v1/me/tokens`), and removing a person ends their sign-in and every
 token of theirs. Without the mail settings there are only tokens, as above.
 
