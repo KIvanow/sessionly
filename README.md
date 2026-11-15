@@ -690,6 +690,20 @@ What it shows depends on what was uploaded. With the default `metadata` level th
 sessions are listed by id and prompts show only their length. Sessions uploaded with `previews`
 show titles and the first 200 characters of each prompt.
 
+**Page counts.** The dashboard counts which of its pages are opened, with PostHog's EU cloud, so
+that I can see which parts are used. An event is the page's name (overview, sessions, session,
+team, connect, pulls) and what PostHog reads from the browser: its kind, the system and the
+screen's size, plus whether the server is hosted or self-hosted. It never carries the address
+the dashboard runs at, an organisation, a person, a session, a token or anything a page shows.
+Nothing is kept in the browser: no cookie, no local storage and no id that lasts past the page.
+The counting is part of the dashboard's own code. Nothing is loaded from PostHog, and the
+dashboard's Content Security Policy lets it reach only `https://eu.i.posthog.com`, and only while
+counting is on. Browsers that send Do Not Track are not counted.
+
+To turn it off on a server of your own, set `SESSIONLY_TELEMETRY=off`. `DO_NOT_TRACK=1` does the
+same. The dashboard then counts nothing and its policy allows no address but its own. The
+`sessionly` program and the server send nothing either way.
+
 While working on the dashboard, `pnpm dev` runs it with live reload and passes API calls to a
 server on port 8080.
 

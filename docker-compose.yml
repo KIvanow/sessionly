@@ -21,6 +21,9 @@ services:
       SESSIONLY_GOOGLE_CLIENT_SECRET: ${SESSIONLY_GOOGLE_CLIENT_SECRET:-}
       SESSIONLY_GITHUB_CLIENT_ID: ${SESSIONLY_GITHUB_CLIENT_ID:-}
       SESSIONLY_GITHUB_CLIENT_SECRET: ${SESSIONLY_GITHUB_CLIENT_SECRET:-}
+      # The dashboard counts which of its pages are opened (README, "Dashboard"); "off" stops it.
+      SESSIONLY_TELEMETRY: ${SESSIONLY_TELEMETRY:-}
+      DO_NOT_TRACK: ${DO_NOT_TRACK:-}
     depends_on:
       db:
         condition: service_healthy
