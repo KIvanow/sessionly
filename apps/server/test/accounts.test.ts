@@ -7,9 +7,9 @@ import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
 import { APP_ROLE, migrationAt, openDb, type Db } from "../src/db.ts";
-import { tidy } from "../src/limits.ts";
-import { MailProblem, resendMailer, type Mail } from "../src/mail.ts";
-import { accountsFrom, background, hostedProblems, outdated } from "../src/run.ts";
+import { giveBack, take, tidy } from "../src/limits.ts";
+import { MailProblem, resendMailer, SEND_MS, type Mail } from "../src/mail.ts";
+import { accountsFrom, background, hostedProblems, unheeded } from "../src/run.ts";
 import { emailFrom, mailbox, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
 import { testDb, testDbUrl, tokenFor } from "./helpers.ts";
 
@@ -400,6 +400,70 @@ test("spellings of a mailbox that nobody confirmed cannot use up its owner's lin
   await post("/auth/email", { email: "ann.owner@gmail.com" });
   assert.equal(sent.at(-1)?.to, "ann.owner@gmail.com");
   assert.equal(sent.length - before, 13);
+});
+
+test("being added to other people's organisations cannot use up the links to one's own", async () => {
+  await signUp("ann@drained.example", "Anns Own");
+  await db.query(`DELETE FROM login_codes`);
+  await db.query(`DELETE FROM rate_counters`);
+  const before = sent.length;
+  const signIns = () => sent.slice(before).filter((m) => m.to === "ann@drained.example" && /^Sign in/.test(m.subject));
+  // A link to her own organisation, in her inbox for the next quarter of an hour.
+  await post("/auth/email", { email: "ann@drained.example" });
+  assert.equal(signIns().length, 1);
+  // Someone adds her address to organisations of theirs, and asks for a
+  // link each time the link to one of them has run out. With the links
+  // running out at different times there is always something to send.
+  for (let i = 1; i <= 3; i++) {
+    const other = await signUp(`eve${i}@drainer.example`, `Drainer ${i}`);
+    assert.equal((await post("/users", { email: "ann@drained.example" }, other.token)).status, 201);
+  }
+  for (let i = 0; i < 14; i++) {
+    await post("/auth/email", { email: "ann@drained.example" });
+    await db.query(
+      `UPDATE login_codes SET expires_at = now() - interval '1 second'
+       WHERE user_id = (SELECT id FROM users WHERE email = 'ann@drained.example' AND confirmed_at IS NULL
+                        ORDER BY created_at OFFSET $1 LIMIT 1)`,
+      [i % 3],
+    );
+  }
+  // Twelve of those went out, on the allowance of mailboxes nobody
+  // confirmed, and then no more.
+  assert.equal(signIns().length, 13);
+  // Her own link has run out, and she asks for another. It comes: none of
+  // the above was hers to pay for. It leads to her own organisation, and
+  // not to the three she never signed in to.
+  await db.query(`UPDATE login_codes SET expires_at = now() - interval '1 second'`);
+  await post("/auth/email", { email: "ann@drained.example" });
+  assert.equal(signIns().length, 14);
+  assert.match(sent.at(-1)?.text ?? "", /Anns Own/);
+  assert.equal(linksTo("ann@drained.example").length, 1);
+  // Round after round she is never refused one.
+  for (let round = 0; round < 3; round++) {
+    await db.query(`UPDATE login_codes SET expires_at = now() - interval '1 second'`);
+    for (let i = 0; i < 4; i++) await post("/auth/email", { email: "ann@drained.example" });
+    assert.equal(signIns().length, 15 + round, `round ${round}`);
+  }
+});
+
+test("a count is given back to the hour it was taken in", async () => {
+  // Taken a moment before the hour turned, for a message given up on a
+  // moment after: the hour that has begun counts other messages.
+  const [last] = await db.query<{ at: string }>(
+    `INSERT INTO rate_counters (key, window_start, n)
+     VALUES ('signup:late@hour.example', to_timestamp(floor(extract(epoch FROM now()) / 3600) * 3600) - interval '1 hour', 3)
+     RETURNING window_start::text AS at`,
+  );
+  const now = await take(db, "signup:late@hour.example", 3600, 5);
+  assert.ok(last && now);
+  assert.notEqual(now.window, last.at);
+  await giveBack(db, { key: "signup:late@hour.example", window: last.at });
+  const counts = await db.query<{ n: number }>(`SELECT n FROM rate_counters WHERE key = 'signup:late@hour.example' ORDER BY window_start`);
+  assert.deepEqual(counts.map((row) => row.n), [2, 1]);
+  // And what was taken now goes back to now.
+  await giveBack(db, now);
+  const then = await db.query<{ n: number }>(`SELECT n FROM rate_counters WHERE key = 'signup:late@hour.example' ORDER BY window_start`);
+  assert.deepEqual(then.map((row) => row.n), [2, 0]);
 });
 
 test("asking in someone's name does not leave them without a link that works", async () => {
@@ -801,6 +865,25 @@ test("the environment sets how people get in", () => {
   assert.equal(accounts.signupsPerHour, undefined);
   assert.equal(accountsFrom({ ...env, SESSIONLY_SIGNUPS_PER_HOUR: "20" }).signupsPerHour, 20);
   assert.equal(accountsFrom({ ...env, SESSIONLY_SIGNUPS_PER_HOUR: "lots" }).signupsPerHour, undefined);
+  // A count is a whole number above 0. Anything else is as if it were not
+  // set: given to the database as a count, it would fail every request.
+  for (const odd of ["0", "-3", "2.5", "1e12", "Infinity", "NaN", "0x", "12 an hour", " ", ""]) {
+    const set = accountsFrom({
+      ...env,
+      SESSIONLY_RATE_PER_MINUTE: odd,
+      SESSIONLY_SIGNUPS_PER_HOUR: odd,
+      SESSIONLY_SIGNUPS_PER_NETWORK: odd,
+    });
+    assert.deepEqual([set.ratePerMinute, set.signupsPerHour, set.signupsPerNetwork], [600, undefined, undefined], `"${odd}"`);
+    assert.equal(accountsFrom({ SESSIONLY_RATE_PER_MINUTE: odd }).ratePerMinute, undefined, `"${odd}"`);
+  }
+  const counts = accountsFrom({
+    ...env,
+    SESSIONLY_RATE_PER_MINUTE: "50",
+    SESSIONLY_SIGNUPS_PER_HOUR: " 7 ",
+    SESSIONLY_SIGNUPS_PER_NETWORK: "1e2",
+  });
+  assert.deepEqual([counts.ratePerMinute, counts.signupsPerHour, counts.signupsPerNetwork], [50, 7, 100]);
   assert.equal(offers(accountsFrom({ ...env, SESSIONLY_SIGNUP: "off" })).signup, false);
   assert.equal(offers(accountsFrom({ ...env, SESSIONLY_SIGNUP_CODE: "x" })).inviteCode, true);
   // A hosted service that could send no links is refused at the start.
@@ -862,6 +945,15 @@ test("a message goes to Resend once, however often it has to be offered", async 
   asked.length = 0;
   await resend(taken()).send(mail);
   assert.notEqual(asked[0]?.headers["idempotency-key"], keyBefore);
+
+  // Told to wait a long time, it waits a little: the whole of it stays
+  // within what stopping the server waits for a message on its way out,
+  // with ten seconds for each of the three offers to get its answer.
+  waited.length = 0;
+  const later = () => says(429, "rate_limit_exceeded", "Too many requests", { "retry-after": "600" });
+  await assert.rejects(resend(later(), later(), later()).send(mail));
+  assert.deepEqual(waited, [5000, 5000]);
+  assert.ok(3 * 10_000 + waited[0]! + waited[1]! <= SEND_MS, String(SEND_MS));
 
   // Three offers at most.
   asked.length = 0;
@@ -931,10 +1023,15 @@ test("people from before sign-ins were noted are known to have signed in", async
   }
 });
 
-test("a setting that no longer does anything is said at the start", () => {
-  assert.match(outdated({ SMTP_URL: "smtp://mail.example" }).join(), /SMTP_URL is set, but email is sent through Resend now/);
-  assert.deepEqual(outdated({ SMTP_URL: "smtp://mail.example", RESEND_API_KEY: "re_test" }), []);
-  assert.deepEqual(outdated({}), []);
+test("a setting that does nothing as it is set is said at the start", () => {
+  assert.match(unheeded({ SMTP_URL: "smtp://mail.example" }).join(), /SMTP_URL is set, but email is sent through Resend now/);
+  assert.deepEqual(unheeded({ SMTP_URL: "smtp://mail.example", RESEND_API_KEY: "re_test" }), []);
+  assert.deepEqual(unheeded({}), []);
+  // A count that is not one.
+  assert.deepEqual(unheeded({ SESSIONLY_RATE_PER_MINUTE: "600", SESSIONLY_SIGNUPS_PER_HOUR: "100", SESSIONLY_DB_POOL: "8", SESSIONLY_SIGNUPS_PER_NETWORK: "" }), []);
+  const notes = unheeded({ SESSIONLY_RATE_PER_MINUTE: "0.5", SESSIONLY_SIGNUPS_PER_HOUR: "many", SESSIONLY_SIGNUPS_PER_NETWORK: "0", SESSIONLY_DB_POOL: "-1" });
+  assert.equal(notes.length, 4);
+  assert.match(notes[0] ?? "", /^SESSIONLY_RATE_PER_MINUTE is "0\.5", which is not a whole number above 0/);
   assert.equal(accountsFrom({ SESSIONLY_SIGNUPS_PER_NETWORK: "25" }).signupsPerNetwork, 25);
 });
 
@@ -1001,6 +1098,15 @@ test("an address is taken in one plain form, or not at all", () => {
     "a..nn@example.com",
     "ann@example",
     "ann@",
+    // Not a domain the DNS could have: a label too long, a hyphen at an
+    // end of one, a number where the top-level domain goes.
+    `ann@${"a".repeat(64)}.example`,
+    "ann@-acme.example",
+    "ann@acme-.example",
+    "ann@acme.-example",
+    "ann@acme..example",
+    "ann@192.168.1.10",
+    "ann@example.123",
     "@example.com",
     "ann",
     "",
@@ -1010,6 +1116,15 @@ test("an address is taken in one plain form, or not at all", () => {
   ]) {
     assert.equal(emailFrom(odd), null, String(odd));
   }
+});
+
+test("a domain's labels may be long, hyphenated and numbered, within what the DNS takes", () => {
+  assert.equal(emailFrom(`ann@${"a".repeat(63)}.example`), `ann@${"a".repeat(63)}.example`);
+  assert.equal(emailFrom("ann@my-team.co-op.example"), "ann@my-team.co-op.example");
+  assert.equal(emailFrom("ann@3m.com"), "ann@3m.com");
+  assert.equal(emailFrom("ann@123.example"), "ann@123.example");
+  assert.equal(emailFrom("ann@mail.x1"), "ann@mail.x1");
+  assert.equal(emailFrom("ann@例え.テスト"), "ann@xn--r8jz45g.xn--zckzah");
 });
 
 test("addresses that lead to one mailbox are counted as one", () => {

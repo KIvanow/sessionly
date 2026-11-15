@@ -14,7 +14,7 @@ import { bodyLimit } from "hono/body-limit";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { hash, issueToken, sameSecret, type Role } from "./auth.ts";
 import type { Db, Queryable } from "./db.ts";
-import { allowed, giveBack } from "./limits.ts";
+import { allowed, giveBack, take, type Taken } from "./limits.ts";
 import { LINK_MINUTES, signInMail, signUpMail, type Mailer } from "./mail.ts";
 
 /** How long a token from signing in lasts. */
@@ -142,8 +142,13 @@ export function emailFrom(typed: unknown): string | null {
   if (at < 1) return null;
   const local = text.slice(0, at).toLowerCase();
   if (!/^[a-z0-9!#$%&'*+/=?^_`{|}~.-]+$/.test(local) || /^\.|\.$|\.\./.test(local)) return null;
-  const domain = domainToASCII(text.slice(at + 1).replace(/\.$/, "")).toLowerCase();
-  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain)) return null;
+  const labels = domainToASCII(text.slice(at + 1).replace(/\.$/, "")).toLowerCase().split(".");
+  // A domain as the DNS has them: two labels or more, each of 63 characters
+  // at most with no hyphen at either end, and the last not a number (which
+  // would be an IP address, or nothing).
+  if (labels.length < 2 || !labels.every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return null;
+  if (/^\d+$/.test(labels.at(-1) ?? "")) return null;
+  const domain = labels.join(".");
   const email = `${local}@${domain}`;
   return email.length <= 254 ? email : null;
 }
@@ -253,9 +258,9 @@ export async function newLink(
  * back the next one for as long as it "still worked", and the hour's
  * allowance would be spent on nothing.
  */
-export async function unsend(db: Queryable, links: { code: string }[], counters: string[]): Promise<void> {
+export async function unsend(db: Queryable, links: { code: string }[], counted: Taken[]): Promise<void> {
   await db.query(`DELETE FROM login_codes WHERE code_hash = ANY($1::text[])`, [links.map((link) => link.code)]);
-  for (const key of counters) await giveBack(db, key, 3600);
+  for (const taken of counted) await giveBack(db, taken);
 }
 
 
@@ -343,14 +348,28 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
       // that works: there is no allowance of theirs for it to use up.
       const due = users.filter((user) => !user.waiting);
       if (!due.length) return;
-      // An address whose owner has signed in with it has an allowance of its
-      // own. Addresses nobody has confirmed share their mailbox's: anyone
-      // can add `ann+1@`, `ann+2@` and so on to an organisation of theirs
-      // and ask for links to them all, and that must not use up Ann's.
-      const counter = users.some((user) => user.known) ? `signin-own:${email}` : `signin:${mailbox(email)}`;
-      if (!(await allowed(db, counter, 3600, SIGN_IN_MAILS_PER_HOUR))) return;
+      // Links to organisations the person has signed in to come out of an
+      // allowance that is their address's own. Every other link comes out
+      // of the mailbox's, shared by all its spellings: anyone can add
+      // `ann+1@`, `ann+2@` and so on to an organisation of theirs, or Ann's
+      // own address to one organisation after another, and ask for links
+      // to them all. That must not use up what Ann needs to get in where
+      // she already is.
+      const counted: Taken[] = [];
+      const sendable = new Set<boolean>();
+      for (const [known, counter] of [
+        [true, `signin-own:${email}`],
+        [false, `signin:${mailbox(email)}`],
+      ] as const) {
+        if (!due.some((user) => user.known === known)) continue;
+        const taken = await take(db, counter, 3600, SIGN_IN_MAILS_PER_HOUR);
+        if (!taken) continue;
+        counted.push(taken);
+        sendable.add(known);
+      }
       const links = [];
       for (const user of due) {
+        if (!sendable.has(user.known)) continue;
         links.push({
           // The name of an organisation they have never signed in to is
           // whatever someone who added them chose: it is not passed on.
@@ -358,11 +377,12 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
           ...(await newLink(db, publicUrl, { purpose: "sign_in", userId: user.id })),
         });
       }
+      if (!links.length) return;
       try {
         await mailer.send(signInMail(email, links));
       } catch (err) {
         notSent(email, err);
-        await unsend(db, links, [counter]);
+        await unsend(db, links, counted);
       }
     });
     return c.json({ ok: true }, 202);
@@ -391,14 +411,15 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     }
     // From here on only messages that really go out are counted. First the
     // mailbox's own: past it nothing is sent, and the answer stays the same.
-    const perMailbox = `signup:${mailbox(email)}`;
-    if (!(await allowed(db, perMailbox, 3600, LINKS_PER_HOUR))) return c.json({ ok: true }, 202);
+    const perMailbox = await take(db, `signup:${mailbox(email)}`, 3600, LINKS_PER_HOUR);
+    if (!perMailbox) return c.json({ ok: true }, 202);
     // These messages go to addresses nobody has confirmed. However many
     // addresses and networks they are asked from, there is a ceiling on them
     // all. Asking again for one address does not come this far, so it cannot
     // be reached that way.
-    if (!(await allowed(db, "signups", 3600, accounts.signupsPerHour ?? 100))) {
-      await giveBack(db, perMailbox, 3600);
+    const ofAll = await take(db, "signups", 3600, accounts.signupsPerHour ?? 100);
+    if (!ofAll) {
+      await giveBack(db, perMailbox);
       // Said once an hour: someone should look at who is signing up.
       if (await allowed(db, "signups-warned", 3600, 1)) {
         console.warn(
@@ -413,7 +434,7 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
         await mailer.send(signUpMail(email, link.url));
       } catch (err) {
         notSent(email, err);
-        await unsend(db, [link], [perMailbox, "signups"]);
+        await unsend(db, [link], [perMailbox, ofAll]);
       }
     });
     return c.json({ ok: true }, 202);

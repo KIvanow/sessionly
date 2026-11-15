@@ -25,7 +25,7 @@ import { DB_COUNTS, misset } from "./db.ts";
 import { createApp, type Extension } from "./app.ts";
 import { openDb, runMigrations, type Migrations } from "./db.ts";
 import { tidy } from "./limits.ts";
-import { resendMailer } from "./mail.ts";
+import { resendMailer, SEND_MS } from "./mail.ts";
 import { offers, type Accounts } from "./signup.ts";
 
 export interface RunOptions {
@@ -72,10 +72,28 @@ export function reason(err: unknown): string {
   return err.message || [...new Set(each)].join("; ") || (typeof code === "string" ? code : err.name);
 }
 
+/** The settings that are a count of something. */
+const COUNTS = [
+  "SESSIONLY_RATE_PER_MINUTE",
+  "SESSIONLY_SIGNUPS_PER_HOUR",
+  "SESSIONLY_SIGNUPS_PER_NETWORK",
+  "SESSIONLY_DB_POOL",
+] as const;
+
+/**
+ * A setting that is a count: a whole number above 0, no larger than the
+ * database's integers go. Undefined if it is not set, or set to anything
+ * else: "0.5" or "1e12" given to the database as a count would fail every
+ * request that is counted.
+ */
+function count(value: string | undefined): number | undefined {
+  const n = value?.trim() ? Number(value) : NaN;
+  return Number.isInteger(n) && n > 0 && n <= 2_147_483_647 ? n : undefined;
+}
+
 /** How people get in, as the environment sets it. */
 export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
   const hosted = env.SESSIONLY_HOSTED === "true";
-  const rate = Number(env.SESSIONLY_RATE_PER_MINUTE ?? (hosted ? 600 : 0));
   const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim() || undefined;
   if (publicUrl && !/^https?:\/\/[^/]+\/?$/.test(publicUrl)) {
     throw new Error("SESSIONLY_PUBLIC_URL must be an address like https://app.example.com, with no path");
@@ -90,19 +108,24 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
     signup: env.SESSIONLY_SIGNUP === "off" ? "off" : "open",
     signupCode: env.SESSIONLY_SIGNUP_CODE?.trim() || undefined,
     trustProxy: env.SESSIONLY_TRUST_PROXY === "true",
-    ratePerMinute: Number.isFinite(rate) && rate > 0 ? rate : undefined,
-    signupsPerHour: Number(env.SESSIONLY_SIGNUPS_PER_HOUR) > 0 ? Number(env.SESSIONLY_SIGNUPS_PER_HOUR) : undefined,
-    signupsPerNetwork:
-      Number(env.SESSIONLY_SIGNUPS_PER_NETWORK) > 0 ? Number(env.SESSIONLY_SIGNUPS_PER_NETWORK) : undefined,
+    // A hosted service always has this limit; an install of one team has it if it is set.
+    ratePerMinute: count(env.SESSIONLY_RATE_PER_MINUTE) ?? (hosted ? 600 : undefined),
+    signupsPerHour: count(env.SESSIONLY_SIGNUPS_PER_HOUR),
+    signupsPerNetwork: count(env.SESSIONLY_SIGNUPS_PER_NETWORK),
   };
 }
 
 /**
- * Settings that no longer do what whoever set them expects. Said at the
- * start, since the server otherwise runs as if they were not there.
+ * Settings that do not do what whoever set them expects. Said at the start,
+ * since the server otherwise runs as if they were not there.
  */
-export function outdated(env: NodeJS.ProcessEnv): string[] {
+export function unheeded(env: NodeJS.ProcessEnv): string[] {
   const notes: string[] = [];
+  for (const name of COUNTS) {
+    if (env[name]?.trim() && count(env[name]) === undefined) {
+      notes.push(`${name} is "${env[name]}", which is not a whole number above 0: it is left out, and the default applies.`);
+    }
+  }
   if (env.SMTP_URL && !env.RESEND_API_KEY) {
     notes.push(
       "SMTP_URL is set, but email is sent through Resend now and not over SMTP: signing in by email is off until RESEND_API_KEY is set.",
@@ -164,7 +187,7 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   const webRoot = existsSync(webDist) ? webDist : undefined;
   const after = background();
   const accounts = { ...accountsFrom(process.env), defer: after.defer };
-  for (const note of outdated(process.env)) console.warn(note);
+  for (const note of unheeded(process.env)) console.warn(note);
   // Old counters and links that ran out are cleared away now and then.
   const tidying = setInterval(() => void tidy(db).catch((err) => console.error("tidying failed:", err)), 15 * 60_000);
   tidying.unref();
@@ -200,8 +223,10 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {
       server.close(async () => {
-        // A message that is on its way out is let go first, for a while.
-        await after.idle(15_000);
+        // A message that is on its way out is let go first: as long as one
+        // can take to be sent or given up on, so that none is left as a
+        // link nobody got that still holds back the next.
+        await after.idle(SEND_MS);
         await db.close();
         process.exit(0);
       });

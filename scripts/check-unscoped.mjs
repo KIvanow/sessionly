@@ -42,7 +42,7 @@ const IN_APP = [
   /\bownerDb\.asOrg\(c\.get\("principal"\)\.orgId,/,
   // Counters of what was asked for lately, and a link whose message was not
   // sent: they belong to no organisation.
-  /\b(?:allowed|giveBack|unsend)\(ownerDb,/,
+  /\b(?:allowed|take|giveBack|unsend)\(ownerDb,/,
   // Whether the database answers at all.
   /\bownerDb\.query\(`SELECT 1`\)/,
   // Signing in and signing up, before anyone is known (signup.ts).

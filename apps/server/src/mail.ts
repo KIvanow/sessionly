@@ -19,6 +19,14 @@ const USER_AGENT = "sessionly-server";
 const TIMEOUT_MS = 10_000;
 /** How often a message is offered in all, when Resend cannot take it right now. */
 const ATTEMPTS = 3;
+/** The longest wait before offering it again. */
+const LONGEST_WAIT_MS = 5_000;
+/**
+ * The longest a message takes to be sent or given up on: every attempt at
+ * its slowest and every wait at its longest. Stopping the server waits this
+ * long for one that is on its way.
+ */
+export const SEND_MS = ATTEMPTS * TIMEOUT_MS + (ATTEMPTS - 1) * LONGEST_WAIT_MS;
 
 /** A message Resend did not take. `status` is 0 if Resend was not reached. */
 export class MailProblem extends Error {
@@ -91,7 +99,7 @@ export function resendMailer(
         }
         // As long as it says, within reason; else a little longer each time.
         const told = Number(response.headers.get("retry-after"));
-        await wait(Number.isFinite(told) && told > 0 ? Math.min(told, 5) * 1000 : 500 * 2 ** (attempt - 1));
+        await wait(Number.isFinite(told) && told > 0 ? Math.min(told * 1000, LONGEST_WAIT_MS) : 500 * 2 ** (attempt - 1));
       }
     },
   };

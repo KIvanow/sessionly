@@ -13,7 +13,7 @@ import {
   type Role,
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
-import { allowed, giveBack } from "./limits.ts";
+import { allowed, giveBack, take, type Taken } from "./limits.ts";
 import { inviteMail } from "./mail.ts";
 import { emailFrom, LINKS_PER_HOUR, mailbox, newLink, newUserId, openRoutes, unsend, type Accounts } from "./signup.ts";
 import { addUser, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
@@ -44,6 +44,8 @@ export type Env = {
     report?: PullReport;
     /** What to do once the request's transaction has been committed, and only then. */
     after: (() => void)[];
+    /** What adding a person was counted against, to be given back if no invitation goes out. */
+    invitation?: Taken[];
   };
 };
 
@@ -307,19 +309,18 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     // Anything else is refused further on, uncounted.
     if (p.role !== "admin" || !email) return next();
     const limited = (error: string) => c.json({ error, code: "rate_limited" }, 429);
-    const perOrg = `invites:${p.orgId}`;
-    const perMailbox = `invite:${mailbox(email)}`;
-    if (!(await allowed(ownerDb, perOrg, 3600, INVITES_PER_HOUR))) {
-      return limited(`an organisation can add ${INVITES_PER_HOUR} people an hour; try again later`);
-    }
-    if (!(await allowed(ownerDb, perMailbox, 3600, LINKS_PER_HOUR))) {
-      await giveBack(ownerDb, perOrg, 3600);
+    const perOrg = await take(ownerDb, `invites:${p.orgId}`, 3600, INVITES_PER_HOUR);
+    if (!perOrg) return limited(`an organisation can add ${INVITES_PER_HOUR} people an hour; try again later`);
+    const perMailbox = await take(ownerDb, `invite:${mailbox(email)}`, 3600, LINKS_PER_HOUR);
+    if (!perMailbox) {
+      await giveBack(ownerDb, perOrg);
       return limited("that address has been sent enough invitations for now; try again in an hour");
     }
+    c.set("invitation", [perOrg, perMailbox]);
     await next();
     if (c.res.status !== 201) {
-      await giveBack(ownerDb, perOrg, 3600);
-      await giveBack(ownerDb, perMailbox, 3600);
+      await giveBack(ownerDb, perOrg);
+      await giveBack(ownerDb, perMailbox);
     }
   });
 
@@ -544,6 +545,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const user = await addUser(db, newUserId(), email, role, p);
     const link = await newLink(db, publicUrl, { purpose: "invite", userId: user.id });
     const mail = inviteMail(email, link.url);
+    const counted = c.get("invitation") ?? [];
     // Sent once the person and their link are really there. If it cannot
     // be sent, the link is forgotten and the message is not one of those
     // counted: the person is in, and asks for a link on the sign-in page.
@@ -553,7 +555,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
           await mailer.send(mail);
         } catch (err) {
           console.error("an invitation was not sent:", err instanceof Error ? err.message : err);
-          await unsend(ownerDb, [link], [`invites:${p.orgId}`, `invite:${mailbox(email)}`]);
+          await unsend(ownerDb, [link], counted);
         }
       }),
     );
