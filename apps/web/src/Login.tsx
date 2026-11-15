@@ -1,13 +1,15 @@
-import type { AuthOptions } from "@sessionly/schema";
+import type { AuthOptions, SignInProvider } from "@sessionly/schema";
 import { useState } from "react";
-import { open } from "./api.ts";
 
-type Mode = "email" | "token" | "signup";
+type Mode = "sign-in" | "token" | "create";
+
+/** The providers as they call themselves. */
+export const PROVIDERS: Record<SignInProvider, string> = { google: "Google", github: "GitHub" };
 
 /**
- * Getting in: by a link sent to an email address where the server offers
- * that, or with a token. Where anyone may sign up, creating an organisation
- * starts here too.
+ * Getting in: with Google or GitHub where the server offers that, or with a
+ * token. Where anyone may sign up, creating an organisation starts here too:
+ * the same way, and the organisation is named on the way back.
  */
 export function Login({
   options,
@@ -21,139 +23,69 @@ export function Login({
   onRetry?: () => void;
   onToken: (token: string) => void;
 }) {
-  const byEmail = options?.emailSignIn === true;
+  const providers = options?.providers ?? [];
   const [chosen, setChosen] = useState<Mode | null>(null);
-  const mode: Mode = chosen ?? (byEmail ? "email" : "token");
-  const [email, setEmail] = useState("");
-  const [orgName, setOrgName] = useState("");
-  const [invite, setInvite] = useState("");
+  const mode: Mode = chosen ?? (providers.length ? "sign-in" : "token");
   const [token, setToken] = useState("");
-  const [sent, setSent] = useState<string | null>(null);
-  const [failed, setFailed] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
-  const choose = (next: Mode) => {
-    setChosen(next);
-    setSent(null);
-    setFailed(null);
-  };
-
-  async function submit(e: React.FormEvent) {
+  function submit(e: React.FormEvent) {
     e.preventDefault();
-    setFailed(null);
-    if (mode === "token") {
-      if (token.trim()) onToken(token.trim());
-      return;
-    }
-    setBusy(true);
-    try {
-      if (mode === "email") {
-        await open("/auth/email", { email });
-        setSent(
-          `If ${email.trim()} has an account here, a link to sign in is on its way. If one was sent in the last 15 minutes it still works, and no second one is sent.`,
-        );
-      } else {
-        await open("/auth/signup", { email, org_name: orgName, invite_code: invite || undefined });
-        setSent(`A link to finish creating ${orgName.trim()} is on its way to ${email.trim()}.`);
-      }
-    } catch (err) {
-      setFailed((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (sent) {
-    return (
-      <main className="center">
-        <div className="card login" role="status">
-          <h1>Check your inbox</h1>
-          <p>{sent}</p>
-          <p className="muted">The link works once, for 15 minutes, in this browser or any other.</p>
-          <button className="quiet" onClick={() => setSent(null)}>
-            Use another address
-          </button>
-        </div>
-      </main>
-    );
+    if (mode === "token" && token.trim()) onToken(token.trim());
   }
 
   return (
     <main className="center">
       <form className="card login" onSubmit={submit}>
-        <h1>{mode === "signup" ? "Create an organisation" : "Sessionly"}</h1>
-        {mode !== "token" && (
-          <label>
-            Email
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoComplete="email"
-              autoFocus
-            />
-          </label>
-        )}
-        {mode === "signup" && (
-          <>
-            <label>
-              Organisation
-              <input
-                required
-                minLength={2}
-                maxLength={60}
-                value={orgName}
-                onChange={(e) => setOrgName(e.target.value)}
-                autoComplete="organization"
-              />
-            </label>
-            {options?.inviteCode && (
-              <label>
-                Invitation code
-                <input required value={invite} onChange={(e) => setInvite(e.target.value)} autoComplete="off" />
-              </label>
-            )}
-          </>
-        )}
+        <h1>{mode === "create" ? "Create an organisation" : "Sessionly"}</h1>
+        {mode !== "token" &&
+          providers.map((provider) => (
+            // A link, not a request: the browser itself goes there and comes back.
+            <a key={provider} className="button" href={`/api/v1/auth/${provider}${mode === "create" ? "?create" : ""}`}>
+              {mode === "create" ? "Continue" : "Sign in"} with {PROVIDERS[provider]}
+            </a>
+          ))}
         {mode === "token" && (
           <label>
             Access token
             <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" autoFocus />
           </label>
         )}
-        {(failed ?? problem) && <p role="alert">{failed ?? problem}</p>}
-        {!failed && problem && onRetry && (
+        {problem && <p role="alert">{problem}</p>}
+        {problem && onRetry && (
           <button type="button" className="quiet" onClick={onRetry}>
             Try again to end them
           </button>
         )}
-        <button type="submit" disabled={busy || (mode === "token" ? !token.trim() : !email.trim())}>
-          {mode === "email" ? "Email me a link" : mode === "signup" ? "Create it" : "Sign in"}
-        </button>
-        {mode === "email" && <p className="muted">No password: a link is sent to your address.</p>}
-        {mode === "signup" && (
+        {mode === "token" && (
+          <button type="submit" disabled={!token.trim()}>
+            Sign in
+          </button>
+        )}
+        {mode === "sign-in" && (
           <p className="muted">
-            Letters, digits, spaces and & ' , ( ) + - in the name. Nothing is created until you use the link sent to
-            your address; you then become the organisation's owner.
+            No password is kept here. All that is asked of {providers.map((p) => PROVIDERS[p]).join(" or ")} is which
+            email addresses are yours.
           </p>
+        )}
+        {mode === "create" && (
+          <p className="muted">You name the organisation once you are back, and become its owner.</p>
         )}
         {mode === "token" && (
           <p className="muted">Use the token you were given for this server. It is kept in this browser only.</p>
         )}
         <p className="ways">
-          {byEmail && mode !== "email" && (
-            <button type="button" className="quiet" onClick={() => choose("email")}>
-              Sign in by email
+          {providers.length > 0 && mode !== "sign-in" && (
+            <button type="button" className="quiet" onClick={() => setChosen("sign-in")}>
+              Sign in
             </button>
           )}
-          {options?.signup && mode !== "signup" && (
-            <button type="button" className="quiet" onClick={() => choose("signup")}>
+          {options?.signup && mode !== "create" && (
+            <button type="button" className="quiet" onClick={() => setChosen("create")}>
               Create an organisation
             </button>
           )}
           {mode !== "token" && (
-            <button type="button" className="quiet" onClick={() => choose("token")}>
+            <button type="button" className="quiet" onClick={() => setChosen("token")}>
               I have a token
             </button>
           )}

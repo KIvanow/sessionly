@@ -1,4 +1,4 @@
-import type { AuthOptions, FilterOptions, Me, SignedIn } from "@sessionly/schema";
+import type { Arrival, AuthOptions, FilterOptions, Me, SignedIn } from "@sessionly/schema";
 import { useEffect, useMemo, useState } from "react";
 import {
   api,
@@ -12,9 +12,9 @@ import {
   saveToken,
   type Saved,
 } from "./api.ts";
+import { Arrived, type Where } from "./Arrived.tsx";
 import { Connect } from "./Connect.tsx";
 import { Login } from "./Login.tsx";
-import { reads } from "./lookalike.ts";
 import { Overview } from "./Overview.tsx";
 import { Pulls } from "./Pulls.tsx";
 import { SessionView } from "./SessionView.tsx";
@@ -63,41 +63,29 @@ function useHash(): string {
   return hash.replace(/^#\/?/, "");
 }
 
-/** The code of a link someone signed in or signed up with: `#login=<code>`. */
-function linkCode(): string | null {
-  return /^#login=([\w-]+)$/.exec(window.location.hash)?.[1] ?? null;
-}
-
-/** A link someone arrived by, and what the server says it is for. */
-interface Link {
-  code: string;
-  /** Asked for by the person, sent on being added, or to create an organisation. */
-  purpose: "sign_in" | "invite" | "signup";
-  email: string;
-  org_name: string;
-  /** The organisation's id, which unlike its name is its own. None yet when creating one. */
-  org_id: string | null;
-  /** The person has not signed in to this organisation before. */
-  first_time: boolean;
-  /**
-   * Who added them to it, if they have not signed in to it before and it
-   * was someone who had signed in: that address is the adder's own.
-   */
-  invited_by: string | null;
-  /**
-   * How they were added: by a person who had signed in, or with a token,
-   * which says nothing of who held it. Null if that was not recorded.
-   */
-  invited_via: "sign_in" | "token" | null;
-}
-
 /**
- * An organisation this browser is signed in to that has the name a link
- * shows and is not the one the link is for. Anyone can make an organisation
- * with any name, so a name alone does not say which one this is.
+ * What someone is back from Google or GitHub with: `#login=<code>` to sign
+ * in, `#create=<code>` to make an organisation.
  */
-function sameNameElsewhere(link: Link): Saved | undefined {
-  return savedSessions().find((s) => s.org !== link.org_id && reads(s.name) === reads(link.org_name));
+function arrivalCode(): { code: string; create: boolean } | null {
+  const found = /^#(login|create)=([\w-]+)$/.exec(window.location.hash);
+  return found?.[2] ? { code: found[2], create: found[1] === "create" } : null;
+}
+
+/** Why they are back without having signed in, as the server names it (`#problem=<word>`), in words. */
+const PROBLEMS: Record<string, string> = {
+  refused: "You did not finish signing in there. Nothing was changed.",
+  not_started: "That sign-in was not started in this browser, or was started too long ago. Start again from here.",
+  provider: "Signing in did not work just now: the service you chose did not answer as expected. Try again in a moment.",
+  no_address:
+    "That account has no email address its provider has verified, and an address is how you are known here. Verify one there and try again.",
+  busy: "Too many sign-ins from your network just now. Try again in a minute.",
+};
+
+/** Someone back from a provider, with the code that says so and what the server says of them. */
+interface Back extends Arrival {
+  code: string;
+  create: boolean;
 }
 
 export function App() {
@@ -105,8 +93,8 @@ export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [options, setOptions] = useState<AuthOptions | null>(null);
-  const [arriving, setArriving] = useState(() => linkCode() !== null);
-  const [link, setLink] = useState<Link | null>(null);
+  const [arriving, setArriving] = useState(() => arrivalCode() !== null);
+  const [back, setBack] = useState<Back | null>(null);
   const [leaving, setLeaving] = useState(false);
   /** Sessions the server could not be told to end, kept (not stored) to try again. */
   const [unended, setUnended] = useState<string[]>([]);
@@ -164,24 +152,45 @@ export function App() {
 
   useEffect(() => {
     open<AuthOptions>("/auth/options")
-      .then(setOptions)
+      // A server from before signing in with Google or GitHub names no providers.
+      .then((offered) => setOptions({ ...offered, providers: offered.providers ?? [] }))
       // An older server, or none: a token is the way in.
-      .catch(() => setOptions({ hosted: false, emailSignIn: false, signup: false, inviteCode: false }));
+      .catch(() => setOptions({ hosted: false, providers: [], signup: false, inviteCode: false }));
   }, []);
 
-  // Arriving by a link. It may open a new page or only change the address of
-  // this one. The link is not used yet: first the server is asked what it is
-  // for, and the person is shown and asked. A link is whatever its sender
-  // made it, and must not sign anyone in to a place they did not choose.
+  /** Use the code: to sign in to an organisation, or to create one. */
+  const enter = (code: string, where: Where) =>
+    open<SignedIn>("/auth/verify", { code, ...where }).then((signed) => {
+      keepSession({ org: signed.org.id, name: signed.org.name, token: signed.token });
+      setProblem(null);
+      setBack(null);
+      use(signed.token);
+      window.location.hash = signed.created ? "#/connect" : "#/";
+    });
+
+  // Back from Google or GitHub. The code is not used yet: first the server
+  // is asked where this person can sign in. Someone in one organisation,
+  // which they have signed in to before, goes straight there. Anyone else is
+  // shown what there is and asked: being added to an organisation is someone
+  // else's doing, and must not sign anyone in to a place they did not choose.
   useEffect(() => {
     const arrive = () => {
-      const code = linkCode();
-      if (!code) return;
-      setArriving(true);
+      const failed = /^#problem=([a-z_]+)$/.exec(window.location.hash)?.[1];
+      const came = arrivalCode();
+      if (!failed && !came) return;
       // The code leaves the address bar and the history straight away.
       window.history.replaceState(null, "", window.location.pathname);
-      open<Omit<Link, "code">>("/auth/check", { code })
-        .then((what) => (setProblem(null), setLink({ code, ...what })))
+      if (!came) return setProblem(PROBLEMS[failed ?? ""] ?? PROBLEMS.provider ?? null);
+      setArriving(true);
+      open<Arrival>("/auth/check", { code: came.code })
+        .then((what) => {
+          setProblem(null);
+          const [only, ...others] = what.orgs;
+          if (!came.create && only && !others.length && !only.first_time) {
+            return enter(came.code, { user_id: only.user_id });
+          }
+          setBack({ ...came, ...what });
+        })
         .catch((err: Error) => setProblem(err.message))
         .finally(() => setArriving(false));
     };
@@ -189,21 +198,6 @@ export function App() {
     window.addEventListener("hashchange", arrive);
     return () => window.removeEventListener("hashchange", arrive);
   }, []);
-
-  /** The person said yes: now the link is used. */
-  const follow = (chosen: Link) => {
-    setArriving(true);
-    setLink(null);
-    open<SignedIn>("/auth/verify", { code: chosen.code })
-      .then((signed) => {
-        keepSession({ org: signed.org.id, name: signed.org.name, token: signed.token });
-        setProblem(null);
-        use(signed.token);
-        window.location.hash = signed.created ? "#/connect" : "#/";
-      })
-      .catch((err: Error) => setProblem(err.message))
-      .finally(() => setArriving(false));
-  };
 
   useEffect(() => {
     if (!token) return;
@@ -227,71 +221,19 @@ export function App() {
   if (arriving || leaving) {
     return (
       <main className="center">
-        <p>{leaving ? "Signing out…" : "Opening the link…"}</p>
+        <p>{leaving ? "Signing out…" : "Signing in…"}</p>
       </main>
     );
   }
-  if (link) {
-    const creating = link.purpose === "signup";
-    const twin = sameNameElsewhere(link);
+  if (back) {
     return (
-      <main className="center">
-        <div className="card login">
-          <h1>{creating ? "Create this organisation?" : "Sign in here?"}</h1>
-          <dl className="facts">
-            <dt>Organisation</dt>
-            <dd>{link.org_name}</dd>
-            {link.org_id && (
-              <>
-                <dt>Its id</dt>
-                <dd>
-                  <code>{link.org_id}</code>
-                </dd>
-              </>
-            )}
-            <dt>{creating ? "Its owner" : "As"}</dt>
-            <dd>{link.email}</dd>
-            {!creating && link.first_time && (
-              <>
-                <dt>Added by</dt>
-                <dd>
-                  {link.invited_by ??
-                    (link.invited_via === "token"
-                      ? "an admin token of that organisation, not a person who signed in"
-                      : "not recorded")}
-                </dd>
-              </>
-            )}
-          </dl>
-          {twin && (
-            <p role="alert">
-              {creating
-                ? `This browser is already signed in to an organisation called ${twin.name} (${twin.org}). This creates a second, separate one with the same name.`
-                : `This is not the ${twin.name} this browser is signed in to: that one is ${twin.org}. Anyone can give an organisation any name. Go on only if you ${
-                    link.invited_by ? `know who ${link.invited_by} is and` : "know who sent this and"
-                  } expected it.`}
-            </p>
-          )}
-          {!creating && link.first_time && !twin && (
-            <p className="muted">
-              You have not signed in to this organisation before. A name can be anyone's choice
-              {link.invited_by
-                ? ": check who added you."
-                : ", and this page cannot say who added you: go on only if you were expecting this."}
-            </p>
-          )}
-          <p className="muted">
-            {creating
-              ? "The organisation is created now, with this address as its owner."
-              : "Sessions you upload after signing in here belong to this organisation."}{" "}
-            If this is not what you expected, or the address is not yours, do not go on.
-          </p>
-          <button onClick={() => follow(link)}>{creating ? "Create it" : "Sign in"}</button>
-          <button className="quiet" onClick={() => setLink(null)}>
-            Not now
-          </button>
-        </div>
-      </main>
+      <Arrived
+        arrival={back}
+        create={back.create}
+        options={options}
+        enter={(where) => enter(back.code, where)}
+        onCancel={() => setBack(null)}
+      />
     );
   }
   if (!token) {
@@ -324,7 +266,7 @@ export function App() {
     <Shell
       token={token}
       me={me}
-      emailSignIn={options?.emailSignIn === true}
+      people={(options?.providers.length ?? 0) > 0}
       hosted={options?.hosted === true}
       sessions={savedSessions()}
       onSwitch={use}
@@ -337,7 +279,7 @@ export function App() {
 function Shell({
   token,
   me,
-  emailSignIn,
+  people,
   hosted,
   sessions,
   onSwitch,
@@ -346,8 +288,8 @@ function Shell({
 }: {
   token: string;
   me: Me;
-  /** Whether people can be added to sign in by email. */
-  emailSignIn: boolean;
+  /** Whether people can be added, to sign in with Google or GitHub. */
+  people: boolean;
   /** A service many organisations share: no license files there. */
   hosted: boolean;
   /** Sessions in other organisations, to switch to. */
@@ -369,7 +311,7 @@ function Shell({
     if (page === "session" && rest.length === 3) {
       return <SessionView token={token} address={rest.join("/")} onSignOut={onSignOut} />;
     }
-    if (page === "team" && isAdmin) return <Team token={token} emailSignIn={emailSignIn} hosted={hosted} onSignOut={onSignOut} />;
+    if (page === "team" && isAdmin) return <Team token={token} people={people} hosted={hosted} onSignOut={onSignOut} />;
     if (page === "connect") return <Connect token={token} me={me} onSignOut={onSignOut} />;
     if (page === "pulls" && isAdmin) {
       return (
@@ -377,7 +319,7 @@ function Shell({
       );
     }
     return <Overview token={token} scope={scope} showUsers={isAdmin} onSignOut={onSignOut} />;
-  }, [page, rest.join("/"), token, scope, isAdmin, options.data, emailSignIn, hosted, me]);
+  }, [page, rest.join("/"), token, scope, isAdmin, options.data, people, hosted, me]);
 
   const scoped = page === "" || page === "sessions";
   const link = (target: string, label: string) => (

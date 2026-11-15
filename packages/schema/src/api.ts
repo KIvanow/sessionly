@@ -23,26 +23,59 @@ export interface Me {
   signed_in?: boolean;
 }
 
+/** A service people sign in with. */
+export type SignInProvider = "google" | "github";
+
 /** What a server offers someone who is not signed in (`/auth/options`). */
 export interface AuthOptions {
   /** A service many organisations share. */
   hosted: boolean;
-  /** People can ask for a link to sign in with. */
-  emailSignIn: boolean;
+  /** What people can sign in with. Empty: by token only. */
+  providers: SignInProvider[];
   /** Anyone can create an organisation. */
   signup: boolean;
   /** Signing up needs an invitation code. */
   inviteCode: boolean;
 }
 
-/** What using a link gives (`/auth/verify`). */
+/** An organisation someone who has signed in can go on to (`/auth/check`). */
+export interface Membership {
+  user_id: string;
+  /** The organisation's id, which unlike its name is its own. */
+  org_id: string;
+  org_name: string;
+  /** The address they are in it under. */
+  email: string;
+  /** The person has not signed in to this organisation before. */
+  first_time: boolean;
+  /**
+   * Who added them to it, if they have not signed in to it before and it
+   * was someone who had signed in: that address is the adder's own.
+   */
+  invited_by: string | null;
+  /**
+   * How they were added: by a person who had signed in, or with a token,
+   * which says nothing of who held it. Null if that was not recorded.
+   */
+  invited_via: "sign_in" | "token" | null;
+}
+
+/** Who a provider said someone is, and where they can sign in (`/auth/check`). */
+export interface Arrival {
+  provider: SignInProvider;
+  /** The addresses the provider vouches for, the main one first. */
+  emails: string[];
+  orgs: Membership[];
+}
+
+/** What signing in to an organisation, or creating one, gives (`/auth/verify`). */
 export interface SignedIn {
   token: string;
   org: { id: string; name: string };
   email: string;
   role: Role;
   expires_at: string;
-  /** True if the link created the organisation. */
+  /** True if this created the organisation. */
   created: boolean;
 }
 

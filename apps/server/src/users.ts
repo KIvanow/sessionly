@@ -66,12 +66,13 @@ export async function addUser(
   if (existing && existing.removed_at == null) {
     throw new UserProblem(409, "already_a_user", `${address} is already in this organisation`);
   }
-  // Who added them is kept, for the page their link opens: but only an
+  // Who added them is kept, for the page that asks them before they first
+  // sign in here: but only an
   // address that is known to be the adder's own. A token's address is what
   // an admin typed when making it, and anyone can be an admin of an
   // organisation they made.
-  const invitedBy = by.viaEmail ? by.email : null;
-  const invitedVia = by.viaEmail ? "sign_in" : "token";
+  const invitedBy = by.signedIn ? by.email : null;
+  const invitedVia = by.signedIn ? "sign_in" : "token";
   const rows = existing
     ? await db.query(
         `UPDATE users SET removed_at = NULL, role = $3, invited_by = $4, invited_via = $5 WHERE org_id = $1 AND id = $2

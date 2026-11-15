@@ -13,9 +13,8 @@ import {
   type Role,
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
-import { allowed, giveBack, take, type Taken } from "./limits.ts";
-import { inviteMail } from "./mail.ts";
-import { emailFrom, LINKS_PER_HOUR, mailbox, newLink, newUserId, openRoutes, unsend, type Accounts } from "./signup.ts";
+import { allowed, giveBack, take } from "./limits.ts";
+import { emailFrom, newUserId, offers, openRoutes, type Accounts } from "./signup.ts";
 import { addUser, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
 import {
   Conflict,
@@ -42,10 +41,6 @@ export type Env = {
     /** An upload or a pull request report, already parsed and checked. */
     upload?: Upload;
     report?: PullReport;
-    /** What to do once the request's transaction has been committed, and only then. */
-    after: (() => void)[];
-    /** What adding a person was counted against, to be given back if no invitation goes out. */
-    invitation?: Taken[];
   };
 };
 
@@ -217,10 +212,6 @@ const DASHBOARD_POLICY = [
 export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
   const accounts = options.accounts ?? {};
-  // Work an answer does not wait for: sending a message that follows it.
-  const defer =
-    accounts.defer ??
-    ((work: () => Promise<void>) => void work().catch((err: unknown) => console.error("work after an answer failed:", err)));
 
   api.use("*", async (c, next) => {
     const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap);
@@ -296,12 +287,11 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     await next();
   });
 
-  // Adding a person sends a message to an address on an admin's word, and
-  // anyone can be the admin of an organisation they just made. So it is
-  // limited per organisation and per mailbox written to. Both are taken
-  // here, outside the transaction, and given back unless a message really
-  // goes out: asking to add someone who is already there, say, sends none,
-  // and must not use up what their address may be sent.
+  // Adding a person puts an organisation in front of them the next time
+  // they sign in, on an admin's word, and anyone can be the admin of an
+  // organisation they just made. So it is limited per organisation. Taken
+  // here, outside the transaction, and given back unless someone really
+  // was added.
   api.post("/users", async (c, next) => {
     const p = c.get("principal");
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
@@ -311,17 +301,8 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const limited = (error: string) => c.json({ error, code: "rate_limited" }, 429);
     const perOrg = await take(ownerDb, `invites:${p.orgId}`, 3600, INVITES_PER_HOUR);
     if (!perOrg) return limited(`an organisation can add ${INVITES_PER_HOUR} people an hour; try again later`);
-    const perMailbox = await take(ownerDb, `invite:${mailbox(email)}`, 3600, LINKS_PER_HOUR);
-    if (!perMailbox) {
-      await giveBack(ownerDb, perOrg);
-      return limited("that address has been sent enough invitations for now; try again in an hour");
-    }
-    c.set("invitation", [perOrg, perMailbox]);
     await next();
-    if (c.res.status !== 201) {
-      await giveBack(ownerDb, perOrg);
-      await giveBack(ownerDb, perMailbox);
-    }
+    if (c.res.status !== 201) await giveBack(ownerDb, perOrg);
   });
 
   // The rest of the request runs in one transaction, as the organisation of
@@ -331,7 +312,6 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     // connection. As text, which is what an upload or a report was parsed
     // from and is kept: asking for bytes would make a second copy of it.
     if (c.req.raw.body) await c.req.text();
-    c.set("after", []);
     try {
       await ownerDb.asOrg(c.get("principal").orgId, async (orgDb) => {
         c.set("db", orgDb);
@@ -342,11 +322,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       });
     } catch (err) {
       if (!(err instanceof Undo)) throw err;
-      return;
     }
-    // Committed: now what depended on it, such as a message with a link to
-    // a row that had to exist first.
-    for (const act of c.get("after")) act();
   });
 
   const failed = failureLog();
@@ -522,8 +498,9 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   );
   api.route("/tokens", admin);
 
-  // The people of the organisation, for admins. Adding someone sends them a
-  // link to sign in with.
+  // The people of the organisation, for admins. Someone who was added signs
+  // in with an account that has the address they were added under, and is
+  // shown the organisation then; nothing is sent to them.
   const users = new Hono<Env>();
   users.use("*", async (c, next) => {
     if (c.get("principal").role !== "admin") return c.json({ error: "admins only" }, 403);
@@ -531,34 +508,15 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   });
   users.get("/", async (c) => c.json({ users: await listUsers(c.get("db")) }));
   users.post("/", async (c) => {
-    const { mailer, publicUrl } = accounts;
-    if (!mailer || !publicUrl) {
-      return c.json({ error: "signing in by email is not set up here; create a token instead", code: "no_email" }, 409);
+    if (!offers(accounts).providers.length) {
+      return c.json({ error: "signing in is not set up here; create a token instead", code: "no_sign_in" }, 409);
     }
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const email = emailFrom(body.email);
     const role = body.role ?? "member";
     if (!email) throw new BadRequest("email is required, as a plain address of 254 characters at most");
     if (role !== "admin" && role !== "member") throw new BadRequest("role must be admin or member");
-    const db = c.get("db");
-    const p = c.get("principal");
-    const user = await addUser(db, newUserId(), email, role, p);
-    const link = await newLink(db, publicUrl, { purpose: "invite", userId: user.id });
-    const mail = inviteMail(email, link.url);
-    const counted = c.get("invitation") ?? [];
-    // Sent once the person and their link are really there. If it cannot
-    // be sent, the link is forgotten and the message is not one of those
-    // counted: the person is in, and asks for a link on the sign-in page.
-    c.get("after").push(() =>
-      defer(async () => {
-        try {
-          await mailer.send(mail);
-        } catch (err) {
-          console.error("an invitation was not sent:", err instanceof Error ? err.message : err);
-          await unsend(ownerDb, [link], counted);
-        }
-      }),
-    );
+    const user = await addUser(c.get("db"), newUserId(), email, role, c.get("principal"));
     return c.json(user, 201);
   });
   users.delete("/:id", async (c) => {

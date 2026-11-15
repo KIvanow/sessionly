@@ -5,6 +5,7 @@
 // stored.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Db, OrgDb, Queryable } from "./db.ts";
+import type { ProviderName } from "./oauth.ts";
 
 import type { Role, TokenInfo } from "@sessionly/schema";
 
@@ -21,11 +22,11 @@ export interface Principal {
   /** The person, if the token is tied to one: they signed in, or it is for their machines. */
   userId: string | null;
   /**
-   * The request comes from someone who signed in with a link sent to
-   * `email`, so the address is theirs. Any other token's address is what
-   * whoever made the token typed.
+   * The request comes from someone who signed in, with an account that
+   * Google or GitHub says has the address `email`: so the address is
+   * theirs. Any other token's address is what whoever made the token typed.
    */
-  viaEmail: boolean;
+  signedIn: boolean;
 }
 
 /** The one organisation of a self-hosted install. */
@@ -54,7 +55,7 @@ export interface NewToken {
   /** The person it is tied to. Left out, a person of that address in the organisation is looked for. */
   userId?: string | null;
   /** Set for a token someone got by signing in, which also expires. */
-  signIn?: "email";
+  signIn?: ProviderName;
   expiresAt?: Date;
 }
 
@@ -134,7 +135,7 @@ export async function authenticate(
   if (bootstrap?.token) {
     const expected = Buffer.from(hash(bootstrap.token));
     if (timingSafeEqual(Buffer.from(digest), expected)) {
-      return { orgId: DEFAULT_ORG, email: bootstrap.email, name: null, role: "admin", tokenId: null, userId: null, viaEmail: false };
+      return { orgId: DEFAULT_ORG, email: bootstrap.email, name: null, role: "admin", tokenId: null, userId: null, signedIn: false };
     }
   }
   // The one question asked before an organisation is known, so as the
@@ -169,7 +170,7 @@ export async function authenticate(
         role: row.role,
         tokenId: row.id,
         userId: row.user_id,
-        viaEmail: row.sign_in === "email",
+        signedIn: row.sign_in !== null,
       }
     : null;
 }

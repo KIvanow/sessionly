@@ -577,6 +577,23 @@ const MIGRATIONS: string[] = [
      (SELECT min(t.created_at) FROM tokens t WHERE t.user_id = u.id AND t.sign_in = 'email'),
      CASE WHEN u.role = 'owner' THEN u.created_at END)
    WHERE u.confirmed_at IS NULL`,
+  // Signing in is with Google or GitHub now, and no link is sent to anyone.
+  // What a provider says of someone who has just come back from it (the
+  // addresses it vouches for, the main one first) is kept for the few
+  // minutes they take to choose an organisation or name a new one. Like the
+  // links before it, it is read by the owner alone; a request can do
+  // nothing with it.
+  `DROP TABLE login_codes`,
+  `CREATE TABLE sign_in_codes (
+     code_hash  text PRIMARY KEY,
+     provider   text NOT NULL CHECK (provider IN ('google', 'github')),
+     emails     text[] NOT NULL CHECK (cardinality(emails) > 0),
+     expires_at timestamptz NOT NULL
+   )`,
+  // A session says which of them it was made with. Sessions from links
+  // ('email') stay as they are until they run out.
+  `ALTER TABLE tokens DROP CONSTRAINT tokens_sign_in_check`,
+  `ALTER TABLE tokens ADD CONSTRAINT tokens_sign_in_check CHECK (sign_in IN ('email', 'google', 'github'))`,
 ];
 
 /**

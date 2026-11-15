@@ -95,7 +95,7 @@ function License({ token, onSignOut }: { token: string; onSignOut: () => void })
   );
 }
 
-/** The people who can sign in by email: adding one sends them a link. */
+/** The people who can sign in. Adding one sends them nothing: they sign in, and are shown the organisation. */
 function People({ token, onSignOut }: { token: string; onSignOut: () => void }) {
   const list = useApi<{ users: UserInfo[] }>(token, "/users", onSignOut);
   const [email, setEmail] = useState("");
@@ -136,7 +136,8 @@ function People({ token, onSignOut }: { token: string; onSignOut: () => void }) 
     <section className="card">
       <h2>People</h2>
       <p className="muted">
-        People sign in with a link sent to their address, and connect their own machines from the Connect page.
+        People sign in with a Google or GitHub account that has the address they were added under, and connect
+        their own machines from the Connect page.
         Members see their own sessions; admins see everyone's and manage this page.
       </p>
       <form className="inline" onSubmit={add}>
@@ -151,10 +152,15 @@ function People({ token, onSignOut }: { token: string; onSignOut: () => void }) 
             <option value="admin">Admin</option>
           </select>
         </label>
-        <button type="submit">Add and send a link</button>
+        <button type="submit">Add</button>
       </form>
       {problem && <p role="alert">{problem}</p>}
-      {added && <p role="status">A link to sign in is on its way to {added}.</p>}
+      {added && (
+        <p role="status">
+          {added} can now sign in at {window.location.origin} with a Google or GitHub account that has this address.
+          Nothing is sent to them: let them know.
+        </p>
+      )}
       {list.error && <p role="alert">{list.error}</p>}
       {people.length > 0 && (
         <div className="scroll">
@@ -193,13 +199,13 @@ function People({ token, onSignOut }: { token: string; onSignOut: () => void }) 
 /** People and access tokens (admins only). */
 export function Team({
   token,
-  emailSignIn,
+  people,
   hosted,
   onSignOut,
 }: {
   token: string;
-  /** Whether this server signs people in by email. */
-  emailSignIn: boolean;
+  /** Whether people sign in here, with Google or GitHub. */
+  people: boolean;
   /** A hosted service: its organisations have no license files to install. */
   hosted: boolean;
   onSignOut: () => void;
@@ -236,11 +242,11 @@ export function Team({
 
   return (
     <>
-      {emailSignIn && <People token={token} onSignOut={onSignOut} />}
+      {people && <People token={token} onSignOut={onSignOut} />}
       <section className="card">
-        <h2>{emailSignIn ? "Tokens for machines and services" : "Give someone access"}</h2>
+        <h2>{people ? "Tokens for machines and services" : "Give someone access"}</h2>
         <p className="muted">
-          {emailSignIn
+          {people
             ? "For what cannot sign in: a cloud environment, CI, or a machine set up for someone. People make the tokens for their own machines on the Connect page."
             : "A token belongs to one person. Members upload their sessions and see their own; admins see everyone's."}{" "}
           A machine is connected with <code>sessionly connect {window.location.origin} --token …</code>
@@ -288,7 +294,9 @@ export function Team({
         <h2>Tokens</h2>
         {list.error && <p role="alert">{list.error}</p>}
         {list.data && list.data.tokens.length === 0 && (
-          <p className="muted">No tokens yet. You are signed in with the server's built-in admin token.</p>
+          <p className="muted">
+            No tokens yet.{!people && " You are signed in with the server's built-in admin token."}
+          </p>
         )}
         {list.data && list.data.tokens.length > 0 && (
           <div className="scroll">

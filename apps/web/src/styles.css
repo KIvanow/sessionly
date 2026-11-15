@@ -43,11 +43,12 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 [role="alert"] { color: var(--alert); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 
-button, select, input {
+button, select, input, a.button {
   font: inherit; color: inherit; background: var(--surface);
   border: 1px solid var(--axis); border-radius: 6px; padding: 5px 10px;
 }
 button { cursor: pointer; }
+a.button { text-decoration: none; text-align: center; }
 button:disabled { opacity: 0.5; cursor: default; }
 button.quiet { border-color: transparent; background: none; color: var(--accent); padding: 5px 6px; }
 :focus-visible { outline: 2px solid var(--data); outline-offset: 1px; }
@@ -163,3 +164,4 @@ pre.command { margin: 0; flex-basis: 100%; padding: 10px 12px; border-radius: 6p
 ol.steps { margin: 10px 0 0; padding-left: 1.3rem; display: grid; gap: 6px; }
 .login .facts { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
 .login .facts dt { color: var(--ink-2); }
+.login .place { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid var(--axis); }
