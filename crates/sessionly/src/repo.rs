@@ -177,15 +177,20 @@ download() {
 
 # Hooks run in parallel: one downloads while the others wait for it.
 #
-# Each step is noted with the process it was, in bootstrap.log. Rarely two
-# hooks have each downloaded, one after the other, and the log of the next
-# time that happens is how the reason will be found. It is a few lines, once
+# The lock is a file that this shell creates only if it is not there yet
+# (set -C): one system call, made by the shell itself. It used to be a folder
+# made with mkdir. Where several hooks asked at the same moment, each was
+# told it had made the folder, and two of them downloaded: seen on Ubuntu
+# 26.04, whose mkdir is not GNU's, and never where it is.
+#
+# Each step is noted with the process it was, in bootstrap.log, so that a
+# sandbox where two hooks still download shows how. It is a few lines, once
 # per sandbox.
 fetch() {
   mkdir -p "$home/bin" && chmod 700 "$home" || return 1
-  lock="$home/bin/fetching"
+  lock="$home/bin/fetching.lock"
   waited=0
-  until mkdir "$lock" 2> /dev/null; do
+  until (set -C && : > "$lock") 2> /dev/null; do
     if [ -x "$bin" ]; then
       note "$$ stopped waiting for the lock after $waited waits: the binary is there"
       return 0
@@ -194,7 +199,7 @@ fetch() {
     if [ "$waited" -gt 300 ]; then
       # Half a minute: whoever is downloading was killed, or is too slow to
       # wait for. This event is not captured; the next hook may try.
-      rmdir "$lock" 2> /dev/null
+      rm -f "$lock"
       note "$$ waited half a minute for the lock, removed it and gave up"
       return 1
     fi
@@ -207,7 +212,7 @@ fetch() {
     download
     note "$$ finished downloading ($?)"
   fi
-  if rmdir "$lock" 2> /dev/null; then
+  if rm "$lock" 2> /dev/null; then
     note "$$ released the lock"
   else
     note "$$ found the lock gone when releasing it"

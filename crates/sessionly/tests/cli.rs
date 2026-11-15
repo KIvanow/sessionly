@@ -1279,20 +1279,21 @@ fn hooks_arriving_together_share_one_download() {
         [format!("sessionly-{}", env!("CARGO_PKG_VERSION"))],
         "{log}"
     );
-    // One download for all six, nearly always. On CI about one run in ten
-    // has had two hooks each download, one after the other, and neither the
-    // script nor 450 runs elsewhere (under bash and under dash) explain it.
-    // A second download is whole and checked like the first, so it costs
-    // time and nothing else; every hook downloading for itself would mean
-    // the lock does nothing, and that still fails here.
+    // One download for all six. On CI about one run in ten had two hooks
+    // each download. The script's own notes then showed why: on Ubuntu
+    // 26.04 several hooks that ran mkdir at the same moment were each told
+    // they had made the lock. The lock is no longer made with mkdir, but
+    // the image that showed it is not one this can be tried on at will, so
+    // a second download is still allowed here until CI has gone without
+    // one for a while. It is whole and checked like the first, and costs
+    // time only. Every hook downloading for itself still fails.
     let downloads = log.matches("installed sessionly").count();
     assert!(
         (1..=2).contains(&downloads),
         "{downloads} downloads:\n{log}"
     );
     // The script notes who took and released the lock, and when. The log of
-    // a run with two downloads is kept where CI prints it, so that the next
-    // one shows the reason.
+    // a run with two downloads is kept where CI prints it.
     if downloads == 2 {
         let kept = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("two-downloads-{}.log", std::process::id()));
