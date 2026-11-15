@@ -34,6 +34,7 @@ services:
       SESSIONLY_SIGNUP_CODE: ${SESSIONLY_SIGNUP_CODE:-}
       SESSIONLY_RATE_PER_MINUTE: ${SESSIONLY_RATE_PER_MINUTE:-600}
       SESSIONLY_SIGNUPS_PER_HOUR: ${SESSIONLY_SIGNUPS_PER_HOUR:-100}
+      SESSIONLY_SIGNUPS_PER_NETWORK: ${SESSIONLY_SIGNUPS_PER_NETWORK:-10}
     volumes:
       # The certificate authority of the managed database, if DATABASE_URL names it.
       - ${DATABASE_CA_FILE:-/dev/null}:/etc/sessionly/db-ca.crt:ro

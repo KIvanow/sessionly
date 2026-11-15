@@ -9,7 +9,10 @@
 #   ./update.sh --build    # build this checkout and run that
 #
 # If the new copies do not come up, they are removed and the old ones go on
-# answering: nothing has changed, and this exits 1. It can be run again from
+# answering: nothing has changed, and this exits 1. A copy that is running
+# is never removed for not answering, only replaced once its replacement
+# does: when the database is away for a while, the copies there are must
+# still be there when it is back. It can be run again from
 # wherever an earlier run stopped, cut short or not. A copy is old or new by
 # what it is (its image, and how it is set up), not by when it was started.
 #
@@ -41,17 +44,20 @@ copies="$(compose config --format json | sed -n 's/.*"replicas": *\([0-9][0-9]*\
 copies="${copies:-2}"
 
 # One line per copy of the server there is: its id and what it is.
-#   new   what it should be, and answering
-#   old   something else, and running
-#   gone  serves nobody: stopped, or a new one an earlier run left before it answered
+#   new      what it should be, and answering
+#   coming   what it should be and running, but not answering: still
+#            starting, or cut off from its database for now. Left alone: it
+#            may be all there is, and what would replace it fares no better.
+#   old      something else, and running
+#   gone     not running, and so serving nobody
 survey() {
   for id in $(compose ps -aq server); do
     is="$(docker inspect --format \
-      '{{.Image}} {{index .Config.Labels "com.docker.compose.config-hash"}} {{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id")"
+      '{{.Image}} {{index .Config.Labels "com.docker.compose.config-hash"}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id")"
     case "$is" in
-      "$want_image $want_setup true healthy") echo "$id new" ;;
-      "$want_image $want_setup "*) echo "$id gone" ;;
-      *" true "*) echo "$id old" ;;
+      "$want_image $want_setup running healthy") echo "$id new" ;;
+      "$want_image $want_setup running "* | "$want_image $want_setup restarting "*) echo "$id coming" ;;
+      *" running "* | *" restarting "*) echo "$id old" ;;
       *) echo "$id gone" ;;
     esac
   done
@@ -77,31 +83,31 @@ take_up() {
 
 for id in $(ids gone); do docker rm -f "$id" > /dev/null; done
 old="$(ids old)"
-new="$(ids new)"
 old_count="$(echo $old | wc -w)"
-new_count="$(echo $new | wc -w)"
+# The copies that already are what they should be, answering or about to.
+have_count="$(echo $(ids new) $(ids coming) | wc -w)"
+# Every copy there was before this run. Whatever fails, none of these is removed.
+before="$(compose ps -aq server)"
 
-if [ "$old_count" -gt 0 ] || [ "$new_count" -lt "$copies" ]; then
+if [ "$old_count" -gt 0 ] || [ "$have_count" -lt "$copies" ] || [ -n "$(ids coming)" ]; then
   # The new ones start beside the old, which keep answering meanwhile.
-  # Whichever new one is first brings the database up to date.
+  # Whichever new one is first brings the database up to date. This also
+  # waits for a copy that was not answering yet.
   wanted=$copies
-  [ "$new_count" -gt "$wanted" ] && wanted=$new_count
+  [ "$have_count" -gt "$wanted" ] && wanted=$have_count
   if ! compose up -d --no-deps --no-recreate --scale "server=$((old_count + wanted))" \
     --wait --wait-timeout "$patience" server; then
     echo >&2
-    echo "The new copies of the server did not come up. The last each one said:" >&2
-    for id in $(compose ps -aq server); do
-      case " $(echo $old $new) " in *" $id "*) continue ;; esac
+    echo "Not every copy of the server came up. The last each one that is not answering said:" >&2
+    for id in $(ids coming) $(ids gone); do
       echo "--- $id" >&2
       docker logs --tail 20 "$id" >&2 2>&1 || true
-      docker rm -f "$id" > /dev/null || true
+      # A copy this run started goes. One that was there before stays, to
+      # answer again when whatever it is waiting for is back.
+      case " $(echo $before) " in *" $id "*) ;; *) docker rm -f "$id" > /dev/null || true ;; esac
     done
     echo >&2
-    if [ "$((old_count + new_count))" -gt 0 ]; then
-      echo "They have been removed. The $((old_count + new_count)) that were answering before still are; nothing else was changed." >&2
-    else
-      echo "They have been removed. No copy was answering before, and none is now." >&2
-    fi
+    echo "The copies this run started that did not come up have been removed. The $(echo $before | wc -w) there were before are as they were; nothing else was changed." >&2
     exit 1
   fi
 

@@ -119,13 +119,17 @@ Limits that are not settings:
 
 - 5 requests for a link a minute from one caller (an IPv6 caller is its /64), and 20 looks at
   or uses of a link.
-- 5 sign-ups an hour asked for from one network (a /24, or a /48 of IPv6).
+- 10 sign-ups an hour asked for from one network, a /24 or a /48 of IPv6
+  (`SESSIONLY_SIGNUPS_PER_NETWORK`). An office or a phone network shares one.
 - 5 messages an hour to one mailbox to finish signing up, and 5 on being added to
   organisations. Only messages that go out are counted, and a mailbox is counted once however
   its address is spelt (`+tag`, and Gmail's dots).
 - A link to sign in is not sent again while one that was asked for still works (15 minutes).
   So asking in someone's name gets them four messages an hour at most, and cannot leave them
-  without a link that works.
+  without a link that works. An address its owner has signed in with has an allowance of its
+  own; spellings of a mailbox that nobody has confirmed share one of 12 messages an hour.
+- A message that could not be sent is not counted, and its link is forgotten, so the next
+  ask sends at once.
 - 100 sign-up messages an hour in all (`SESSIONLY_SIGNUPS_PER_HOUR`). The server logs a
   warning, once an hour, when this is reached: until the hour is over nobody can sign up.
 - 30 people an hour added by one organisation.
@@ -133,7 +137,9 @@ Limits that are not settings:
 These exist because the service sends mail on a stranger's word. No message carries what its
 asker wrote: not a name, not an address, and an organisation's name only to someone who has
 signed in to that organisation before. The page a link opens shows the organisation's name
-and id and who added the address, and asks before going on. An organisation's name may not
+and id and who added the address, and asks before going on. Who added it is shown only if
+that was a person who had signed in, whose address is then their own; someone added with a
+token is told so and no more, since a token's address and name are whatever its maker typed. An organisation's name may not
 contain what could make a link, or letters that are styled forms of other letters.
 
 A hosted service refuses to start with `SESSIONLY_ADMIN_TOKEN` set, without Postgres, or
@@ -157,6 +163,12 @@ and only add things: to go back, run the version before.
 - **It can be run again from any state**: after a failure, or after a run that was cut short
   with old and new copies both running. It tells old from new by what a copy is (its image
   and its settings), not by when it started.
+- **It never removes a copy that is running** for not answering: only copies that have
+  stopped, and new ones of its own that did not come up. When the database is away, running
+  it changes nothing, and the copies there are answer again when the database is back.
+- **A failed update does not undo migrations**, and old copies answer beside new ones while
+  an update runs. So a migration must leave the version before it able to run: add, and
+  remove only what the version before no longer reads.
 - **Changing `SESSIONLY_REPLICAS`** or any other setting in `.env` is the same command.
 - **Caddy** takes up a changed `caddy/Caddyfile` without closing anything. It is replaced
   only when its image or its part of the compose file changed, which closes the front door
@@ -199,7 +211,9 @@ where `update.sh` was run while requests kept arriving:
 - again after a run killed part-way, with old and new copies both running: none refused;
 - from two copies to three and back; from nothing after `docker compose down`;
 - a copy cut off from the database: Caddy stopped sending to it within its five seconds, and
-  sent to it again once the database was back.
+  sent to it again once the database was back;
+- every copy cut off from the database, and `update.sh` run meanwhile: exit 1, both copies
+  left as they were, and answering again within seconds of the database coming back.
 
 Mail was checked against Resend itself: one message from its test sender to its test inbox
 was taken, and one from a domain not verified there was refused and logged as such. Not
