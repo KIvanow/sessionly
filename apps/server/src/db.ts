@@ -30,8 +30,13 @@ export interface OrgDb extends Queryable {
 export interface Db extends Queryable {
   /** Run `fn` as the app role with row-level security set to `orgId`, in one transaction. */
   asOrg<T>(orgId: string, fn: (db: OrgDb) => Promise<T>): Promise<T>;
-  /** Run `fn` in one transaction, as the owner. */
-  transaction<T>(fn: (tx: Queryable) => Promise<T>): Promise<T>;
+  /**
+   * Run `fn` in one transaction, as the owner. `patient` is for bringing the
+   * database up to date: no limit on how long a statement may take, since a
+   * large table takes as long as it takes, and the copies that wait for the
+   * one that is doing it wait as long.
+   */
+  transaction<T>(fn: (tx: Queryable) => Promise<T>, options?: { patient?: boolean }): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -121,10 +126,26 @@ async function enter(tx: Queryable, role: string, orgId: string): Promise<OrgDb>
   return { orgId, query: tx.query };
 }
 
-/** A whole number from a setting, or `fallback` if it is not one. */
-function setting(value: string | undefined, fallback: number): number {
-  const n = Number(value);
-  return Number.isInteger(n) && n > 0 ? n : fallback;
+/**
+ * A setting that is a count: a whole number above 0 in plain digits, no
+ * larger than the database's integers go. Undefined if it is not set, or set
+ * to anything else: "0.5", "1e3" and "0x10" are not taken for a number that
+ * whoever wrote them may not have meant.
+ */
+export function count(value: string | undefined): number | undefined {
+  const text = value?.trim() ?? "";
+  const n = /^[0-9]{1,10}$/.test(text) ? Number(text) : 0;
+  return n > 0 && n <= 2_147_483_647 ? n : undefined;
+}
+
+/** The settings of the connections to Postgres, each a count. */
+export const DB_COUNTS = ["SESSIONLY_DB_POOL", "SESSIONLY_DB_QUERY_SECONDS"] as const;
+
+/** What to say of each of `names` that is set to something `count` does not take. */
+export function misset(env: NodeJS.ProcessEnv, names: readonly string[]): string[] {
+  return names
+    .filter((name) => env[name]?.trim() && count(env[name]) === undefined)
+    .map((name) => `${name} is "${env[name]}", which is not a whole number above 0: it is left out, and the default applies.`);
 }
 
 /**
@@ -134,6 +155,36 @@ function setting(value: string | undefined, fallback: number): number {
  * holds its requests for good.
  */
 const CONNECT_MS = 10_000;
+
+/**
+ * How long a statement may take, in seconds, unless SESSIONLY_DB_QUERY_SECONDS
+ * says otherwise. A database that fails over can leave its old connections
+ * open and silent: nothing sent on one is answered or refused. Without a
+ * limit every request that gets such a connection waits for good, and holds
+ * the connection while it does.
+ */
+const QUERY_SECONDS = 30;
+
+/**
+ * How long a connection may sit silent before the system asks the other end
+ * whether it is still there, which is how one that nobody is using is found
+ * to be gone.
+ */
+const KEEP_ALIVE_MS = 10_000;
+
+/** A statement with this side's limit on how long its answer may take, which pg's types leave out. */
+const within = (text: string, values: unknown[] | undefined, ms: number | undefined) =>
+  ({ text, values, query_timeout: ms }) as pg.QueryConfig;
+
+/** Where a Postgres address points, without the user or the password. */
+function hostOf(url: string): string {
+  try {
+    const { hostname, port } = new URL(url);
+    return `${hostname || "localhost"}:${port || 5432}`;
+  } catch {
+    return "its address";
+  }
+}
 
 /**
  * `postgres://…` connects to a Postgres server. `memory://` is an in-memory
@@ -148,14 +199,31 @@ export async function openDb(
     pool?: number;
     /** How long to wait for a connection, in milliseconds (Postgres only). Default: ten seconds. */
     connectMs?: number;
+    /** How long a statement may take, in milliseconds (Postgres only). Default: SESSIONLY_DB_QUERY_SECONDS, or 30 seconds. */
+    queryMs?: number;
   } = {},
 ): Promise<Db> {
   let db: Db;
   // Known once the migrations have run.
   let appRole = "";
+  // An error of opening the database, said so that it can be acted on.
+  let named = (err: unknown) => err;
   if (/^postgres(ql)?:\/\//.test(url)) {
-    const max = options.pool ?? setting(process.env.SESSIONLY_DB_POOL, 10);
-    const pool = new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: options.connectMs ?? CONNECT_MS });
+    const max = options.pool ?? count(process.env.SESSIONLY_DB_POOL) ?? 10;
+    const connectMs = options.connectMs ?? CONNECT_MS;
+    const queryMs = options.queryMs ?? (count(process.env.SESSIONLY_DB_QUERY_SECONDS) ?? QUERY_SECONDS) * 1000;
+    // The database is told the limit and ends a statement that passes it,
+    // which leaves the connection usable. This side waits a little longer
+    // than that before it gives up itself: by then the database is not
+    // answering at all, and the connection is thrown away.
+    const giveUpMs = Math.ceil(queryMs * 1.2);
+    const pool = new pg.Pool({
+      connectionString: url,
+      max,
+      connectionTimeoutMillis: connectMs,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: KEEP_ALIVE_MS,
+    });
     // A connection the database closes (a failover, a restart, an admin)
     // says so with an event, and an event nobody hears ends the process.
     // The pool hears it only while the connection sits unused, and a
@@ -173,7 +241,7 @@ export async function openDb(
     // What the pool says of a connection it dropped while unused, which
     // must be heard as well.
     pool.on("error", (err, client) => lost(client, err));
-    const transaction: Db["transaction"] = async (fn) => {
+    const transaction: Db["transaction"] = async (fn, { patient = false } = {}) => {
       const client = await pool.connect();
       // Set if the connection may still be inside the transaction: it is
       // then thrown away, not handed to the next request with a role and an
@@ -185,11 +253,30 @@ export async function openDb(
         unsure ??= err;
       };
       client.on("error", mine);
-      try {
-        await client.query("BEGIN");
-        const out = await fn({ query: async (text, params) => (await client.query(text, params as unknown[])).rows });
+      const run = async (text: string, params?: unknown[]) => {
         try {
-          await client.query("COMMIT");
+          return await client.query(within(text, params, patient ? undefined : giveUpMs));
+        } catch (err) {
+          // The database saying no (a row that breaks a rule, a statement
+          // that took too long) leaves the connection as it was. Anything
+          // else is the connection itself: no answer in time, or gone.
+          if (!(err instanceof pg.DatabaseError)) mine(err as Error);
+          throw err;
+        }
+      };
+      try {
+        // The limits end with the transaction, so they hold through a
+        // pooler that hands out a connection per transaction, and cost no
+        // exchange of their own. The second is for a transaction whose
+        // server went away in the middle of it: the rows it had locked are
+        // let go, and not kept until the system notices.
+        const limit = patient ? 0 : queryMs;
+        await run(
+          `BEGIN; SET LOCAL statement_timeout = ${limit}; SET LOCAL idle_in_transaction_session_timeout = ${limit}`,
+        );
+        const out = await fn({ query: async (text, params) => (await run(text, params)).rows });
+        try {
+          await run("COMMIT");
         } catch (err) {
           unsure = err as Error;
           throw err;
@@ -197,7 +284,7 @@ export async function openDb(
         return out;
       } catch (err) {
         if (!unsure) {
-          await client.query("ROLLBACK").catch((failed: Error) => {
+          await run("ROLLBACK").catch((failed: Error) => {
             unsure = failed;
           });
         }
@@ -208,11 +295,19 @@ export async function openDb(
       }
     };
     db = {
-      query: async (text, params) => (await pool.query(text, params as unknown[])).rows,
+      // One statement on its own has only this side's limit. The pool throws
+      // away a connection whose statement failed, whatever the reason.
+      query: async (text, params) => (await pool.query(within(text, params, giveUpMs))).rows,
       transaction,
       asOrg: (orgId, fn) => transaction(async (tx) => fn(await enter(tx, appRole, orgId))),
       close: () => pool.end(),
     };
+    // A host that takes the connection and says nothing is named, with how
+    // long it was given: "timeout" alone says neither.
+    named = (err) =>
+      err instanceof Error && /timeout.*connect|connect.*timeout/i.test(err.message)
+        ? new Error(`The database at ${hostOf(url)} did not answer within ${connectMs / 1000} seconds (${err.message}).`)
+        : err;
   } else {
     let lite: PGlite;
     if (url === "memory://") {
@@ -241,7 +336,7 @@ export async function openDb(
     appRole = (await db.query<{ role: string }>(`SELECT ${APP_ROLE} AS role`))[0]?.role ?? "";
   } catch (err) {
     await db.close().catch(() => {});
-    throw err;
+    throw named(err);
   }
   return db;
 }
@@ -508,6 +603,8 @@ export function rowLevelSecurity(table: string, column = "org_id"): string[] {
   ];
 }
 
+const PATIENT = { patient: true };
+
 /** A list of migrations and the table that records which of them have run. */
 export interface Migrations {
   table: string;
@@ -527,6 +624,8 @@ export async function runMigrations(db: Db, table: string, list: string[]): Prom
   // left to do. The lock ends with the transaction, which is what makes it
   // hold through a connection pooler that hands out a connection per
   // transaction.
+  // A statement here may take as long as it takes, and so may the wait for
+  // the copy that is running them.
   const migrate = () =>
     db.transaction(async (tx) => {
       await tx.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-${table}`]);
@@ -541,7 +640,7 @@ export async function runMigrations(db: Db, table: string, list: string[]): Prom
         else await tx.query(sql);
         await tx.query(`INSERT INTO ${table} (id) VALUES ($1)`, [id]);
       }
-    });
+    }, PATIENT);
   // The lock is this database's. Roles are the whole cluster's, and changing
   // them at the same moment from two databases of one cluster (as tests do)
   // can fail in one. Nothing of its transaction stays, so it starts over.

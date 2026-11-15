@@ -593,6 +593,8 @@ for anything but localhost.
 |---|---|
 | `PORT`, `HOST` | Where to listen. Default `127.0.0.1:8080`; use `HOST=0.0.0.0` in a container. |
 | `DATABASE_URL` | `postgres://…` (Postgres 16 or later), or unset for the embedded database (in `apps/server/data`; in the Docker image, `/data`). |
+| `SESSIONLY_DB_POOL` | Postgres only: connections kept at most. Default 10. |
+| `SESSIONLY_DB_QUERY_SECONDS` | Postgres only: how long a statement may take. Default 30. |
 | `SESSIONLY_ADMIN_TOKEN` | An admin token that always works, for first use. |
 | `SESSIONLY_ADMIN_EMAIL` | Who uploads made with that token belong to. |
 
@@ -609,6 +611,13 @@ start (it says which). When restoring a dump into another database, use `pg_rest
 --no-acl`: the grants in the dump are to the role of the old name, and the server makes its
 own at the next start. A role of an old name that is left in the cluster holds nothing in
 this database any more and can be dropped.
+
+**A database that goes quiet.** After a failover the old connections can stay open and
+answer nothing. A statement that passes the limit is ended by the database, and a
+connection that has not answered a fifth of the limit later is thrown away and replaced,
+so the server finds the new database by itself, within the limit and that fifth. Bringing
+the database up to date at a start is not limited. The two settings are whole numbers in
+plain digits; anything else is said at the start and left out.
 
 **People and tokens.** Each token belongs to one person and is `member`, `admin`, `ci` or
 `env`. Uploads are filed under the token's owner, whatever name the record carries. A member

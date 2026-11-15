@@ -2,12 +2,15 @@
 //   PORT                   default 8080
 //   HOST                   default 127.0.0.1 (use 0.0.0.0 in a container)
 //   DATABASE_URL           postgres://… ; default: an embedded database in apps/server/data
+//   SESSIONLY_DB_POOL      Postgres only: connections kept at most (default 10)
+//   SESSIONLY_DB_QUERY_SECONDS  Postgres only: how long a statement may take (default 30)
 //   SESSIONLY_ADMIN_TOKEN  an admin token that always works (for first use)
 //   SESSIONLY_ADMIN_EMAIL  whose sessions uploads with that token belong to
 //   SESSIONLY_HOSTED       "true" for a service that many organisations share
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
+import { DB_COUNTS, misset } from "./db.ts";
 import { createApp, type Extension } from "./app.ts";
 import { openDb, runMigrations, type Migrations } from "./db.ts";
 
@@ -61,6 +64,8 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       process.exit(1);
     }
   }
+  // A setting that is not what it was meant to be is said, since the server runs as if it were not there.
+  for (const note of misset(process.env, DB_COUNTS)) console.warn(note);
   // The embedded database lives next to the server's code, wherever it is started from.
   const embedded = fileURLToPath(new URL("../data/pglite", import.meta.url));
   const databaseUrl = process.env.DATABASE_URL ?? `file:${embedded}`;

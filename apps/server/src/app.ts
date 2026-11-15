@@ -106,6 +106,35 @@ function wholeNumber(value: string | undefined, fallback: number, max: number, n
   return Math.min(n, max);
 }
 
+/**
+ * Writes out why requests failed: the first few in any ten seconds as they
+ * are, and of the rest how many there were. With the database away every
+ * request fails for one reason, thousands of them a second, and a log of
+ * nothing else buries what began it.
+ */
+export function failureLog(
+  options: { each?: number; ms?: number; say?: (what: unknown) => void; now?: () => number } = {},
+): (err: unknown) => void {
+  const { each = 5, ms = 10_000, say = console.error, now = Date.now } = options;
+  let began = -Infinity;
+  let said = 0;
+  let left = 0;
+  return (err) => {
+    if (now() - began >= ms) {
+      if (left) say(`${left} more requests failed in the ${ms / 1000} seconds before this, and are not written out.`);
+      began = now();
+      said = 0;
+      left = 0;
+    }
+    if (said < each) {
+      said++;
+      say(err);
+    } else {
+      left++;
+    }
+  };
+}
+
 export interface Options {
   bootstrap?: Bootstrap;
   /** Folder with the built dashboard, served at the root if given. */
@@ -211,11 +240,12 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     }
   });
 
+  const failed = failureLog();
   api.onError((err, c) => {
     if (err instanceof BadRequest) return c.json({ error: err.message }, 400);
     if (err instanceof BadReport) return c.json({ error: err.message }, 422);
     if (err instanceof ApiError) return c.json({ error: err.message, code: err.code }, err.status);
-    console.error(err);
+    failed(err);
     return c.json({ error: "internal error" }, 500);
   });
 

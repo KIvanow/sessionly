@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer, type AddressInfo, type Socket } from "node:net";
+import { connect, createServer, type AddressInfo, type Socket } from "node:net";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
-import { ApiError, createApp, type Env } from "../src/app.ts";
+import pg from "pg";
+import { ApiError, createApp, failureLog, type Env } from "../src/app.ts";
 import { createToken } from "../src/auth.ts";
-import { APP_ROLE, appRoleOf, FIRST_ORG_MIGRATION, openDb, versionProblem, type Db } from "../src/db.ts";
+import { APP_ROLE, appRoleOf, count, DB_COUNTS, FIRST_ORG_MIGRATION, misset, openDb, versionProblem, type Db } from "../src/db.ts";
 import { hostedProblems, reason } from "../src/run.ts";
 import { adminRuns, newOrg, renameTestDb, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
 
@@ -661,7 +662,11 @@ test("a database that never answers is given up on, at the start and when every 
   const { port } = silent.address() as AddressInfo;
   try {
     const began = Date.now();
-    await assert.rejects(openDb(`postgres://app@127.0.0.1:${port}/sessionly`, { connectMs: 300 }), /timeout/);
+    // Said with where the database is and how long it was given, and without the password.
+    await assert.rejects(
+      openDb(`postgres://app:hunter2@127.0.0.1:${port}/sessionly`, { connectMs: 300 }),
+      (err: Error) => err.message.startsWith(`The database at 127.0.0.1:${port} did not answer within 0.3 seconds (`) && !/hunter2/.test(err.message),
+    );
     assert.ok(Date.now() - began < 3000, `${Date.now() - began} ms`);
   } finally {
     for (const socket of taken) socket.destroy();
@@ -684,6 +689,233 @@ test("a database that never answers is given up on, at the start and when every 
   } finally {
     await pooled.close();
   }
+});
+
+/**
+ * Something between the server and the database that can go silent on the
+ * connections it has: what is sent on them goes nowhere and nothing comes
+ * back, and nothing says they are closed. New connections pass as before.
+ * That is how a failover can leave the old ones.
+ */
+async function silencer(url: string): Promise<{ url: string; silence(): number; close(): Promise<void> }> {
+  const to = new URL(url);
+  const open: { near: Socket; far: Socket; silent: boolean }[] = [];
+  const server = createServer((near) => {
+    const far = connect(Number(to.port || 5432), to.hostname);
+    const pair = { near, far, silent: false };
+    open.push(pair);
+    near.on("data", (data) => void (pair.silent || far.write(data)));
+    far.on("data", (data) => void (pair.silent || near.write(data)));
+    near.on("error", () => {});
+    far.on("error", () => {});
+    // A connection that went silent does not say that its other end closed either.
+    near.on("close", () => void (pair.silent || far.destroy()));
+    far.on("close", () => void (pair.silent || near.destroy()));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const through = new URL(url);
+  through.hostname = "127.0.0.1";
+  through.port = String((server.address() as AddressInfo).port);
+  return {
+    url: through.toString(),
+    silence() {
+      const live = open.filter((pair) => !pair.silent && !pair.near.destroyed);
+      for (const pair of live) pair.silent = true;
+      return live.length;
+    },
+    async close() {
+      for (const { near, far } of open) {
+        near.destroy();
+        far.destroy();
+      }
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+test("connections that go silent are given up on, and the server finds new ones by itself", async (t) => {
+  const direct = await testDbUrl();
+  if (direct === "memory://") return t.skip("needs a Postgres server (TEST_DATABASE_URL)");
+  const between = await silencer(direct);
+  // A statement may take 400 ms, and an answer is given up on a fifth later.
+  const pooled = await openDb(between.url, { pool: 3, queryMs: 400 });
+  const count = () => pooled.asOrg("default", (scoped) => scoped.query<{ n: unknown }>(`SELECT count(*) AS n FROM orgs`));
+  try {
+    // Every connection of the pool is open and unused.
+    await Promise.all([count(), count(), count()]);
+    assert.equal(between.silence(), 3);
+    // More requests than connections, through the pool and in transactions.
+    // Those that get an old connection fail once the wait is over; the rest
+    // are answered on new ones, and nobody restarted anything.
+    const began = Date.now();
+    const asked = await Promise.allSettled(
+      Array.from({ length: 12 }, (_, i) => (i % 2 ? pooled.query(`SELECT 1 AS n`) : count())),
+    );
+    const failed = asked.filter((each) => each.status === "rejected");
+    assert.equal(failed.length, 3, asked.map((each) => each.status).join(" "));
+    for (const each of failed) assert.match(String((each as PromiseRejectedResult).reason), /Query read timeout/);
+    assert.ok(Date.now() - began < 2000, `${Date.now() - began} ms`);
+    // From here on, as if nothing had happened.
+    const after = Date.now();
+    for (let i = 0; i < 6; i++) assert.equal(Number((await count())[0]?.n), 1);
+    assert.ok(Date.now() - after < 400, `${Date.now() - after} ms`);
+
+    // Silent in the middle of a transaction: its next statement is given up
+    // on once, not a second time to undo what cannot be reached.
+    const inside = Date.now();
+    await assert.rejects(
+      pooled.asOrg("default", async (scoped) => {
+        await scoped.query(`SELECT 1`);
+        between.silence();
+        return scoped.query(`SELECT 2`);
+      }),
+      /Query read timeout/,
+    );
+    assert.ok(Date.now() - inside < 900, `${Date.now() - inside} ms`);
+    // The other two went silent with it, unused. They are found the same way.
+    const again = await Promise.allSettled(Array.from({ length: 6 }, (_, i) => (i % 2 ? pooled.query(`SELECT 1 AS n`) : count())));
+    assert.equal(again.filter((each) => each.status === "rejected").length, 2);
+    assert.equal(Number((await count())[0]?.n), 1);
+    assert.deepEqual(await pooled.query(`SELECT 1 AS n`), [{ n: 1 }]);
+  } finally {
+    await pooled.close();
+    await between.close();
+  }
+});
+
+test("a statement that takes too long is ended by the database, and its connection is used again", async (t) => {
+  const url = await testDbUrl();
+  if (url === "memory://") return t.skip("needs a Postgres server (TEST_DATABASE_URL)");
+  const pooled = await openDb(url, { pool: 1, queryMs: 300 });
+  const connection = async () => (await pooled.transaction((tx) => tx.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`)))[0]?.pid;
+  try {
+    const before = await connection();
+    const began = Date.now();
+    await assert.rejects(
+      pooled.asOrg("default", (scoped) => scoped.query(`SELECT pg_sleep(5)`)),
+      (err: Error & { code?: string }) => err.code === "57014",
+    );
+    assert.ok(Date.now() - began < 360, `${Date.now() - began} ms: the database's limit comes before this side's`);
+    // The database said no, so the connection is as good as it was.
+    assert.equal(await connection(), before);
+    // One statement on its own has this side's limit, and its connection is not used again.
+    await assert.rejects(pooled.query(`SELECT pg_sleep(5)`), /Query read timeout/);
+    assert.notEqual(await connection(), before);
+    // A transaction left open and unused is ended by the database too.
+    await assert.rejects(
+      pooled.transaction(async (tx) => {
+        await tx.query(`SELECT 1`);
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        return tx.query(`SELECT 2`);
+      }),
+    );
+    // Bringing the database up to date is not limited: a large table takes what it takes.
+    await pooled.transaction((tx) => tx.query(`SELECT pg_sleep(0.7)`), { patient: true });
+    // And the limits are the transaction's own: none is left on the connection.
+    const [left] = await pooled.transaction(
+      (tx) => tx.query<{ statement: string; idle: string }>(
+        `SELECT current_setting('statement_timeout') AS statement, current_setting('idle_in_transaction_session_timeout') AS idle`,
+      ),
+      { patient: true },
+    );
+    assert.deepEqual(left, { statement: "0", idle: "0" });
+  } finally {
+    const error = console.error;
+    console.error = () => {};
+    await pooled.close();
+    console.error = error;
+  }
+});
+
+test("a connection that fails as the pool hands it to a waiting request is heard", async (t) => {
+  const url = await testDbUrl();
+  if (url === "memory://") return t.skip("needs a Postgres server (TEST_DATABASE_URL)");
+  // One connection, and a transaction waiting for it behind a statement.
+  // When the statement is done the pool takes its own listener off the
+  // connection and hands it over, and the transaction has not put its own
+  // on yet. An "error" at that moment is put there by hand here, since no
+  // amount of closing connections is sure to hit it. With nobody listening
+  // it is thrown, inside the pool, which ends a server: so that is looked
+  // at first, and the error is sent only if someone will hear it.
+  type Emitter = {
+    removeListener(name: string, listener: { name?: string }): unknown;
+    emit(name: string, err: Error): boolean;
+    listenerCount(name: string): number;
+  };
+  const client = pg.Client.prototype as unknown as Emitter;
+  const removeListener = client.removeListener;
+  let gaps = 0;
+  let unheard = 0;
+  let armed = false;
+  client.removeListener = function (this: Emitter, name, listener) {
+    const out = removeListener.call(this, name, listener);
+    if (armed && name === "error" && listener.name === "idleListener") {
+      gaps++;
+      if (this.listenerCount("error") === 0) unheard++;
+      else this.emit("error", new Error("closed between the pool and a request"));
+    }
+    return out;
+  };
+  const lost: string[] = [];
+  const error = console.error;
+  console.error = (line: string) => void lost.push(String(line));
+  const pooled = await openDb(url, { pool: 1 });
+  try {
+    const first = pooled.query(`SELECT pg_sleep(0.2)`);
+    const waiting = pooled.transaction((tx) => tx.query<{ n: number }>(`SELECT 1 AS n`));
+    // The statement has the connection by now: the next handing over is to the transaction.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    armed = true;
+    await first;
+    assert.deepEqual(await waiting, [{ n: 1 }]);
+    armed = false;
+    // The moment came once, someone was listening, and what was said was heard.
+    assert.equal(gaps, 1);
+    assert.equal(unheard, 0, "nobody was listening to the connection: an error then ends the server");
+    assert.deepEqual(lost, ["A database connection was lost: closed between the pool and a request"]);
+  } finally {
+    armed = false;
+    client.removeListener = removeListener;
+    console.error = error;
+    await pooled.close();
+  }
+});
+
+test("a setting that is a count is a whole number in plain digits, or is left out and said", () => {
+  assert.equal(count("10"), 10);
+  assert.equal(count(" 25 "), 25);
+  assert.equal(count("2147483647"), 2_147_483_647);
+  for (const not of [undefined, "", " ", "0", "-1", "0.5", "1.0", "1e3", "0x10", "0b11", "ten", "10 20", "2147483648", "99999999999", "Infinity"]) {
+    assert.equal(count(not), undefined, String(not));
+  }
+  assert.deepEqual(misset({ SESSIONLY_DB_POOL: "20", SESSIONLY_DB_QUERY_SECONDS: "60" }, DB_COUNTS), []);
+  assert.deepEqual(misset({ SESSIONLY_DB_POOL: "" }, DB_COUNTS), []);
+  const notes = misset({ SESSIONLY_DB_POOL: "0x10", SESSIONLY_DB_QUERY_SECONDS: "1e3" }, DB_COUNTS);
+  assert.equal(notes.length, 2);
+  assert.match(notes[0] ?? "", /^SESSIONLY_DB_POOL is "0x10", which is not a whole number above 0/);
+  assert.match(notes[1] ?? "", /^SESSIONLY_DB_QUERY_SECONDS is "1e3"/);
+});
+
+test("requests that all fail are written out a few at a time, with a count of the rest", () => {
+  const said: unknown[] = [];
+  let now = 1_000_000;
+  const failed = failureLog({ each: 2, ms: 10_000, say: (what) => void said.push(what), now: () => now });
+  const errors = Array.from({ length: 3000 }, (_, i) => new Error(`failed ${i}`));
+  for (const err of errors) failed(err);
+  // The first two as they are, and nothing of the other 2998 yet.
+  assert.deepEqual(said, errors.slice(0, 2));
+  now += 9_999;
+  failed(new Error("still within the ten seconds"));
+  assert.equal(said.length, 2);
+  // The next one after that says how many there were, and is written out itself.
+  now += 1;
+  const next = new Error("later");
+  failed(next);
+  assert.deepEqual(said.slice(2), ["2999 more requests failed in the 10 seconds before this, and are not written out.", next]);
+  // A quiet stretch leaves nothing to say.
+  now += 60_000;
+  failed(next);
+  assert.equal(said.length, 5);
 });
 
 test("why the database could not be opened is said, whatever shape the error has", () => {
