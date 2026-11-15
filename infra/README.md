@@ -115,6 +115,9 @@ All in `infra/.env`; `.env.example` describes each. The ones that decide who get
 | `SESSIONLY_SIGNUP_CODE` | If set, signing up needs this code as well: a waiting list, or invitations. |
 | `SESSIONLY_RATE_PER_MINUTE` | Requests one token may make a minute (default 600). |
 
+A setting that is a count (this one, the two below, `SESSIONLY_DB_POOL`) is a whole number
+above 0. Anything else is left out with a warning at the start, and the default applies.
+
 Limits that are not settings:
 
 - 5 requests for a link a minute from one caller (an IPv6 caller is its /64), and 20 looks at
@@ -126,8 +129,11 @@ Limits that are not settings:
   its address is spelt (`+tag`, and Gmail's dots).
 - A link to sign in is not sent again while one that was asked for still works (15 minutes).
   So asking in someone's name gets them four messages an hour at most, and cannot leave them
-  without a link that works. An address its owner has signed in with has an allowance of its
-  own; spellings of a mailbox that nobody has confirmed share one of 12 messages an hour.
+  without a link that works. Links to organisations someone has signed in to come out of an
+  allowance of their address's own, 12 messages an hour. Every other link to sign in (to an
+  organisation they were added to and never signed in to, or to a spelling of the mailbox
+  nobody confirmed) comes out of another 12 that the whole mailbox shares, so that being
+  added to other people's organisations cannot use up the links to one's own.
 - A message that could not be sent is not counted, and its link is forgotten, so the next
   ask sends at once.
 - 100 sign-up messages an hour in all (`SESSIONLY_SIGNUPS_PER_HOUR`). The server logs a
@@ -159,13 +165,16 @@ and only add things: to go back, run the version before.
 
 - **If the new copies do not come up** (within `SESSIONLY_UPDATE_WAIT` seconds, 180 unless
   set), it prints the last lines each one logged, removes them, and exits 1. The old copies
-  were never touched and go on answering.
-- **It can be run again from any state**: after a failure, or after a run that was cut short
-  with old and new copies both running. It tells old from new by what a copy is (its image
-  and its settings), not by when it started.
-- **It never removes a copy that is running** for not answering: only copies that have
-  stopped, and new ones of its own that did not come up. When the database is away, running
-  it changes nothing, and the copies there are answer again when the database is back.
+  were never touched and go on answering. Copies that stop at once fail it in seconds.
+- **It waits only for the copies it started itself**, and only those does it remove for not
+  answering. When the database is away, running it changes nothing, and the copies there are
+  answer again when the database is back.
+- **Once enough new copies answer, every other copy goes**: the ones of the version before,
+  and whatever an earlier run left behind, answering or not.
+- **It can be run again from any state**: after a failure, or after a run that was killed
+  with old and new copies both running, to the same version, the one before, or the next.
+  It tells old from new by what a copy is (its image and its settings), not by when it
+  started. Stopped with Ctrl-C, it removes what it started.
 - **A failed update does not undo migrations**, and old copies answer beside new ones while
   an update runs. So a migration must leave the version before it able to run: add, and
   remove only what the version before no longer reads.
@@ -205,11 +214,14 @@ and as one who may not (with the statement above run by an admin who is not a su
 signing up and connecting a machine against a local Postgres; and this stack on one machine,
 where `update.sh` was run while requests kept arriving:
 
-- replacing two copies, eight times: none of about 8,700 requests refused;
-- to copies that exit at once, to copies that run and never answer, and to an image that
-  cannot start, each twice in a row: exit 1, the old copies still answering, none refused;
-- again after a run killed part-way, with old and new copies both running: none refused;
-- from two copies to three and back; from nothing after `docker compose down`;
+- replacing two copies, eight times: none of about 7,000 requests refused;
+- to copies that exit at once and to copies that run and never answer: exit 1, the old
+  copies still answering, none refused;
+- killed outright (`kill -9`) while waiting for an image whose copies never answer, and then
+  run again to the same image (exit 1, nothing more left behind), to the image before, and
+  to a newer one (both exit 0, with what the killed run left removed): none refused;
+- killed part-way to a good image and run again; stopped part-way with a signal;
+- from two copies to three and back; from nothing;
 - a copy cut off from the database: Caddy stopped sending to it within its five seconds, and
   sent to it again once the database was back;
 - every copy cut off from the database, and `update.sh` run meanwhile: exit 1, both copies

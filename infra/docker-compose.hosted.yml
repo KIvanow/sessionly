@@ -50,8 +50,9 @@ services:
       retries: 6
       start_period: 20s
     restart: unless-stopped
-    # Stopping waits for requests in flight.
-    stop_grace_period: 30s
+    # Stopping waits for requests in flight, and for a message that is on
+    # its way out: up to 40 seconds for one that Resend keeps not answering.
+    stop_grace_period: 60s
 
   caddy:
     # A named release and the digest of its image, so that what runs in front

@@ -9,12 +9,15 @@
 #   ./update.sh --build    # build this checkout and run that
 #
 # If the new copies do not come up, they are removed and the old ones go on
-# answering: nothing has changed, and this exits 1. A copy that is running
-# is never removed for not answering, only replaced once its replacement
-# does: when the database is away for a while, the copies there are must
-# still be there when it is back. It can be run again from
-# wherever an earlier run stopped, cut short or not. A copy is old or new by
-# what it is (its image, and how it is set up), not by when it was started.
+# answering: nothing has changed, and this exits 1. Only the copies a run
+# starts are waited for, and only they are removed for not answering. Every
+# other copy stays until enough new ones answer, and then goes, whatever it
+# was and whether it answers or not: when the database is away for a while,
+# the copies there are must still be there when it is back, and what an
+# earlier run left half done is cleared away by the next one that works. So
+# it can be run again from wherever an earlier run stopped, however that run
+# ended. A copy is old or new by what it is (its image, and how it is set
+# up), not by when it was started.
 #
 # Caddy sends to the copies named in caddy/copies, which this writes. So
 # start, update and change the number of copies with this script and not
@@ -46,8 +49,8 @@ copies="${copies:-2}"
 # One line per copy of the server there is: its id and what it is.
 #   new      what it should be, and answering
 #   coming   what it should be and running, but not answering: still
-#            starting, or cut off from its database for now. Left alone: it
-#            may be all there is, and what would replace it fares no better.
+#            starting, cut off from its database for now, or left by a run
+#            that was killed
 #   old      something else, and running
 #   gone     not running, and so serving nobody
 survey() {
@@ -81,62 +84,90 @@ take_up() {
   [ -z "$(compose ps -q caddy)" ] || compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile > /dev/null 2>&1
 }
 
-for id in $(ids gone); do docker rm -f "$id" > /dev/null; done
-old="$(ids old)"
-old_count="$(echo $old | wc -w)"
-# The copies that already are what they should be, answering or about to.
-have_count="$(echo $(ids new) $(ids coming) | wc -w)"
-# Every copy there was before this run. Whatever fails, none of these is removed.
-before="$(compose ps -aq server)"
+# Wait for each copy given to answer. Fails once one of them has stopped,
+# keeps being restarted, or was found not answering after its time to start,
+# or when the time for all of them is up.
+await() {
+  until=$(($(date +%s) + patience))
+  while :; do
+    waiting=""
+    for id in "$@"; do
+      is="$(docker inspect --format \
+        '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}}' "$id" 2> /dev/null || echo gone)"
+      case "$is" in
+        "running healthy "*) ;;
+        "running starting "[012] | "restarting starting "[012] | "created "*) waiting="$waiting $id" ;;
+        *) return 1 ;;
+      esac
+    done
+    [ -n "$waiting" ] || return 0
+    [ "$(date +%s)" -lt "$until" ] || return 1
+    sleep 1
+  done
+}
 
-if [ "$old_count" -gt 0 ] || [ "$have_count" -lt "$copies" ] || [ -n "$(ids coming)" ]; then
-  # The new ones start beside the old, which keep answering meanwhile.
-  # Whichever new one is first brings the database up to date. This also
-  # waits for a copy that was not answering yet.
-  wanted=$copies
-  [ "$have_count" -gt "$wanted" ] && wanted=$have_count
-  if ! compose up -d --no-deps --no-recreate --scale "server=$((old_count + wanted))" \
-    --wait --wait-timeout "$patience" server; then
+for id in $(ids gone); do docker rm -f "$id" > /dev/null; done
+# Every copy there is before this run. Whatever fails, none of these is removed.
+before="$(compose ps -aq server)"
+# The ones that already are what they should be, and answer.
+keep="$(ids new | head -n "$copies")"
+missing=$((copies - $(echo $keep | wc -w)))
+
+if [ "$missing" -gt 0 ]; then
+  # The new ones start beside whatever is there, which keeps answering
+  # meanwhile. Whichever new one is first brings the database up to date.
+  started=""
+  # Stopped by hand, this takes back what it started. (Killed outright it
+  # cannot, and the next run that works clears up.)
+  undo() {
+    for id in $started; do docker rm -f "$id" > /dev/null 2>&1 || true; done
+  }
+  trap 'undo; exit 1' INT TERM HUP
+  compose up -d --no-deps --no-recreate --scale "server=$(($(echo $before | wc -w) + missing))" server
+  for id in $(compose ps -aq server); do
+    case " $(echo $before) " in *" $id "*) ;; *) started="$started $id" ;; esac
+  done
+  # shellcheck disable=SC2086
+  if ! await $started; then
     echo >&2
-    echo "Not every copy of the server came up. The last each one that is not answering said:" >&2
-    for id in $(ids coming) $(ids gone); do
+    echo "Not every new copy of the server came up. The last each one that is not answering said:" >&2
+    for id in $started; do
+      case " $(ids new | tr '\n' ' ') " in *" $id "*) continue ;; esac
       echo "--- $id" >&2
       docker logs --tail 20 "$id" >&2 2>&1 || true
-      # A copy this run started goes. One that was there before stays, to
-      # answer again when whatever it is waiting for is back.
-      case " $(echo $before) " in *" $id "*) ;; *) docker rm -f "$id" > /dev/null || true ;; esac
     done
+    undo
     echo >&2
-    echo "The copies this run started that did not come up have been removed. The $(echo $before | wc -w) there were before are as they were; nothing else was changed." >&2
+    echo "The copies this run started have been removed. The $(echo $before | wc -w) there were before are as they were; nothing else was changed." >&2
     exit 1
   fi
-
-  # Caddy sends to the new ones from here on. If it cannot be told, the old
-  # ones stay: both go on running until this is run again.
-  # shellcheck disable=SC2046
-  list $(ids new)
-  if ! take_up; then
-    echo "Caddy did not take up the new copies (docker compose logs caddy). The old ones are still answering; run this again." >&2
-    exit 1
-  fi
-
-  # The old ones finish what they are answering and go.
-  for id in $old; do
-    docker stop "$id" > /dev/null
-    docker rm "$id" > /dev/null
-  done
+  trap - INT TERM HUP
+  keep="$keep $started"
 fi
 
-# Every copy is now what it should be, so this leaves them alone and settles
-# their number. Caddy is started if it was not running, and made anew if its
-# image or its part of the compose file changed, which closes the front door
-# for the few seconds that takes.
-# shellcheck disable=SC2046
-[ -e caddy/copies ] || list $(ids new)
-compose up -d --scale "server=$copies" --wait --wait-timeout "$patience"
-# The copies there are now, if their number was just settled, and whatever
-# changed in the Caddyfile.
-# shellcheck disable=SC2046
-list $(ids new)
+# Caddy sends to those from here on. If it cannot be told, nothing is
+# removed: every copy goes on running until this is run again.
+# shellcheck disable=SC2086
+list $keep
+if ! take_up; then
+  echo "Caddy did not take up the new copies (docker compose logs caddy). The old ones are still answering; run this again." >&2
+  exit 1
+fi
+
+# Every other copy goes: the ones of another version, the ones an earlier
+# run left that never answered, and those there are too many of. One that
+# answers finishes what it is answering first.
+for id in $(compose ps -aq server); do
+  case " $(echo $keep) " in *" $id "*) continue ;; esac
+  if [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$id")" = healthy ]; then
+    docker stop "$id" > /dev/null
+  fi
+  docker rm -f "$id" > /dev/null
+done
+
+# Caddy is started if it was not running, and made anew if its image or its
+# part of the compose file changed, which closes the front door for the few
+# seconds that takes. A change to the Caddyfile alone it only reads again.
+compose up -d --no-deps --wait --wait-timeout "$patience" caddy
 take_up || echo "Caddy did not take up its Caddyfile; see: docker compose logs caddy" >&2
 compose ps
