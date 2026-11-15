@@ -50,4 +50,5 @@ export async function giveBack(db: Queryable, taken: Taken): Promise<void> {
 export async function tidy(db: Queryable): Promise<void> {
   await db.query(`DELETE FROM rate_counters WHERE window_start < now() - interval '2 hours'`);
   await db.query(`DELETE FROM sign_in_codes WHERE expires_at < now()`);
+  await db.query(`DELETE FROM sign_in_states WHERE expires_at < now()`);
 }

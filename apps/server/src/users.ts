@@ -73,9 +73,14 @@ export async function addUser(
   // organisation they made.
   const invitedBy = by.signedIn ? by.email : null;
   const invitedVia = by.signedIn ? "sign_in" : "token";
+  // Someone brought back is added anew: asked before they sign in here
+  // again, and let in with whichever account they then come with. That is
+  // how an admin lets a person in who has changed accounts.
   const rows = existing
     ? await db.query(
-        `UPDATE users SET removed_at = NULL, role = $3, invited_by = $4, invited_via = $5 WHERE org_id = $1 AND id = $2
+        `UPDATE users SET removed_at = NULL, role = $3, invited_by = $4, invited_via = $5, created_at = now(),
+                          confirmed_at = NULL, sign_in_provider = NULL, sign_in_account = NULL
+         WHERE org_id = $1 AND id = $2
          RETURNING id, email, role, created_at, removed_at`,
         [db.orgId, existing.id, role, invitedBy, invitedVia],
       )

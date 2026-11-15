@@ -4,11 +4,12 @@
 // token.
 //
 // The browser is sent to the provider and comes back with the provider's
-// answer. What the provider says of the person (which addresses are theirs)
-// is kept for a few minutes under a code, and the dashboard is handed the
-// code in the part of the address after "#", which browsers do not send to
-// servers, so it reaches no access log. Only the code's hash is stored, and
-// it works once.
+// answer. What the provider says of the person (which account this is, and
+// which addresses are its) is kept for a few minutes under a code. The code
+// is given to the browser that came back and to nothing else: in a cookie
+// that scripts cannot read and that only this host is sent. It is in no
+// address, so it cannot be passed on in a link, and is in no history and no
+// log. Only its hash is stored, and it works once.
 import { randomBytes } from "node:crypto";
 import { isIPv4, isIPv6 } from "node:net";
 import { domainToASCII } from "node:url";
@@ -19,13 +20,29 @@ import { getConnInfo } from "@hono/node-server/conninfo";
 import { hash, issueToken, sameSecret, type Role } from "./auth.ts";
 import type { Db, Queryable } from "./db.ts";
 import { allowed, giveBack, take, type Taken } from "./limits.ts";
-import { challengeOf, PROVIDER_NAMES, type Provider, type ProviderName } from "./oauth.ts";
+import {
+  challengeOf,
+  errorWord,
+  isSetupWord,
+  PROVIDER_LABELS as LABELS,
+  PROVIDER_NAMES,
+  ProviderProblem,
+  type Person,
+  type Provider,
+  type ProviderName,
+} from "./oauth.ts";
 
 /** How long a token from signing in lasts. */
 export const SIGN_IN_DAYS = 7;
 
-/** Someone is shown at most this many organisations to sign in to. */
-const MAX_ORGS = 10;
+/** Someone is shown at most this many organisations they have signed in to before. */
+const MAX_ORGS = 50;
+
+/** Organisations someone was added to and has not signed in to yet are shown this many at a time, newest first. */
+export const INVITATIONS_SHOWN = 10;
+
+/** Sign-ins one browser may have under way at once, each begun and not yet come back from. */
+const MAX_UNDER_WAY = 5;
 
 /** At most this many of the addresses a provider vouches for are looked at. */
 const MAX_ADDRESSES = 20;
@@ -62,6 +79,13 @@ const MAX_BODY_BYTES = 16 * 1024;
 
 /** Organisations one address may create an hour. */
 export const ORGS_PER_ADDRESS = 5;
+
+/**
+ * Organisations one person may be the owner of, in all: counted by their
+ * address and by the account they signed in with. The hourly counts alone
+ * let one account make over a hundred a day, for as long as it likes.
+ */
+export const ORGS_PER_PERSON = 20;
 
 /**
  * Organisations created an hour from one network (a /24, or a /48 of IPv6),
@@ -211,13 +235,18 @@ export function newUserId(): string {
   return `usr_${Array.from(randomBytes(14), (byte) => ALPHABET[byte % ALPHABET.length]).join("")}`;
 }
 
-/** Keep what a provider said of someone who has just come back from it. Returns the code the dashboard is handed. */
-async function arrived(db: Queryable, provider: ProviderName, emails: string[]): Promise<string> {
+/** What a provider said of someone who has just come back from it. */
+interface Arrival extends Person {
+  provider: ProviderName;
+}
+
+/** Keep it. Returns the code the browser is given. */
+async function arrived(db: Queryable, { provider, account, emails }: Arrival): Promise<string> {
   const secret = randomBytes(32).toString("base64url");
   await db.query(
-    `INSERT INTO sign_in_codes (code_hash, provider, emails, expires_at)
-     VALUES ($1, $2, $3::text[], now() + make_interval(mins => $4::int))`,
-    [hash(secret), provider, emails, CODE_MINUTES],
+    `INSERT INTO sign_in_codes (code_hash, provider, account, emails, expires_at)
+     VALUES ($1, $2, $3, $4::text[], now() + make_interval(mins => $5::int))`,
+    [hash(secret), provider, account, emails, CODE_MINUTES],
   );
   return secret;
 }
@@ -233,34 +262,55 @@ interface Membership {
   first_time: boolean;
   invited_by: string | null;
   invited_via: string | null;
+  /**
+   * Set if someone signed in to it before with another account than this
+   * one: that account's provider. Only that account gets in.
+   */
+  other_account: ProviderName | null;
 }
 
-/**
- * Where the holder of these addresses can sign in. Organisations they have
- * signed in to come first: anyone can add anyone's address to an
- * organisation of their own, and being added to many must not push out of
- * the list the ones a person is really in.
- */
-async function membershipsOf(db: Queryable, emails: string[]): Promise<Membership[]> {
-  const rows = await db.query<Membership>(
-    `SELECT u.id AS user_id, u.org_id, o.name AS org_name, u.email, u.confirmed_at IS NULL AS first_time,
-            u.invited_by, u.invited_via
+const MEMBERSHIP = `SELECT u.id AS user_id, u.org_id, o.name AS org_name, u.email, u.confirmed_at IS NULL AS first_time,
+            u.invited_by, u.invited_via,
+            CASE WHEN u.sign_in_account IS NOT NULL AND (u.sign_in_provider <> $2 OR u.sign_in_account <> $3)
+                 THEN u.sign_in_provider END AS other_account
      FROM users u JOIN orgs o ON o.id = u.org_id
-     WHERE u.email = ANY($1::text[]) AND u.removed_at IS NULL AND o.deleted_at IS NULL
-     ORDER BY u.confirmed_at IS NULL, u.created_at, u.id LIMIT ${MAX_ORGS}`,
-    [emails],
+     WHERE u.email = ANY($1::text[]) AND u.removed_at IS NULL AND o.deleted_at IS NULL`;
+
+/**
+ * Where this person can sign in. First the organisations someone has signed
+ * in to under these addresses. Then, from the `shown`th on, the ones they
+ * were added to and have not signed in to: the newest first and a few at a
+ * time, with how many there are beyond those. Anyone can add anyone's
+ * address to an organisation of their own. Being added to many must not
+ * push out of the list the ones a person is really in, nor the one they
+ * were just told about, and what was put there to hide it can be paged past.
+ */
+async function membershipsOf(db: Queryable, who: Arrival, shown = 0): Promise<{ orgs: Membership[]; more: number }> {
+  const person = [who.emails, who.provider, who.account];
+  const known = shown
+    ? []
+    : await db.query<Membership>(
+        `${MEMBERSHIP} AND u.confirmed_at IS NOT NULL ORDER BY u.created_at, u.id LIMIT ${MAX_ORGS}`,
+        person,
+      );
+  const added = await db.query<Membership & { in_all: unknown }>(
+    `${MEMBERSHIP.replace("SELECT ", "SELECT count(*) OVER () AS in_all, ")} AND u.confirmed_at IS NULL
+     ORDER BY u.created_at DESC, u.id LIMIT ${INVITATIONS_SHOWN} OFFSET $4::int`,
+    [...person, shown],
   );
+  const inAll = added.length ? Number(added[0]?.in_all) : shown;
   // A name is not enough to tell an organisation by: anyone can make
   // another of the same name. So also its id, which is its own, and for
   // someone who has not signed in to it before, who added them: if that
   // was a person who had signed in, whose address is then theirs. Someone
   // added with a token is told that much and no address, since a token's
   // address and name are whatever its maker typed.
-  return rows.map((row) => ({
+  const orgs = [...known, ...added].map(({ in_all: _, ...row }: Membership & { in_all?: unknown }) => ({
     ...row,
     invited_by: row.first_time && row.invited_via === "sign_in" ? row.invited_by : null,
     invited_via: row.first_time ? row.invited_via : null,
   }));
+  return { orgs, more: Math.max(0, inAll - shown - added.length) };
 }
 
 /** The token role someone signs in with: an owner can do what an admin can. */
@@ -315,18 +365,39 @@ type Problem =
   | "not_started"
   /** The provider did not answer, or not with what was asked. */
   | "provider"
+  /** The provider says this server is not set up right with it. */
+  | "setup"
   /** The provider vouches for no address of theirs. */
   | "no_address"
   | "busy";
+
+/** Thrown inside a transaction to undo it, the code's use included, and answer with this. */
+class Refused extends Error {
+  code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+
 
 /** The routes under /api/v1/auth that need no token. */
 export function openRoutes(db: Db, accounts: Accounts): Hono {
   const open = new Hono();
   const home = accounts.publicUrl?.replace(/\/+$/, "");
   const secure = home?.startsWith("https://") === true;
-  // Under this name a browser takes the cookie only from this very host,
+  // Under this prefix a browser takes a cookie only from this very host,
   // over HTTPS: a neighbouring site of the same domain cannot plant one.
-  const cookie = secure ? "__Host-sessionly-signin" : "sessionly-signin";
+  const prefix = secure ? "__Host-" : "";
+  // One for each sign-in that is under way, named after its `state`, so
+  // that two tabs do not undo each other and a request that is not the way
+  // back from a provider touches none of them.
+  const leaving = `${prefix}sessionly-signin-`;
+  const leavingAs = (state: string) => `${leaving}${hash(state).slice(0, 16)}`;
+  // And one for whoever has come back, until they have said where to.
+  const arrivedAs = `${prefix}sessionly-arrived`;
+  const ours = { httpOnly: true, secure, sameSite: "Lax", path: "/" } as const;
   const providerOf = (name: ProviderName) => (home ? accounts.providers?.find((provider) => provider.name === name) : undefined);
   const redirectUri = (provider: ProviderName) => `${home}/api/v1/auth/${provider}/callback`;
   const tooMany = (c: Context) => c.json({ error: "too many requests; try again in a minute", code: "rate_limited" }, 429);
@@ -362,45 +433,77 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     const verifier = randomBytes(32).toString("base64url");
     // What they came for is theirs to say, and decides only which page they land on.
     const wants = c.req.query("create") === undefined ? "in" : "new";
-    setCookie(c, cookie, [provider.name, state, verifier, wants].join("."), {
-      httpOnly: true,
-      secure,
-      sameSite: "Lax",
-      path: "/",
-      maxAge: AWAY_MINUTES * 60,
-    });
+    // Each start leaves a cookie for ten minutes. Past a few, the earlier
+    // ones go: a browser sent here over and over would otherwise carry more
+    // of them than a request may.
+    const underWay = Object.keys(getCookie(c)).filter((each) => each.startsWith(leaving));
+    if (underWay.length >= MAX_UNDER_WAY) for (const each of underWay) deleteCookie(c, each, { path: "/", secure });
+    setCookie(c, leavingAs(state), [provider.name, state, verifier, wants].join("."), { ...ours, maxAge: AWAY_MINUTES * 60 });
     return c.redirect(
       provider.authorizeUrl({ redirectUri: redirectUri(provider.name), state, challenge: challengeOf(verifier) }),
     );
   };
 
+  /** The code this browser was given when it came back, and what it came for. */
+  const held = (c: Context) => {
+    const [code, wants] = getCookie(c, arrivedAs)?.split(".") ?? [];
+    return code && code.length <= 200 ? { code, create: wants === "new" } : null;
+  };
+  const forget = (code: string) => db.query(`DELETE FROM sign_in_codes WHERE code_hash = $1`, [hash(code)]);
+
   // Back from the provider.
   const comeBack = (name: ProviderName) => async (c: Context) => {
     const provider = providerOf(name);
     if (!provider) return notSetUp(c);
-    const [left, state, verifier, wants] = getCookie(c, cookie)?.split(".") ?? [];
+    // Only the browser that left is taken back: the one that has the cookie
+    // of this `state`. Otherwise a link to this address, with a code of the
+    // sender's own, would sign whoever opened it in as the sender. A request
+    // that shows no such cookie changes nothing: any site can make a
+    // browser ask for this address, and that must not end a sign-in that
+    // is under way.
+    const shown = c.req.query("state") ?? "";
+    const cookie = shown && shown.length <= 200 ? leavingAs(shown) : "";
+    const [left, state, verifier, wants] = (cookie ? getCookie(c, cookie) : undefined)?.split(".") ?? [];
+    if (left !== provider.name || !state || !verifier || !sameSecret(shown, state)) return back(c, "not_started");
+    if (!(await perMinute(c, "auth-return", 20))) return back(c, "busy");
+    // This sign-in is over, however it ends, and comes back once.
     deleteCookie(c, cookie, { path: "/", secure });
-    // Only the browser that left is taken back. Otherwise a link to this
-    // address, with a code of the sender's own, would sign whoever opened
-    // it in as the sender.
-    if (left !== provider.name || !state || !verifier || !sameSecret(c.req.query("state") ?? "", state)) {
-      return back(c, "not_started");
+    const first = await db.query(
+      `INSERT INTO sign_in_states (state_hash, expires_at) VALUES ($1, now() + make_interval(mins => $2::int))
+       ON CONFLICT DO NOTHING RETURNING 1 AS first`,
+      [hash(state), AWAY_MINUTES],
+    );
+    if (!first.length) return back(c, "not_started");
+    const said = c.req.query("error");
+    if (said === "access_denied") return back(c, "refused");
+    if (said !== undefined) {
+      // In its own word and no more: the rest of what it sends is not for a log.
+      const word = errorWord(said);
+      console.error(
+        `signing in with ${LABELS[provider.name]}: it sent someone back with ${word ? `"${word}"` : "an error it did not name plainly"}`,
+      );
+      return back(c, isSetupWord(word) ? "setup" : "provider");
     }
     const code = c.req.query("code") ?? "";
-    if (c.req.query("error") === "access_denied") return back(c, "refused");
     if (!code || code.length > 2048) return back(c, "provider");
-    if (!(await perMinute(c, "auth-return", 20))) return back(c, "busy");
-    let emails: string[];
+    let person: Person;
     try {
-      const vouched = await provider.addresses({ code, redirectUri: redirectUri(provider.name), verifier });
-      emails = [...new Set(vouched.map(emailFrom).filter((email) => email !== null))].slice(0, MAX_ADDRESSES);
+      const vouched = await provider.who({ code, redirectUri: redirectUri(provider.name), verifier });
+      const emails = [...new Set(vouched.emails.map(emailFrom).filter((email) => email !== null))].slice(0, MAX_ADDRESSES);
+      person = { account: vouched.account, emails };
     } catch (err) {
-      console.error(`signing in with ${provider.name} failed: ${err instanceof Error ? err.message : err}`);
-      return back(c, "provider");
+      console.error(`signing in with ${LABELS[provider.name]} failed: ${err instanceof Error ? err.message : err}`);
+      return back(c, err instanceof ProviderProblem && isSetupWord(err.word) ? "setup" : "provider");
     }
-    if (!emails.length) return back(c, "no_address");
-    const secret = await arrived(db, provider.name, emails);
-    return c.redirect(`${home}/#${wants === "new" ? "create" : "login"}=${secret}`);
+    if (!person.account || person.account.length > 200) return back(c, "provider");
+    if (!person.emails.length) return back(c, "no_address");
+    // A sign-in this browser came back from earlier and did nothing with is over.
+    const earlier = held(c);
+    if (earlier) await forget(earlier.code);
+    const secret = await arrived(db, { provider: provider.name, ...person });
+    setCookie(c, arrivedAs, `${secret}.${wants === "new" ? "new" : "in"}`, { ...ours, maxAge: CODE_MINUTES * 60 });
+    // Nothing of it in the address: the page asks, and the cookie answers.
+    return c.redirect(`${home}/#signed-in`);
   };
 
   // Each by its own name: whether or not it is set up here, the address is
@@ -410,17 +513,15 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     open.get(`/${name}/callback`, comeBack(name));
   }
 
-  const invalid = (c: Context) =>
-    c.json({ error: "that sign-in has run out or was used already; sign in again", code: "invalid_code" }, 400);
-  const codeOf = (sent: Record<string, unknown>) => {
-    const code = text(sent.code);
-    return code && code.length <= 200 ? code : null;
+  const invalid = (c: Context) => {
+    deleteCookie(c, arrivedAs, { path: "/", secure });
+    return c.json({ error: "that sign-in has run out or was used already; sign in again", code: "invalid_code" }, 400);
   };
   /** What a code stands for, without using it. */
   const stored = async (code: string) =>
     (
-      await db.query<{ provider: ProviderName; emails: string[] }>(
-        `SELECT provider, emails FROM sign_in_codes WHERE code_hash = $1 AND expires_at > now()`,
+      await db.query<Arrival>(
+        `SELECT provider, account, emails FROM sign_in_codes WHERE code_hash = $1 AND expires_at > now()`,
         [hash(code)],
       )
     )[0];
@@ -428,13 +529,26 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
   // Who the provider said this is, and where they can sign in, without
   // using the code: the dashboard shows it and asks. Being added to an
   // organisation is someone else's doing, and must not sign anyone in to a
-  // place they did not choose.
+  // place they did not choose. The code is the one in this browser's
+  // cookie: one from anywhere else, in the request or in another browser's
+  // cookie, is nobody's here.
   open.post("/check", async (c) => {
     if (!(await perMinute(c, "auth-verify", 20))) return tooMany(c);
-    const code = codeOf(await body(c));
-    const found = code ? await stored(code) : undefined;
-    if (!found) return invalid(c);
-    return c.json({ provider: found.provider, emails: found.emails, orgs: await membershipsOf(db, found.emails) });
+    const mine = held(c);
+    const found = mine ? await stored(mine.code) : undefined;
+    if (!mine || !found) return invalid(c);
+    const shown = Number((await body(c)).shown ?? 0);
+    if (!Number.isInteger(shown) || shown < 0 || shown > 100_000) return c.json({ error: "shown must be a whole number" }, 400);
+    return c.json({ provider: found.provider, emails: found.emails, create: mine.create, ...(await membershipsOf(db, found, shown)) });
+  });
+
+  // "Not now": the sign-in is over, here and in this browser.
+  open.post("/cancel", async (c) => {
+    if (!(await perMinute(c, "auth-verify", 20))) return tooMany(c);
+    const mine = held(c);
+    if (mine) await forget(mine.code);
+    deleteCookie(c, arrivedAs, { path: "/", secure });
+    return c.json({ ok: true });
   });
 
   // Use the code, once: to sign in to an organisation (`user_id`, as
@@ -442,33 +556,69 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
   open.post("/verify", async (c) => {
     if (!(await perMinute(c, "auth-verify", 20))) return tooMany(c);
     const sent = await body(c);
-    const code = codeOf(sent);
-    if (!code) return invalid(c);
+    const code = held(c)?.code ?? "";
     const used = (tx: Queryable) =>
       tx
-        .query<{ provider: ProviderName; emails: string[] }>(
-          `DELETE FROM sign_in_codes WHERE code_hash = $1 AND expires_at > now() RETURNING provider, emails`,
+        .query<Arrival>(
+          `DELETE FROM sign_in_codes WHERE code_hash = $1 AND expires_at > now() RETURNING provider, account, emails`,
           [hash(code)],
         )
         .then((rows) => rows[0]);
+    /** Signed in: the code is used, and this browser no longer has it. */
+    const done = (signed: SignedIn) => {
+      deleteCookie(c, arrivedAs, { path: "/", secure });
+      return c.json(signed);
+    };
+    /** Said no for a reason that leaves the code as it was, to choose again with. */
+    const refusal = (err: unknown, status: 403 | 409) => {
+      if (!(err instanceof Refused)) throw err;
+      return c.json({ error: err.message, code: err.code }, status);
+    };
 
     if (sent.org_name === undefined) {
       const userId = text(sent.user_id);
       if (!userId) return c.json({ error: "say where: user_id to sign in, or org_name to create an organisation" }, 400);
-      const signed = await db.transaction(async (tx) => {
-        const found = await used(tx);
-        if (!found) return null;
-        // Theirs only under an address the provider vouched for.
-        const [user] = await tx.query<{ id: string; org_id: string; org_name: string; email: string; role: string }>(
-          `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.role FROM users u JOIN orgs o ON o.id = u.org_id
-           WHERE u.id = $1 AND u.email = ANY($2::text[]) AND u.removed_at IS NULL AND o.deleted_at IS NULL`,
-          [userId, found.emails],
-        );
-        if (!user) return null;
-        await tx.query(`UPDATE users SET confirmed_at = now() WHERE id = $1 AND confirmed_at IS NULL`, [user.id]);
-        return signIn(tx, user, found.provider, false);
-      });
-      return signed ? c.json(signed) : invalid(c);
+      if (!code) return invalid(c);
+      try {
+        const signed = await db.transaction(async (tx) => {
+          const found = await used(tx);
+          if (!found) return null;
+          // Theirs only under an address the provider vouched for.
+          const [user] = await tx.query<{
+            id: string;
+            org_id: string;
+            org_name: string;
+            email: string;
+            role: string;
+            sign_in_provider: ProviderName | null;
+            sign_in_account: string | null;
+          }>(
+            `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.role, u.sign_in_provider, u.sign_in_account
+             FROM users u JOIN orgs o ON o.id = u.org_id
+             WHERE u.id = $1 AND u.email = ANY($2::text[]) AND u.removed_at IS NULL AND o.deleted_at IS NULL
+             FOR UPDATE OF u`,
+            [userId, found.emails],
+          );
+          if (!user) return null;
+          // And only with the account that signed in to it first. A provider
+          // goes on vouching for an address after its mailbox has passed to
+          // someone else; the account's own number does not pass with it.
+          if (user.sign_in_account !== null && (user.sign_in_provider !== found.provider || user.sign_in_account !== found.account)) {
+            throw new Refused(
+              "other_account",
+              `this organisation was signed in to before with another ${LABELS[user.sign_in_provider ?? found.provider]} account; sign in with that one, or ask an admin there to remove you and add you again`,
+            );
+          }
+          await tx.query(
+            `UPDATE users SET confirmed_at = coalesce(confirmed_at, now()), sign_in_provider = $2, sign_in_account = $3 WHERE id = $1`,
+            [user.id, found.provider, found.account],
+          );
+          return signIn(tx, user, found.provider, false);
+        });
+        return signed ? done(signed) : invalid(c);
+      } catch (err) {
+        return refusal(err, 403);
+      }
     }
 
     // Signing up. What can be said without the code is said first, so that
@@ -479,7 +629,7 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     if (accounts.signupCode && !sameSecret(text(sent.invite_code), accounts.signupCode)) {
       return c.json({ error: "signing up needs an invitation code", code: "invite_required" }, 403);
     }
-    const owner = (await stored(code))?.emails[0];
+    const owner = code ? (await stored(code))?.emails[0] : undefined;
     if (!owner) return invalid(c);
     // An organisation costs its maker nothing, so there are only so many an
     // hour: from one network, by one address, and in all. What is counted
@@ -508,28 +658,42 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
       return limited("too many people are signing up right now; try again in an hour", "signups_busy");
     }
     // The organisation, its owner and their token, or none of them.
-    const signed = await db.transaction(async (tx) => {
-      const found = await used(tx);
-      const email = found?.emails[0];
-      if (!found || !email) return null;
-      await tx.query(`SELECT pg_advisory_xact_lock(hashtext('sessionly-signup'))`);
-      let orgId = orgIdFor(orgName);
-      while ((await tx.query(`SELECT 1 FROM orgs WHERE id = $1`, [orgId])).length) orgId = orgIdFor(orgName);
-      await tx.query(`INSERT INTO orgs (id, name) VALUES ($1, $2)`, [orgId, orgName]);
-      const user = { id: newUserId(), org_id: orgId, org_name: orgName, email, role: "owner" };
-      await tx.query(`INSERT INTO users (id, org_id, email, role, confirmed_at) VALUES ($1, $2, $3, $4, now())`, [
-        user.id,
-        user.org_id,
-        user.email,
-        user.role,
-      ]);
-      return signIn(tx, user, found.provider, true);
-    });
-    if (!signed) {
+    try {
+      const signed = await db.transaction(async (tx) => {
+        const found = await used(tx);
+        const email = found?.emails[0];
+        if (!found || !email) return null;
+        await tx.query(`SELECT pg_advisory_xact_lock(hashtext('sessionly-signup'))`);
+        // Under the lock, so that the count is of what is there.
+        const [owned] = await tx.query<{ n: unknown }>(
+          `SELECT count(*) AS n FROM users u JOIN orgs o ON o.id = u.org_id
+           WHERE u.role = 'owner' AND u.removed_at IS NULL AND o.deleted_at IS NULL
+             AND (u.email = ANY($1::text[]) OR (u.sign_in_provider = $2 AND u.sign_in_account = $3))`,
+          [found.emails, found.provider, found.account],
+        );
+        if (Number(owned?.n) >= ORGS_PER_PERSON) {
+          throw new Refused("too_many_orgs", `one person can own ${ORGS_PER_PERSON} organisations at most, and you own that many`);
+        }
+        let orgId = orgIdFor(orgName);
+        while ((await tx.query(`SELECT 1 FROM orgs WHERE id = $1`, [orgId])).length) orgId = orgIdFor(orgName);
+        await tx.query(`INSERT INTO orgs (id, name) VALUES ($1, $2)`, [orgId, orgName]);
+        const user = { id: newUserId(), org_id: orgId, org_name: orgName, email, role: "owner" };
+        await tx.query(
+          `INSERT INTO users (id, org_id, email, role, confirmed_at, sign_in_provider, sign_in_account)
+           VALUES ($1, $2, $3, $4, now(), $5, $6)`,
+          [user.id, user.org_id, user.email, user.role, found.provider, found.account],
+        );
+        return signIn(tx, user, found.provider, true);
+      });
+      if (!signed) {
+        for (const each of counted) await giveBack(db, each);
+        return invalid(c);
+      }
+      return done(signed);
+    } catch (err) {
       for (const each of counted) await giveBack(db, each);
-      return invalid(c);
+      return refusal(err, 409);
     }
-    return c.json(signed);
   });
 
   return open;

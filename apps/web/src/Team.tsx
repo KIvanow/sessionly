@@ -137,7 +137,8 @@ function People({ token, onSignOut }: { token: string; onSignOut: () => void }) 
       <h2>People</h2>
       <p className="muted">
         People sign in with a Google or GitHub account that has the address they were added under, and connect
-        their own machines from the Connect page.
+        their own machines from the Connect page. The account someone first signs in with is from then on the
+        only one that gets in as them here: to let them in with another, remove them and add them again.
         Members see their own sessions; admins see everyone's and manage this page.
       </p>
       <form className="inline" onSubmit={add}>

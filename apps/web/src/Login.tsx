@@ -63,8 +63,8 @@ export function Login({
         )}
         {mode === "sign-in" && (
           <p className="muted">
-            No password is kept here. All that is asked of {providers.map((p) => PROVIDERS[p]).join(" or ")} is which
-            email addresses are yours.
+            No password is kept here. What is asked of {providers.map((p) => PROVIDERS[p]).join(" or ")} is which
+            account this is and which email addresses are its.
           </p>
         )}
         {mode === "create" && (

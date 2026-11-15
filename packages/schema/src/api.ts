@@ -58,6 +58,12 @@ export interface Membership {
    * which says nothing of who held it. Null if that was not recorded.
    */
   invited_via: "sign_in" | "token" | null;
+  /**
+   * Set if this organisation was signed in to before with another account
+   * than the one just signed in with: the provider of that account. Only
+   * that account gets in.
+   */
+  other_account: SignInProvider | null;
 }
 
 /** Who a provider said someone is, and where they can sign in (`/auth/check`). */
@@ -65,7 +71,16 @@ export interface Arrival {
   provider: SignInProvider;
   /** The addresses the provider vouches for, the main one first. */
   emails: string[];
+  /** They came to create an organisation. */
+  create: boolean;
+  /**
+   * The organisations they have signed in to before, and then the ones they
+   * were added to and have not, newest first: a few of those at a time,
+   * from the `shown`th on that was asked for (when it is not 0, only those).
+   */
   orgs: Membership[];
+  /** How many more they were added to, beyond the ones listed. */
+  more: number;
 }
 
 /** What signing in to an organisation, or creating one, gives (`/auth/verify`). */

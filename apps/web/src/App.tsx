@@ -12,7 +12,8 @@ import {
   saveToken,
   type Saved,
 } from "./api.ts";
-import { Arrived, type Where } from "./Arrived.tsx";
+import { arrive, doors, landingOf } from "./arrival.ts";
+import { Arrived } from "./Arrived.tsx";
 import { Connect } from "./Connect.tsx";
 import { Login } from "./Login.tsx";
 import { Overview } from "./Overview.tsx";
@@ -63,38 +64,13 @@ function useHash(): string {
   return hash.replace(/^#\/?/, "");
 }
 
-/**
- * What someone is back from Google or GitHub with: `#login=<code>` to sign
- * in, `#create=<code>` to make an organisation.
- */
-function arrivalCode(): { code: string; create: boolean } | null {
-  const found = /^#(login|create)=([\w-]+)$/.exec(window.location.hash);
-  return found?.[2] ? { code: found[2], create: found[1] === "create" } : null;
-}
-
-/** Why they are back without having signed in, as the server names it (`#problem=<word>`), in words. */
-const PROBLEMS: Record<string, string> = {
-  refused: "You did not finish signing in there. Nothing was changed.",
-  not_started: "That sign-in was not started in this browser, or was started too long ago. Start again from here.",
-  provider: "Signing in did not work just now: the service you chose did not answer as expected. Try again in a moment.",
-  no_address:
-    "That account has no email address its provider has verified, and an address is how you are known here. Verify one there and try again.",
-  busy: "Too many sign-ins from your network just now. Try again in a minute.",
-};
-
-/** Someone back from a provider, with the code that says so and what the server says of them. */
-interface Back extends Arrival {
-  code: string;
-  create: boolean;
-}
-
 export function App() {
   const [token, setToken] = useState<string | null>(savedToken);
   const [me, setMe] = useState<Me | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [options, setOptions] = useState<AuthOptions | null>(null);
-  const [arriving, setArriving] = useState(() => arrivalCode() !== null);
-  const [back, setBack] = useState<Back | null>(null);
+  const [arriving, setArriving] = useState(() => landingOf(window.location.hash)?.arrived === true);
+  const [back, setBack] = useState<Arrival | null>(null);
   const [leaving, setLeaving] = useState(false);
   /** Sessions the server could not be told to end, kept (not stored) to try again. */
   const [unended, setUnended] = useState<string[]>([]);
@@ -158,45 +134,40 @@ export function App() {
       .catch(() => setOptions({ hosted: false, providers: [], signup: false, inviteCode: false }));
   }, []);
 
-  /** Use the code: to sign in to an organisation, or to create one. */
-  const enter = (code: string, where: Where) =>
-    open<SignedIn>("/auth/verify", { code, ...where }).then((signed) => {
-      keepSession({ org: signed.org.id, name: signed.org.name, token: signed.token });
-      setProblem(null);
-      setBack(null);
-      use(signed.token);
-      window.location.hash = signed.created ? "#/connect" : "#/";
-    });
+  /** Signed in: this browser keeps the session, and shows the organisation. */
+  const signedIn = (signed: SignedIn) => {
+    keepSession({ org: signed.org.id, name: signed.org.name, token: signed.token });
+    setProblem(null);
+    setBack(null);
+    use(signed.token);
+    window.location.hash = signed.created ? "#/connect" : "#/";
+  };
 
-  // Back from Google or GitHub. The code is not used yet: first the server
-  // is asked where this person can sign in. Someone in one organisation,
-  // which they have signed in to before, goes straight there. Anyone else is
-  // shown what there is and asked: being added to an organisation is someone
-  // else's doing, and must not sign anyone in to a place they did not choose.
+  // Back from Google or GitHub. The address says only that: the sign-in is
+  // in a cookie the server gave this browser, and a link to this page has
+  // nothing in it for anyone else. First the server is asked where this
+  // person can sign in. Someone in one organisation, which they have signed
+  // in to before, goes straight there, unless this browser is signed in
+  // somewhere already. Anyone else is shown what there is and asked: being
+  // added to an organisation is someone else's doing, and must not sign
+  // anyone in to a place they did not choose.
   useEffect(() => {
-    const arrive = () => {
-      const failed = /^#problem=([a-z_]+)$/.exec(window.location.hash)?.[1];
-      const came = arrivalCode();
-      if (!failed && !came) return;
-      // The code leaves the address bar and the history straight away.
+    const land = () => {
+      const landing = landingOf(window.location.hash);
+      if (!landing) return;
       window.history.replaceState(null, "", window.location.pathname);
-      if (!came) return setProblem(PROBLEMS[failed ?? ""] ?? PROBLEMS.provider ?? null);
-      setArriving(true);
-      open<Arrival>("/auth/check", { code: came.code })
-        .then((what) => {
-          setProblem(null);
-          const [only, ...others] = what.orgs;
-          if (!came.create && only && !others.length && !only.first_time) {
-            return enter(came.code, { user_id: only.user_id });
-          }
-          setBack({ ...came, ...what });
+      if (landing.arrived) setArriving(true);
+      void arrive(landing, savedToken() !== null || savedSessions().length > 0)
+        .then((outcome) => {
+          if (outcome.kind === "entered") signedIn(outcome.signed);
+          else if (outcome.kind === "ask") (setProblem(null), setBack(outcome.arrival));
+          else if (outcome.kind === "problem") setProblem(outcome.text);
         })
-        .catch((err: Error) => setProblem(err.message))
         .finally(() => setArriving(false));
     };
-    arrive();
-    window.addEventListener("hashchange", arrive);
-    return () => window.removeEventListener("hashchange", arrive);
+    land();
+    window.addEventListener("hashchange", land);
+    return () => window.removeEventListener("hashchange", land);
   }, []);
 
   useEffect(() => {
@@ -229,10 +200,18 @@ export function App() {
     return (
       <Arrived
         arrival={back}
-        create={back.create}
         options={options}
-        enter={(where) => enter(back.code, where)}
-        onCancel={() => setBack(null)}
+        enter={(where) => doors.enter(where).then(signedIn)}
+        onMore={() =>
+          doors.check(back.orgs.filter((org) => org.first_time).length).then((next) =>
+            setBack({ ...back, orgs: [...back.orgs, ...next.orgs], more: next.more }),
+          )
+        }
+        onCancel={() => {
+          // Over on the server too. If it cannot be told, it runs out by itself in minutes.
+          void doors.cancel().catch(() => {});
+          setBack(null);
+        }}
       />
     );
   }

@@ -28,7 +28,15 @@ import { serve } from "@hono/node-server";
 import { createApp, type Extension } from "./app.ts";
 import { count, DB_COUNTS, misset, openDb, runMigrations, type Migrations } from "./db.ts";
 import { tidy } from "./limits.ts";
-import { github, google, PROVIDER_NAMES, type Client, type Provider, type ProviderName } from "./oauth.ts";
+import {
+  github,
+  google,
+  PROVIDER_LABELS as LABELS,
+  PROVIDER_NAMES,
+  type Client,
+  type Provider,
+  type ProviderName,
+} from "./oauth.ts";
 import { offers, type Accounts } from "./signup.ts";
 
 export interface RunOptions {
@@ -57,8 +65,13 @@ export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
   if (!/^postgres(ql)?:\/\//.test(env.DATABASE_URL ?? "")) {
     problems.push("DATABASE_URL must be a postgres:// address: the embedded database is for one install.");
   }
-  if (!env.SESSIONLY_PUBLIC_URL?.trim()) {
+  const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim();
+  if (!publicUrl) {
     problems.push("SESSIONLY_PUBLIC_URL is not set: nobody could sign in or sign up.");
+  } else if (!publicUrl.startsWith("https://")) {
+    // Over plain HTTP the cookies that carry a sign-in are not kept to this
+    // host or to an encrypted connection, and every token crosses in clear.
+    problems.push("SESSIONLY_PUBLIC_URL must begin with https://: a hosted service is not reached over plain HTTP.");
   }
   if (!PROVIDER_NAMES.some((name) => clientOf(env, name))) {
     problems.push(
@@ -140,6 +153,12 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
       notes.push(`${id} is set, but SESSIONLY_PUBLIC_URL is not: signing in with ${LABELS[name]} is off, since it has nowhere to send people back to.`);
     }
   }
+  const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim() ?? "";
+  if (/^http:\/\/(?!(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$)/.test(publicUrl) && PROVIDER_NAMES.some((name) => clientOf(env, name))) {
+    notes.push(
+      "SESSIONLY_PUBLIC_URL is plain HTTP on a host that is not this machine: sign-ins and tokens cross the network in clear. Put it behind HTTPS.",
+    );
+  }
   const mail = ["RESEND_API_KEY", "SESSIONLY_EMAIL_FROM", "SMTP_URL"].filter((name) => env[name]);
   if (mail.length) {
     notes.push(
@@ -148,8 +167,6 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
   }
   return notes;
 }
-
-const LABELS: Record<ProviderName, string> = { google: "Google", github: "GitHub" };
 
 export async function runServer(options: RunOptions = {}): Promise<void> {
   const hosted = process.env.SESSIONLY_HOSTED === "true";

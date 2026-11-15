@@ -10,7 +10,7 @@ import { APP_ROLE, migrationAt, openDb, type Db } from "../src/db.ts";
 import { giveBack, take, tidy } from "../src/limits.ts";
 import { challengeOf, ProviderProblem, type Provider, type ProviderName } from "../src/oauth.ts";
 import { accountsFrom, hostedProblems, unheeded } from "../src/run.ts";
-import { emailFrom, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
+import { emailFrom, INVITATIONS_SHOWN, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
 import { testDb, testDbUrl, tokenFor } from "./helpers.ts";
 
 let db: Db;
@@ -18,20 +18,21 @@ let app: Hono<Env>;
 
 // Stand-ins for Google and GitHub. A test says which addresses go with the
 // code a browser comes back with, or that the provider fails; what the
-// server asked of the provider is kept to look at.
-const vouched = new Map<string, string[] | Error>();
+// server asked of the provider is kept to look at. The account is the same
+// one for the same main address, unless a test names another.
+const vouched = new Map<string, { emails: string[]; account?: string } | Error>();
 const asked: { name: ProviderName; code: string; redirectUri: string; verifier: string }[] = [];
 function provider(name: ProviderName): Provider {
   return {
     name,
     authorizeUrl: ({ redirectUri, state, challenge }) =>
       `https://${name}.test/authorize?${new URLSearchParams({ redirect_uri: redirectUri, state, challenge })}`,
-    async addresses(answer) {
+    async who(answer) {
       asked.push({ name, ...answer });
       const said = vouched.get(answer.code);
       if (!said) throw new ProviderProblem("no such code");
       if (said instanceof Error) throw said;
-      return said;
+      return { account: said.account ?? `${name}-account-of-${said.emails[0]?.toLowerCase()}`, emails: said.emails };
     },
   };
 }
@@ -63,15 +64,34 @@ async function call(
     "x-forwarded-for": options.from ?? nextCaller(),
   };
   if (options.token) headers.authorization = `Bearer ${options.token}`;
+  // The sign-in a browser came back with is in its cookie, and nothing it
+  // sends says which: `code` in what a test sends is that browser's cookie
+  // (as `arrive` returns it), or what a made-up one would hold.
+  let body = options.body;
+  if (body && typeof body === "object" && typeof (body as { code?: unknown }).code === "string") {
+    const { code, ...rest } = body as { code: string };
+    headers.cookie = code.includes("=") ? code : `${ARRIVED}=${code}`;
+    body = rest;
+  }
   const response = await server.request(`/api/v1${path}`, {
     method,
     headers,
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   return { status: response.status, body: (await response.json()) as any };
 }
 const post = (path: string, body: unknown, token?: string) => call(app, "POST", path, { body, token });
 const get = (path: string, token: string) => call(app, "GET", path, { token });
+
+/** The cookie that holds the sign-in of a browser that has come back, and the ones of sign-ins under way. */
+const ARRIVED = "__Host-sessionly-arrived";
+const LEAVING = "__Host-sessionly-signin-";
+/** The cookies a response sets, each as `name=value`, without the ones it takes away. */
+const cookiesOf = (response: Response) =>
+  response.headers
+    .getSetCookie()
+    .filter((each) => !/Max-Age=0/i.test(each))
+    .map((each) => each.split(";")[0] ?? "");
 
 interface Trip {
   provider?: ProviderName;
@@ -88,7 +108,7 @@ async function leave(trip: Trip = {}) {
   });
   assert.equal(response.status, 302);
   const to = new URL(response.headers.get("location") ?? "");
-  return { response, to, state: to.searchParams.get("state") ?? "", cookie: (response.headers.get("set-cookie") ?? "").split(";")[0] ?? "" };
+  return { response, to, state: to.searchParams.get("state") ?? "", cookie: cookiesOf(response).find((each) => each.startsWith(LEAVING)) ?? "" };
 }
 
 let codes = 0;
@@ -96,10 +116,10 @@ let codes = 0;
 async function comeBack(
   emails: string[] | Error,
   left: { state: string; cookie: string },
-  trip: Trip & { query?: Record<string, string> } = {},
+  trip: Trip & { query?: Record<string, string>; account?: string } = {},
 ) {
   const code = `code-${++codes}`;
-  vouched.set(code, emails);
+  vouched.set(code, emails instanceof Error ? emails : { emails, account: trip.account });
   const query = new URLSearchParams(trip.query ?? { code, state: left.state });
   const response = await (trip.server ?? app).request(`/api/v1/auth/${trip.provider ?? "google"}/callback?${query}`, {
     headers: { cookie: left.cookie, "x-forwarded-for": trip.from ?? nextCaller() },
@@ -108,14 +128,17 @@ async function comeBack(
   return { response, code, to: new URL(response.headers.get("location") ?? "") };
 }
 
-/** There and back. Returns the code the dashboard is handed. */
-async function arrive(emails: string[], trip: Trip = {}): Promise<string> {
-  const { to } = await comeBack(emails, await leave(trip), trip);
-  const found = /^#(login|create)=([\w-]+)$/.exec(to.hash);
-  assert.ok(found?.[2], `not signed in: ${to.hash}`);
-  assert.equal(found[1], trip.create ? "create" : "login");
-  assert.equal(to.origin + to.pathname, "https://app.test/");
-  return found[2];
+/**
+ * There and back. Returns what the browser now holds: the cookie with its
+ * sign-in. The address it is sent to says only that it has one.
+ */
+async function arrive(emails: string[], trip: Trip & { account?: string } = {}): Promise<string> {
+  const { to, response } = await comeBack(emails, await leave(trip), trip);
+  assert.equal(to.href, "https://app.test/#signed-in", `not signed in: ${to.hash}`);
+  const cookie = cookiesOf(response).find((each) => each.startsWith(`${ARRIVED}=`));
+  assert.ok(cookie, "no sign-in was given to the browser");
+  assert.match(cookie, new RegExp(`^${ARRIVED}=[\\w-]{43}\\.${trip.create ? "new" : "in"}$`));
+  return cookie;
 }
 
 type Session = { token: string; org: { id: string; name: string }; email: string; role: string; expires_at: string; created: boolean };
@@ -190,50 +213,111 @@ test("the browser that comes back from a provider must be the one that left", as
   assert.equal(left.to.origin + left.to.pathname, "https://google.test/authorize");
   assert.equal(left.to.searchParams.get("redirect_uri"), "https://app.test/api/v1/auth/google/callback");
   assert.ok(left.state.length >= 32);
-  const set = left.response.headers.get("set-cookie") ?? "";
-  // The cookie is this host's alone, is not shown to scripts, and does not last.
-  assert.match(set, /^__Host-sessionly-signin=/);
+  const [set = "", ...others] = left.response.headers.getSetCookie();
+  assert.equal(others.length, 0);
+  // The cookie is this sign-in's own, this host's alone, is not shown to scripts, and does not last.
+  assert.match(set, /^__Host-sessionly-signin-[0-9a-f]{16}=/);
   for (const part of ["HttpOnly", "Secure", "SameSite=Lax", "Path=/", "Max-Age=600"]) assert.ok(set.includes(part), `${part} in ${set}`);
   assert.doesNotMatch(set, /Domain=/i);
   assert.equal(left.response.headers.get("cache-control"), "no-store");
 
   const back = await comeBack(["kit@loop.example"], left);
-  assert.match(back.to.hash, /^#login=[\w-]{40,}$/);
+  // The address the browser is sent to says that it signed in, and nothing
+  // of the sign-in: that is in a cookie like the first.
+  assert.equal(back.to.href, "https://app.test/#signed-in");
+  const given = back.response.headers.getSetCookie().find((each) => each.startsWith(`${ARRIVED}=`)) ?? "";
+  for (const part of ["HttpOnly", "Secure", "SameSite=Lax", "Path=/", "Max-Age=600"]) assert.ok(given.includes(part), `${part} in ${given}`);
+  assert.doesNotMatch(given, /Domain=/i);
+  const secret = /=([\w-]+)\./.exec(given)?.[1] ?? "no secret";
+  assert.ok(!back.response.headers.get("location")?.includes(secret));
   // The provider was shown the secret whose hash it was given, and the same address to come back to.
   const question = asked.at(-1);
   assert.deepEqual([question?.name, question?.code, question?.redirectUri], ["google", back.code, "https://app.test/api/v1/auth/google/callback"]);
   assert.equal(challengeOf(question?.verifier ?? ""), left.to.searchParams.get("challenge"));
-  // The browser forgets the cookie on the way back.
-  assert.match(back.response.headers.get("set-cookie") ?? "", /^__Host-sessionly-signin=;.*Max-Age=0/);
+  // The browser forgets the first cookie on the way back.
+  const name = left.cookie.split("=")[0];
+  assert.ok(back.response.headers.getSetCookie().some((each) => each.startsWith(`${name}=;`) && /Max-Age=0/.test(each)));
+  // And the same way back works once, even for a browser that kept the cookie.
+  const questions = asked.length;
+  assert.equal((await comeBack(["kit@loop.example"], left)).to.hash, "#problem=not_started");
 
   // A browser that never left (someone was sent a link to the way back,
   // with a code of the sender's own) is not signed in, and the provider is
   // not asked anything.
-  const questions = asked.length;
+  const mine = await leave();
   const strangers = [
-    await comeBack(["eve@loop.example"], { state: left.state, cookie: "" }),
+    await comeBack(["eve@loop.example"], { state: mine.state, cookie: "" }),
     // Another browser's state.
-    await comeBack(["eve@loop.example"], { state: left.state, cookie: (await leave()).cookie }),
-    await comeBack(["eve@loop.example"], { state: "", cookie: left.cookie }),
+    await comeBack(["eve@loop.example"], { state: mine.state, cookie: (await leave()).cookie }),
+    await comeBack(["eve@loop.example"], { state: "", cookie: mine.cookie }),
+    await comeBack(["eve@loop.example"], { state: "made-up", cookie: mine.cookie }),
     // Left for one provider, back from the other.
-    await comeBack(["eve@loop.example"], left, { provider: "github" }),
+    await comeBack(["eve@loop.example"], mine, { provider: "github" }),
   ];
-  assert.deepEqual(strangers.map((each) => each.to.hash), Array(4).fill("#problem=not_started"));
+  assert.deepEqual(strangers.map((each) => each.to.hash), Array(5).fill("#problem=not_started"));
   assert.equal(asked.length, questions);
+  // None of them took anything from the browser: any site can make a
+  // browser ask for the way back, and that does not end a sign-in that is
+  // under way.
+  assert.deepEqual(strangers.flatMap((each) => each.response.headers.getSetCookie()), []);
+  assert.equal((await comeBack(["kit@loop.example"], mine)).to.hash, "#signed-in");
+
+  // Two sign-ins begun in one browser, in two tabs, both come back.
+  const [one, two] = [await leave(), await leave({ provider: "github" })];
+  const both = `${one.cookie}; ${two.cookie}`;
+  assert.notEqual(one.cookie.split("=")[0], two.cookie.split("=")[0]);
+  assert.equal((await comeBack(["kit@loop.example"], { state: two.state, cookie: both }, { provider: "github" })).to.hash, "#signed-in");
+  assert.equal((await comeBack(["kit@loop.example"], { state: one.state, cookie: both })).to.hash, "#signed-in");
+  // A browser sent off again and again does not gather cookies without end: past five, the earlier ones go.
+  const many: string[] = [];
+  for (let i = 0; i < 5; i++) many.push((await leave()).cookie);
+  const sixth = await app.request("/api/v1/auth/google", { headers: { cookie: many.join("; "), "x-forwarded-for": nextCaller() } });
+  const cleared = sixth.headers.getSetCookie().filter((each) => /Max-Age=0/.test(each)).map((each) => each.split("=")[0]);
+  assert.deepEqual(cleared.sort(), many.map((each) => each.split("=")[0]).sort());
+  assert.equal(cookiesOf(sixth).length, 1);
 
   // They said no there.
   const again = await leave();
+  const before = asked.length;
   const refused = await comeBack([], again, { query: { error: "access_denied", state: again.state } });
   assert.equal(refused.to.hash, "#problem=refused");
-  assert.equal(asked.length, questions);
-  // The provider fails, or answers with no code: said to whoever runs the
-  // server, and to the person only that it did not work.
+  assert.equal(asked.length, before);
+  // The provider sends them back with another error. In its own word it is
+  // written for whoever runs the server, and no more of what came with it.
+  // A word that means the server is set up wrongly is said as that to the
+  // person too: trying again would not help them.
+  const sentBack = async (error: string, provider: ProviderName = "github") => {
+    const going = await leave({ provider });
+    return quietly(() => comeBack([], going, { provider, query: { error, state: going.state, error_description: "secret-looking text" } }));
+  };
+  const mismatch = await sentBack("redirect_uri_mismatch");
+  assert.equal(mismatch.out.to.hash, "#problem=setup");
+  assert.deepEqual(mismatch.errors, ['signing in with GitHub: it sent someone back with "redirect_uri_mismatch"']);
+  const policy = await sentBack("admin_policy_enforced", "google");
+  assert.equal(policy.out.to.hash, "#problem=setup");
+  assert.deepEqual(policy.errors, ['signing in with Google: it sent someone back with "admin_policy_enforced"']);
+  const down = await sentBack("temporarily_unavailable", "google");
+  assert.equal(down.out.to.hash, "#problem=provider");
+  assert.deepEqual(down.errors, ['signing in with Google: it sent someone back with "temporarily_unavailable"']);
+  const odd = await sentBack("<script>alert(1)</script> client_secret=abc");
+  assert.equal(odd.out.to.hash, "#problem=provider");
+  assert.deepEqual(odd.errors, ["signing in with GitHub: it sent someone back with an error it did not name plainly"]);
+  assert.equal(asked.length, before);
+  // The provider fails when asked who this is: said to whoever runs the
+  // server, and to the person only that it did not work, or that it is not
+  // set up right.
   const failing = await leave({ provider: "github" });
   const { out: failed, errors } = await quietly(() =>
     comeBack(new ProviderProblem("GitHub's token endpoint answered 503"), failing, { provider: "github" }),
   );
   assert.equal(failed.to.hash, "#problem=provider");
-  assert.deepEqual(errors, ["signing in with github failed: GitHub's token endpoint answered 503"]);
+  assert.deepEqual(errors, ["signing in with GitHub failed: GitHub's token endpoint answered 503"]);
+  const wrong = await leave();
+  const unknown = await quietly(() =>
+    comeBack(new ProviderProblem("Google's token endpoint answered 401 (invalid_client)", "invalid_client"), wrong),
+  );
+  assert.equal(unknown.out.to.hash, "#problem=setup");
+  assert.deepEqual(unknown.errors, ["signing in with Google failed: Google's token endpoint answered 401 (invalid_client)"]);
   const empty = await leave();
   assert.equal((await comeBack([], empty, { query: { state: empty.state } })).to.hash, "#problem=provider");
   // It vouches for no address, or for nothing that is one.
@@ -246,14 +330,163 @@ test("the browser that comes back from a provider must be the one that left", as
   const code = await arrive(["Kit@Loop.Example", "kit@loop.example", "nonsense", "kit@other.example"]);
   assert.deepEqual((await post("/auth/check", { code })).body.emails, ["kit@loop.example", "kit@other.example"]);
 
-  // Without HTTPS (a server tried on one's own machine) the cookie cannot have the name browsers guard.
+  // Without HTTPS (a server tried on one's own machine) the cookies cannot have the name browsers guard.
   const local = createApp(db, { accounts: { ...hosted, publicUrl: "http://localhost:8080" } });
-  const plainly = await leave({ server: local });
-  assert.match(plainly.response.headers.get("set-cookie") ?? "", /^sessionly-signin=/);
-  assert.doesNotMatch(plainly.response.headers.get("set-cookie") ?? "", /Secure/);
-  assert.equal(plainly.to.searchParams.get("redirect_uri"), "http://localhost:8080/api/v1/auth/google/callback");
-  const home = await comeBack(["kit@loop.example"], plainly, { server: local });
-  assert.match(home.to.href, /^http:\/\/localhost:8080\/#login=/);
+  const plainly = await local.request("/api/v1/auth/google", { headers: { "x-forwarded-for": nextCaller() } });
+  const [crumb = ""] = plainly.headers.getSetCookie();
+  assert.match(crumb, /^sessionly-signin-[0-9a-f]{16}=/);
+  assert.doesNotMatch(crumb, /Secure/);
+  const to = new URL(plainly.headers.get("location") ?? "");
+  assert.equal(to.searchParams.get("redirect_uri"), "http://localhost:8080/api/v1/auth/google/callback");
+  const home = await comeBack(["kit@loop.example"], { state: to.searchParams.get("state") ?? "", cookie: crumb.split(";")[0] ?? "" }, { server: local });
+  assert.equal(home.to.href, "http://localhost:8080/#signed-in");
+  assert.ok(home.response.headers.getSetCookie().some((each) => /^sessionly-arrived=[\w-]+\.in; /.test(each) && !/Secure/.test(each)));
+});
+
+test("a sign-in is only the browser's that came back: one from anywhere else is nobody's", async () => {
+  const eve = await signUp("eve@attack.example", "Attack");
+  const victim = await signUp("vic@target.example", "Target");
+  // Eve signs in and stops at the page that asks where to. Whatever of that
+  // she can pass on (the address she is at, or the secret itself, had she a
+  // way to read it) does nothing in anyone else's browser.
+  const hers = await arrive(["eve@attack.example"]);
+  const secret = /=([\w-]+)\./.exec(hers)?.[1] ?? "";
+  const mine = (await post("/auth/check", { code: hers })).body.orgs[0].user_id;
+  const raw = async (path: string, body: unknown, cookie?: string) => {
+    const response = await app.request(`/api/v1/auth/${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": nextCaller(), ...(cookie ? { cookie } : {}) },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, body: (await response.json()) as any, set: response.headers.getSetCookie() };
+  };
+  // A browser with no sign-in of its own, sent the secret every way a request can carry one.
+  for (const body of [{ code: secret }, { code: `${secret}.in` }, { code: hers }, { code: secret, user_id: mine }, {}]) {
+    assert.deepEqual([(await raw("check", body)).body.code, (await raw("verify", { ...body, user_id: mine })).body.code], ["invalid_code", "invalid_code"]);
+  }
+  assert.equal((await raw("verify", { code: secret, org_name: "Planted" })).body.code, "invalid_code");
+  // A browser with a sign-in of its own is asked about its own, whatever it sends.
+  const theirs = await arrive(["vic@target.example"]);
+  const seen = await raw("check", { code: secret }, theirs);
+  assert.deepEqual([seen.body.emails, seen.body.orgs.map((org: any) => org.org_id)], [["vic@target.example"], [victim.org.id]]);
+  assert.equal((await raw("verify", { code: secret, user_id: mine }, theirs)).body.code, "invalid_code");
+  // Nobody was signed in to Eve's organisation by any of it, and her own sign-in is as it was.
+  const sessions = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM tokens WHERE org_id = $1 AND sign_in IS NOT NULL`, [eve.org.id]);
+  assert.equal(Number(sessions[0]?.n), 1);
+  assert.equal((await raw("check", {}, hers)).status, 200);
+
+  // "Not now" ends it: on the server, and in the browser.
+  const stopped = await raw("cancel", {}, hers);
+  assert.deepEqual([stopped.status, stopped.body], [200, { ok: true }]);
+  assert.ok(stopped.set.some((each) => each.startsWith(`${ARRIVED}=;`) && /Max-Age=0/.test(each)));
+  assert.equal((await raw("check", {}, hers)).body.code, "invalid_code");
+  assert.equal((await db.query(`SELECT 1 FROM sign_in_codes WHERE emails @> ARRAY['eve@attack.example']`)).length, 0);
+  // Asking for a place that is not theirs used the other browser's sign-in up.
+  assert.equal((await raw("check", {}, theirs)).body.code, "invalid_code");
+  // With nothing to end, "Not now" ends nothing: a sign-in named in what is sent is not this browser's.
+  const anew = await arrive(["vic@target.example"]);
+  assert.equal((await raw("cancel", {})).status, 200);
+  assert.equal((await raw("cancel", { code: /=([\w-]+)\./.exec(anew)?.[1] })).status, 200);
+  assert.equal((await raw("check", {}, anew)).status, 200);
+
+  // Signing in uses it, once, and it is then gone from the browser too.
+  const used = await raw("verify", { user_id: seen.body.orgs[0].user_id }, anew);
+  assert.equal(used.status, 200);
+  assert.ok(used.set.some((each) => each.startsWith(`${ARRIVED}=;`) && /Max-Age=0/.test(each)));
+  // A browser that comes back a second time without having gone on leaves nothing of the first.
+  const first = await arrive(["vic@target.example"]);
+  const going = await leave();
+  await comeBack(["vic@target.example"], { state: going.state, cookie: `${going.cookie}; ${first}` });
+  assert.equal((await raw("check", {}, first)).body.code, "invalid_code");
+  assert.equal((await db.query(`SELECT 1 FROM sign_in_codes WHERE emails @> ARRAY['vic@target.example']`)).length, 1);
+});
+
+test("an organisation is signed in to with the account that signed in to it first", async () => {
+  const owner = await signUp("olga@firm.example", "Firm");
+  await post("/users", { email: "alice@firm.example", role: "admin" }, owner.token);
+  // Alice signs in with her Google account, which is from then on who alice@firm.example is here.
+  const alice = await arrive(["alice@firm.example"], { account: "google-alice" });
+  const [place] = (await post("/auth/check", { code: alice })).body.orgs;
+  assert.deepEqual([place.first_time, place.other_account], [true, null]);
+  assert.equal((await post("/auth/verify", { code: alice, user_id: place.user_id })).status, 200);
+  assert.deepEqual(
+    await db.query(`SELECT sign_in_provider, sign_in_account FROM users WHERE id = $1`, [place.user_id]),
+    [{ sign_in_provider: "google", sign_in_account: "google-alice" }],
+  );
+  // The same account again: as before, and it would go straight in.
+  const again = await arrive(["alice@firm.example"], { account: "google-alice" });
+  assert.deepEqual((await post("/auth/check", { code: again })).body.orgs.map((org: any) => [org.first_time, org.other_account]), [[false, null]]);
+  assert.equal((await post("/auth/verify", { code: again, user_id: place.user_id })).status, 200);
+
+  // Alice leaves the firm and the mailbox goes to someone else, who makes a
+  // Google account with it; or she keeps the address on a GitHub account of
+  // her own. Either provider still vouches for the address. Neither account
+  // is the one that signed in here, and neither gets in.
+  for (const [provider, account] of [["google", "google-newcomer"], ["github", "github-alice"]] as const) {
+    const other = await arrive(["alice@firm.example"], { provider, account });
+    const shown = (await post("/auth/check", { code: other })).body.orgs;
+    assert.deepEqual(shown.map((org: any) => [org.org_id, org.first_time, org.other_account]), [[owner.org.id, false, "google"]]);
+    const refused = await post("/auth/verify", { code: other, user_id: place.user_id });
+    assert.deepEqual([refused.status, refused.body.code], [403, "other_account"]);
+    assert.match(refused.body.error, /another Google account/);
+    // The refusal did not use the sign-in up: it can still go somewhere else.
+    assert.equal((await post("/auth/check", { code: other })).status, 200);
+  }
+  // Two accounts at the same moment, for someone who has not signed in yet: one is who they are.
+  await post("/users", { email: "race@firm.example" }, owner.token);
+  const [a, b] = [await arrive(["race@firm.example"], { account: "one" }), await arrive(["race@firm.example"], { account: "two" })];
+  const racer = (await post("/auth/check", { code: a })).body.orgs[0].user_id;
+  const two = await Promise.all([post("/auth/verify", { code: a, user_id: racer }), post("/auth/verify", { code: b, user_id: racer })]);
+  assert.deepEqual(two.map((each) => each.status).sort(), [200, 403]);
+
+  // An admin lets her in with another account by removing her and adding
+  // her again: she is asked as someone new, and that account is then hers.
+  assert.equal((await call(app, "DELETE", `/users/${place.user_id}`, { token: owner.token })).status, 200);
+  await post("/users", { email: "alice@firm.example" }, owner.token);
+  const back = await arrive(["alice@firm.example"], { provider: "github", account: "github-alice" });
+  assert.deepEqual((await post("/auth/check", { code: back })).body.orgs.map((org: any) => [org.first_time, org.other_account]), [[true, null]]);
+  assert.equal((await post("/auth/verify", { code: back, user_id: place.user_id })).status, 200);
+  const old = await arrive(["alice@firm.example"], { account: "google-alice" });
+  assert.equal((await post("/auth/verify", { code: old, user_id: place.user_id })).body.code, "other_account");
+  // The owner is known by the account they made the organisation with.
+  const [made] = await db.query<{ sign_in_account: string }>(`SELECT sign_in_account FROM users WHERE org_id = $1 AND role = 'owner'`, [owner.org.id]);
+  assert.equal(made?.sign_in_account, "google-account-of-olga@firm.example");
+  const impostor = await arrive(["olga@firm.example"], { account: "not-olga" });
+  const ownerRow = (await post("/auth/check", { code: impostor })).body.orgs[0];
+  assert.equal((await post("/auth/verify", { code: impostor, user_id: ownerRow.user_id })).body.code, "other_account");
+});
+
+test("one person owns only so many organisations, by address and by account", async () => {
+  // Nineteen already, made over time: as many as the hourly counts would let through in a day.
+  const seed = async (email: string, account: string, n: number, tag: string) => {
+    for (let i = 0; i < n; i++) {
+      await db.query(`INSERT INTO orgs (id, name) VALUES ($1, 'Pile')`, [`pile-${tag}-${i}`]);
+      await db.query(
+        `INSERT INTO users (id, org_id, email, role, confirmed_at, sign_in_provider, sign_in_account)
+         VALUES ($1, $2, $3, 'owner', now(), 'google', $4)`,
+        [`usr_pile${tag}${i}`, `pile-${tag}-${i}`, email, account],
+      );
+    }
+  };
+  await seed("hoard@pile.example", "hoarder", 19, "a");
+  const create = async (email: string, account: string, name: string) => {
+    const code = await arrive([email], { create: true, account });
+    return { code, made: await post("/auth/verify", { code, org_name: name }) };
+  };
+  assert.equal((await create("hoard@pile.example", "hoarder", "Twentieth")).made.status, 200);
+  const over = await create("hoard@pile.example", "hoarder", "One too many");
+  assert.deepEqual([over.made.status, over.made.body.code], [409, "too_many_orgs"]);
+  // Nothing was made, what was counted for it was given back, and the sign-in can still be used.
+  assert.equal((await db.query(`SELECT 1 FROM orgs WHERE name = 'One too many'`)).length, 0);
+  const [counted] = await db.query<{ n: number }>(`SELECT n FROM rate_counters WHERE key = 'signup:hoard@pile.example'`);
+  assert.equal(counted?.n, 1);
+  assert.equal((await post("/auth/check", { code: over.code })).body.orgs.length, 20);
+  // The same account under another of its addresses, and the same address under another account.
+  assert.equal((await create("second@pile.example", "hoarder", "By account")).made.body.code, "too_many_orgs");
+  assert.equal((await create("hoard@pile.example", "someone-else", "By address")).made.body.code, "too_many_orgs");
+  // An organisation that is being deleted is not one of them.
+  await db.query(`UPDATE orgs SET deleted_at = now() WHERE id = 'pile-a-0'`);
+  assert.equal((await create("second@pile.example", "hoarder", "Room again")).made.status, 200);
 });
 
 test("signing up creates an organisation once it is named, and not before", async () => {
@@ -262,7 +495,13 @@ test("signing up creates an organisation once it is named, and not before", asyn
   const code = await arrive(["Kay@Acme.example"], { create: true });
   assert.equal(await orgs(), before);
   // Who the provider said this is can be asked without using the code.
-  assert.deepEqual((await post("/auth/check", { code })).body, { provider: "google", emails: ["kay@acme.example"], orgs: [] });
+  assert.deepEqual((await post("/auth/check", { code })).body, {
+    provider: "google",
+    emails: ["kay@acme.example"],
+    create: true,
+    orgs: [],
+    more: 0,
+  });
   // A name is letters, digits and a little punctuation: nothing that could
   // be a link or an address where it is shown. A name that will not do
   // does not use the code up.
@@ -342,8 +581,13 @@ test("a code that has run out does nothing", async () => {
     `SELECT code_hash, extract(epoch FROM expires_at - now()) / 60 AS minutes FROM sign_in_codes`,
   );
   assert.ok(stored.every((row) => /^[0-9a-f]{64}$/.test(row.code_hash) && row.code_hash !== code && Number(row.minutes) <= 10));
+  // A sign-in that came back is noted until it could no longer come back again.
+  const noted = async () => Number((await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM sign_in_states`))[0]?.n);
+  assert.ok((await noted()) > 0);
+  await db.query(`UPDATE sign_in_states SET expires_at = now() - interval '1 second'`);
   await tidy(db);
   assert.equal((await db.query(`SELECT 1 FROM sign_in_codes WHERE emails = ARRAY['late@slow.example']`)).length, 0);
+  assert.equal(await noted(), 0);
 });
 
 test("signing in shows where one can sign in, and takes one there", async () => {
@@ -360,6 +604,7 @@ test("signing in shows where one can sign in, and takes one there", async () => 
       first_time: false,
       invited_by: null,
       invited_via: null,
+      other_account: null,
     },
   ]);
   const signed = await post("/auth/verify", { code, user_id: only.user_id });
@@ -437,27 +682,59 @@ test("who added someone is shown only if that is known, not on a token's word", 
   assert.deepEqual(await shown("new@guest.example"), [["Host", false, null, null]]);
 });
 
-test("being added to other people's organisations does not hide one's own", async () => {
+test("being added to other people's organisations hides neither one's own nor the one just added", async () => {
   const own = await signUp("vera@mine.example", "Mine");
-  // Twelve organisations, each made before hers, that added her address.
-  for (let i = 0; i < 12; i++) {
-    await db.query(`INSERT INTO orgs (id, name) VALUES ($1, 'Mine')`, [`crowd-${i}`]);
-    await db.query(
-      `INSERT INTO users (id, org_id, email, role, invited_via, created_at)
-       VALUES ($1, $2, 'vera@mine.example', 'member', 'token', now() - interval '1 day')`,
-      [`usr_crowd${i}`, `crowd-${i}`],
-    );
+  // Twelve organisations, each made before hers, that added her address
+  // ahead of time: what someone would do to bury a real invitation.
+  const crowd = async (from: number, to: number, when: string) => {
+    for (let i = from; i < to; i++) {
+      await db.query(`INSERT INTO orgs (id, name) VALUES ($1, 'Mine')`, [`crowd-${i}`]);
+      await db.query(
+        `INSERT INTO users (id, org_id, email, role, invited_via, created_at)
+         VALUES ($1, $2, 'vera@mine.example', 'member', 'token', now() + $3::interval)`,
+        [`usr_crowd${i}`, `crowd-${i}`, when],
+      );
+    }
+  };
+  await crowd(0, 12, "-1 day");
+  // Then the real one, by a person who signed in.
+  const corp = await signUp("hr@corp.example", "Corp");
+  await post("/users", { email: "vera@mine.example" }, corp.token);
+  const browser = await arrive(["vera@mine.example"]);
+  const first = (await post("/auth/check", { code: browser })).body;
+  // Hers first; then the ones she was added to, the newest first, ten at a
+  // time: the real one leads them, and the rest can be asked for.
+  assert.deepEqual(first.orgs.map((org: any) => org.org_id).slice(0, 2), [own.org.id, corp.org.id]);
+  assert.deepEqual([first.orgs[0].first_time, first.orgs[1].first_time, first.orgs[1].invited_by], [false, true, "hr@corp.example"]);
+  assert.equal(first.orgs.length, 1 + INVITATIONS_SHOWN);
+  assert.equal(first.more, 3);
+  const rest = (await post("/auth/check", { code: browser, shown: INVITATIONS_SHOWN })).body;
+  assert.deepEqual([rest.orgs.length, rest.more], [3, 0]);
+  assert.ok(rest.orgs.every((org: any) => org.first_time && org.org_id.startsWith("crowd-")));
+  assert.deepEqual((await post("/auth/check", { code: browser, shown: 13 })).body.orgs, []);
+  for (const shown of [-1, 1.5, "ten", 1e9]) assert.equal((await post("/auth/check", { code: browser, shown })).status, 400, String(shown));
+
+  // Fakes added after the real one push it down the list, not out of it.
+  await crowd(12, 27, "1 hour");
+  const seen: string[] = [];
+  let more = 1;
+  for (let shown = 0; more > 0; shown += INVITATIONS_SHOWN) {
+    const page = (await post("/auth/check", { code: browser, shown })).body;
+    seen.push(...page.orgs.filter((org: any) => org.first_time).map((org: any) => org.org_id));
+    more = page.more;
   }
-  const offered = (await post("/auth/check", { code: await arrive(["vera@mine.example"]) })).body.orgs;
-  // Ten at most, hers first.
-  assert.equal(offered.length, 10);
-  assert.deepEqual([offered[0].org_id, offered[0].first_time], [own.org.id, false]);
-  assert.ok(offered.slice(1).every((org: any) => org.first_time && org.org_id.startsWith("crowd-")));
+  assert.equal(seen.length, 28);
+  assert.equal(new Set(seen).size, 28);
+  assert.equal(seen.indexOf(corp.org.id), 15);
+  // And she can sign in to it from wherever in the list it is.
+  const there = (await post("/auth/check", { code: browser, shown: 10 })).body.orgs.find((org: any) => org.org_id === corp.org.id);
+  assert.equal((await post("/auth/verify", { code: browser, user_id: there.user_id })).body.org.id, corp.org.id);
+
   // An organisation that is being deleted, or that removed her, is not offered.
   await db.query(`UPDATE orgs SET deleted_at = now() WHERE id LIKE 'crowd-%' AND id <> 'crowd-3'`);
   await db.query(`UPDATE users SET removed_at = now() WHERE id = 'usr_crowd3'`);
-  const left = (await post("/auth/check", { code: await arrive(["vera@mine.example"]) })).body.orgs;
-  assert.deepEqual(left.map((org: any) => org.org_id), [own.org.id]);
+  const left = (await post("/auth/check", { code: await arrive(["vera@mine.example"]) })).body;
+  assert.deepEqual([left.orgs.map((org: any) => org.org_id), left.more], [[own.org.id, corp.org.id], 0]);
 });
 
 test("an admin adds people, who sign in as what they were added as", async () => {
@@ -609,7 +886,7 @@ test("too many requests are refused, and too many organisations are not created"
   for (let i = 0; i < 21; i++) lefts.push(await leave());
   const backs = [];
   for (const left of lefts) backs.push((await comeBack(["a@x.example"], left, { from: comer })).to.hash.replace(/=.*/, ""));
-  assert.deepEqual(backs.slice(18), ["#login", "#login", "#problem"]);
+  assert.deepEqual(backs.slice(18), ["#signed-in", "#signed-in", "#problem"]);
   const asker = "203.0.113.11";
   const asks = [];
   for (let i = 0; i < 21; i++) asks.push((await call(app, "POST", "/auth/check", { body: { code: "x" }, from: asker })).status);
@@ -840,6 +1117,11 @@ test("the environment sets how people get in", () => {
   // with no provider, with half of one, or with nowhere to send people back to.
   assert.match(hostedProblems({ ...env, SESSIONLY_GITHUB_CLIENT_SECRET: "" }).join(), /No way of signing in is set \(SESSIONLY_GOOGLE_CLIENT_ID with SESSIONLY_GOOGLE_CLIENT_SECRET, or SESSIONLY_GITHUB_CLIENT_ID with SESSIONLY_GITHUB_CLIENT_SECRET\)/);
   assert.match(hostedProblems({ ...env, SESSIONLY_PUBLIC_URL: " " }).join(), /SESSIONLY_PUBLIC_URL is not set/);
+  // Or one reached over plain HTTP, where the cookies of a sign-in are not
+  // kept to this host and every token crosses in clear.
+  for (const plain of ["http://app.example.com", "http://localhost:8080", "HTTP://app.example.com"]) {
+    assert.match(hostedProblems({ ...env, SESSIONLY_PUBLIC_URL: plain }).join(), /SESSIONLY_PUBLIC_URL must begin with https:\/\//, plain);
+  }
   assert.deepEqual(offers(accountsFrom({ ...env, SESSIONLY_GITHUB_CLIENT_SECRET: " " })).providers, []);
   // A single install: no limits, no signing up, and signing in only if it is set up.
   const single = accountsFrom({});
@@ -902,6 +1184,16 @@ test("a setting that does nothing as it is set is said at the start", () => {
     unheeded({ SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "s", SESSIONLY_PUBLIC_URL: "https://app.example.com" }),
     [],
   );
+  // A team's own server may be tried over plain HTTP on its own machine,
+  // and is told if it is set up that way anywhere else.
+  const github = { SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "s" };
+  for (const here of ["http://localhost:8080", "http://127.0.0.1:8080/", "http://[::1]:8080", "http://localhost"]) {
+    assert.deepEqual(unheeded({ ...github, SESSIONLY_PUBLIC_URL: here }), [], here);
+  }
+  for (const there of ["http://sessionly.corp.example", "http://localhost.evil.example", "http://10.0.0.5:8080"]) {
+    assert.match(unheeded({ ...github, SESSIONLY_PUBLIC_URL: there }).join(), /^SESSIONLY_PUBLIC_URL is plain HTTP on a host that is not this machine/, there);
+  }
+  assert.deepEqual(unheeded({ SESSIONLY_PUBLIC_URL: "http://sessionly.corp.example" }), []);
   // What sent the links that people signed in with before.
   assert.deepEqual(unheeded({ RESEND_API_KEY: "re_test", SESSIONLY_EMAIL_FROM: "a@b.example" }), [
     "RESEND_API_KEY and SESSIONLY_EMAIL_FROM are set, but no email is sent any more: people sign in with Google or GitHub.",

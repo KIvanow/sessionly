@@ -1,11 +1,9 @@
 import type { Arrival, AuthOptions, Membership } from "@sessionly/schema";
 import { useState } from "react";
 import { savedSessions, type Saved } from "./api.ts";
+import type { Where } from "./arrival.ts";
 import { PROVIDERS } from "./Login.tsx";
 import { reads } from "./lookalike.ts";
-
-/** Where someone who has signed in goes on to: an organisation they are in, or a new one. */
-export type Where = { user_id: string } | { org_name: string; invite_code?: string };
 
 /**
  * An organisation this browser is signed in to that has this name and is
@@ -17,26 +15,26 @@ function sameNameElsewhere(name: string, orgId: string | null): Saved | undefine
 }
 
 /**
- * Back from Google or GitHub, and not signed in anywhere yet. Being in an
- * organisation is someone else's doing (anyone can add any address to one of
- * theirs), so nobody is taken into one they have not chosen: they are shown
- * which there are, and asked.
+ * Back from Google or GitHub. Being in an organisation is someone else's
+ * doing (anyone can add any address to one of theirs), so nobody is taken
+ * into one they have not chosen: they are shown which there are, and asked.
  */
 export function Arrived({
   arrival,
-  create,
   options,
   enter,
+  onMore,
   onCancel,
 }: {
   arrival: Arrival;
-  /** They came to create an organisation. */
-  create: boolean;
   options: AuthOptions | null;
   /** Go on. Rejects with what to tell them if that did not work. */
   enter: (where: Where) => Promise<void>;
+  /** List the next organisations they were added to. */
+  onMore: () => Promise<void>;
   onCancel: () => void;
 }) {
+  const create = arrival.create;
   const maySignUp = options?.signup === true;
   const [creating, setCreating] = useState(create && maySignUp);
   const [orgName, setOrgName] = useState("");
@@ -132,6 +130,26 @@ export function Arrived({
         {arrival.orgs.map((org) => (
           <Place key={org.user_id} org={org} busy={busy} onChoose={() => go({ user_id: org.user_id })} />
         ))}
+        {arrival.more > 0 && (
+          <p className="muted">
+            {arrival.more === 1 ? "One more organisation has" : `${arrival.more} more organisations have`} added{" "}
+            {arrival.emails.length > 1 ? "one of these addresses" : "this address"}, earlier than the ones above.{" "}
+            <button
+              type="button"
+              className="quiet"
+              disabled={busy}
+              onClick={() => {
+                setFailed(null);
+                setBusy(true);
+                onMore()
+                  .catch((err: Error) => setFailed(err.message))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              Show more
+            </button>
+          </p>
+        )}
         {failed && <p role="alert">{failed}</p>}
         <p className="ways">
           {maySignUp && (
@@ -190,9 +208,17 @@ function Place({ org, busy, onChoose }: { org: Membership; busy: boolean; onChoo
           Sessions you upload after signing in here belong to it.
         </p>
       )}
-      <button type="button" disabled={busy} onClick={onChoose}>
-        Sign in
-      </button>
+      {org.other_account ? (
+        <p role="alert">
+          This organisation was signed in to before with another {PROVIDERS[org.other_account]} account, and only that
+          account gets in. Sign in with that one. If it is gone, an admin of the organisation can remove you and add
+          you again.
+        </p>
+      ) : (
+        <button type="button" disabled={busy} onClick={onChoose}>
+          Sign in
+        </button>
+      )}
     </section>
   );
 }

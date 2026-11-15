@@ -594,6 +594,25 @@ const MIGRATIONS: string[] = [
   // ('email') stay as they are until they run out.
   `ALTER TABLE tokens DROP CONSTRAINT tokens_sign_in_check`,
   `ALTER TABLE tokens ADD CONSTRAINT tokens_sign_in_check CHECK (sign_in IN ('email', 'google', 'github'))`,
+  // Which account a provider said someone is, by the provider's own number
+  // for it, beside the addresses. A sign-in that was waiting for its
+  // organisation to be chosen when this is added is started again.
+  `DELETE FROM sign_in_codes`,
+  `ALTER TABLE sign_in_codes ADD COLUMN account text NOT NULL`,
+  // The account a person first signed in to an organisation with. From then
+  // on only that account gets in as them: a provider goes on vouching for
+  // an address after its mailbox has passed to someone else.
+  `ALTER TABLE users ADD COLUMN sign_in_provider text CHECK (sign_in_provider IN ('google', 'github'))`,
+  `ALTER TABLE users ADD COLUMN sign_in_account text`,
+  `ALTER TABLE users ADD CONSTRAINT users_sign_in_account_check CHECK ((sign_in_provider IS NULL) = (sign_in_account IS NULL))`,
+  // how many organisations an account owns is counted when it makes another
+  `CREATE INDEX users_sign_in_account ON users (sign_in_provider, sign_in_account) WHERE sign_in_account IS NOT NULL`,
+  // A sign-in that has come back from its provider, so that the same one
+  // does not come back twice. Like the codes, no request reaches it.
+  `CREATE TABLE sign_in_states (
+     state_hash text PRIMARY KEY,
+     expires_at timestamptz NOT NULL
+   )`,
 ];
 
 /**

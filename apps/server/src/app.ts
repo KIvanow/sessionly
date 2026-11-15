@@ -184,7 +184,7 @@ export interface Options {
   /** Folder with the built dashboard, served at the root if given. */
   webRoot?: string;
   extensions?: Extension[];
-  /** Signing in and signing up by email, and what limits them. */
+  /** Signing in and signing up with Google or GitHub, and what limits them. */
   accounts?: Accounts;
 }
 
