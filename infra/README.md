@@ -81,8 +81,30 @@ provider goes on vouching for an address long after it was verified: Google for 
 that is not its own, since the account was made; GitHub until its holder takes the address
 off. So an address alone would let in whoever had it once. After the first sign-in it does
 not: another account that has the address, of the same provider or the other, is told to
-use the first one and is not let in. An admin lets someone in with another account by
-removing them and adding them again.
+use the first one and is not let in.
+
+When that account is gone (deleted and made again, or the person now uses the other
+provider), someone else lets them in with another: an admin of the organisation, from its
+Team page ("Let in with another account"), for anyone but themselves. For the owner that
+takes an admin who has signed in: an admin token does it for anyone else, and not for the
+owner, since a token says nothing of who holds it. An owner who is the only admin has
+nobody to ask there, and whoever runs the service does it:
+
+```sh
+docker compose --env-file .env -f docker-compose.hosted.yml run --rm --no-deps -w /app/apps/server \
+  server node src/cli.ts person forget-account --org acme-x7k2p9 --email owner@acme.example
+```
+
+(`person list --org …` shows who signs in with what.) Either way the person is then as
+someone who was just added: whoever next signs in under their address is asked first, and
+is that person from then on. Their sessions are ended; the tokens of their machines are not.
+So do it for someone you know has lost the account, not on the word of a message from the
+address. Each time it is done the server's log has a line saying for whom, in which
+organisation, and by whom.
+
+People who signed in before the account was kept (no release did that; a trial database
+may have some) are treated the same way by the migration: asked as someone new at their
+next sign-in, and never taken straight in.
 
 What this does not cover is the first sign-in itself. Whoever a provider vouches for under
 an address is taken to be its holder, so add people under addresses whose mailboxes are
@@ -98,6 +120,30 @@ Nothing of it is in an address, so nothing of it is in a link, a history or a lo
 the only cookies the service sets. A hosted service does not start unless its public address
 is `https://`. The one exception is `http://localhost` (or `127.0.0.1`, `[::1]`), for trying
 it on the machine it runs on; the cookies then have neither the prefix nor `Secure`.
+
+**One address.** People sign in at `SESSIONLY_PUBLIC_URL` and nowhere else: a provider sends
+them back there, and the cookies are kept for that host. So open the dashboard at exactly
+that address. A server tried on its own machine has several names, and there the server
+helps: with `http://localhost:8080` as the public address, a browser at
+`http://127.0.0.1:8080` or `http://[::1]:8080` is sent on to the same page at `localhost`.
+That is the only case in which it sends a browser anywhere: for any other host, and for
+one of the machine's names on another port, it answers where it is asked.
+
+That matters behind a proxy. Many pass on their own name for the server as `Host`, not the
+one the browser asked for (nginx unless told `proxy_set_header Host $host;`, Apache without
+`ProxyPreserveHost On`, a tunnel with a host override), and a server that went by it would
+send every browser to the public address, to be handed straight back. The server does not
+go by it, so such a proxy works as it is; passing the browser's `Host` on is still the
+better setup, and is what the Caddyfile here does.
+
+Google takes a plain `http://` address to send people back to only for this machine's own
+names (`localhost`, `127.0.0.1`, `[::1]`); a server reached over plain HTTP under any other
+name can offer GitHub alone.
+
+What the dashboard asks while someone signs in is taken from the dashboard only: as JSON,
+and from this very origin where the browser says where from. A page on a neighbouring host
+of the same domain cannot create an organisation, or end a sign-in, in the name of someone
+who has just signed in.
 
 ### The database's role
 
@@ -186,6 +232,11 @@ Limits that are not settings:
 - 100 organisations an hour in all (`SESSIONLY_SIGNUPS_PER_HOUR`). The server logs a warning,
   once an hour, when this is reached: until the hour is over nobody can sign up.
 - 30 people an hour added by one organisation.
+- 10 wrong invitation codes an hour from one network, and 10 by one account
+  (`SESSIONLY_SIGNUP_CODE`). Past either, no code of theirs is looked at until the hour is
+  over. Only someone who has signed in is told whether a code is right, and a try is counted
+  before the code is looked at. Past 1,000 wrong ones an hour from everyone, the log says
+  so once; nobody is refused for that, or one guesser could close signing up for all.
 
 An organisation costs its maker nothing, and anyone can add anyone's address to one of
 theirs. So nobody is taken into an organisation they have not chosen: someone who signs in

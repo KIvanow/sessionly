@@ -600,7 +600,7 @@ for anything but localhost.
 | `SESSIONLY_DB_QUERY_SECONDS` | Postgres only: how long a statement may take. Default 30, and a day (86400) at most. |
 | `SESSIONLY_ADMIN_TOKEN` | An admin token that always works, for first use. |
 | `SESSIONLY_ADMIN_EMAIL` | Who uploads made with that token belong to. |
-| `SESSIONLY_PUBLIC_URL` | Where people reach the dashboard, e.g. `https://sessionly.example.com`. Needed for signing in with Google or GitHub, which send people back there. |
+| `SESSIONLY_PUBLIC_URL` | Where people reach the dashboard, e.g. `https://sessionly.example.com`. Needed for signing in with Google or GitHub, which send people back there; open the dashboard at exactly this address. (A server on your own machine sends a browser at `127.0.0.1` on to `localhost`, or the other way; behind a proxy it sends nobody anywhere, whatever `Host` the proxy passes on.) Google takes a plain `http://` address only for `localhost`, `127.0.0.1` and `[::1]`. |
 | `SESSIONLY_GOOGLE_CLIENT_ID`, `SESSIONLY_GOOGLE_CLIENT_SECRET` | Optional, both together: people then sign in with Google (see below). From an OAuth client of type "Web application" in Google Cloud, whose redirect URI is the public address followed by `/api/v1/auth/google/callback`. |
 | `SESSIONLY_GITHUB_CLIENT_ID`, `SESSIONLY_GITHUB_CLIENT_SECRET` | Optional, both together: people then sign in with GitHub. From an OAuth app on GitHub, whose callback URL is the public address followed by `/api/v1/auth/github/callback`. |
 | `SESSIONLY_HOSTED` | `true` for a service many organisations sign up to. See [`infra/`](infra/README.md). |
@@ -648,8 +648,11 @@ verified for a GitHub account. Nothing is sent to anyone, and no password is kep
 asked of Google or GitHub is which account this is and which addresses are its. Signing in
 lasts a week. The first time someone signs in to an organisation, they are shown which one
 it is and who added them, and asked; the account they sign in with then is from that time on
-the only one that gets in as them there, whoever else comes to have the address (to change
-it, remove the person and add them again). People then make the tokens for their own machines on the Connect page
+the only one that gets in as them there, whoever else comes to have the address. If that
+account is gone, another admin lets them in with a new one from the Team page (for the
+owner, an admin who has signed in, not one with a token); for an owner with no other admin,
+`pnpm person forget-account --email owner@example.com` does (with the embedded database,
+stop the server first). People then make the tokens for their own machines on the Connect page
 (`POST /api/v1/me/tokens`), and removing a person ends their sign-in and every token of
 theirs. Without those settings there are only tokens, as above.
 
