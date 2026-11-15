@@ -13,9 +13,9 @@ import {
   type Role,
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
-import { allowed } from "./limits.ts";
+import { allowed, giveBack } from "./limits.ts";
 import { inviteMail } from "./mail.ts";
-import { LINKS_PER_HOUR, newLink, newUserId, openRoutes, type Accounts } from "./signup.ts";
+import { LINKS_PER_HOUR, mailbox, newLink, newUserId, openRoutes, type Accounts } from "./signup.ts";
 import { addUser, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
 import {
   Conflict,
@@ -64,6 +64,8 @@ export type Extension = (api: Api) => void;
 class BadRequest extends Error {}
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/** The longest an address can be. */
+const MAX_EMAIL = 254;
 
 /** Thrown to undo what a request wrote, once its answer is already decided. */
 class Undo extends Error {}
@@ -293,23 +295,31 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
 
   // Adding a person sends a message to an address on an admin's word, and
   // anyone can be the admin of an organisation they just made. So it is
-  // limited per organisation and per address written to, and counted here,
-  // outside the transaction: an attempt counts whether or not it goes through.
+  // limited per organisation and per mailbox written to. Both are taken
+  // here, outside the transaction, and given back unless a message really
+  // goes out: asking to add someone who is already there, say, sends none,
+  // and must not use up what their address may be sent.
   api.post("/users", async (c, next) => {
     const p = c.get("principal");
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
     // Anything else is refused further on, uncounted.
-    if (p.role === "admin" && EMAIL.test(email)) {
-      const limited = (error: string) => c.json({ error, code: "rate_limited" }, 429);
-      if (!(await allowed(ownerDb, `invites:${p.orgId}`, 3600, INVITES_PER_HOUR))) {
-        return limited(`an organisation can add ${INVITES_PER_HOUR} people an hour; try again later`);
-      }
-      if (!(await allowed(ownerDb, `invite:${email}`, 3600, LINKS_PER_HOUR))) {
-        return limited("that address has been sent enough invitations for now; try again in an hour");
-      }
+    if (p.role !== "admin" || !EMAIL.test(email) || email.length > MAX_EMAIL) return next();
+    const limited = (error: string) => c.json({ error, code: "rate_limited" }, 429);
+    const perOrg = `invites:${p.orgId}`;
+    const perMailbox = `invite:${mailbox(email)}`;
+    if (!(await allowed(ownerDb, perOrg, 3600, INVITES_PER_HOUR))) {
+      return limited(`an organisation can add ${INVITES_PER_HOUR} people an hour; try again later`);
+    }
+    if (!(await allowed(ownerDb, perMailbox, 3600, LINKS_PER_HOUR))) {
+      await giveBack(ownerDb, perOrg, 3600);
+      return limited("that address has been sent enough invitations for now; try again in an hour");
     }
     await next();
+    if (c.res.status !== 201) {
+      await giveBack(ownerDb, perOrg, 3600);
+      await giveBack(ownerDb, perMailbox, 3600);
+    }
   });
 
   // The rest of the request runs in one transaction, as the organisation of
@@ -526,11 +536,11 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
     const role = body.role ?? "member";
-    if (!EMAIL.test(email)) throw new BadRequest("email is required");
+    if (!EMAIL.test(email) || email.length > MAX_EMAIL) throw new BadRequest("email is required, and is 254 characters at most");
     if (role !== "admin" && role !== "member") throw new BadRequest("role must be admin or member");
     const db = c.get("db");
-    const user = await addUser(db, newUserId(), email, role);
-    const mail = inviteMail(email, await newLink(db, publicUrl, { purpose: "sign_in", userId: user.id }));
+    const user = await addUser(db, newUserId(), email, role, c.get("principal"));
+    const mail = inviteMail(email, await newLink(db, publicUrl, { purpose: "invite", userId: user.id }));
     // Sent once the person and their link are really there.
     c.get("after").push(() => {
       mailer.send(mail).catch((err: unknown) => {

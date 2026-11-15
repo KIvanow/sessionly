@@ -51,7 +51,13 @@ export async function orgName(db: OrgDb): Promise<string> {
  * Add a person, or bring back one who was removed. Their history was never
  * taken away: sessions are kept under the address they were filed under.
  */
-export async function addUser(db: OrgDb, id: string, email: string, role: "admin" | "member"): Promise<UserInfo> {
+export async function addUser(
+  db: OrgDb,
+  id: string,
+  email: string,
+  role: "admin" | "member",
+  by: Principal,
+): Promise<UserInfo> {
   const address = email.trim().toLowerCase();
   const [existing] = await db.query<{ id: string; removed_at: unknown }>(
     `SELECT id, removed_at FROM users WHERE org_id = $1 AND email = $2`,
@@ -60,16 +66,17 @@ export async function addUser(db: OrgDb, id: string, email: string, role: "admin
   if (existing && existing.removed_at == null) {
     throw new UserProblem(409, "already_a_user", `${address} is already in this organisation`);
   }
+  // Who added them is kept: the page their link opens says so.
   const rows = existing
     ? await db.query(
-        `UPDATE users SET removed_at = NULL, role = $3 WHERE org_id = $1 AND id = $2
+        `UPDATE users SET removed_at = NULL, role = $3, invited_by = $4 WHERE org_id = $1 AND id = $2
          RETURNING id, email, role, created_at, removed_at`,
-        [db.orgId, existing.id, role],
+        [db.orgId, existing.id, role, by.email],
       )
     : await db.query(
-        `INSERT INTO users (id, org_id, email, role) VALUES ($1, $2, $3, $4)
+        `INSERT INTO users (id, org_id, email, role, invited_by) VALUES ($1, $2, $3, $4, $5)
          RETURNING id, email, role, created_at, removed_at`,
-        [id, db.orgId, address, role],
+        [id, db.orgId, address, role, by.email],
       );
   return info(rows[0] ?? {});
 }

@@ -2,19 +2,31 @@
 // they hold across several copies of the server.
 import type { Queryable } from "./db.ts";
 
+/** The start of the window of `$2` seconds that now is in. */
+const WINDOW = `to_timestamp(floor(extract(epoch FROM now()) / $2::int) * $2::int)`;
+
 /**
- * Count one more of `key` in the current window of `seconds`, and say
- * whether that is still within `max`.
+ * Take one of the `max` that `key` has in the current window of `seconds`,
+ * if one is left. What is refused is not counted, so the count is of what
+ * was let through.
  */
 export async function allowed(db: Queryable, key: string, seconds: number, max: number): Promise<boolean> {
-  const [row] = await db.query<{ n: number }>(
-    `INSERT INTO rate_counters (key, window_start, n)
-     VALUES ($1, to_timestamp(floor(extract(epoch FROM now()) / $2::int) * $2::int), 1)
-     ON CONFLICT (key, window_start) DO UPDATE SET n = rate_counters.n + 1
+  if (max < 1) return false;
+  const taken = await db.query(
+    `INSERT INTO rate_counters (key, window_start, n) VALUES ($1, ${WINDOW}, 1)
+     ON CONFLICT (key, window_start) DO UPDATE SET n = rate_counters.n + 1 WHERE rate_counters.n < $3
      RETURNING n`,
-    [key, seconds],
+    [key, seconds, max],
   );
-  return Number(row?.n ?? 1) <= max;
+  return taken.length > 0;
+}
+
+/**
+ * Give back one that was taken for something that then did not happen: a
+ * message that was not sent after all is not one of the messages counted.
+ */
+export async function giveBack(db: Queryable, key: string, seconds: number): Promise<void> {
+  await db.query(`UPDATE rate_counters SET n = n - 1 WHERE key = $1 AND window_start = ${WINDOW} AND n > 0`, [key, seconds]);
 }
 
 /** Forget windows that have passed, and links that have run out. */

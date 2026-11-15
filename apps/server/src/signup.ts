@@ -13,7 +13,7 @@ import { bodyLimit } from "hono/body-limit";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { hash, issueToken, sameSecret, type Role } from "./auth.ts";
 import type { Db, Queryable } from "./db.ts";
-import { allowed } from "./limits.ts";
+import { allowed, giveBack } from "./limits.ts";
 import { LINK_MINUTES, signInMail, signUpMail, type Mailer } from "./mail.ts";
 
 /** How long a token from signing in lasts. */
@@ -50,16 +50,64 @@ export interface Accounts {
 /** A request to these routes is an address and a name: this is plenty. */
 const MAX_BODY_BYTES = 16 * 1024;
 
-/** Links one address is sent an hour, for each thing it can be sent a link for. */
+/**
+ * Links one mailbox is sent an hour to finish signing up, and as many again
+ * on being added to organisations. Counted when a message goes out, not when
+ * one is asked for.
+ */
 export const LINKS_PER_HOUR = 5;
 
 /**
- * What an organisation may be called: 2 to 60 letters, digits, spaces and a
- * little punctuation. No dot, slash, colon or @: the name is shown to people
- * in messages, and it must not be able to carry a link or an address.
+ * Messages one mailbox is sent an hour to sign in. One address cannot reach
+ * this on its own, since no second link is sent while one still works (four
+ * an hour at most); it is for addresses that all lead to one mailbox.
  */
-export const ORG_NAME = /^[\p{L}\p{N}][\p{L}\p{N} &',()+-]{1,59}$/u;
-export const ORG_NAME_RULE = "an organisation's name is 2 to 60 letters, digits, spaces and any of & ' , ( ) + -";
+const SIGN_IN_MAILS_PER_HOUR = 12;
+
+/** Sign-ups asked for an hour from one network (a /24, or a /48 of IPv6). */
+const SIGNUPS_PER_NETWORK = 5;
+
+/**
+ * What an organisation may be called: 2 to 60 letters, digits, spaces and a
+ * little punctuation. No dot, slash, colon or @: the name is shown to people,
+ * and it must not be able to carry a link or an address. Letters may carry
+ * the marks their script writes them with (accents, vowel signs), three in a
+ * row at most.
+ */
+const ORG_NAME = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} &',()+-]{1,59}$/u;
+export const ORG_NAME_RULE =
+  "an organisation's name is 2 to 60 letters, digits, spaces and any of & ' , ( ) + - (plain letters, not styled forms of them)";
+
+/**
+ * The name as it is kept, or null if it may not be one. Composed (NFC), so
+ * that a name typed with separate accents is the same name as one typed
+ * without. A letter that is a styled form of another (fullwidth, mathematical,
+ * circled) is refused: it reads as the plain letter and is not it, which is
+ * how one organisation's name is made to look like another's.
+ */
+export function orgNameFrom(typed: string): string | null {
+  const name = typed.trim().replace(/\s+/g, " ").normalize("NFC");
+  if (!ORG_NAME.test(name) || /\p{M}{4}/u.test(name)) return null;
+  // Thai and Lao write one vowel (sara am) with a letter that the
+  // compatibility form takes apart; it is no one's lookalike.
+  const plain = name.replace(/[\u0E33\u0EB3]/g, "");
+  return plain.normalize("NFKC") === plain ? name : null;
+}
+
+/**
+ * The mailbox an address leads to, for counting what is sent there: without
+ * a "+tag", and for Gmail without the dots it ignores. Messages still go to
+ * the address as it was typed.
+ */
+export function mailbox(email: string): string {
+  const at = email.lastIndexOf("@");
+  const typed = email.slice(0, at).toLowerCase();
+  let domain = email.slice(at + 1).toLowerCase();
+  let local = typed.split("+")[0] || typed;
+  if (domain === "googlemail.com") domain = "gmail.com";
+  if (domain === "gmail.com") local = local.replace(/\./g, "") || local;
+  return `${local}@${domain}`;
+}
 
 /** What the server offers someone who is not signed in. */
 export function offers(accounts: Accounts) {
@@ -74,35 +122,55 @@ export function offers(accounts: Accounts) {
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/** The groups of an IPv6 address, written out; null for anything else. */
+function groupsOf(address: string): string[] | null {
+  if (!isIPv6(address)) return null;
+  const [head = "", tail] = address.split("::");
+  const front = head ? head.split(":") : [];
+  const back = tail ? tail.split(":") : [];
+  const groups = tail === undefined ? front : [...front, ...Array(8 - front.length - back.length).fill("0"), ...back];
+  return groups.map((group) => group.toLowerCase().replace(/^0+(?=.)/, ""));
+}
+
+/** An address as it is compared: no brackets or zone, and an IPv4 address written as IPv6 as IPv4. */
+function plainAddress(address: string): string {
+  const plain = address.replace(/^\[|\]$/g, "").split("%")[0] ?? "";
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(plain)?.[1];
+  return mapped && isIPv4(mapped) ? mapped : plain;
+}
+
 /**
  * What to count an address under. One IPv4 address is one caller. An IPv6
  * caller usually has a whole /64 to pick addresses from, so its network is
  * what is counted.
  */
 export function network(address: string): string {
-  const plain = address.replace(/^\[|\]$/g, "").split("%")[0] ?? "";
-  // An IPv4 address written as IPv6.
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(plain)?.[1];
-  if (mapped && isIPv4(mapped)) return mapped;
-  if (!isIPv6(plain)) return plain;
-  const [head = "", tail] = plain.split("::");
-  const front = head ? head.split(":") : [];
-  const back = tail ? tail.split(":") : [];
-  const groups = tail === undefined ? front : [...front, ...Array(8 - front.length - back.length).fill("0"), ...back];
-  const first = groups.slice(0, 4).map((group) => group.toLowerCase().replace(/^0+(?=.)/, ""));
-  return `${first.join(":")}::/64`;
+  const plain = plainAddress(address);
+  const groups = groupsOf(plain);
+  return groups ? `${groups.slice(0, 4).join(":")}::/64` : plain;
+}
+
+/**
+ * The wider network an address is in, for what is counted by the hour: a /24
+ * of IPv4, and the /48 a site is usually given of IPv6.
+ */
+export function widerNetwork(address: string): string {
+  const plain = plainAddress(address);
+  const groups = groupsOf(plain);
+  if (groups) return `${groups.slice(0, 3).join(":")}::/48`;
+  return isIPv4(plain) ? `${plain.split(".").slice(0, 3).join(".")}.0/24` : plain;
 }
 
 /** Who is asking, as far as it can be told: for counting, not for trusting. */
-export function clientAddress(c: Context, trustProxy: boolean | undefined): string {
+function callerOf(c: Context, trustProxy: boolean | undefined): string {
   if (trustProxy) {
     // The last hop is the one the proxy added itself.
     const hops = (c.req.header("x-forwarded-for") ?? "").split(",").map((hop) => hop.trim());
     const last = hops.filter(Boolean).at(-1);
-    if (last) return network(last);
+    if (last) return last;
   }
   try {
-    return network(getConnInfo(c).remote.address ?? "unknown");
+    return getConnInfo(c).remote.address ?? "unknown";
   } catch {
     return "unknown";
   }
@@ -134,7 +202,7 @@ export function newUserId(): string {
 export async function newLink(
   db: Queryable,
   publicUrl: string,
-  code: { purpose: "sign_in"; userId: string } | { purpose: "signup"; email: string; orgName: string },
+  code: { purpose: "sign_in" | "invite"; userId: string } | { purpose: "signup"; email: string; orgName: string },
 ): Promise<string> {
   const secret = randomBytes(32).toString("base64url");
   await db.query(
@@ -143,7 +211,7 @@ export async function newLink(
     [
       hash(secret),
       code.purpose,
-      code.purpose === "sign_in" ? code.userId : null,
+      code.purpose === "signup" ? null : code.userId,
       code.purpose === "signup" ? code.email : null,
       code.purpose === "signup" ? code.orgName : null,
       LINK_MINUTES,
@@ -197,7 +265,7 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
   const { mailer, publicUrl } = accounts;
   const tooMany = (c: Context) => c.json({ error: "too many requests; try again in a minute", code: "rate_limited" }, 429);
   const perMinute = async (c: Context, what: string, max: number) =>
-    allowed(db, `${what}:${clientAddress(c, accounts.trustProxy)}`, 60, max);
+    allowed(db, `${what}:${network(callerOf(c, accounts.trustProxy))}`, 60, max);
   const failed = (what: string) => (err: unknown) => console.error(`${what}:`, err instanceof Error ? err.message : err);
   const defer = accounts.defer ?? ((work) => void work().catch(failed("work after an answer failed")));
   const send = async (mail: ReturnType<typeof signInMail>) => {
@@ -223,18 +291,31 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     const email = text((await body(c)).email).toLowerCase();
     if (!EMAIL.test(email) || email.length > 254) return c.json({ error: "that is not an email address" }, 400);
     defer(async () => {
-      const users = await db.query<{ id: string; org_name: string }>(
-        `SELECT u.id, o.name AS org_name FROM users u JOIN orgs o ON o.id = u.org_id
+      const users = await db.query<{ id: string; org_name: string; known: boolean; waiting: boolean }>(
+        `SELECT u.id, o.name AS org_name, u.confirmed_at IS NOT NULL AS known,
+                EXISTS (SELECT 1 FROM login_codes c
+                        WHERE c.user_id = u.id AND c.purpose = 'sign_in' AND c.expires_at > now()) AS waiting
+         FROM users u JOIN orgs o ON o.id = u.org_id
          WHERE u.email = $1 AND u.removed_at IS NULL AND o.deleted_at IS NULL
          ORDER BY u.created_at LIMIT ${MAX_ORGS}`,
         [email],
       );
-      // Counted only when a message would go out, and apart from the links
-      // for signing up: asking in someone's name cannot use theirs up.
-      if (!users.length || !(await allowed(db, `signin:${email}`, 3600, LINKS_PER_HOUR))) return;
+      // A link that was asked for and still works is in their inbox, and no
+      // second one is sent. So asking in someone's name gets them one message
+      // per quarter of an hour at most, and never leaves them without a link
+      // that works: there is no allowance of theirs for it to use up.
+      const due = users.filter((user) => !user.waiting);
+      if (!due.length) return;
+      // What is counted is the mailbox, for the addresses that all lead to one.
+      if (!(await allowed(db, `signin:${mailbox(email)}`, 3600, SIGN_IN_MAILS_PER_HOUR))) return;
       const links = [];
-      for (const user of users) {
-        links.push({ org: user.org_name, url: await newLink(db, publicUrl, { purpose: "sign_in", userId: user.id }) });
+      for (const user of due) {
+        links.push({
+          // The name of an organisation they have never signed in to is
+          // whatever someone who added them chose: it is not passed on.
+          org: user.known ? user.org_name : null,
+          url: await newLink(db, publicUrl, { purpose: "sign_in", userId: user.id }),
+        });
       }
       await send(signInMail(email, links));
     });
@@ -251,21 +332,36 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     if (!(await perMinute(c, "auth-email", 5))) return tooMany(c);
     const sent = await body(c);
     const email = text(sent.email).toLowerCase();
-    const orgName = text(sent.org_name).replace(/\s+/g, " ");
+    const orgName = orgNameFrom(text(sent.org_name));
     if (!EMAIL.test(email) || email.length > 254) return c.json({ error: "that is not an email address" }, 400);
-    if (!ORG_NAME.test(orgName)) return c.json({ error: ORG_NAME_RULE, code: "bad_org_name" }, 400);
+    if (!orgName) return c.json({ error: ORG_NAME_RULE, code: "bad_org_name" }, 400);
     if (accounts.signupCode && !sameSecret(text(sent.invite_code), accounts.signupCode)) {
       return c.json({ error: "signing up needs an invitation code", code: "invite_required" }, 403);
     }
+    // By the hour too, and by a wider network than the minute's: what one
+    // caller can ask for is their own to use up, and no one else's.
+    if (!(await allowed(db, `signups-from:${widerNetwork(callerOf(c, accounts.trustProxy))}`, 3600, SIGNUPS_PER_NETWORK))) {
+      return c.json({ error: "too many sign-ups from your network; try again in an hour", code: "rate_limited" }, 429);
+    }
+    // From here on only messages that really go out are counted. First the
+    // mailbox's own: past it nothing is sent, and the answer stays the same.
+    const perMailbox = `signup:${mailbox(email)}`;
+    if (!(await allowed(db, perMailbox, 3600, LINKS_PER_HOUR))) return c.json({ ok: true }, 202);
     // These messages go to addresses nobody has confirmed. However many
-    // addresses they are asked from, there is a ceiling on them all.
+    // addresses and networks they are asked from, there is a ceiling on them
+    // all. Asking again for one address does not come this far, so it cannot
+    // be reached that way.
     if (!(await allowed(db, "signups", 3600, accounts.signupsPerHour ?? 100))) {
+      await giveBack(db, perMailbox, 3600);
+      // Said once an hour: someone should look at who is signing up.
+      if (await allowed(db, "signups-warned", 3600, 1)) {
+        console.warn(
+          `The ceiling of ${accounts.signupsPerHour ?? 100} sign-up messages an hour is reached: no more are sent until the hour is over (SESSIONLY_SIGNUPS_PER_HOUR).`,
+        );
+      }
       return c.json({ error: "too many people are signing up right now; try again in an hour", code: "signups_busy" }, 429);
     }
-    defer(async () => {
-      if (!(await allowed(db, `signup:${email}`, 3600, LINKS_PER_HOUR))) return;
-      await send(signUpMail(email, await newLink(db, publicUrl, { purpose: "signup", email, orgName })));
-    });
+    defer(async () => send(signUpMail(email, await newLink(db, publicUrl, { purpose: "signup", email, orgName }))));
     return c.json({ ok: true }, 202);
   });
 
@@ -277,8 +373,16 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     const code = text((await body(c)).code);
     const invalid = () => c.json({ error: "this link is not valid any more; ask for a new one", code: "invalid_code" }, 400);
     if (!code || code.length > 200) return invalid();
-    const [found] = await db.query<{ purpose: string; email: string | null; org_name: string | null }>(
-      `SELECT c.purpose, coalesce(u.email, c.email) AS email, coalesce(o.name, c.org_name) AS org_name
+    const [found] = await db.query<{
+      purpose: string;
+      email: string | null;
+      org_name: string | null;
+      org_id: string | null;
+      invited_by: string | null;
+      first_time: boolean;
+    }>(
+      `SELECT c.purpose, coalesce(u.email, c.email) AS email, coalesce(o.name, c.org_name) AS org_name,
+              o.id AS org_id, u.invited_by, u.confirmed_at IS NULL AS first_time
        FROM login_codes c
        LEFT JOIN users u ON u.id = c.user_id AND u.removed_at IS NULL
        LEFT JOIN orgs o ON o.id = u.org_id AND o.deleted_at IS NULL
@@ -287,7 +391,18 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     );
     if (!found?.email || !found.org_name) return invalid();
     if (found.purpose === "signup" && !offers(accounts).signup) return invalid();
-    return c.json({ purpose: found.purpose, email: found.email, org_name: found.org_name });
+    // A name is not enough to tell an organisation by: anyone can make
+    // another of the same name. So also its id, which is its own, and for
+    // someone who has not signed in to it before, who added them.
+    const signup = found.purpose === "signup";
+    return c.json({
+      purpose: found.purpose,
+      email: found.email,
+      org_name: found.org_name,
+      org_id: found.org_id,
+      first_time: !signup && found.first_time,
+      invited_by: !signup && found.first_time ? found.invited_by : null,
+    });
   });
 
   // Use a link: once, and only before it runs out.
@@ -306,13 +421,15 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
         hash(code),
       ]);
       if (!found) return null;
-      if (found.purpose === "sign_in") {
+      if (found.purpose !== "signup") {
         const [user] = await tx.query<{ id: string; org_id: string; org_name: string; email: string; role: string }>(
           `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.role FROM users u JOIN orgs o ON o.id = u.org_id
            WHERE u.id = $1 AND u.removed_at IS NULL AND o.deleted_at IS NULL`,
           [found.user_id],
         );
-        return user ? signIn(tx, user, false) : null;
+        if (!user) return null;
+        await tx.query(`UPDATE users SET confirmed_at = now() WHERE id = $1 AND confirmed_at IS NULL`, [user.id]);
+        return signIn(tx, user, false);
       }
       // Signing up: the organisation, its owner and their token, or none of them.
       if (!found.email || !found.org_name || !offers(accounts).signup) return null;
@@ -321,7 +438,7 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
       while ((await tx.query(`SELECT 1 FROM orgs WHERE id = $1`, [orgId])).length) orgId = orgIdFor(found.org_name);
       await tx.query(`INSERT INTO orgs (id, name) VALUES ($1, $2)`, [orgId, found.org_name]);
       const user = { id: newUserId(), org_id: orgId, org_name: found.org_name, email: found.email, role: "owner" };
-      await tx.query(`INSERT INTO users (id, org_id, email, role) VALUES ($1, $2, $3, $4)`, [
+      await tx.query(`INSERT INTO users (id, org_id, email, role, confirmed_at) VALUES ($1, $2, $3, $4, now())`, [
         user.id,
         user.org_id,
         user.email,

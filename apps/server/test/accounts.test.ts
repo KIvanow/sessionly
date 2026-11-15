@@ -6,11 +6,11 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
-import type { Db } from "../src/db.ts";
+import { APP_ROLE, type Db } from "../src/db.ts";
 import { tidy } from "../src/limits.ts";
 import type { Mail } from "../src/mail.ts";
 import { accountsFrom, hostedProblems } from "../src/run.ts";
-import { network, offers, orgIdFor, type Accounts } from "../src/signup.ts";
+import { mailbox, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
 import { testDb, tokenFor } from "./helpers.ts";
 
 let db: Db;
@@ -50,7 +50,7 @@ async function call(
 ) {
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    "x-forwarded-for": options.from ?? `10.0.${Math.floor(++caller / 250)}.${caller % 250}`,
+    "x-forwarded-for": options.from ?? `10.${Math.floor(++caller / 250)}.${caller % 250}.1`,
   };
   if (options.token) headers.authorization = `Bearer ${options.token}`;
   const response = await server.request(`/api/v1${path}`, {
@@ -122,7 +122,14 @@ test("signing up creates an organisation when the link is used, and not before",
   assert.doesNotMatch(sent.at(-1)?.text ?? "", /Acme/);
   // What the link is for can be asked without using it.
   const what = await post("/auth/check", { code: linksTo("kay@acme.example")[0] });
-  assert.deepEqual(what.body, { purpose: "signup", email: "kay@acme.example", org_name: "Acme, Inc" });
+  assert.deepEqual(what.body, {
+    purpose: "signup",
+    email: "kay@acme.example",
+    org_name: "Acme, Inc",
+    org_id: null,
+    first_time: false,
+    invited_by: null,
+  });
   assert.equal(await orgs(), before);
 
   const [code] = linksTo("kay@acme.example");
@@ -233,15 +240,97 @@ test("one address in two organisations gets a link to each", async () => {
   assert.notEqual(one.org.id, two.org.id);
   assert.equal((await post("/auth/email", { email: "pat@both.example" })).status, 202);
   const text = sent.at(-1)?.text ?? "";
-  assert.match(text, /in 2 organisations/);
+  assert.match(text, /Each link is for one organisation/);
   assert.ok(text.indexOf("First Co:") < text.indexOf("Second Co:"));
   const codes = linksTo("pat@both.example");
   assert.equal(codes.length, 2);
+  // What a link is for says which organisation, by its id too: a name is
+  // not enough to tell one by.
+  const what = await post("/auth/check", { code: codes[1] });
+  assert.deepEqual(what.body, {
+    purpose: "sign_in",
+    email: "pat@both.example",
+    org_name: "Second Co",
+    org_id: two.org.id,
+    first_time: false,
+    invited_by: null,
+  });
   const into = await Promise.all(codes.map((code) => post("/auth/verify", { code })));
   assert.deepEqual(into.map((s) => s.body.org.name), ["First Co", "Second Co"]);
   // Each session is of its own organisation.
   assert.equal((await get("/me", into[0]?.body.token)).body.org, one.org.id);
   assert.equal((await get("/me", into[1]?.body.token)).body.org, two.org.id);
+});
+
+test("a message to sign in names no organisation the person has not signed in to", async () => {
+  // Anyone can make an organisation, call it anything the rule allows, and
+  // add an address to it.
+  const name = "Call 0800 123 4567 to stop the 499 USD charge";
+  const attacker = await signUp("mal@attacker.example", name);
+  const added = await post("/users", { email: "vic@victim.example" }, attacker.token);
+  assert.equal(added.status, 201);
+  assert.doesNotMatch(sent.at(-1)?.text ?? "", /0800|attacker/);
+  // Then asks for a link to sign in, in the victim's name.
+  const before = sent.length;
+  assert.equal((await post("/auth/email", { email: "vic@victim.example" })).status, 202);
+  assert.equal(sent.length, before + 1);
+  const mail = sent.at(-1);
+  assert.equal(mail?.to, "vic@victim.example");
+  assert.doesNotMatch(`${mail?.subject} ${mail?.text}`, /0800|499|Call|attacker/);
+  assert.match(mail?.text ?? "", /^Sign in to Sessionly:/);
+  // The page the link opens does say, with who added them.
+  const what = await post("/auth/check", { code: linksTo("vic@victim.example")[0] });
+  assert.deepEqual(
+    [what.body.org_name, what.body.org_id, what.body.first_time, what.body.invited_by],
+    [name, attacker.org.id, true, "mal@attacker.example"],
+  );
+
+  // With an organisation of their own that they have signed in to: its name
+  // is given, and the other's still is not.
+  await signUp("vic@victim.example", "Victim and Co");
+  await db.query(`DELETE FROM login_codes`);
+  await post("/auth/email", { email: "vic@victim.example" });
+  const both = sent.at(-1)?.text ?? "";
+  assert.match(both, /An organisation you have not signed in to before:\nhttps/);
+  assert.match(both, /Victim and Co:\nhttps/);
+  assert.doesNotMatch(both, /0800/);
+  // Once they have used a link of the first, it is one they know.
+  assert.equal((await post("/auth/verify", { code: linksTo("vic@victim.example")[0] })).body.org.id, attacker.org.id);
+  await db.query(`DELETE FROM login_codes`);
+  await post("/auth/email", { email: "vic@victim.example" });
+  assert.match(sent.at(-1)?.text ?? "", /0800/);
+  const known = await post("/auth/check", { code: linksTo("vic@victim.example")[0] });
+  assert.deepEqual([known.body.first_time, known.body.invited_by], [false, null]);
+});
+
+test("asking in someone's name does not leave them without a link that works", async () => {
+  await signUp("dana@steady.example", "Steady");
+  await db.query(`DELETE FROM login_codes`);
+  // Asked for twenty times by someone else: one message, not twenty.
+  const before = sent.length;
+  for (let i = 0; i < 20; i++) assert.equal((await post("/auth/email", { email: "dana@steady.example" })).status, 202);
+  assert.equal(sent.length, before + 1);
+  // Dana asks too: the link already in her inbox works, so no second one.
+  await post("/auth/email", { email: "dana@steady.example" });
+  assert.equal(sent.length, before + 1);
+  assert.equal((await post("/auth/verify", { code: linksTo("dana@steady.example")[0] })).status, 200);
+  // Used, or run out: the next ask sends one. Round after round, for hours
+  // of the other's asking, she is never refused one.
+  for (let round = 0; round < 8; round++) {
+    for (let i = 0; i < 6; i++) await post("/auth/email", { email: "dana@steady.example" });
+    assert.equal(sent.length, before + 2 + round, `round ${round}`);
+    await db.query(`UPDATE login_codes SET expires_at = now() - interval '1 second'`);
+    await db.query(`UPDATE rate_counters SET window_start = window_start - interval '15 minutes' WHERE key LIKE 'signin:%'`);
+  }
+  // A link sent on being added is not one that was asked for: it does not
+  // hold back the link to an organisation of one's own.
+  const other = await signUp("eve@elsewhere.example", "Elsewhere");
+  await db.query(`DELETE FROM login_codes`);
+  assert.equal((await post("/users", { email: "dana@steady.example" }, other.token)).status, 201);
+  const then = sent.length;
+  await post("/auth/email", { email: "dana@steady.example" });
+  assert.equal(sent.length, then + 1);
+  assert.equal(linksTo("dana@steady.example").length, 2);
 });
 
 test("an admin adds people, who sign in as what they were added as", async () => {
@@ -253,7 +342,14 @@ test("an admin adds people, who sign in as what they were added as", async () =>
   assert.doesNotMatch(sent.at(-1)?.text ?? "", /olive|Team\b/);
   // The page the link opens shows where it leads, before anything happens.
   const what = await post("/auth/check", { code: linksTo("mo@team.example")[0] });
-  assert.deepEqual(what.body, { purpose: "sign_in", email: "mo@team.example", org_name: "Team" });
+  assert.deepEqual(what.body, {
+    purpose: "invite",
+    email: "mo@team.example",
+    org_name: "Team",
+    org_id: owner.org.id,
+    first_time: true,
+    invited_by: "olive@team.example",
+  });
   const mo = await post("/auth/verify", { code: linksTo("mo@team.example")[0] });
   assert.deepEqual([mo.body.org.id, mo.body.role], [owner.org.id, "member"]);
   // A member manages nobody.
@@ -262,6 +358,7 @@ test("an admin adds people, who sign in as what they were added as", async () =>
 
   assert.equal((await post("/users", { email: "mo@team.example" }, owner.token)).body.code, "already_a_user");
   assert.equal((await post("/users", { email: "nope" }, owner.token)).status, 400);
+  assert.equal((await post("/users", { email: `${"x".repeat(250)}@team.example` }, owner.token)).status, 400);
   assert.equal((await post("/users", { email: "x@team.example", role: "owner" }, owner.token)).status, 400);
   assert.deepEqual(
     (await get("/users", owner.token)).body.users.map((u: any) => [u.email, u.role]),
@@ -368,11 +465,17 @@ test("too many requests are refused, and too many links are not sent", async () 
   assert.equal((await call(app, "POST", "/auth/email", { body: { email: "b6@x.example" }, from: "2001:db8:7:7:ffff::9" })).status, 429);
   assert.equal((await call(app, "POST", "/auth/email", { body: { email: "b7@x.example" }, from: "2001:db8:7:8::1" })).status, 202);
 
-  // Five links an hour to one address, whoever asks: the answer stays the same.
-  await signUp("busy@inbox.example", "Inbox");
+  // Five links an hour to finish signing up go to one mailbox, whoever
+  // asks and however the address is spelt: the answer stays the same.
+  const spellings = ["busy.box@gmail.com", "busybox+a@gmail.com", "b.u.s.y.box+b@googlemail.com", "BusyBox@Gmail.com"];
   const count = sent.length;
-  for (let i = 0; i < 8; i++) assert.equal((await post("/auth/email", { email: "busy@inbox.example" })).status, 202);
+  for (let i = 0; i < 8; i++) {
+    const email = spellings[i % spellings.length];
+    assert.equal((await post("/auth/signup", { email, org_name: "Busy" })).status, 202);
+  }
   assert.equal(sent.length - count, 5);
+  // Each went to the address as it was typed.
+  assert.deepEqual(sent.slice(count).map((m) => m.to).slice(0, 3), ["busy.box@gmail.com", "busybox+a@gmail.com", "b.u.s.y.box+b@googlemail.com"]);
   // Asking to sign up in someone's name does not use up their links to sign
   // in: each kind is counted on its own.
   await signUp("target@inbox.example", "Target");
@@ -399,15 +502,49 @@ test("too many requests are refused, and too many links are not sent", async () 
   }
   assert.deepEqual(statuses, [202, 202, 202, 202, 202, 429]);
 
-  // All sign-ups together have a ceiling, however many addresses they come from.
-  const capped = createApp(db, { accounts: { ...hosted, signupsPerHour: 2 } });
-  await db.query(`DELETE FROM rate_counters WHERE key = 'signups'`);
-  const asks = [];
-  for (let i = 0; i < 3; i++) {
-    asks.push(await call(capped, "POST", "/auth/signup", { body: { email: `d${i}@x.example`, org_name: "Capped" } }));
+  // All sign-up messages together have a ceiling, however many addresses
+  // and networks they are asked from.
+  const capped = createApp(db, { accounts: { ...hosted, signupsPerHour: 7 } });
+  const ask = (email: string, from?: string) => call(capped, "POST", "/auth/signup", { body: { email, org_name: "Capped" }, from });
+  await db.query(`DELETE FROM rate_counters WHERE key LIKE 'signups%'`);
+  // Asking again and again for one address is not what reaches it: only
+  // messages that go out count, and that address gets five.
+  const sentBefore = sent.length;
+  for (let i = 0; i < 20; i++) assert.equal((await ask("again@x.example")).status, 202);
+  assert.equal(sent.length - sentBefore, 5);
+  const [{ n: counted } = { n: 0 }] = await db.query<{ n: number }>(`SELECT n FROM rate_counters WHERE key = 'signups'`);
+  assert.equal(Number(counted), 5);
+  for (const email of ["c1@x.example", "c2@x.example"]) assert.equal((await ask(email)).status, 202);
+  // Reached, it says so to the next address, and (once) to whoever runs the server.
+  const warned: string[] = [];
+  const warn = console.warn;
+  console.warn = (line: string) => void warned.push(line);
+  try {
+    for (const email of ["d1@x.example", "d2@x.example"]) {
+      const refused = await ask(email);
+      assert.deepEqual([refused.status, refused.body.code], [429, "signups_busy"]);
+    }
+  } finally {
+    console.warn = warn;
   }
-  assert.deepEqual(asks.map((r) => r.status), [202, 202, 429]);
-  assert.equal(asks[2]?.body.code, "signups_busy");
+  assert.equal(warned.length, 1);
+  assert.match(warned[0] ?? "", /ceiling of 7 sign-up messages an hour is reached/);
+  // A refusal there does not count against the address either.
+  assert.equal((await db.query(`SELECT 1 FROM rate_counters WHERE key = 'signup:d1@x.example' AND n > 0`)).length, 0);
+
+  // One network asks for five sign-ups an hour, whichever of its addresses
+  // asks and whoever for. The next network is not held up by it.
+  await db.query(`DELETE FROM rate_counters WHERE key LIKE 'signups%'`);
+  const fromOne = [];
+  for (let i = 0; i < 7; i++) fromOne.push((await call(app, "POST", "/auth/signup", { body: { email: `n${i}@x.example`, org_name: "Net" }, from: `198.18.7.${i + 1}` })).status);
+  assert.deepEqual(fromOne, [202, 202, 202, 202, 202, 429, 429]);
+  assert.equal((await call(app, "POST", "/auth/signup", { body: { email: "n8@x.example", org_name: "Net" }, from: "198.18.8.1" })).status, 202);
+  const fromSite = [];
+  for (let i = 0; i < 6; i++) fromSite.push((await call(app, "POST", "/auth/signup", { body: { email: `s${i}@x.example`, org_name: "Site" }, from: `2001:db8:9:${i}::1` })).status);
+  assert.deepEqual(fromSite, [202, 202, 202, 202, 202, 429]);
+  // Requests that are refused for what they say are not counted there.
+  for (let i = 0; i < 4; i++) await call(app, "POST", "/auth/signup", { body: { email: "nope", org_name: "Net" }, from: "198.18.9.1" });
+  assert.equal((await call(app, "POST", "/auth/signup", { body: { email: "n9@x.example", org_name: "Net" }, from: "198.18.9.2" })).status, 202);
 
   // A token's own limit, where one is set.
   const limited = createApp(db, { accounts: { ...hosted, ratePerMinute: 3 } });
@@ -446,6 +583,22 @@ test("adding people is limited, since each is a message to an address nobody con
   for (let i = 0; i < 32; i++) many.push((await post("/users", { email: `p${i}@many.example` }, fresh.token)).status);
   assert.equal(many.filter((status) => status === 201).length, 30);
   assert.deepEqual(many.slice(30), [429, 429]);
+  // Adding someone who is already there sends nothing, so it is not
+  // counted: it cannot use up what their address may be sent.
+  await db.query(`DELETE FROM rate_counters WHERE key LIKE 'invites:%' OR key LIKE 'invite:%'`);
+  const again = await signUp("moe@again.example", "Again");
+  assert.equal((await post("/users", { email: "here@again.example" }, again.token)).status, 201);
+  for (let i = 0; i < 40; i++) {
+    assert.equal((await post("/users", { email: "here@again.example" }, again.token)).status, 409);
+  }
+  const kept = await db.query<{ key: string; n: number }>(`SELECT key, n FROM rate_counters WHERE key LIKE 'invite%' ORDER BY key`);
+  assert.deepEqual(kept.map((row) => [row.key, Number(row.n)]), [["invite:here@again.example", 1], [`invites:${again.org.id}`, 1]]);
+  // Addresses that lead to one mailbox are counted as that mailbox.
+  const boxes = [];
+  for (const email of ["dot.ty@gmail.com", "dotty+1@gmail.com", "d.otty@googlemail.com", "dotty+2@gmail.com", "do.tty@gmail.com", "dotty@gmail.com"]) {
+    boxes.push((await post("/users", { email }, again.token)).status);
+  }
+  assert.deepEqual(boxes, [201, 201, 201, 201, 201, 429]);
   // A member's attempts, and nonsense, are refused without being counted.
   await db.query(`DELETE FROM rate_counters WHERE key LIKE 'invites:%' OR key LIKE 'invite:%'`);
   const admin2 = await signUp("lou@count.example", "Count");
@@ -482,7 +635,7 @@ test("requests may add a link and nothing more to what is kept outside organisat
               CASE WHEN has_table_privilege(r.role, c.oid, 'UPDATE') THEN 'update' END,
               CASE WHEN has_table_privilege(r.role, c.oid, 'DELETE') THEN 'delete' END) AS can
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace,
-          (SELECT left('sessionly_app_' || current_database(), 63) AS role) r
+          (SELECT ${APP_ROLE} AS role) r
      WHERE n.nspname = 'public' AND c.relname IN ('users', 'login_codes', 'rate_counters')`,
   );
   assert.deepEqual(Object.fromEntries(granted.map((t) => [t.name, t.can])), {
@@ -563,6 +716,42 @@ test("an IPv6 caller is counted by its network, an IPv4 caller by its address", 
   assert.equal(network("fe80::1%eth0"), "fe80:0:0:0::/64");
   assert.equal(network("::ffff:203.0.113.9"), "203.0.113.9");
   assert.equal(network("unknown"), "unknown");
+});
+
+test("by the hour a caller is counted by a wider network", () => {
+  assert.equal(widerNetwork("203.0.113.9"), "203.0.113.0/24");
+  assert.equal(widerNetwork("::ffff:203.0.113.9"), "203.0.113.0/24");
+  assert.equal(widerNetwork("2001:db8:1:2:3:4:5:6"), "2001:db8:1::/48");
+  assert.equal(widerNetwork("2001:0DB8:0001::1"), "2001:db8:1::/48");
+  assert.equal(widerNetwork("unknown"), "unknown");
+});
+
+test("addresses that lead to one mailbox are counted as one", () => {
+  assert.equal(mailbox("Ann.Lee+work@Example.com"), "ann.lee@example.com");
+  assert.equal(mailbox("ann.lee+a+b@gmail.com"), "annlee@gmail.com");
+  assert.equal(mailbox("a.n.n.l.e.e@googlemail.com"), "annlee@gmail.com");
+  assert.equal(mailbox("+tag@example.com"), "+tag@example.com");
+  assert.equal(mailbox("plain@example.com"), "plain@example.com");
+});
+
+test("an organisation's name: any script's letters, composed, and no styled lookalikes", () => {
+  // Typed with a separate accent, it is kept as the one letter.
+  assert.equal(orgNameFrom("Cafe\u0301 Central"), "Caf\u00e9 Central");
+  assert.equal(orgNameFrom("  Acme,   Inc "), "Acme, Inc");
+  // Scripts that write vowels and tones as marks on a letter.
+  for (const name of ["देवनागरी सेवा", "น้ำใจ บริษัท", "ກຳໄລ", "شركة النور", "한국 회사", "Ünïcödé & Sons", "Société Générale"]) {
+    assert.equal(orgNameFrom(name), name.normalize("NFC"), name);
+  }
+  // Letters that are a styled form of another: fullwidth, mathematical, circled, ligatures.
+  for (const name of ["Ａｃｍｅ", "\u{1D400}cme Inc", "Ⓐcme", "Oﬃce Co", "Acme\u00a0Inc²"]) {
+    assert.equal(orgNameFrom(name), null, name);
+  }
+  // Marks piled on a letter, and what could carry a link or an address.
+  assert.equal(orgNameFrom(`Za${"\u0301".repeat(5)}lgo`), null);
+  assert.equal(orgNameFrom(`Za${"\u0301".repeat(4)}lgo`)?.length, 8);
+  for (const name of ["evil.example", "a@b", "http://x", "x", "", "\u0301Acme", "x".repeat(61)]) {
+    assert.equal(orgNameFrom(name), null, name);
+  }
 });
 
 test("an organisation's id is readable and its own", () => {

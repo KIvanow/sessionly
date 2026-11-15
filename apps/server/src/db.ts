@@ -558,6 +558,14 @@ const MIGRATIONS: string[] = [
      n            integer NOT NULL,
      PRIMARY KEY (key, window_start)
    )`,
+  // Who added a person, and when they first used a link of this
+  // organisation's. Until they have, its name is not put in a message to them.
+  `ALTER TABLE users ADD COLUMN invited_by text`,
+  `ALTER TABLE users ADD COLUMN confirmed_at timestamptz`,
+  // A link someone was sent on being added, apart from one they asked for.
+  `ALTER TABLE login_codes DROP CONSTRAINT login_codes_purpose_check`,
+  `ALTER TABLE login_codes ADD CONSTRAINT login_codes_purpose_check CHECK (purpose IN ('sign_in', 'signup', 'invite'))`,
+  `CREATE INDEX login_codes_user ON login_codes (user_id)`,
 ];
 
 /**

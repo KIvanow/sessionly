@@ -30,21 +30,29 @@ export const LINK_MINUTES = 15;
 
 const FOOTER = `The link works once, for ${LINK_MINUTES} minutes. If you did not ask for this, ignore this message: nothing happens without the link.`;
 
-/** A link to sign in to each organisation the address is a user of. */
-export function signInMail(to: string, links: { org: string; url: string }[]): Mail {
+// Every message here goes to an address on the word of whoever asked, and
+// anyone can make an organisation, name it, and add an address to it. So a
+// message says nothing its asker chose: no one's address, and no
+// organisation's name unless the person it goes to has signed in to that
+// organisation before and so knows the name. The page a link opens says
+// where it leads and who added the address, and asks before going there.
+
+/**
+ * A link to sign in to each organisation the address is a user of. `org` is
+ * the organisation's name where the person has signed in to it before, and
+ * null where they have not.
+ */
+export function signInMail(to: string, links: { org: string | null; url: string }[]): Mail {
   const only = links[0];
+  const says = "The page it opens says which organisation it is for, and asks before signing you in.";
+  const unknown = "An organisation you have not signed in to before";
   const body =
     links.length === 1 && only
-      ? `Sign in to ${only.org} on Sessionly:\n\n${only.url}`
-      : `Sign in to Sessionly. This address is in ${links.length} organisations; each has its own link:\n\n` +
-        links.map((link) => `${link.org}:\n${link.url}`).join("\n\n");
+      ? `${only.org ? `Sign in to ${only.org} on Sessionly` : "Sign in to Sessionly"}:\n\n${only.url}\n\n${says}`
+      : `Sign in to Sessionly. Each link is for one organisation. ${says.replace("The page it", "The page a link")}\n\n` +
+        links.map((link) => `${link.org ?? unknown}:\n${link.url}`).join("\n\n");
   return { to, subject: "Sign in to Sessionly", text: `${body}\n\n${FOOTER}\n` };
 }
-
-// The two messages below go to addresses nobody has confirmed, on the word of
-// whoever asked. So they say nothing their asker chose: no organisation's
-// name, no one's address. The page the link opens says where it leads, and
-// asks before going there.
 
 /** The link that creates the organisation someone asked for. */
 export function signUpMail(to: string, url: string): Mail {
