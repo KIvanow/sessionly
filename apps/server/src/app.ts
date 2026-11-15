@@ -15,7 +15,7 @@ import {
 import type { Db, OrgDb } from "./db.ts";
 import { allowed, giveBack } from "./limits.ts";
 import { inviteMail } from "./mail.ts";
-import { LINKS_PER_HOUR, mailbox, newLink, newUserId, openRoutes, type Accounts } from "./signup.ts";
+import { emailFrom, LINKS_PER_HOUR, mailbox, newLink, newUserId, openRoutes, unsend, type Accounts } from "./signup.ts";
 import { addUser, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
 import {
   Conflict,
@@ -63,9 +63,6 @@ export type Extension = (api: Api) => void;
 
 class BadRequest extends Error {}
 
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-/** The longest an address can be. */
-const MAX_EMAIL = 254;
 
 /** Thrown to undo what a request wrote, once its answer is already decided. */
 class Undo extends Error {}
@@ -218,6 +215,10 @@ const DASHBOARD_POLICY = [
 export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
   const accounts = options.accounts ?? {};
+  // Work an answer does not wait for: sending a message that follows it.
+  const defer =
+    accounts.defer ??
+    ((work: () => Promise<void>) => void work().catch((err: unknown) => console.error("work after an answer failed:", err)));
 
   api.use("*", async (c, next) => {
     const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap);
@@ -302,9 +303,9 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   api.post("/users", async (c, next) => {
     const p = c.get("principal");
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    const email = emailFrom(body.email);
     // Anything else is refused further on, uncounted.
-    if (p.role !== "admin" || !EMAIL.test(email) || email.length > MAX_EMAIL) return next();
+    if (p.role !== "admin" || !email) return next();
     const limited = (error: string) => c.json({ error, code: "rate_limited" }, 429);
     const perOrg = `invites:${p.orgId}`;
     const perMailbox = `invite:${mailbox(email)}`;
@@ -502,16 +503,16 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   admin.get("/", async (c) => c.json({ tokens: await listTokens(c.get("db")) }));
   admin.post("/", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const email = typeof body.email === "string" ? body.email.trim() : "";
+    const email = emailFrom(body.email);
     const role = (body.role ?? "member") as Role;
-    if (!/^\S+@\S+$/.test(email)) throw new BadRequest("email is required");
+    if (!email) throw new BadRequest("email is required, as a plain address of 254 characters at most");
     if (role !== "admin" && role !== "member" && role !== "ci" && role !== "env") {
       throw new BadRequest("role must be admin, member, ci or env");
     }
     const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : null;
     const created = await createToken(c.get("db"), { email, name, role });
     // The only time the token itself is returned.
-    return c.json({ ...created, email: email.toLowerCase(), name, role }, 201);
+    return c.json({ ...created, email, name, role }, 201);
   });
   admin.delete("/:id", async (c) =>
     (await revokeToken(c.get("db"), c.req.param("id")))
@@ -534,19 +535,28 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       return c.json({ error: "signing in by email is not set up here; create a token instead", code: "no_email" }, 409);
     }
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    const email = emailFrom(body.email);
     const role = body.role ?? "member";
-    if (!EMAIL.test(email) || email.length > MAX_EMAIL) throw new BadRequest("email is required, and is 254 characters at most");
+    if (!email) throw new BadRequest("email is required, as a plain address of 254 characters at most");
     if (role !== "admin" && role !== "member") throw new BadRequest("role must be admin or member");
     const db = c.get("db");
-    const user = await addUser(db, newUserId(), email, role, c.get("principal"));
-    const mail = inviteMail(email, await newLink(db, publicUrl, { purpose: "invite", userId: user.id }));
-    // Sent once the person and their link are really there.
-    c.get("after").push(() => {
-      mailer.send(mail).catch((err: unknown) => {
-        console.error("an invitation was not sent:", err instanceof Error ? err.message : err);
-      });
-    });
+    const p = c.get("principal");
+    const user = await addUser(db, newUserId(), email, role, p);
+    const link = await newLink(db, publicUrl, { purpose: "invite", userId: user.id });
+    const mail = inviteMail(email, link.url);
+    // Sent once the person and their link are really there. If it cannot
+    // be sent, the link is forgotten and the message is not one of those
+    // counted: the person is in, and asks for a link on the sign-in page.
+    c.get("after").push(() =>
+      defer(async () => {
+        try {
+          await mailer.send(mail);
+        } catch (err) {
+          console.error("an invitation was not sent:", err instanceof Error ? err.message : err);
+          await unsend(ownerDb, [link], [`invites:${p.orgId}`, `invite:${mailbox(email)}`]);
+        }
+      }),
+    );
     return c.json(user, 201);
   });
   users.delete("/:id", async (c) => {

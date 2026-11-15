@@ -20,6 +20,12 @@ export interface Principal {
   tokenId: string | null;
   /** The person, if the token is tied to one: they signed in, or it is for their machines. */
   userId: string | null;
+  /**
+   * The request comes from someone who signed in with a link sent to
+   * `email`, so the address is theirs. Any other token's address is what
+   * whoever made the token typed.
+   */
+  viaEmail: boolean;
 }
 
 /** The one organisation of a self-hosted install. */
@@ -128,7 +134,7 @@ export async function authenticate(
   if (bootstrap?.token) {
     const expected = Buffer.from(hash(bootstrap.token));
     if (timingSafeEqual(Buffer.from(digest), expected)) {
-      return { orgId: DEFAULT_ORG, email: bootstrap.email, name: null, role: "admin", tokenId: null, userId: null };
+      return { orgId: DEFAULT_ORG, email: bootstrap.email, name: null, role: "admin", tokenId: null, userId: null, viaEmail: false };
     }
   }
   // The one question asked before an organisation is known, so as the
@@ -141,6 +147,7 @@ export async function authenticate(
     name: string | null;
     role: Role;
     user_id: string | null;
+    sign_in: string | null;
   }>(
     `UPDATE tokens SET last_used_at = now()
      WHERE token_hash = $1 AND revoked_at IS NULL
@@ -150,11 +157,19 @@ export async function authenticate(
        -- was being issued at that very moment
        AND (tokens.user_id IS NULL OR EXISTS (
          SELECT 1 FROM users WHERE users.id = tokens.user_id AND users.removed_at IS NULL))
-     RETURNING id, org_id, email, name, role, user_id`,
+     RETURNING id, org_id, email, name, role, user_id, sign_in`,
     [digest],
   );
   const row = rows[0];
   return row
-    ? { orgId: row.org_id, email: row.email, name: row.name, role: row.role, tokenId: row.id, userId: row.user_id }
+    ? {
+        orgId: row.org_id,
+        email: row.email,
+        name: row.name,
+        role: row.role,
+        tokenId: row.id,
+        userId: row.user_id,
+        viaEmail: row.sign_in === "email",
+      }
     : null;
 }

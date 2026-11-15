@@ -566,6 +566,17 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE login_codes DROP CONSTRAINT login_codes_purpose_check`,
   `ALTER TABLE login_codes ADD CONSTRAINT login_codes_purpose_check CHECK (purpose IN ('sign_in', 'signup', 'invite'))`,
   `CREATE INDEX login_codes_user ON login_codes (user_id)`,
+  // How a person was added: by someone who had signed in, whose address is
+  // then known to be theirs, or with a token, whose address is whatever its
+  // maker typed. Only the first is shown to the person as who added them.
+  `ALTER TABLE users ADD COLUMN invited_via text CHECK (invited_via IN ('sign_in', 'token'))`,
+  // People from before sign-ins were noted have signed in if a session of
+  // theirs was ever made, or if they are the owner, who signed up by a link.
+  `UPDATE users u
+   SET confirmed_at = coalesce(
+     (SELECT min(t.created_at) FROM tokens t WHERE t.user_id = u.id AND t.sign_in = 'email'),
+     CASE WHEN u.role = 'owner' THEN u.created_at END)
+   WHERE u.confirmed_at IS NULL`,
 ];
 
 /**
@@ -677,6 +688,11 @@ async function sameRoleStill(tx: Queryable, grants: Grant[]): Promise<void> {
 
 /** Where the migrations that brought organisations begin. */
 export const FIRST_ORG_MIGRATION = MIGRATIONS.findIndex((sql) => sql.startsWith("CREATE TABLE orgs"));
+
+/** Where the migration that begins with `start` is: how a test stops just short of it. */
+export function migrationAt(start: string): number {
+  return MIGRATIONS.findIndex((sql) => sql.startsWith(start));
+}
 
 /**
  * The statements that confine a table to the organisation of the transaction.

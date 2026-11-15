@@ -17,6 +17,7 @@
 //   SESSIONLY_TRUST_PROXY  "true" behind a proxy of your own, to count requests by its X-Forwarded-For
 //   SESSIONLY_RATE_PER_MINUTE  requests a token may make a minute (hosted default: 600)
 //   SESSIONLY_SIGNUPS_PER_HOUR links to finish signing up sent an hour, in all (default 100)
+//   SESSIONLY_SIGNUPS_PER_NETWORK  sign-ups asked for an hour from one network (default 10)
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
@@ -91,6 +92,45 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
     trustProxy: env.SESSIONLY_TRUST_PROXY === "true",
     ratePerMinute: Number.isFinite(rate) && rate > 0 ? rate : undefined,
     signupsPerHour: Number(env.SESSIONLY_SIGNUPS_PER_HOUR) > 0 ? Number(env.SESSIONLY_SIGNUPS_PER_HOUR) : undefined,
+    signupsPerNetwork:
+      Number(env.SESSIONLY_SIGNUPS_PER_NETWORK) > 0 ? Number(env.SESSIONLY_SIGNUPS_PER_NETWORK) : undefined,
+  };
+}
+
+/**
+ * Settings that no longer do what whoever set them expects. Said at the
+ * start, since the server otherwise runs as if they were not there.
+ */
+export function outdated(env: NodeJS.ProcessEnv): string[] {
+  const notes: string[] = [];
+  if (env.SMTP_URL && !env.RESEND_API_KEY) {
+    notes.push(
+      "SMTP_URL is set, but email is sent through Resend now and not over SMTP: signing in by email is off until RESEND_API_KEY is set.",
+    );
+  }
+  return notes;
+}
+
+/**
+ * Work that an answer does not wait for (sending a message), kept track of
+ * so that stopping the server can wait for it.
+ */
+export function background() {
+  const running = new Set<Promise<void>>();
+  return {
+    defer(work: () => Promise<void>): void {
+      const done: Promise<void> = work()
+        .catch((err: unknown) => console.error(`work after an answer failed: ${reason(err)}`))
+        .finally(() => running.delete(done));
+      running.add(done);
+    },
+    /** Resolves once nothing is running, or after `ms` whatever still is. */
+    async idle(ms: number): Promise<void> {
+      const until = Date.now() + ms;
+      while (running.size && Date.now() < until) {
+        await Promise.race([Promise.all(running), new Promise((resolve) => setTimeout(resolve, until - Date.now()))]);
+      }
+    },
   };
 }
 
@@ -122,7 +162,9 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   // The dashboard, if it has been built (pnpm build).
   const webDist = fileURLToPath(new URL("../../web/dist", import.meta.url));
   const webRoot = existsSync(webDist) ? webDist : undefined;
-  const accounts = accountsFrom(process.env);
+  const after = background();
+  const accounts = { ...accountsFrom(process.env), defer: after.defer };
+  for (const note of outdated(process.env)) console.warn(note);
   // Old counters and links that ran out are cleared away now and then.
   const tidying = setInterval(() => void tidy(db).catch((err) => console.error("tidying failed:", err)), 15 * 60_000);
   tidying.unref();
@@ -158,6 +200,8 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {
       server.close(async () => {
+        // A message that is on its way out is let go first, for a while.
+        await after.idle(15_000);
         await db.close();
         process.exit(0);
       });

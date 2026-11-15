@@ -8,6 +8,7 @@
 // it works once.
 import { randomBytes } from "node:crypto";
 import { isIPv4, isIPv6 } from "node:net";
+import { domainToASCII } from "node:url";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { getConnInfo } from "@hono/node-server/conninfo";
@@ -39,6 +40,8 @@ export interface Accounts {
   ratePerMinute?: number;
   /** Links to finish signing up sent an hour, to everyone together. Default 100. */
   signupsPerHour?: number;
+  /** Sign-ups asked for an hour from one network (a /24, or a /48 of IPv6). Default 10. */
+  signupsPerNetwork?: number;
   /**
    * Runs work an answer does not wait for: looking an address up and sending
    * it a link. That way an answer takes as long for an address nobody has as
@@ -64,8 +67,12 @@ export const LINKS_PER_HOUR = 5;
  */
 const SIGN_IN_MAILS_PER_HOUR = 12;
 
-/** Sign-ups asked for an hour from one network (a /24, or a /48 of IPv6). */
-const SIGNUPS_PER_NETWORK = 5;
+/**
+ * Sign-ups asked for an hour from one network (a /24, or a /48 of IPv6),
+ * unless set otherwise. An office or a phone network shares one, so this is
+ * not tight; it is there so that one place cannot ask for them all.
+ */
+const SIGNUPS_PER_NETWORK = 10;
 
 /**
  * What an organisation may be called: 2 to 60 letters, digits, spaces and a
@@ -120,7 +127,26 @@ export function offers(accounts: Accounts) {
   };
 }
 
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/**
+ * An address as it is kept and compared, or null if it is not one this
+ * takes. Lower case, and the domain in its plain form (`domainToASCII`), so
+ * that one domain is one however it is written. The part before the @ is
+ * the letters, digits and signs of an ordinary address: no quotes, no
+ * spaces, nothing invisible, and no letters from beyond ASCII, each of which
+ * is a way to write one mailbox as many addresses.
+ */
+export function emailFrom(typed: unknown): string | null {
+  if (typeof typed !== "string") return null;
+  const text = typed.trim();
+  const at = text.lastIndexOf("@");
+  if (at < 1) return null;
+  const local = text.slice(0, at).toLowerCase();
+  if (!/^[a-z0-9!#$%&'*+/=?^_`{|}~.-]+$/.test(local) || /^\.|\.$|\.\./.test(local)) return null;
+  const domain = domainToASCII(text.slice(at + 1).replace(/\.$/, "")).toLowerCase();
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain)) return null;
+  const email = `${local}@${domain}`;
+  return email.length <= 254 ? email : null;
+}
 
 /** The groups of an IPv6 address, written out; null for anything else. */
 function groupsOf(address: string): string[] | null {
@@ -198,18 +224,19 @@ export function newUserId(): string {
   return `usr_${Array.from(randomBytes(14), (byte) => ALPHABET[byte % ALPHABET.length]).join("")}`;
 }
 
-/** Store a code for a link and return the link. */
+/** Store a code for a link. Returns the link, and what it is kept under, to forget it by. */
 export async function newLink(
   db: Queryable,
   publicUrl: string,
   code: { purpose: "sign_in" | "invite"; userId: string } | { purpose: "signup"; email: string; orgName: string },
-): Promise<string> {
+): Promise<{ url: string; code: string }> {
   const secret = randomBytes(32).toString("base64url");
+  const kept = hash(secret);
   await db.query(
     `INSERT INTO login_codes (code_hash, purpose, user_id, email, org_name, expires_at)
      VALUES ($1, $2, $3, $4, $5, now() + make_interval(mins => $6::int))`,
     [
-      hash(secret),
+      kept,
       code.purpose,
       code.purpose === "signup" ? null : code.userId,
       code.purpose === "signup" ? code.email : null,
@@ -217,8 +244,20 @@ export async function newLink(
       LINK_MINUTES,
     ],
   );
-  return `${publicUrl.replace(/\/+$/, "")}/#login=${secret}`;
+  return { url: `${publicUrl.replace(/\/+$/, "")}/#login=${secret}`, code: kept };
 }
+
+/**
+ * A message was not sent. Its links are forgotten and it does not count as
+ * one that went out: left as they were, a link nobody received would hold
+ * back the next one for as long as it "still worked", and the hour's
+ * allowance would be spent on nothing.
+ */
+export async function unsend(db: Queryable, links: { code: string }[], counters: string[]): Promise<void> {
+  await db.query(`DELETE FROM login_codes WHERE code_hash = ANY($1::text[])`, [links.map((link) => link.code)]);
+  for (const key of counters) await giveBack(db, key, 3600);
+}
+
 
 /** The token role someone signs in with: an owner can do what an admin can. */
 function tokenRole(userRole: string): Role {
@@ -268,10 +307,8 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     allowed(db, `${what}:${network(callerOf(c, accounts.trustProxy))}`, 60, max);
   const failed = (what: string) => (err: unknown) => console.error(`${what}:`, err instanceof Error ? err.message : err);
   const defer = accounts.defer ?? ((work) => void work().catch(failed("work after an answer failed")));
-  const send = async (mail: ReturnType<typeof signInMail>) => {
-    // Named by its domain only: neither the address nor the link is logged.
-    await mailer?.send(mail).catch(failed(`email to …${mail.to.replace(/^[^@]*/, "")} was not sent`));
-  };
+  // Named by its domain only: neither the address nor the link is logged.
+  const notSent = (to: string, err: unknown) => failed(`email to …${to.replace(/^[^@]*/, "")} was not sent`)(err);
   const body = async (c: Context) => ((await c.req.json().catch(() => ({}))) ?? {}) as Record<string, unknown>;
   const text = (value: unknown) => (typeof value === "string" ? value.trim() : "");
 
@@ -288,8 +325,8 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
   open.post("/email", async (c) => {
     if (!mailer || !publicUrl) return c.json({ error: "signing in by email is not set up here", code: "no_email" }, 404);
     if (!(await perMinute(c, "auth-email", 5))) return tooMany(c);
-    const email = text((await body(c)).email).toLowerCase();
-    if (!EMAIL.test(email) || email.length > 254) return c.json({ error: "that is not an email address" }, 400);
+    const email = emailFrom((await body(c)).email);
+    if (!email) return c.json({ error: "that is not an email address" }, 400);
     defer(async () => {
       const users = await db.query<{ id: string; org_name: string; known: boolean; waiting: boolean }>(
         `SELECT u.id, o.name AS org_name, u.confirmed_at IS NOT NULL AS known,
@@ -306,18 +343,27 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
       // that works: there is no allowance of theirs for it to use up.
       const due = users.filter((user) => !user.waiting);
       if (!due.length) return;
-      // What is counted is the mailbox, for the addresses that all lead to one.
-      if (!(await allowed(db, `signin:${mailbox(email)}`, 3600, SIGN_IN_MAILS_PER_HOUR))) return;
+      // An address whose owner has signed in with it has an allowance of its
+      // own. Addresses nobody has confirmed share their mailbox's: anyone
+      // can add `ann+1@`, `ann+2@` and so on to an organisation of theirs
+      // and ask for links to them all, and that must not use up Ann's.
+      const counter = users.some((user) => user.known) ? `signin-own:${email}` : `signin:${mailbox(email)}`;
+      if (!(await allowed(db, counter, 3600, SIGN_IN_MAILS_PER_HOUR))) return;
       const links = [];
       for (const user of due) {
         links.push({
           // The name of an organisation they have never signed in to is
           // whatever someone who added them chose: it is not passed on.
           org: user.known ? user.org_name : null,
-          url: await newLink(db, publicUrl, { purpose: "sign_in", userId: user.id }),
+          ...(await newLink(db, publicUrl, { purpose: "sign_in", userId: user.id })),
         });
       }
-      await send(signInMail(email, links));
+      try {
+        await mailer.send(signInMail(email, links));
+      } catch (err) {
+        notSent(email, err);
+        await unsend(db, links, [counter]);
+      }
     });
     return c.json({ ok: true }, 202);
   });
@@ -331,16 +377,16 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     }
     if (!(await perMinute(c, "auth-email", 5))) return tooMany(c);
     const sent = await body(c);
-    const email = text(sent.email).toLowerCase();
+    const email = emailFrom(sent.email);
     const orgName = orgNameFrom(text(sent.org_name));
-    if (!EMAIL.test(email) || email.length > 254) return c.json({ error: "that is not an email address" }, 400);
+    if (!email) return c.json({ error: "that is not an email address" }, 400);
     if (!orgName) return c.json({ error: ORG_NAME_RULE, code: "bad_org_name" }, 400);
     if (accounts.signupCode && !sameSecret(text(sent.invite_code), accounts.signupCode)) {
       return c.json({ error: "signing up needs an invitation code", code: "invite_required" }, 403);
     }
     // By the hour too, and by a wider network than the minute's: what one
     // caller can ask for is their own to use up, and no one else's.
-    if (!(await allowed(db, `signups-from:${widerNetwork(callerOf(c, accounts.trustProxy))}`, 3600, SIGNUPS_PER_NETWORK))) {
+    if (!(await allowed(db, `signups-from:${widerNetwork(callerOf(c, accounts.trustProxy))}`, 3600, accounts.signupsPerNetwork ?? SIGNUPS_PER_NETWORK))) {
       return c.json({ error: "too many sign-ups from your network; try again in an hour", code: "rate_limited" }, 429);
     }
     // From here on only messages that really go out are counted. First the
@@ -361,7 +407,15 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
       }
       return c.json({ error: "too many people are signing up right now; try again in an hour", code: "signups_busy" }, 429);
     }
-    defer(async () => send(signUpMail(email, await newLink(db, publicUrl, { purpose: "signup", email, orgName }))));
+    defer(async () => {
+      const link = await newLink(db, publicUrl, { purpose: "signup", email, orgName });
+      try {
+        await mailer.send(signUpMail(email, link.url));
+      } catch (err) {
+        notSent(email, err);
+        await unsend(db, [link], [perMailbox, "signups"]);
+      }
+    });
     return c.json({ ok: true }, 202);
   });
 
@@ -379,10 +433,11 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
       org_name: string | null;
       org_id: string | null;
       invited_by: string | null;
+      invited_via: string | null;
       first_time: boolean;
     }>(
       `SELECT c.purpose, coalesce(u.email, c.email) AS email, coalesce(o.name, c.org_name) AS org_name,
-              o.id AS org_id, u.invited_by, u.confirmed_at IS NULL AS first_time
+              o.id AS org_id, u.invited_by, u.invited_via, u.confirmed_at IS NULL AS first_time
        FROM login_codes c
        LEFT JOIN users u ON u.id = c.user_id AND u.removed_at IS NULL
        LEFT JOIN orgs o ON o.id = u.org_id AND o.deleted_at IS NULL
@@ -393,15 +448,20 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     if (found.purpose === "signup" && !offers(accounts).signup) return invalid();
     // A name is not enough to tell an organisation by: anyone can make
     // another of the same name. So also its id, which is its own, and for
-    // someone who has not signed in to it before, who added them.
+    // someone who has not signed in to it before, who added them: if that
+    // was a person who had signed in, whose address is then theirs. Someone
+    // added with a token is told that much and no address, since a token's
+    // address and name are whatever its maker typed.
     const signup = found.purpose === "signup";
+    const unknown = !signup && found.first_time;
     return c.json({
       purpose: found.purpose,
       email: found.email,
       org_name: found.org_name,
       org_id: found.org_id,
-      first_time: !signup && found.first_time,
-      invited_by: !signup && found.first_time ? found.invited_by : null,
+      first_time: unknown,
+      invited_by: unknown && found.invited_via === "sign_in" ? found.invited_by : null,
+      invited_via: unknown ? found.invited_via : null,
     });
   });
 

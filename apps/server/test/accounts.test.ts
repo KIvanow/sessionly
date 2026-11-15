@@ -1,23 +1,26 @@
 // Signing up, signing in by email, and the people of an organisation.
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
-import { APP_ROLE, type Db } from "../src/db.ts";
+import { APP_ROLE, migrationAt, openDb, type Db } from "../src/db.ts";
 import { tidy } from "../src/limits.ts";
 import { MailProblem, resendMailer, type Mail } from "../src/mail.ts";
-import { accountsFrom, hostedProblems } from "../src/run.ts";
-import { mailbox, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
-import { testDb, tokenFor } from "./helpers.ts";
+import { accountsFrom, background, hostedProblems, outdated } from "../src/run.ts";
+import { emailFrom, mailbox, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
+import { testDb, testDbUrl, tokenFor } from "./helpers.ts";
 
 let db: Db;
 let app: Hono<Env>;
 const sent: Mail[] = [];
+// Set by a test to have messages fail to go out, as when the mail service is down.
+let mailDown = false;
 const mailer = {
   send: async (mail: Mail) => {
+    if (mailDown) throw new Error("Resend did not take the message (503 service_unavailable)");
     sent.push(mail);
   },
 };
@@ -129,6 +132,7 @@ test("signing up creates an organisation when the link is used, and not before",
     org_id: null,
     first_time: false,
     invited_by: null,
+    invited_via: null,
   });
   assert.equal(await orgs(), before);
 
@@ -254,6 +258,7 @@ test("one address in two organisations gets a link to each", async () => {
     org_id: two.org.id,
     first_time: false,
     invited_by: null,
+    invited_via: null,
   });
   const into = await Promise.all(codes.map((code) => post("/auth/verify", { code })));
   assert.deepEqual(into.map((s) => s.body.org.name), ["First Co", "Second Co"]);
@@ -303,6 +308,100 @@ test("a message to sign in names no organisation the person has not signed in to
   assert.deepEqual([known.body.first_time, known.body.invited_by], [false, null]);
 });
 
+test("who added someone is shown only if that is known, not on a token's word", async () => {
+  // Anyone can make an organisation, and its admin can make a token in any
+  // address and any name.
+  const attacker = await signUp("mal@lookalike.example", "Acme");
+  const made = await post("/tokens", { email: "it-admin@acme.example", name: "IT Admin (it-admin@acme.example)", role: "admin" }, attacker.token);
+  assert.equal(made.status, 201);
+  // (A token's address is at least a plain address.)
+  for (const email of ['"it admin"@acme.example', "it-admin\u200b@acme.example", "nope"]) {
+    assert.equal((await post("/tokens", { email, role: "admin" }, attacker.token)).status, 400, email);
+  }
+  // Adding the victim with that token does not make the token's address
+  // "who added you": the page is told a token did, and no address or name.
+  assert.equal((await post("/users", { email: "victim@acme.example" }, made.body.token)).status, 201);
+  const what = await post("/auth/check", { code: linksTo("victim@acme.example")[0] });
+  assert.deepEqual(
+    [what.body.first_time, what.body.invited_by, what.body.invited_via],
+    [true, null, "token"],
+  );
+  assert.doesNotMatch(JSON.stringify(what.body), /it-admin|IT Admin/);
+  // Added by the same person signed in, it is their own, confirmed address.
+  assert.equal((await post("/users", { email: "second@acme.example" }, attacker.token)).status, 201);
+  const honest = await post("/auth/check", { code: linksTo("second@acme.example")[0] });
+  assert.deepEqual([honest.body.invited_by, honest.body.invited_via], ["mal@lookalike.example", "sign_in"]);
+  // Brought back by a token after having been added by a person: the token's word again.
+  const id = (await get("/users", attacker.token)).body.users.find((u: any) => u.email === "second@acme.example").id;
+  await call(app, "DELETE", `/users/${id}`, { token: attacker.token });
+  assert.equal((await post("/users", { email: "second@acme.example" }, made.body.token)).status, 201);
+  const again = await post("/auth/check", { code: linksTo("second@acme.example")[0] });
+  assert.deepEqual([again.body.invited_by, again.body.invited_via], [null, "token"]);
+});
+
+test("a message that could not be sent holds nothing back and uses nothing up", async () => {
+  const counted = async (like: string) =>
+    (await db.query<{ key: string; n: number }>(`SELECT key, n FROM rate_counters WHERE key LIKE $1 AND n > 0 ORDER BY key`, [like])).map((r) => `${r.key}=${r.n}`);
+  const links = async (purpose: string) =>
+    Number((await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM login_codes WHERE purpose = $1`, [purpose]))[0]?.n);
+  const owner = await signUp("flo@outage.example", "Outage");
+  await db.query(`DELETE FROM login_codes`);
+  await db.query(`DELETE FROM rate_counters`);
+  const error = console.error;
+  const logged: string[] = [];
+  console.error = (...line: unknown[]) => void logged.push(line.join(" "));
+  try {
+    mailDown = true;
+    // A link to sign in: asked for, not sent. Nothing is kept of it.
+    assert.equal((await post("/auth/email", { email: "flo@outage.example" })).status, 202);
+    assert.equal(await links("sign_in"), 0);
+    assert.deepEqual(await counted("signin%"), []);
+    // What is logged names the domain, not the address.
+    assert.match(logged.join("\n"), /email to …@outage\.example was not sent/);
+    assert.doesNotMatch(logged.join("\n"), /flo@/);
+    // A link to finish signing up.
+    assert.equal((await post("/auth/signup", { email: "new@outage.example", org_name: "Later" })).status, 202);
+    assert.equal(await links("signup"), 0);
+    // (What the caller's own network asked for is theirs, and stays counted.)
+    assert.deepEqual((await counted("signup%")).map((kept) => kept.split(":")[0]), ["signups-from"]);
+    // An invitation: the person is added, the link and the counts are not kept.
+    assert.equal((await post("/users", { email: "added@outage.example" }, owner.token)).status, 201);
+    assert.equal(await links("invite"), 0);
+    assert.deepEqual(await counted("invite%"), []);
+    mailDown = false;
+    // The mail service is back: the very next ask sends, with nothing to wait out.
+    const before = sent.length;
+    await post("/auth/email", { email: "flo@outage.example" });
+    await post("/auth/signup", { email: "new@outage.example", org_name: "Later" });
+    await post("/auth/email", { email: "added@outage.example" });
+    assert.deepEqual(sent.slice(before).map((m) => m.to), ["flo@outage.example", "new@outage.example", "added@outage.example"]);
+  } finally {
+    mailDown = false;
+    console.error = error;
+  }
+});
+
+test("spellings of a mailbox that nobody confirmed cannot use up its owner's links", async () => {
+  await signUp("ann.owner@gmail.com", "Ann and Co");
+  const attacker = await signUp("eve@variants.example", "Variants");
+  // Twelve spellings of Ann's mailbox, added to an organisation of the
+  // attacker's (over hours: five invitations an hour go to one mailbox).
+  for (let i = 1; i <= 13; i++) {
+    await db.query(`DELETE FROM rate_counters WHERE key LIKE 'invite%'`);
+    assert.equal((await post("/users", { email: `annowner+${i}@gmail.com` }, attacker.token)).status, 201);
+  }
+  await db.query(`DELETE FROM login_codes`);
+  await db.query(`DELETE FROM rate_counters`);
+  // Links asked for to all of them: twelve go out, and then no more.
+  const before = sent.length;
+  for (let i = 1; i <= 13; i++) await post("/auth/email", { email: `annowner+${i}@gmail.com` });
+  assert.equal(sent.length - before, 12);
+  // Ann's own address, which she has signed in with, still gets hers.
+  await post("/auth/email", { email: "ann.owner@gmail.com" });
+  assert.equal(sent.at(-1)?.to, "ann.owner@gmail.com");
+  assert.equal(sent.length - before, 13);
+});
+
 test("asking in someone's name does not leave them without a link that works", async () => {
   await signUp("dana@steady.example", "Steady");
   await db.query(`DELETE FROM login_codes`);
@@ -349,6 +448,7 @@ test("an admin adds people, who sign in as what they were added as", async () =>
     org_id: owner.org.id,
     first_time: true,
     invited_by: "olive@team.example",
+    invited_via: "sign_in",
   });
   const mo = await post("/auth/verify", { code: linksTo("mo@team.example")[0] });
   assert.deepEqual([mo.body.org.id, mo.body.role], [owner.org.id, "member"]);
@@ -532,16 +632,21 @@ test("too many requests are refused, and too many links are not sent", async () 
   // A refusal there does not count against the address either.
   assert.equal((await db.query(`SELECT 1 FROM rate_counters WHERE key = 'signup:d1@x.example' AND n > 0`)).length, 0);
 
-  // One network asks for five sign-ups an hour, whichever of its addresses
-  // asks and whoever for. The next network is not held up by it.
+  // One network asks for so many sign-ups an hour (five here, ten unless
+  // set), whichever of its addresses asks and whoever for. The next network
+  // is not held up by it.
   await db.query(`DELETE FROM rate_counters WHERE key LIKE 'signups%'`);
+  const five = createApp(db, { accounts: { ...hosted, signupsPerNetwork: 5 } });
   const fromOne = [];
-  for (let i = 0; i < 7; i++) fromOne.push((await call(app, "POST", "/auth/signup", { body: { email: `n${i}@x.example`, org_name: "Net" }, from: `198.18.7.${i + 1}` })).status);
+  for (let i = 0; i < 7; i++) fromOne.push((await call(five, "POST", "/auth/signup", { body: { email: `n${i}@x.example`, org_name: "Net" }, from: `198.18.7.${i + 1}` })).status);
   assert.deepEqual(fromOne, [202, 202, 202, 202, 202, 429, 429]);
-  assert.equal((await call(app, "POST", "/auth/signup", { body: { email: "n8@x.example", org_name: "Net" }, from: "198.18.8.1" })).status, 202);
+  assert.equal((await call(five, "POST", "/auth/signup", { body: { email: "n8@x.example", org_name: "Net" }, from: "198.18.8.1" })).status, 202);
   const fromSite = [];
-  for (let i = 0; i < 6; i++) fromSite.push((await call(app, "POST", "/auth/signup", { body: { email: `s${i}@x.example`, org_name: "Site" }, from: `2001:db8:9:${i}::1` })).status);
+  for (let i = 0; i < 6; i++) fromSite.push((await call(five, "POST", "/auth/signup", { body: { email: `s${i}@x.example`, org_name: "Site" }, from: `2001:db8:9:${i}::1` })).status);
   assert.deepEqual(fromSite, [202, 202, 202, 202, 202, 429]);
+  const unset = [];
+  for (let i = 0; i < 11; i++) unset.push((await call(app, "POST", "/auth/signup", { body: { email: `u${i}@x.example`, org_name: "Net" }, from: `198.18.10.${i + 1}` })).status);
+  assert.deepEqual(unset.slice(8), [202, 202, 429]);
   // Requests that are refused for what they say are not counted there.
   for (let i = 0; i < 4; i++) await call(app, "POST", "/auth/signup", { body: { email: "nope", org_name: "Net" }, from: "198.18.9.1" });
   assert.equal((await call(app, "POST", "/auth/signup", { body: { email: "n9@x.example", org_name: "Net" }, from: "198.18.9.2" })).status, 202);
@@ -793,6 +898,71 @@ test("a message goes to Resend once, however often it has to be offered", async 
   );
 });
 
+test("people from before sign-ins were noted are known to have signed in", async (t) => {
+  const fresh = await testDbUrl();
+  const folder = fresh === "memory://" ? mkdtempSync(join(tmpdir(), "sessionly-confirmed-")) : undefined;
+  t.after(() => folder && rmSync(folder, { recursive: true, force: true }));
+  const url = folder ? `file:${join(folder, "db")}` : fresh;
+  // As a server just before this one left it: nobody's first sign-in noted.
+  const old = await openDb(url, { migrations: migrationAt("UPDATE users u") });
+  await old.query(`INSERT INTO orgs (id, name) VALUES ('old-org', 'Old Org')`);
+  await old.query(
+    `INSERT INTO users (id, org_id, email, role) VALUES
+       ('usr_owner', 'old-org', 'owner@old.example', 'owner'),
+       ('usr_seen', 'old-org', 'seen@old.example', 'member'),
+       ('usr_never', 'old-org', 'never@old.example', 'member')`,
+  );
+  await old.query(
+    `INSERT INTO tokens (org_id, id, token_hash, email, role, user_id, sign_in, expires_at) VALUES
+       ('old-org', 't1', 'h1', 'seen@old.example', 'member', 'usr_seen', 'email', now() - interval '3 days'),
+       ('old-org', 't2', 'h2', 'never@old.example', 'member', 'usr_never', NULL, NULL)`,
+  );
+  await old.close();
+  const now = await openDb(url);
+  try {
+    const rows = await now.query<{ id: string; known: boolean }>(
+      `SELECT id, confirmed_at IS NOT NULL AS known FROM users WHERE org_id = 'old-org' ORDER BY id`,
+    );
+    // The owner signed up by a link; one member has had a session; the
+    // other only a token for a machine, which says nothing of the address.
+    assert.deepEqual(rows.map((r) => [r.id, r.known]), [["usr_never", false], ["usr_owner", true], ["usr_seen", true]]);
+  } finally {
+    await now.close();
+  }
+});
+
+test("a setting that no longer does anything is said at the start", () => {
+  assert.match(outdated({ SMTP_URL: "smtp://mail.example" }).join(), /SMTP_URL is set, but email is sent through Resend now/);
+  assert.deepEqual(outdated({ SMTP_URL: "smtp://mail.example", RESEND_API_KEY: "re_test" }), []);
+  assert.deepEqual(outdated({}), []);
+  assert.equal(accountsFrom({ SESSIONLY_SIGNUPS_PER_NETWORK: "25" }).signupsPerNetwork, 25);
+});
+
+test("stopping waits for messages that are on their way out, for a while", async () => {
+  const after = background();
+  let done = 0;
+  after.defer(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    done++;
+  });
+  after.defer(async () => {
+    throw new Error("a send that failed");
+  });
+  const error = console.error;
+  console.error = () => {};
+  try {
+    await after.idle(2000);
+  } finally {
+    console.error = error;
+  }
+  assert.equal(done, 1);
+  // Not for ever: one that hangs is left behind.
+  after.defer(() => new Promise(() => {}));
+  const began = Date.now();
+  await after.idle(60);
+  assert.ok(Date.now() - began < 1000);
+});
+
 test("an IPv6 caller is counted by its network, an IPv4 caller by its address", () => {
   assert.equal(network("203.0.113.9"), "203.0.113.9");
   assert.equal(network("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::/64");
@@ -810,6 +980,36 @@ test("by the hour a caller is counted by a wider network", () => {
   assert.equal(widerNetwork("2001:db8:1:2:3:4:5:6"), "2001:db8:1::/48");
   assert.equal(widerNetwork("2001:0DB8:0001::1"), "2001:db8:1::/48");
   assert.equal(widerNetwork("unknown"), "unknown");
+});
+
+test("an address is taken in one plain form, or not at all", () => {
+  assert.equal(emailFrom("  Kay@Acme.Example "), "kay@acme.example");
+  assert.equal(emailFrom("o'brien+tag@example.co.uk"), "o'brien+tag@example.co.uk");
+  // One domain however it is written: a trailing dot, fullwidth letters, its own script.
+  assert.equal(emailFrom("ann@example.com."), "ann@example.com");
+  assert.equal(emailFrom("ann@ｅｘａｍｐｌｅ.com"), "ann@example.com");
+  assert.equal(emailFrom("ann@bücher.example"), "ann@xn--bcher-kva.example");
+  // What makes one mailbox many addresses, or is no address.
+  for (const odd of [
+    '"ann"@example.com',
+    "an n@example.com",
+    "ann\u200b@example.com",
+    "ａｎｎ@example.com",
+    "änn@example.com",
+    ".ann@example.com",
+    "ann.@example.com",
+    "a..nn@example.com",
+    "ann@example",
+    "ann@",
+    "@example.com",
+    "ann",
+    "",
+    `${"x".repeat(250)}@example.com`,
+    42,
+    null,
+  ]) {
+    assert.equal(emailFrom(odd), null, String(odd));
+  }
 });
 
 test("addresses that lead to one mailbox are counted as one", () => {
