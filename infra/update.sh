@@ -37,13 +37,34 @@ if ! command -v flock > /dev/null 2>&1; then
   echo "update.sh needs flock (in util-linux), so that two runs cannot work at once." >&2
   exit 1
 fi
+# What a run writes has to be this user's to write. After a run as someone
+# else (root, with sudo) it is not, and the shell would say only "Permission
+# denied".
+for file in . caddy .update.lock caddy/copies; do
+  if [ -e "$file" ] && [ ! -w "$file" ]; then
+    # shellcheck disable=SC2012
+    owner="$(ls -ld "$file" | awk '{print $3}')"
+    if [ "$owner" = "$(id -un)" ]; then
+      echo "update.sh cannot write $(pwd)/$file: it is yours ($owner), and set not to be written. Allow it (chmod u+w), and run this again. Nothing was changed." >&2
+    else
+      echo "update.sh cannot write $(pwd)/$file as $(id -un): it belongs to $owner. If this was run as $owner before, run it as $owner again, or hand the file over (chown). Nothing was changed." >&2
+    fi
+    exit 1
+  fi
+done
 exec 9>> .update.lock
 if ! flock -n 9; then
   holder="$(sed -n 's/.* as process \([0-9][0-9]*\)$/\1/p' .update.lock 2> /dev/null | tail -n 1)"
-  # A run that was killed can leave something it started still at work for
-  # a moment, holding the lock. That is waited for; a run that is alive is not.
-  if [ -z "$holder" ] || kill -0 "$holder" 2> /dev/null || ! flock -w 20 9; then
+  if [ -z "$holder" ] || ps -p "$holder" > /dev/null 2>&1; then
     echo "Another update is at work in this folder ($(tail -n 1 .update.lock 2> /dev/null || echo "see .update.lock")). Nothing was changed. Run this again when it is done." >&2
+    exit 1
+  fi
+  # The run that took the lock is gone, and something it started still
+  # holds it: a last step of its own, which ends by itself. That is waited
+  # for; a run that is alive is not.
+  echo "An earlier update (process $holder) was killed, and its last step is still finishing. Waiting for that, 20 seconds at most." >&2
+  if ! flock -w 20 9; then
+    echo "It has not finished. Nothing was changed. See what is left of it (ps, docker ps), and run this again." >&2
     exit 1
   fi
 fi

@@ -185,7 +185,9 @@ and only add things: to go back, run the version before.
 - **One run at a time.** A second `update.sh` started in this folder while one is at work
   is refused with a message and changes nothing. The lock (`.update.lock`, held with
   `flock`) is let go when the run ends, however it ends, so there is nothing to clear after
-  one that was killed.
+  one that was killed. If a killed run's last step is still finishing, the next run says so
+  and waits for it, 20 seconds at most. Run it as the same user each time: after a run as
+  root, another user's stops at once and says whose the files are.
 - **Stopped or failed before Caddy was told**, by Ctrl-C, a signal or a step that fails, it
   removes what it started, also copies that `docker compose` was still making.
 - **Copies that leave are asked to stop** and finish what they are answering, whether or not
