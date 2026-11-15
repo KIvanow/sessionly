@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp, FIRST_ORG_MIGRATION, openDb, testDb, testDbUrl, type Db } from "@sessionly/server";
@@ -181,9 +181,11 @@ test("a hosted service installs no licenses", async () => {
   assert.equal(Number(stored?.n), 0);
 });
 
-test("a license and a policy from before organisations land in the default one", async () => {
+test("a license and a policy from before organisations land in the default one", async (t) => {
   const fresh = await testDbUrl();
-  const url = fresh === "memory://" ? `file:${join(mkdtempSync(join(tmpdir(), "sessionly-ee-upgrade-")), "db")}` : fresh;
+  const folder = fresh === "memory://" ? mkdtempSync(join(tmpdir(), "sessionly-ee-upgrade-")) : undefined;
+  t.after(() => folder && rmSync(folder, { recursive: true, force: true }));
+  const url = folder ? `file:${join(folder, "db")}` : fresh;
   // As the server before organisations left it.
   const old = await openDb(url, { migrations: FIRST_ORG_MIGRATION });
   await migrateEe(old, FIRST_EE_ORG_MIGRATION);

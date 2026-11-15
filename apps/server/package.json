@@ -8,7 +8,7 @@
     "start": "node src/index.ts",
     "token": "node src/cli.ts token",
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"test/*.test.ts\""
+    "test": "node --test --test-global-setup=test/global.ts \"test/*.test.ts\""
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.16",

@@ -592,9 +592,16 @@ for anything but localhost.
 | Setting | Meaning |
 |---|---|
 | `PORT`, `HOST` | Where to listen. Default `127.0.0.1:8080`; use `HOST=0.0.0.0` in a container. |
-| `DATABASE_URL` | `postgres://…`, or unset for the embedded database (in `apps/server/data`; in the Docker image, `/data`). |
+| `DATABASE_URL` | `postgres://…` (Postgres 16 or later), or unset for the embedded database (in `apps/server/data`; in the Docker image, `/data`). |
 | `SESSIONLY_ADMIN_TOKEN` | An admin token that always works, for first use. |
 | `SESSIONLY_ADMIN_EMAIL` | Who uploads made with that token belong to. |
+
+**The database's user.** On Postgres, requests run as a second role that cannot log in, which
+the server makes at its first start; its name comes from the database's name. If the
+database's user may not create roles (the one a managed database's panel makes usually may
+not), the server stops and prints one statement for the database's admin to run. It asks
+again if the database is later renamed, or restored under another name, because the role
+goes with the name. Running the statement twice is harmless.
 
 **People and tokens.** Each token belongs to one person and is `member`, `admin`, `ci` or
 `env`. Uploads are filed under the token's owner, whatever name the record carries. A member

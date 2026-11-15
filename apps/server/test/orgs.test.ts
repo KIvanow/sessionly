@@ -1,15 +1,15 @@
 // Organisations: what one stores, another must never see, change or be told of.
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { ApiError, createApp, type Env } from "../src/app.ts";
 import { createToken } from "../src/auth.ts";
-import { FIRST_ORG_MIGRATION, openDb, type Db } from "../src/db.ts";
+import { APP_ROLE, appRoleOf, FIRST_ORG_MIGRATION, openDb, versionProblem, type Db } from "../src/db.ts";
 import { hostedProblems } from "../src/run.ts";
-import { newOrg, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
+import { adminRuns, newOrg, renameTestDb, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
 
 let db: Db;
 let dbUrl: string;
@@ -257,7 +257,7 @@ test("the database itself confines a request to its organisation", async () => {
   });
   // With no organisation set there is nothing to see.
   const [{ role } = { role: "" }] = await db.query<{ role: string }>(
-    `SELECT left('sessionly_app_' || current_database(), 63) AS role`,
+    `SELECT ${APP_ROLE} AS role`,
   );
   const unset = await db.transaction(async (tx) => {
     await tx.query(`SET LOCAL ROLE "${role}"`);
@@ -301,7 +301,7 @@ test("requests are granted exactly the tables they must reach", async () => {
               CASE WHEN has_table_privilege(r.role, c.oid, 'UPDATE') THEN 'update' END,
               CASE WHEN has_table_privilege(r.role, c.oid, 'DELETE') THEN 'delete' END) AS can
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace,
-          (SELECT left('sessionly_app_' || current_database(), 63) AS role) r
+          (SELECT ${APP_ROLE} AS role) r
      WHERE n.nspname = 'public' AND c.relkind = 'r' ORDER BY 1`,
   );
   const can = Object.fromEntries(granted.map((t) => [t.name, t.can]));
@@ -332,15 +332,112 @@ test("two people storing the same new session at once: one has it, the other is 
   }
 });
 
+/** The statement a start-up error tells the database's admin to run. */
+function whatToRun(err: Error): string {
+  const block = /DO \$\$[\s\S]*?END \$\$;/.exec(err.message)?.[0];
+  assert.ok(block, err.message);
+  return block;
+}
+
 test("a database user who may not make roles is told what its admin must run", async (t) => {
   if (!process.env.TEST_DATABASE_ADMIN_URL) return t.skip("needs TEST_DATABASE_ADMIN_URL and a user without CREATEROLE");
   const url = await testDbUrl({ provision: false });
   const name = new URL(url).pathname.slice(1);
+  const role = appRoleOf(name);
+  let told: Error | undefined;
   await assert.rejects(openDb(url), (err: Error) => {
-    assert.match(err.message, new RegExp(`CREATE ROLE "sessionly_app_${name}" NOLOGIN;`));
-    assert.match(err.message, new RegExp(`GRANT "sessionly_app_${name}" TO "`));
+    assert.match(err.message, new RegExp(`"${role}", does not exist`));
+    assert.match(err.message, new RegExp(`connected to the database "${name}"`));
+    told = err;
     return true;
   });
+  // The role made but not granted: it says so, and what it prints does not
+  // trip over the role being there already.
+  await adminRuns(name, `CREATE ROLE "${role}" NOLOGIN`);
+  await assert.rejects(openDb(url), (err: Error) => {
+    assert.match(err.message, new RegExp(`has not been granted the role requests run as, "${role}"`));
+    assert.equal(whatToRun(err), whatToRun(told!));
+    return true;
+  });
+  // What it printed is all that was needed, and running it again is harmless.
+  await adminRuns(name, whatToRun(told!));
+  await adminRuns(name, whatToRun(told!));
+  const opened = await openDb(url);
+  try {
+    const [who] = await opened.asOrg("default", (scoped) => scoped.query<{ who: string }>(`SELECT current_user AS who`));
+    assert.equal(who?.who, role);
+  } finally {
+    await opened.close();
+  }
+});
+
+test("a database that was renamed gets a role for its new name at the next start", async (t) => {
+  const url = await testDbUrl();
+  if (url === "memory://") return t.skip("needs a Postgres server (TEST_DATABASE_URL)");
+  const before = await openDb(url);
+  await newOrg(before, "org-a");
+  const token = await tokenFor(before, { email: "ann@a.example", role: "admin" }, "org-a");
+  const [was] = await before.query<{ role: string }>(`SELECT ${APP_ROLE} AS role`);
+  await before.close();
+
+  const renamed = await renameTestDb(url);
+  const name = new URL(renamed).pathname.slice(1);
+  if (process.env.TEST_DATABASE_ADMIN_URL) {
+    // This user may not make the new role: the start fails, and says what to run.
+    let told = "";
+    await assert.rejects(openDb(renamed), (err: Error) => {
+      told = whatToRun(err);
+      return true;
+    });
+    await adminRuns(name, told);
+  }
+  const now = await openDb(renamed);
+  try {
+    const [is] = await now.query<{ role: string }>(`SELECT ${APP_ROLE} AS role`);
+    assert.equal(is?.role, appRoleOf(name));
+    assert.notEqual(is?.role, was?.role);
+    // Requests work, and see what was there.
+    const asked = await createApp(now).request("/api/v1/tokens", { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(asked.status, 200);
+    assert.equal(((await asked.json()) as any).tokens.length, 1);
+    // The role of the old name holds nothing here any more.
+    const [old] = await now.query<{ can: boolean }>(
+      `SELECT bool_or(has_table_privilege($1, c.oid, 'SELECT, INSERT, UPDATE, DELETE')) AS can
+       FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r'`,
+      [was?.role],
+    );
+    assert.equal(old?.can, false);
+  } finally {
+    await now.close();
+  }
+  // A start with nothing missing changes nothing.
+  await (await openDb(renamed)).close();
+});
+
+test("the role's name fits whatever the database is called", async (t) => {
+  // 25 two-byte letters: with the suffix of a test database a name of 62
+  // bytes, which Postgres takes whole, and no room for anything before it.
+  const long = "é".repeat(25);
+  assert.equal(Buffer.byteLength(appRoleOf(`${long}0123456789ab`)), 30);
+  // Names that begin alike for longer than a name may be do not share a role.
+  assert.notEqual(appRoleOf(`${"a".repeat(60)}1`), appRoleOf(`${"a".repeat(60)}2`));
+  const url = await testDbUrl({ prefix: long });
+  if (url === "memory://") return t.skip("the rest needs a Postgres server (TEST_DATABASE_URL)");
+  const odd = await openDb(url);
+  try {
+    const [who] = await odd.asOrg("default", (scoped) =>
+      scoped.query<{ who: string; name: string }>(`SELECT current_user AS who, current_database() AS name`),
+    );
+    assert.equal(who?.who, appRoleOf(who?.name ?? ""));
+  } finally {
+    await odd.close();
+  }
+});
+
+test("a Postgres older than 16 is refused", () => {
+  assert.equal(versionProblem(160000), null);
+  assert.equal(versionProblem(180001), null);
+  assert.match(versionProblem(150014) ?? "", /needs Postgres 16 or later; this server is 15\.14/);
 });
 
 test("every table that belongs to an organisation has row-level security on", async () => {
@@ -380,10 +477,12 @@ test("an expired token, and a token of an organisation being deleted, are nobody
   assert.equal(Number(left?.n), 0);
 });
 
-test("a database from before organisations lands in the default one", async () => {
+test("a database from before organisations lands in the default one", async (t) => {
   // On Postgres where the tests run on one; else a folder for the embedded database.
   const fresh = await testDbUrl();
-  const dir = fresh === "memory://" ? `file:${join(mkdtempSync(join(tmpdir(), "sessionly-upgrade-")), "db")}` : fresh;
+  const folder = fresh === "memory://" ? mkdtempSync(join(tmpdir(), "sessionly-upgrade-")) : undefined;
+  t.after(() => folder && rmSync(folder, { recursive: true, force: true }));
+  const dir = folder ? `file:${join(folder, "db")}` : fresh;
   // As a server before this one left it, with a token, a session and a pull request.
   const old = await openDb(dir, { migrations: FIRST_ORG_MIGRATION });
   const hash = await import("node:crypto").then((c) => c.createHash("sha256").update("old-token").digest("hex"));

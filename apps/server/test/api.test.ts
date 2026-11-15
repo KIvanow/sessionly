@@ -311,11 +311,13 @@ test("sessions from several agents are told apart", async () => {
   assert.equal((await get(tokens.admin, "/sessions/machine-1/cursor/cur-1")).status, 200);
 });
 
-test("the embedded database creates its folder", async () => {
-  const { mkdtempSync, existsSync } = await import("node:fs");
+test("the embedded database creates its folder", async (t) => {
+  const { mkdtempSync, existsSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const dir = join(mkdtempSync(join(tmpdir(), "sessionly-db-")), "not", "there", "yet");
+  const folder = mkdtempSync(join(tmpdir(), "sessionly-db-"));
+  t.after(() => rmSync(folder, { recursive: true, force: true }));
+  const dir = join(folder, "not", "there", "yet");
   const fresh = await openDb(`file:${dir}`);
   await tokenFor(fresh, { email: "a@example.com", role: "member" });
   await fresh.close();

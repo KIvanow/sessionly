@@ -8,7 +8,7 @@
     "start": "node src/main.ts",
     "sign-license": "node scripts/sign-license.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"test/*.test.ts\""
+    "test": "node --test --test-global-setup=test/global.ts \"test/*.test.ts\""
   },
   "dependencies": {
     "@sessionly/server": "workspace:*",

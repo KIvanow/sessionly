@@ -8,8 +8,9 @@ export {
   runMigrations,
   toApp,
   type Db,
+  type Migrations,
   type OrgDb,
   type Queryable,
 } from "./db.ts";
 export { runServer, type RunOptions } from "./run.ts";
-export { testDb, testDbUrl } from "./testing.ts";
+export { globalSetup, globalTeardown, testDb, testDbUrl } from "./testing.ts";

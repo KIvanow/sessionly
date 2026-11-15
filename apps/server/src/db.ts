@@ -1,6 +1,7 @@
 // Database access. The server speaks Postgres. Without a DATABASE_URL it runs
 // on PGlite (Postgres compiled to WebAssembly, stored in a local folder), so a
 // single process is enough to try it or to self-host for a small team.
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import pg from "pg";
@@ -38,8 +39,77 @@ export interface Db extends Queryable {
  * The name of the role requests run as, as SQL. Each database has its own:
  * roles belong to the whole cluster, and one shared name would let the user
  * of another database on it (a staging copy, say) take this one's role too.
+ *
+ * The name is made from a hash of the database's name, so it is 30 bytes
+ * whatever the database is called (Postgres cuts names at 63 bytes, not
+ * characters), and two long names that begin alike do not end up sharing one.
  */
-const APP_ROLE = `left('sessionly_app_' || current_database(), 63)`;
+export const APP_ROLE = `('sessionly_app_' || left(encode(sha256(convert_to(current_database(), 'UTF8')), 'hex'), 16))`;
+
+/** The same name, worked out here for the database called `database`. */
+export function appRoleOf(database: string): string {
+  return `sessionly_app_${createHash("sha256").update(database, "utf8").digest("hex").slice(0, 16)}`;
+}
+
+/**
+ * Makes the role if it is missing, and lets this user switch to it if it may
+ * not yet. A user who may create roles does both for itself. One who may not
+ * (the kind a managed database's panel creates) needs `roleSetup` run by the
+ * database's admin; after that there is nothing left for this to do.
+ */
+const ROLE_STEP = `DO $$
+   DECLARE app text := ${APP_ROLE};
+   BEGIN
+     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = app) THEN
+       EXECUTE format('CREATE ROLE %I NOLOGIN', app);
+     END IF;
+     IF NOT pg_has_role(current_user::name, app::name, 'SET') THEN
+       EXECUTE format('GRANT %I TO %I', app, current_user);
+     END IF;
+   END $$`;
+
+/**
+ * What the admin of a database runs, connected to that database, when its
+ * user `user` may not create roles. It works out the role's name itself, so
+ * it is the same text for every database, and it can be run again (after the
+ * database was renamed or restored under another name, say).
+ */
+export function roleSetup(user: string): string {
+  return [
+    `DO $$`,
+    `DECLARE app text := 'sessionly_app_' || left(encode(sha256(convert_to(current_database(), 'UTF8')), 'hex'), 16);`,
+    `BEGIN`,
+    `  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = app) THEN`,
+    `    EXECUTE format('CREATE ROLE %I NOLOGIN', app);`,
+    `  END IF;`,
+    `  EXECUTE format('GRANT %I TO %I', app, '${user.replace(/'/g, "''")}');`,
+    `END $$;`,
+  ].join("\n");
+}
+
+/** The oldest Postgres this runs on. */
+const OLDEST_POSTGRES = 16;
+
+/**
+ * Why a server of this version (`server_version_num`) will not do, if it
+ * will not. Before 16 a user who may create roles can grant itself any role
+ * of the cluster, another database's app role included, and "may switch to
+ * a role" cannot be granted apart from "is a member of it".
+ */
+export function versionProblem(num: number): string | null {
+  if (num >= OLDEST_POSTGRES * 10000) return null;
+  const version = num >= 100000 ? `${Math.floor(num / 10000)}.${num % 10000}` : String(num);
+  return `Sessionly needs Postgres ${OLDEST_POSTGRES} or later; this server is ${version}.`;
+}
+
+/** What `toApp` granted, by the statement it made: what a start checks is still in place. */
+const GRANTS = new Map<string, Grant>();
+interface Grant {
+  privileges: string[];
+  /** Tables, or one schema. */
+  on: string[];
+  schema: boolean;
+}
 
 /** A name as SQL may spell it, whatever is in it. */
 const quoted = (name: string) => `"${name.replace(/"/g, '""')}"`;
@@ -130,13 +200,15 @@ export async function openDb(
     };
   }
   try {
+    const [version] = await db.query<{ num: string }>(`SELECT current_setting('server_version_num') AS num`);
+    const problem = versionProblem(Number(version?.num));
+    if (problem) throw new Error(problem);
     await runMigrations(db, "migrations", MIGRATIONS.slice(0, options.migrations));
+    appRole = (await db.query<{ role: string }>(`SELECT ${APP_ROLE} AS role`))[0]?.role ?? "";
   } catch (err) {
-    const explained = await roleProblem(db, err);
     await db.close().catch(() => {});
-    throw explained ?? err;
+    throw err;
   }
-  appRole = (await db.query<{ role: string }>(`SELECT ${APP_ROLE} AS role`))[0]?.role ?? "";
   return db;
 }
 
@@ -271,22 +343,7 @@ const MIGRATIONS: string[] = [
   // and writes only the rows of the organisation set for its transaction;
   // with none set, no rows at all. The owner of the tables (who runs these
   // migrations) is not subject to the policies.
-  //
-  // The role is made here if this user may make roles. A user who may not
-  // (the kind a managed database's panel creates) needs its admin to make
-  // the role and grant it once; then both steps find nothing left to do.
-  `DO $$
-   DECLARE app text := ${APP_ROLE};
-   BEGIN
-     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = app) THEN
-       EXECUTE format('CREATE ROLE %I NOLOGIN', app);
-     END IF;
-     -- being able to switch to it is what is needed; before Postgres 16 membership meant that
-     IF NOT pg_has_role(current_user::name, app::name,
-          CASE WHEN current_setting('server_version_num')::int >= 160000 THEN 'SET' ELSE 'MEMBER' END) THEN
-       EXECUTE format('GRANT %I TO %I', app, current_user);
-     END IF;
-   END $$`,
+  ROLE_STEP,
   toApp(`USAGE ON SCHEMA public`),
   toApp(`SELECT, INSERT, UPDATE, DELETE ON tokens, sessions, pull_requests`),
   toApp(`SELECT ON orgs`),
@@ -295,33 +352,109 @@ const MIGRATIONS: string[] = [
 ];
 
 /**
- * A statement granting `privileges` (as `SELECT, INSERT ON a, b`) to the
- * database's app role. A table requests must reach gets this in the
- * migration that makes it; a test fails for one that has not.
+ * A statement granting `privileges` (as `SELECT, INSERT ON a, b`, or
+ * `USAGE ON SCHEMA public`) to the database's app role. A table requests
+ * must reach gets this in the migration that makes it; a test fails for one
+ * that has not.
  */
 export function toApp(privileges: string): string {
-  return `DO $$ BEGIN EXECUTE format('GRANT ${privileges} TO %I', ${APP_ROLE}); END $$`;
+  const parts = /^([A-Z, ]+) ON (SCHEMA )?([a-z0-9_, ]+)$/.exec(privileges);
+  if (!parts) throw new Error(`toApp: "${privileges}" is not "PRIVILEGE, … ON table, …"`);
+  const sql = `DO $$ BEGIN EXECUTE format('GRANT ${privileges} TO %I', ${APP_ROLE}); END $$`;
+  const list = (text: string) => text.split(",").map((word) => word.trim());
+  GRANTS.set(sql, { privileges: list(parts[1]!), on: list(parts[3]!), schema: Boolean(parts[2]) });
+  return sql;
+}
+
+/** Run the role step, and say what the database's admin has to do if this user may not. */
+async function roleStep(tx: Queryable): Promise<void> {
+  const [who] = await tx.query<{ app: string; me: string; name: string; made: boolean }>(
+    `SELECT r.app, current_user AS me, current_database() AS name,
+            EXISTS (SELECT FROM pg_roles WHERE rolname = r.app) AS made
+     FROM (SELECT ${APP_ROLE} AS app) r`,
+  );
+  try {
+    await tx.query(ROLE_STEP);
+  } catch (err) {
+    if ((err as { code?: string }).code !== "42501" || !who) throw err;
+    const missing = who.made
+      ? `The database user ${quoted(who.me)} has not been granted the role requests run as, ${quoted(who.app)}.`
+      : `The role requests run as, ${quoted(who.app)}, does not exist, and the database user ${quoted(who.me)} may not create roles.`;
+    throw new Error(
+      `${missing}\n` +
+        `Have the database's admin run this, connected to the database ${quoted(who.name)}, then start again.\n` +
+        `It does only what is missing, so running it twice is safe:\n\n${roleSetup(who.me)}\n`,
+      { cause: err },
+    );
+  }
 }
 
 /**
- * If migrating failed because this user may not make or grant the app role,
- * the error that says what the database's admin has to run.
+ * The role belongs to the database's name, and what it was granted was
+ * granted by migrations that ran once. A database that was renamed, copied
+ * or restored under another name has neither for its new name, and every
+ * request would fail. So each start checks that the role is there, that
+ * this user may switch to it, and that it holds everything in `grants`; if
+ * anything is missing, the role step and the grants run again. The role of
+ * the name the database had before loses what it held here.
  */
-async function roleProblem(db: Db, err: unknown): Promise<Error | null> {
-  const e = err as { code?: string; message?: string };
-  if (e.code !== "42501" || !/permission denied to (create|grant) role/.test(e.message ?? "")) return null;
-  const [who] = await db
-    .query<{ role: string; me: string; name: string }>(
-      `SELECT ${APP_ROLE} AS role, current_user AS me, current_database() AS name`,
-    )
-    .catch(() => []);
-  if (!who) return null;
-  return new Error(
-    `The database user ${quoted(who.me)} may not create the role requests run as, or was not granted it.\n` +
-      `Have the database's admin run this once, connected to the database ${quoted(who.name)}, then start again:\n` +
-      `  CREATE ROLE ${quoted(who.role)} NOLOGIN;\n` +
-      `  GRANT ${quoted(who.role)} TO ${quoted(who.me)};`,
-    { cause: err },
+async function sameRoleStill(tx: Queryable, grants: Grant[]): Promise<void> {
+  const [role] = await tx.query<{ app: string; made: boolean }>(
+    `SELECT r.app, EXISTS (SELECT FROM pg_roles WHERE rolname = r.app) AS made FROM (SELECT ${APP_ROLE} AS app) r`,
+  );
+  if (!role) return;
+  const wanted = grants.flatMap((grant) =>
+    grant.on.flatMap((on) => grant.privileges.map((privilege) => ({ on, privilege, schema: grant.schema }))),
+  );
+  if (role.made) {
+    // A table that a later migration dropped is not one to hold anything on.
+    const [found] = await tx.query<{ may: boolean; missing: unknown }>(
+      `SELECT pg_has_role(current_user::name, $1::name, 'SET') AS may,
+              (SELECT count(*) FROM unnest($2::text[], $3::text[], $4::boolean[]) AS g(obj, privilege, is_schema)
+               WHERE CASE WHEN g.is_schema THEN NOT has_schema_privilege($1::name, g.obj, g.privilege)
+                          ELSE to_regclass(g.obj) IS NOT NULL
+                               AND NOT has_table_privilege($1::name, to_regclass(g.obj)::oid, g.privilege) END) AS missing`,
+      [role.app, wanted.map((w) => w.on), wanted.map((w) => w.privilege), wanted.map((w) => w.schema)],
+    );
+    if (found?.may && Number(found.missing) === 0) return;
+  }
+  await roleStep(tx);
+  for (const grant of grants) {
+    const privileges = grant.privileges.join(", ");
+    for (const on of grant.on) {
+      await tx.query(
+        grant.schema
+          ? `DO $$ BEGIN EXECUTE format('GRANT ${privileges} ON SCHEMA ${on} TO %I', ${APP_ROLE}); END $$`
+          : `DO $$ BEGIN IF to_regclass('${on}') IS NOT NULL THEN
+               EXECUTE format('GRANT ${privileges} ON ${on} TO %I', ${APP_ROLE});
+             END IF; END $$`,
+      );
+    }
+  }
+  await tx.query(
+    `DO $$
+     DECLARE app text := ${APP_ROLE}; stale record;
+     BEGIN
+       FOR stale IN
+         SELECT DISTINCT c.oid::regclass AS tbl, r.rolname AS role
+         FROM pg_class c
+              CROSS JOIN LATERAL aclexplode(c.relacl) AS acl
+              JOIN pg_roles r ON r.oid = acl.grantee
+         WHERE c.relnamespace = current_schema()::regnamespace AND c.relkind = 'r'
+           AND r.rolname ~ '^sessionly_app_' AND r.rolname <> app
+       LOOP
+         EXECUTE format('REVOKE ALL ON %s FROM %I', stale.tbl, stale.role);
+       END LOOP;
+       FOR stale IN
+         SELECT DISTINCT r.rolname AS role
+         FROM pg_namespace n
+              CROSS JOIN LATERAL aclexplode(n.nspacl) AS acl
+              JOIN pg_roles r ON r.oid = acl.grantee
+         WHERE n.nspname = current_schema() AND r.rolname ~ '^sessionly_app_' AND r.rolname <> app
+       LOOP
+         EXECUTE format('REVOKE ALL ON SCHEMA %I FROM %I', current_schema(), stale.role);
+       END LOOP;
+     END $$`,
   );
 }
 
@@ -339,6 +472,12 @@ export function rowLevelSecurity(table: string, column = "org_id"): string[] {
     `ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`,
     `CREATE POLICY org_only ON ${table} USING (${column} = ${org}) WITH CHECK (${column} = ${org})`,
   ];
+}
+
+/** A list of migrations and the table that records which of them have run. */
+export interface Migrations {
+  table: string;
+  list: string[];
 }
 
 /**
@@ -359,9 +498,13 @@ export async function runMigrations(db: Db, table: string, list: string[]): Prom
       await tx.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-${table}`]);
       await tx.query(`CREATE TABLE IF NOT EXISTS ${table} (id integer PRIMARY KEY)`);
       const done = new Set((await tx.query<{ id: number }>(`SELECT id FROM ${table}`)).map((r) => r.id));
+      // Before anything new is granted: the role everything before it was granted to.
+      const granted = list.flatMap((sql, id) => (done.has(id) ? (GRANTS.get(sql) ?? []) : []));
+      if (granted.length) await sameRoleStill(tx, granted);
       for (const [id, sql] of list.entries()) {
         if (done.has(id)) continue;
-        await tx.query(sql);
+        if (sql === ROLE_STEP) await roleStep(tx);
+        else await tx.query(sql);
         await tx.query(`INSERT INTO ${table} (id) VALUES ($1)`, [id]);
       }
     });
