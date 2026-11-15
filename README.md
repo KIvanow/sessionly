@@ -603,6 +603,13 @@ not), the server stops and prints one statement for the database's admin to run.
 again if the database is later renamed, or restored under another name, because the role
 goes with the name. Running the statement twice is harmless.
 
+Upgrading a server from before organisations: it now needs Postgres 16 or later, and a
+database user who may not create roles needs that statement run once, or the server does not
+start (it says which). When restoring a dump into another database, use `pg_restore
+--no-acl`: the grants in the dump are to the role of the old name, and the server makes its
+own at the next start. A role of an old name that is left in the cluster holds nothing in
+this database any more and can be dropped.
+
 **People and tokens.** Each token belongs to one person and is `member`, `admin`, `ci` or
 `env`. Uploads are filed under the token's owner, whatever name the record carries. A member
 sees their own sessions; an admin sees everyone's. A `ci` token is for the GitHub Action: it can

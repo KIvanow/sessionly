@@ -8,7 +8,7 @@ import type { Hono } from "hono";
 import { ApiError, createApp, type Env } from "../src/app.ts";
 import { createToken } from "../src/auth.ts";
 import { APP_ROLE, appRoleOf, FIRST_ORG_MIGRATION, openDb, versionProblem, type Db } from "../src/db.ts";
-import { hostedProblems } from "../src/run.ts";
+import { hostedProblems, reason } from "../src/run.ts";
 import { adminRuns, newOrg, renameTestDb, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
 
 let db: Db;
@@ -557,6 +557,60 @@ test("connections the database closes do not end the server", async (t) => {
     console.error = error;
     await pooled.close();
   }
+});
+
+test("a connection the database closes under a request fails that request and no more", async (t) => {
+  const url = await testDbUrl();
+  if (url === "memory://") return t.skip("needs a Postgres server (TEST_DATABASE_URL)");
+  const pooled = await openDb(url, { pool: 2 });
+  const name = new URL(url).pathname.slice(1);
+  const cut = () =>
+    adminRuns(name, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()`);
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const error = console.error;
+  console.error = () => {};
+  try {
+    // In the middle of a statement.
+    const asking = assert.rejects(pooled.asOrg("default", (scoped) => scoped.query(`SELECT pg_sleep(5)`)));
+    await pause(150);
+    await cut();
+    await asking;
+    // Between two statements of one transaction.
+    const between = pooled.asOrg("default", async (scoped) => {
+      await scoped.query(`SELECT 1`);
+      await cut();
+      await pause(150);
+      return scoped.query(`SELECT 2`);
+    });
+    await assert.rejects(between);
+    // And as the owner, in a transaction of its own.
+    const owner = pooled.transaction(async (tx) => {
+      await tx.query(`SELECT 1`);
+      await cut();
+      await pause(150);
+    });
+    await assert.rejects(owner);
+    await pause(100);
+    // The server is still here, and the next request gets a connection that works.
+    const [row] = await pooled.asOrg("default", (scoped) => scoped.query<{ n: unknown }>(`SELECT count(*) AS n FROM orgs`));
+    assert.equal(Number(row?.n), 1);
+  } finally {
+    console.error = error;
+    await pooled.close();
+  }
+});
+
+test("why the database could not be opened is said, whatever shape the error has", () => {
+  assert.equal(reason(new Error("password authentication failed")), "password authentication failed");
+  // A refused connection: one error per address tried, under one with no message.
+  const refused = new AggregateError([
+    Object.assign(new Error("connect ECONNREFUSED ::1:5432"), { code: "ECONNREFUSED" }),
+    Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), { code: "ECONNREFUSED" }),
+  ]);
+  assert.equal(refused.message, "");
+  assert.equal(reason(refused), "connect ECONNREFUSED ::1:5432; connect ECONNREFUSED 127.0.0.1:5432");
+  assert.equal(reason(Object.assign(new Error(""), { code: "ETIMEDOUT" })), "ETIMEDOUT");
+  assert.equal(reason("plain text"), "plain text");
 });
 
 test("a hosted service refuses what only a single install may have", () => {

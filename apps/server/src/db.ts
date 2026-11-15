@@ -156,6 +156,15 @@ export async function openDb(
       // then thrown away, not handed to the next request with a role and an
       // organisation still set on it.
       let unsure: Error | undefined;
+      // The pool listens only while a connection is unused. While a request
+      // has it, a connection the database closes says so here, and whatever
+      // statement comes next fails for that request. Unheard, this too
+      // would end the process, and every other request with it.
+      const lost = (err: Error) => {
+        unsure ??= err;
+        console.error(`A database connection was lost under a request: ${err.message}`);
+      };
+      client.on("error", lost);
       try {
         await client.query("BEGIN");
         const out = await fn({ query: async (text, params) => (await client.query(text, params as unknown[])).rows });
@@ -174,6 +183,7 @@ export async function openDb(
         }
         throw err;
       } finally {
+        client.removeListener("error", lost);
         client.release(unsure);
       }
     };

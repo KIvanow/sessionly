@@ -40,6 +40,18 @@ export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
   return problems;
 }
 
+/**
+ * Why something failed, in words. A connection that was refused comes as
+ * several errors under one with no message of its own (one per address
+ * tried), so those are what is said.
+ */
+export function reason(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const each = err instanceof AggregateError ? err.errors.map(reason).filter(Boolean) : [];
+  const code = (err as { code?: unknown }).code;
+  return err.message || [...new Set(each)].join("; ") || (typeof code === "string" ? code : err.name);
+}
+
 export async function runServer(options: RunOptions = {}): Promise<void> {
   const hosted = process.env.SESSIONLY_HOSTED === "true";
   if (hosted) {
@@ -54,11 +66,14 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL ?? `file:${embedded}`;
   // A database that cannot be used is said in a few lines, with what to do
   // about it where that is known, and not as a stack of where it failed.
-  const db = await openDb(databaseUrl).catch((err: unknown) => {
-    console.error(`The database could not be opened.\n${err instanceof Error ? err.message : String(err)}`);
+  const cannot = (what: string) => (err: unknown) => {
+    console.error(`${what}\n${reason(err)}`);
     process.exit(1);
-  });
-  for (const { table, list } of options.migrations ?? []) await runMigrations(db, table, list);
+  };
+  const db = await openDb(databaseUrl).catch(cannot("The database could not be opened."));
+  for (const { table, list } of options.migrations ?? []) {
+    await runMigrations(db, table, list).catch(cannot(`The database could not be brought up to date (${table}).`));
+  }
   const adminToken = process.env.SESSIONLY_ADMIN_TOKEN;
   // The dashboard, if it has been built (pnpm build).
   const webDist = fileURLToPath(new URL("../../web/dist", import.meta.url));

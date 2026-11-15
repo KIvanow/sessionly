@@ -17,7 +17,11 @@ const FROM =
   /\b(?:import|export)\s+(?:type\s+)?(\*(?:\s+as\s+\w+)?|\w+|\{[^}]*\})(?:\s*,\s*(?:\{[^}]*\}|\*\s+as\s+\w+))?\s+from\s+["']([^"']+)["']/g;
 // `import("…")`: awaited for the module, or written as a type.
 const CALLED = /(?<![.\w])import\s*\(\s*(?:["'`]([^"'`]*)["'`]\s*\))?/g;
-const DATABASE = /(?:^|\/)db(?:\.(?:ts|js|mts|mjs))?$|^@sessionly\/server$/;
+// The database module, and the two that pass its names on: the package's
+// own front door (also what `@sessionly/server` is) and the tests' helpers.
+const DATABASE = /(?:^|\/)(?:db|lib|testing)(?:\.(?:ts|js|mts|mjs))?$|^@sessionly\/server$/;
+// Another way to load a module, which nothing here needs.
+const REQUIRE = /\bcreateRequire\b|(?<![.\w])require\s*\(\s*["'`]/;
 // The names that are, or hand out, the owner's view.
 const OWNER = /(?:^|[\s,{])(?:type\s+)?(?:Db|openDb|testDb)(?:$|[\s,}])/;
 // Where app.ts may use the owner's database: these and nothing else. The
@@ -42,6 +46,7 @@ function imports(text) {
     if (from === undefined) found.push(`${whole.trim()}…): only import("a literal") can be checked`);
     else if (DATABASE.test(from)) found.push(whole);
   }
+  if (REQUIRE.test(text)) found.push("require(): modules are imported, where this check can read what from");
   return found;
 }
 
@@ -50,7 +55,9 @@ function inApp(text, allowed = IN_APP) {
   const found = [];
   const lines = text.split("\n");
   lines.forEach((line, i) => {
-    if (/\bownerDb\b/.test(line) && !COMMENT.test(line) && !allowed.some((ok) => ok.test(line))) {
+    if (!/\bownerDb\b/.test(line) || COMMENT.test(line)) return;
+    // Once on a line: a second use could ride along with an allowed one.
+    if (!allowed.some((ok) => ok.test(line)) || line.match(/\bownerDb\b/g).length > 1) {
       found.push(`:${i + 1}: ${line.trim()}`);
     }
   });
@@ -95,9 +102,15 @@ const MUST_FAIL = [
   ["imports", `const { openDb } = await import("./db.ts");`],
   ["imports", `let kept: import("@sessionly/server").Db;`],
   ["imports", `const m = await import(where);`],
+  ["imports", `import { openDb } from "./lib.ts";`],
+  ["imports", `import { testDb } from "./testing.ts";`],
+  ["imports", `import type { Db } from "../lib.js";`],
+  ["imports", `import { createRequire } from "node:module";\nconst { openDb } = createRequire(import.meta.url)("./db.ts");`],
+  ["imports", `const db = require("./db.ts");`],
   ["inApp", `${APP}\n  api.get("/all", async (c) => c.json(await ownerDb.query("SELECT * FROM sessions")));`],
   ["inApp", `${APP}\n  await ownerDb.asOrg(c.req.query("org"), async (orgDb) => {});`],
   ["inApp", `${APP}\n  const db = ownerDb;`],
+  ["inApp", `${APP}\n  const p = await authenticate(ownerDb, header), all = await ownerDb.query("SELECT * FROM tokens");`],
   ["inApp", APP.replace("ownerDb: Db", "db: Db")],
   ["inApp", APP.split("\n").slice(0, 2).join("\n")],
   ["inRun", `${RUN}\nawait options.prepare?.(db);`],
@@ -107,6 +120,7 @@ const MUST_PASS = [
   ["imports", `import { rowLevelSecurity, toApp, type OrgDb } from "@sessionly/server";`],
   ["imports", `import type { OrgDb, Queryable } from "./db.ts";\nexport { toApp } from "./db.ts";`],
   ["imports", `const fs = await import("node:fs");`],
+  ["imports", `import { toApp } from "./lib.ts";\nawait ent.require(db, "content_policy", "read");\nclass E {\n  async require(db, feature) {}\n}`],
   ["inApp", APP],
   ["inRun", RUN],
 ];
