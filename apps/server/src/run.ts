@@ -52,7 +52,12 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   // The embedded database lives next to the server's code, wherever it is started from.
   const embedded = fileURLToPath(new URL("../data/pglite", import.meta.url));
   const databaseUrl = process.env.DATABASE_URL ?? `file:${embedded}`;
-  const db = await openDb(databaseUrl);
+  // A database that cannot be used is said in a few lines, with what to do
+  // about it where that is known, and not as a stack of where it failed.
+  const db = await openDb(databaseUrl).catch((err: unknown) => {
+    console.error(`The database could not be opened.\n${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
   for (const { table, list } of options.migrations ?? []) await runMigrations(db, table, list);
   const adminToken = process.env.SESSIONLY_ADMIN_TOKEN;
   // The dashboard, if it has been built (pnpm build).
