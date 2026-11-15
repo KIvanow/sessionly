@@ -22,13 +22,50 @@
 # Caddy sends to the copies named in caddy/copies, which this writes. So
 # start, update and change the number of copies with this script and not
 # with `docker compose up`, and run it again after `docker compose down`.
+#
+# One run at a time: a second one started in this folder while the first is
+# at work is refused, and changes nothing. Two at once would each take the
+# other's new copies for ones to clear away, and leave Caddy sending to
+# copies that are gone.
 set -eu
 cd "$(dirname "$0")"
+
+# The lock is held by this run and everything it starts, and is let go when
+# the last of them ends, however that happens: there is nothing to clear up
+# after a run that was killed.
+if ! command -v flock > /dev/null 2>&1; then
+  echo "update.sh needs flock (in util-linux), so that two runs cannot work at once." >&2
+  exit 1
+fi
+exec 9>> .update.lock
+if ! flock -n 9; then
+  holder="$(sed -n 's/.* as process \([0-9][0-9]*\)$/\1/p' .update.lock 2> /dev/null | tail -n 1)"
+  # A run that was killed can leave something it started still at work for
+  # a moment, holding the lock. That is waited for; a run that is alive is not.
+  if [ -z "$holder" ] || kill -0 "$holder" 2> /dev/null || ! flock -w 20 9; then
+    echo "Another update is at work in this folder ($(tail -n 1 .update.lock 2> /dev/null || echo "see .update.lock")). Nothing was changed. Run this again when it is done." >&2
+    exit 1
+  fi
+fi
+echo "started $(date -u +%Y-%m-%dT%H:%M:%SZ) as process $$" > .update.lock
 
 compose() {
   # SESSIONLY_COMPOSE lets a test name its own files.
   ${SESSIONLY_COMPOSE:-docker compose --env-file .env -f docker-compose.hosted.yml} "$@"
 }
+
+# Until the stack had a name of its own it took this folder's, "infra". Copies
+# that still run under another name are not this stack's to compose, and its
+# Caddy would ask for the ports theirs has.
+project="$(compose config | sed -n 's/^name: *//p' | head -n 1)"
+for id in $(docker ps -aq --filter "label=com.docker.compose.project.working_dir=$(pwd)"); do
+  was="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$id")"
+  if [ "$was" != "$project" ]; then
+    echo "This folder's stack is running under another name, \"$was\", and is now called \"$project\"." >&2
+    echo "Nothing was changed. See \"Moving from the old name\" in README.md for the three commands." >&2
+    exit 1
+  fi
+done
 
 # How long new copies get to answer, in seconds.
 patience="${SESSIONLY_UPDATE_WAIT:-180}"
@@ -107,25 +144,47 @@ await() {
 }
 
 for id in $(ids gone); do docker rm -f "$id" > /dev/null; done
-# Every copy there is before this run. Whatever fails, none of these is removed.
-before="$(compose ps -aq server)"
+# Every copy there is before this run, on one line as every list here is.
+# Whatever fails, none of these is removed.
+before="$(compose ps -aq server | tr '\n' ' ')"
 # The ones that already are what they should be, and answer.
-keep="$(ids new | head -n "$copies")"
-missing=$((copies - $(echo $keep | wc -w)))
+keep="$(ids new | head -n "$copies" | tr '\n' ' ')"
+missing=$((copies - $(echo "$keep" | wc -w)))
+
+# What this run started is taken back if it ends before Caddy was told of
+# it: stopped by hand (Ctrl-C, or a signal), or failed at any step. Whatever
+# is not in $before is this run's, also while `compose up` is still making
+# it, since no other run is at work. (Killed outright this cannot run, and
+# the next run that works clears up.)
+starting=no
+undo() {
+  for id in $(compose ps -aq server 2> /dev/null); do
+    case " $before " in *" $id "*) ;; *) docker rm -f "$id" > /dev/null 2>&1 || true ;; esac
+  done
+}
+ended() {
+  code=$?
+  trap - EXIT INT TERM HUP
+  if [ "$starting" = yes ]; then
+    undo
+    echo >&2
+    echo "The copies this run started have been removed. The $(echo "$before" | wc -w) there were before are as they were; nothing else was changed." >&2
+  fi
+  exit "$code"
+}
+trap ended EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 if [ "$missing" -gt 0 ]; then
   # The new ones start beside whatever is there, which keeps answering
   # meanwhile. Whichever new one is first brings the database up to date.
+  starting=yes
+  compose up -d --no-deps --no-recreate --scale "server=$(($(echo "$before" | wc -w) + missing))" server
   started=""
-  # Stopped by hand, this takes back what it started. (Killed outright it
-  # cannot, and the next run that works clears up.)
-  undo() {
-    for id in $started; do docker rm -f "$id" > /dev/null 2>&1 || true; done
-  }
-  trap 'undo; exit 1' INT TERM HUP
-  compose up -d --no-deps --no-recreate --scale "server=$(($(echo $before | wc -w) + missing))" server
   for id in $(compose ps -aq server); do
-    case " $(echo $before) " in *" $id "*) ;; *) started="$started $id" ;; esac
+    case " $before " in *" $id "*) ;; *) started="$started $id" ;; esac
   done
   # shellcheck disable=SC2086
   if ! await $started; then
@@ -136,12 +195,8 @@ if [ "$missing" -gt 0 ]; then
       echo "--- $id" >&2
       docker logs --tail 20 "$id" >&2 2>&1 || true
     done
-    undo
-    echo >&2
-    echo "The copies this run started have been removed. The $(echo $before | wc -w) there were before are as they were; nothing else was changed." >&2
     exit 1
   fi
-  trap - INT TERM HUP
   keep="$keep $started"
 fi
 
@@ -149,21 +204,29 @@ fi
 # removed: every copy goes on running until this is run again.
 # shellcheck disable=SC2086
 list $keep
+# Told or not, the list now names the new copies: they stay.
+starting=no
 if ! take_up; then
   echo "Caddy did not take up the new copies (docker compose logs caddy). The old ones are still answering; run this again." >&2
   exit 1
 fi
 
 # Every other copy goes: the ones of another version, the ones an earlier
-# run left that never answered, and those there are too many of. One that
-# answers finishes what it is answering first.
+# run left that never answered, and those there are too many of. Each is
+# asked to stop, and finishes what it is answering first, whether or not it
+# was found well: one that cannot reach its database for now may still be in
+# the middle of something. One that does not stop in the time it is given
+# (stop_grace_period) is ended by that same command, and removed either way.
+leaving=""
 for id in $(compose ps -aq server); do
-  case " $(echo $keep) " in *" $id "*) continue ;; esac
-  if [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$id")" = healthy ]; then
-    docker stop "$id" > /dev/null
-  fi
-  docker rm -f "$id" > /dev/null
+  case " $keep " in *" $id "*) ;; *) leaving="$leaving $id" ;; esac
 done
+if [ -n "$leaving" ]; then
+  # shellcheck disable=SC2086
+  docker stop $leaving > /dev/null 2>&1 || true
+  # shellcheck disable=SC2086
+  docker rm -f $leaving > /dev/null
+fi
 
 # Caddy is started if it was not running, and made anew if its image or its
 # part of the compose file changed, which closes the front door for the few

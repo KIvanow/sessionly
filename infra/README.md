@@ -102,6 +102,12 @@ mode. Everything the server does per request is inside one transaction, and migr
 lock that ends with theirs. Each copy of the server keeps at most `SESSIONLY_DB_POOL`
 connections; copies times that must stay under what the database allows.
 
+A statement may take `SESSIONLY_DB_QUERY_SECONDS` (30). The database ends one that passes
+it, and a connection that has not answered a fifth of that later is thrown away and replaced.
+That is what gets the service over a failover that leaves the old connections open and
+silent: requests on them fail once, after 36 seconds at most, and the next ones are answered
+by the new database, with nothing restarted. Bringing the database up to date is not limited.
+
 Restrict the database to the machine (a "trusted source", or a firewall rule), so the address
 alone is not enough to reach it.
 
@@ -115,8 +121,9 @@ All in `infra/.env`; `.env.example` describes each. The ones that decide who get
 | `SESSIONLY_SIGNUP_CODE` | If set, signing up needs this code as well: a waiting list, or invitations. |
 | `SESSIONLY_RATE_PER_MINUTE` | Requests one token may make a minute (default 600). |
 
-A setting that is a count (this one, the two below, `SESSIONLY_DB_POOL`) is a whole number
-above 0. Anything else is left out with a warning at the start, and the default applies.
+A setting that is a count (this one, the two below, `SESSIONLY_DB_POOL`,
+`SESSIONLY_DB_QUERY_SECONDS`) is a whole number above 0 in plain digits. Anything else
+(`1e3`, `0x10`, `0.5`) is left out with a warning at the start, and the default applies.
 
 Limits that are not settings:
 
@@ -175,6 +182,14 @@ and only add things: to go back, run the version before.
   with old and new copies both running, to the same version, the one before, or the next.
   It tells old from new by what a copy is (its image and its settings), not by when it
   started. Stopped with Ctrl-C, it removes what it started.
+- **One run at a time.** A second `update.sh` started in this folder while one is at work
+  is refused with a message and changes nothing. The lock (`.update.lock`, held with
+  `flock`) is let go when the run ends, however it ends, so there is nothing to clear after
+  one that was killed.
+- **Stopped or failed before Caddy was told**, by Ctrl-C, a signal or a step that fails, it
+  removes what it started, also copies that `docker compose` was still making.
+- **Copies that leave are asked to stop** and finish what they are answering, whether or not
+  they were found well. One that has not stopped after `stop_grace_period` is ended.
 - **A failed update does not undo migrations**, and old copies answer beside new ones while
   an update runs. So a migration must leave the version before it able to run: add, and
   remove only what the version before no longer reads.
@@ -189,6 +204,23 @@ one that cannot. Caddy only asks copies it is given by name, which is why they a
 down and not found under the name they share. So **start, update and scale with
 `update.sh`, not with `docker compose up`**, and run it again after `docker compose down`:
 copies started behind its back are not in the file, and get nothing.
+
+### Moving from the old name
+
+The stack is called `sessionly`. Before it had a name it took this folder's, `infra`, as any
+other project in a folder of that name would, and the two would have been taken for one. A
+stack that was started under the old name is not found under the new one, and `update.sh`
+refuses to start a second beside it. Once, in this folder:
+
+```sh
+docker compose -p infra --env-file .env -f docker-compose.hosted.yml down   # the site is down from here
+docker run --rm -v infra_caddy-data:/from -v sessionly_caddy-data:/to caddy:2.11.9 cp -a /from/. /to/
+./update.sh                                                                # and up again
+```
+
+The second line keeps Caddy's certificate; without it Caddy asks for a new one at its start.
+Compose then warns that it did not make that volume itself, and uses it all the same.
+`docker volume rm infra_caddy-data infra_caddy-config` afterwards removes what is left.
 
 ## What is kept where
 
