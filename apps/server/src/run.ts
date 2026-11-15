@@ -8,8 +8,9 @@
 //   SESSIONLY_ADMIN_EMAIL  whose sessions uploads with that token belong to
 //   SESSIONLY_HOSTED       "true" for a service that many organisations share
 // Signing in by email (and, hosted, signing up) needs these two and the next:
-//   SMTP_URL               smtp://user:pass@host:port, or smtps://… for TLS from the start
-//   SESSIONLY_EMAIL_FROM   the address the links come from, e.g. "Sessionly <sign-in@example.com>"
+//   RESEND_API_KEY         a key of resend.com with sending access: the links are sent through it
+//   SESSIONLY_EMAIL_FROM   the address the links come from, e.g. "Sessionly <sign-in@example.com>",
+//                          on a domain verified in Resend
 //   SESSIONLY_PUBLIC_URL   where people reach the dashboard, e.g. https://app.example.com
 //   SESSIONLY_SIGNUP       hosted only: "open" (the default) or "off"
 //   SESSIONLY_SIGNUP_CODE  if set, signing up needs this code too
@@ -23,7 +24,7 @@ import { DB_COUNTS, misset } from "./db.ts";
 import { createApp, type Extension } from "./app.ts";
 import { openDb, runMigrations, type Migrations } from "./db.ts";
 import { tidy } from "./limits.ts";
-import { smtpMailer } from "./mail.ts";
+import { resendMailer } from "./mail.ts";
 import { offers, type Accounts } from "./signup.ts";
 
 export interface RunOptions {
@@ -52,7 +53,7 @@ export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
   if (!/^postgres(ql)?:\/\//.test(env.DATABASE_URL ?? "")) {
     problems.push("DATABASE_URL must be a postgres:// address: the embedded database is for one install.");
   }
-  for (const name of ["SMTP_URL", "SESSIONLY_EMAIL_FROM", "SESSIONLY_PUBLIC_URL"]) {
+  for (const name of ["RESEND_API_KEY", "SESSIONLY_EMAIL_FROM", "SESSIONLY_PUBLIC_URL"]) {
     if (!env[name]) problems.push(`${name} is not set: nobody could sign in or sign up.`);
   }
   return problems;
@@ -80,7 +81,10 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
   }
   return {
     hosted,
-    mailer: env.SMTP_URL && env.SESSIONLY_EMAIL_FROM ? smtpMailer(env.SMTP_URL, env.SESSIONLY_EMAIL_FROM) : undefined,
+    mailer:
+      env.RESEND_API_KEY && env.SESSIONLY_EMAIL_FROM
+        ? resendMailer(env.RESEND_API_KEY.trim(), env.SESSIONLY_EMAIL_FROM)
+        : undefined,
     publicUrl,
     signup: env.SESSIONLY_SIGNUP === "off" ? "off" : "open",
     signupCode: env.SESSIONLY_SIGNUP_CODE?.trim() || undefined,

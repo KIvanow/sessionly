@@ -1025,7 +1025,7 @@ test("why the database could not be opened is said, whatever shape the error has
 test("a hosted service refuses what only a single install may have", () => {
   const set = {
     DATABASE_URL: "postgres://app@db.internal/sessionly",
-    SMTP_URL: "smtp://mail.example:2587",
+    RESEND_API_KEY: "re_test",
     SESSIONLY_EMAIL_FROM: "sign-in@example.com",
     SESSIONLY_PUBLIC_URL: "https://app.example.com",
   };

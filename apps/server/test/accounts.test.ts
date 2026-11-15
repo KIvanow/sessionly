@@ -8,7 +8,7 @@ import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
 import { APP_ROLE, type Db } from "../src/db.ts";
 import { tidy } from "../src/limits.ts";
-import type { Mail } from "../src/mail.ts";
+import { MailProblem, resendMailer, type Mail } from "../src/mail.ts";
 import { accountsFrom, hostedProblems } from "../src/run.ts";
 import { mailbox, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
 import { testDb, tokenFor } from "./helpers.ts";
@@ -685,7 +685,7 @@ test("the environment sets how people get in", () => {
   const env = {
     SESSIONLY_HOSTED: "true",
     DATABASE_URL: "postgres://app@db.internal/sessionly",
-    SMTP_URL: "smtp://user:pass@mail.example:2587",
+    RESEND_API_KEY: "re_test",
     SESSIONLY_EMAIL_FROM: "Sessionly <sign-in@example.com>",
     SESSIONLY_PUBLIC_URL: "https://app.example.com",
   };
@@ -699,12 +699,98 @@ test("the environment sets how people get in", () => {
   assert.equal(offers(accountsFrom({ ...env, SESSIONLY_SIGNUP: "off" })).signup, false);
   assert.equal(offers(accountsFrom({ ...env, SESSIONLY_SIGNUP_CODE: "x" })).inviteCode, true);
   // A hosted service that could send no links is refused at the start.
-  assert.match(hostedProblems({ ...env, SMTP_URL: "" }).join(), /SMTP_URL is not set/);
+  assert.match(hostedProblems({ ...env, RESEND_API_KEY: "" }).join(), /RESEND_API_KEY is not set/);
   // A single install: no limits, no signing up, and email only if it is set up.
   const single = accountsFrom({});
   assert.deepEqual(offers(single), { hosted: false, emailSignIn: false, signup: false, inviteCode: false });
   assert.equal(single.ratePerMinute, undefined);
   assert.throws(() => accountsFrom({ SESSIONLY_PUBLIC_URL: "app.example.com/x" }), /SESSIONLY_PUBLIC_URL/);
+});
+
+test("a message goes to Resend once, however often it has to be offered", async () => {
+  // What Resend is asked, and what this stand-in for it answers in turn.
+  const asked: { url: string; headers: Record<string, string>; body: any }[] = [];
+  const waited: number[] = [];
+  const resend = (...answers: (Response | Error)[]) =>
+    resendMailer("re_secret_key", "Sessionly <sign-in@example.com>", {
+      fetch: (async (url: string, init: RequestInit) => {
+        asked.push({ url, headers: init.headers as Record<string, string>, body: JSON.parse(String(init.body)) });
+        const answer = answers.shift() ?? new Error("nothing left to answer");
+        if (answer instanceof Error) throw answer;
+        return answer;
+      }) as typeof fetch,
+      wait: async (ms) => void waited.push(ms),
+    });
+  const says = (status: number, name: string, message: string, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify({ statusCode: status, name, message }), { status, headers });
+  const taken = () => new Response(JSON.stringify({ id: "49a3999c" }), { status: 200 });
+  const mail = { to: "ann@example.com", subject: "Sign in to Sessionly", text: "https://app.test/#login=abc" };
+
+  // Taken at once: one request, saying who asks, with the key and the message as it is.
+  await resend(taken()).send(mail);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0]?.url, "https://api.resend.com/emails");
+  assert.equal(asked[0]?.headers.authorization, "Bearer re_secret_key");
+  assert.ok(asked[0]?.headers["user-agent"]);
+  assert.deepEqual(asked[0]?.body, { from: "Sessionly <sign-in@example.com>", to: ["ann@example.com"], subject: mail.subject, text: mail.text });
+
+  // Too many requests, then a failure on Resend's side, then no answer at
+  // all: offered again each time under the same idempotency key, so that
+  // Resend sends it once whichever of the offers it took.
+  for (const first of [says(429, "rate_limit_exceeded", "Too many requests", { "retry-after": "1" }), says(500, "application_error", "An unexpected error occurred"), new Error("socket hang up")]) {
+    asked.length = 0;
+    waited.length = 0;
+    await resend(first, taken()).send(mail);
+    assert.equal(asked.length, 2);
+    assert.equal(asked[0]?.headers["idempotency-key"], asked[1]?.headers["idempotency-key"]);
+    assert.match(asked[0]?.headers["idempotency-key"] ?? "", /^[0-9a-f-]{36}$/);
+    assert.equal(waited.length, 1);
+  }
+  // As long as Resend says to wait, when it says.
+  assert.deepEqual(waited, [500]);
+  asked.length = 0;
+  waited.length = 0;
+  await resend(says(429, "rate_limit_exceeded", "Too many requests", { "retry-after": "2" }), taken()).send(mail);
+  assert.deepEqual(waited, [2000]);
+  // Another message has another key.
+  const keyBefore = asked[0]?.headers["idempotency-key"];
+  asked.length = 0;
+  await resend(taken()).send(mail);
+  assert.notEqual(asked[0]?.headers["idempotency-key"], keyBefore);
+
+  // Three offers at most.
+  asked.length = 0;
+  await assert.rejects(
+    resend(says(503, "service_unavailable", "down"), says(503, "service_unavailable", "down"), says(503, "service_unavailable", "down"), taken()).send(mail),
+    (err: MailProblem) => err.status === 503 && err.code === "service_unavailable",
+  );
+  assert.equal(asked.length, 3);
+  await assert.rejects(resend(new Error("a"), new Error("b"), new Error("no route to host")).send(mail), /Resend was not reached: no route to host/);
+
+  // What is refused for what it is, is not offered again: a domain that is
+  // not verified, a quota used up, a key that is not valid.
+  for (const [status, name, message] of [
+    [403, "validation_error", "The example.com domain is not verified. Please, add and verify your domain."],
+    [429, "daily_quota_exceeded", "You have exceeded your daily email sending quota."],
+    [401, "validation_error", "API key is invalid"],
+  ] as const) {
+    asked.length = 0;
+    await assert.rejects(resend(says(status, name, message), taken()).send(mail), (err: MailProblem) => {
+      assert.deepEqual([err.status, err.code], [status, name]);
+      assert.ok(err.message.includes(message), err.message);
+      return true;
+    });
+    assert.equal(asked.length, 1, name);
+  }
+  // What is logged of a refusal names no one, and never has the key in it.
+  await assert.rejects(
+    resend(says(403, "validation_error", "You can only send testing emails to your own email address (owner@corp.example).")).send(mail),
+    (err: MailProblem) => {
+      assert.match(err.message, /…@corp\.example/);
+      assert.doesNotMatch(err.message, /owner@|ann@|re_secret_key/);
+      return true;
+    },
+  );
 });
 
 test("an IPv6 caller is counted by its network, an IPv4 caller by its address", () => {

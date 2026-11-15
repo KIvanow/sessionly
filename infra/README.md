@@ -19,8 +19,10 @@ and there is no admin of everything.
 - **A managed Postgres**, version 16 or later, in the same region, with a database and a user
   for Sessionly. One statement has to be run in it by its admin before the first start: see
   [The database's role](#the-databases-role).
-- **An SMTP account** for the sign-in links. Many cloud providers block outgoing ports 25, 465
-  and 587 on new accounts; mail providers offer another port (often 2525 or 2587) for this.
+- **A [Resend](https://resend.com) account** for the sign-in links, with the domain the links
+  come from verified there (Resend gives the DNS records to add), and an API key with
+  "Sending access" only. Messages leave over HTTPS, so the outgoing mail ports that cloud
+  providers block on new accounts do not matter.
 
 ## First start
 
@@ -199,5 +201,8 @@ where `update.sh` was run while requests kept arriving:
 - a copy cut off from the database: Caddy stopped sending to it within its five seconds, and
   sent to it again once the database was back.
 
-Not checked: a real managed database, a real mail provider, and Caddy getting a public
-certificate.
+Mail was checked against Resend itself: one message from its test sender to its test inbox
+was taken, and one from a domain not verified there was refused and logged as such. Not
+checked: a message from a verified domain of your own arriving in a real inbox.
+
+Not checked: a real managed database, and Caddy getting a public certificate.

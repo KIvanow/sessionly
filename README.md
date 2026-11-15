@@ -571,6 +571,9 @@ pnpm build      # builds the dashboard; the server then serves it
 SESSIONLY_ADMIN_TOKEN=choose-a-long-secret SESSIONLY_ADMIN_EMAIL=you@example.com pnpm server
 ```
 
+Settings can also be kept in a file named `.env` at the top of the repository, one
+`NAME=value` a line; `pnpm server` reads it, and git ignores it.
+
 That starts it on `http://127.0.0.1:8080` with an embedded database in `apps/server/data`, which
 is enough to try it or for a small team. Open that address and sign in with the token. Set `DATABASE_URL=postgres://…` to use a Postgres
 server. Then, on a developer's machine:
@@ -597,7 +600,7 @@ for anything but localhost.
 | `SESSIONLY_DB_QUERY_SECONDS` | Postgres only: how long a statement may take. Default 30, and a day (86400) at most. |
 | `SESSIONLY_ADMIN_TOKEN` | An admin token that always works, for first use. |
 | `SESSIONLY_ADMIN_EMAIL` | Who uploads made with that token belong to. |
-| `SMTP_URL`, `SESSIONLY_EMAIL_FROM`, `SESSIONLY_PUBLIC_URL` | Optional, all three together: people then sign in by a link sent to their address (see below). `SMTP_URL` is `smtp://user:pass@host:port`; the last is where people reach the dashboard, e.g. `https://sessionly.example.com`. |
+| `RESEND_API_KEY`, `SESSIONLY_EMAIL_FROM`, `SESSIONLY_PUBLIC_URL` | Optional, all three together: people then sign in by a link sent to their address (see below). The links are sent through [Resend](https://resend.com): the key needs "Sending access" only, and the address the links come from (e.g. `Sessionly <sign-in@example.com>`) must be on a domain verified there. The last is where people reach the dashboard, e.g. `https://sessionly.example.com`. |
 | `SESSIONLY_HOSTED` | `true` for a service many organisations sign up to. See [`infra/`](infra/README.md). |
 
 **The database's user.** On Postgres, requests run as a second role that cannot log in, which
