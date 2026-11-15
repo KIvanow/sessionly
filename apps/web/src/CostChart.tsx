@@ -9,10 +9,9 @@ function label(bucket: Bucket): string {
   return bucket.span === "week" ? `Week of ${dayLabel(bucket.start)}` : dayLabel(bucket.start);
 }
 
-/** A column with a rounded top and a square foot on the baseline. */
+/** A column standing on the baseline: square, like everything else on the sheet. */
 function column(x: number, y: number, width: number, height: number): string {
-  const r = Math.min(4, width / 2, height);
-  return `M${x},${y + height} V${y + r} Q${x},${y} ${x + r},${y} H${x + width - r} Q${x + width},${y} ${x + width},${y + r} V${y + height} Z`;
+  return `M${x},${y + height} V${y} H${x + width} V${y + height} Z`;
 }
 
 /**

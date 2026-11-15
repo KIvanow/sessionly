@@ -1,5 +1,6 @@
 import type { AuthOptions, SignInProvider } from "@sessionly/schema";
 import { useState } from "react";
+import { Brand } from "./Brand.tsx";
 
 type Mode = "sign-in" | "token" | "create";
 
@@ -35,8 +36,10 @@ export function Login({
 
   return (
     <main className="center">
+      <Brand />
+      <p>A ledger of AI coding agent sessions</p>
       <form className="card login" onSubmit={submit}>
-        <h1>{mode === "create" ? "Create an organisation" : "Sessionly"}</h1>
+        <h1>{mode === "create" ? "Create an organisation" : mode === "token" ? "Sign in with a token" : "Sign in"}</h1>
         {mode !== "token" &&
           providers.map((provider) => (
             // A link, not a request: the browser itself goes there and comes back.

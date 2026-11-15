@@ -665,7 +665,9 @@ to run one.
 ### Dashboard
 
 Sign in with a token, or with Google or GitHub where the server is set up for them. An admin
-sees the whole team; a member sees their own sessions.
+sees the whole team; a member sees their own sessions. The dashboard has the website's look,
+light or dark as the system is, and serves the same two typefaces itself, from
+`apps/web/public/fonts/`.
 
 - **Overview:** total cost, sessions, active time, prompts, tool calls and failure rate, files
   changed, the share of files rewritten since and of agent lines still there; cost per day (per

@@ -41,8 +41,20 @@ export function Overview({ token, scope, showUsers, onSignOut }: Props) {
     <>
       <section className="headline" aria-label="Totals">
         <div className="hero">
-          <span className="label">Cost</span>
-          <span className="value" title={usd(total.cost_usd)}>{usdCompact(total.cost_usd)}</span>
+          <div>
+            <span className="label">Cost</span>
+            <span className="value" title={usd(total.cost_usd)}>{usdCompact(total.cost_usd)}</span>
+          </div>
+          <dl className="facts">
+            <dt>A session</dt>
+            <dd>{usd(total.cost_usd / total.sessions)}</dd>
+            {total.active_ms > 0 && (
+              <>
+                <dt>An active hour</dt>
+                <dd>{usd(total.cost_usd / (total.active_ms / 3_600_000))}</dd>
+              </>
+            )}
+          </dl>
           <span className="note">
             {estimated > 0 && `${count(estimated)} of ${count(total.sessions)} sessions are estimates. `}
             {total.sessions_without_cost > 0 && `${count(total.sessions_without_cost)} have no cost figure.`}
@@ -58,6 +70,11 @@ export function Overview({ token, scope, showUsers, onSignOut }: Props) {
             note={`${percent(share(total.tool_failures, total.tool_calls))} failed`}
           />
           <Tile
+            label="Tokens"
+            value={compact(total.input_tokens + total.output_tokens)}
+            note={`${compact(total.input_tokens)} in, ${compact(total.output_tokens)} out`}
+          />
+          <Tile
             label="Files changed"
             value={compact(total.files_changed)}
             note={`+${compact(total.lines_added)} −${compact(total.lines_removed)} lines`}
@@ -65,11 +82,13 @@ export function Overview({ token, scope, showUsers, onSignOut }: Props) {
           <Tile
             label="Files rewritten since"
             value={percent(rewriteRate(total.rewrite))}
+            part={rewriteRate(total.rewrite)}
             note={`${count(total.rewrite.files_rewritten)} of ${count(total.rewrite.files_measured)} measured`}
           />
           <Tile
             label="Agent lines still there"
             value={percent(linesKept(total.rewrite))}
+            part={linesKept(total.rewrite)}
             note={`of ${compact(total.rewrite.lines_added)} tracked lines`}
           />
         </div>
@@ -95,11 +114,23 @@ export function Overview({ token, scope, showUsers, onSignOut }: Props) {
   );
 }
 
-export function Tile({ label, value, note }: { label: string; value: string; note?: string }) {
+export function Tile(props: {
+  label: string;
+  value: string;
+  note?: string;
+  /** If the figure is a share of a whole (0 to 1), a bar shows it as well. */
+  part?: number | null;
+}) {
+  const { label, value, note, part } = props;
   return (
     <div className="tile">
       <span className="label">{label}</span>
       <span className="value">{value}</span>
+      {part != null && Number.isFinite(part) && (
+        <span className="track" aria-hidden="true">
+          <i style={{ width: `${Math.max(0, Math.min(1, part)) * 100}%` }} />
+        </span>
+      )}
       {note && <span className="note">{note}</span>}
     </div>
   );

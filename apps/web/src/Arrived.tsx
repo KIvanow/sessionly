@@ -2,6 +2,7 @@ import type { Arrival, AuthOptions, Membership } from "@sessionly/schema";
 import { useState } from "react";
 import { savedSessions, type Saved } from "./api.ts";
 import type { Where } from "./arrival.ts";
+import { Brand } from "./Brand.tsx";
 import { PROVIDERS } from "./Login.tsx";
 import { reads } from "./lookalike.ts";
 
@@ -59,6 +60,7 @@ export function Arrived({
     const twin = orgName.trim() ? sameNameElsewhere(orgName, null) : undefined;
     return (
       <main className="center">
+        <Brand />
         <form
           className="card login"
           onSubmit={(e) => {
@@ -122,6 +124,7 @@ export function Arrived({
 
   return (
     <main className="center">
+      <Brand />
       <div className="card login">
         <h1>{arrival.orgs.length ? "Sign in where?" : "Nowhere to sign in yet"}</h1>
         {arrival.orgs.length === 0 && (
@@ -219,7 +222,7 @@ function Place({ org, busy, onChoose }: { org: Membership; busy: boolean; onChoo
           a new one from its Team page; if there is no other admin, whoever runs this server can.
         </p>
       ) : (
-        <button type="button" disabled={busy} onClick={onChoose}>
+        <button type="button" className="primary" disabled={busy} onClick={onChoose}>
           Sign in
         </button>
       )}
