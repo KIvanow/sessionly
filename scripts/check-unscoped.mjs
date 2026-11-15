@@ -31,7 +31,9 @@ const DATABASE = /(?:^|\/)(?:db|lib|testing)(?:\.(?:[cm]?[jt]s|[jt]sx))?$|^@sess
 // Another way to load a module, which nothing here needs.
 const REQUIRE = /\bcreateRequire\b|(?<![.\w])require\s*\(\s*["'`]/;
 // The names that are, or hand out, the owner's view.
-const OWNER = /(?:^|[\s,{])(?:type\s+)?["']?(?:Db|openDb|testDb)["']?(?:$|[\s,}])/;
+// Written plainly a name ends at a space, a comma or a brace. Written as a
+// string it ends at its quote, and `as` may follow with nothing between.
+const OWNER = /(?:^|[\s,{])(?:(?:type\s+)?(?:Db|openDb|testDb)(?:$|[\s,}])|(?:type\s*)?(["'])(?:Db|openDb|testDb)\1)/;
 // Where app.ts may use the owner's database: these and nothing else. The
 // organisation of a transaction is the one of the request's token.
 const IN_APP = [
@@ -192,6 +194,10 @@ const MUST_FAIL = [
   ["imports", `import { "openDb" as open } from "./db.ts";`],
   ["imports", `import { 'testDb' as fresh } from "./testing.ts";`],
   ["imports", `import { "}" as brace, openDb } from "./db.ts";`],
+  ["imports", `import{"openDb"as o}from"./db.ts"`],
+  ["imports", `import { 'Db'as D } from './db.ts'`],
+  ["imports", `import {x, type"Db"as D} from "./db.ts"`],
+  ["imports", `export {"openDb"as"o"} from "./db.js"`],
   ["imports", `import { "open\\u0044b" as open } from "./db.ts";`],
   ["imports", `import { openDb } from "./db.cts";`],
   ["imports", `import { openDb } from "../db.tsx";`],
@@ -211,6 +217,7 @@ const MUST_PASS = [
   ["imports", `const fs = await import("node:fs");`],
   ["imports", `import{toApp}from"./db.ts";\nimport { "toApp" as grant, type OrgDb } from "./db.ts";`],
   ["imports", `const important = 1; // comes from "./db.ts"`],
+  ["imports", `import{"toApp"as grant,typeDb,"openDbs"as many}from"./db.ts";`],
   ["imports", `import { toApp } from "./lib.ts";\nawait ent.require(db, "content_policy", "read");\nclass E {\n  async require(db, feature) {}\n}`],
   ["imports", `// More at https://example.com/db.ts\nimport { toApp } /* not the owner's */ from "./db.ts?again";`],
   ["imports", `const docs = "https://example.com//db.ts";\nimport { helper } from "./other.ts?from=db.ts";`],
