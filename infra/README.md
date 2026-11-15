@@ -281,7 +281,9 @@ where `update.sh` was run while requests kept arriving:
   left as they were, and answering again within seconds of the database coming back.
 
 Signing in was checked against stand-ins for Google and GitHub that answer as their
-documentation says they do. Not checked: signing in through Google or GitHub themselves,
-which takes an OAuth client of each.
+documentation says they do, and through Google and GitHub themselves on one machine, at
+`http://localhost:8080` against a local Postgres: creating an organisation with a Google
+account, and signing in with a Google and with a GitHub account. Not checked: either of them
+sending people back to a public address over HTTPS.
 
 Not checked: a real managed database, and Caddy getting a public certificate.
