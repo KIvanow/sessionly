@@ -107,7 +107,21 @@ export async function globalTeardown(): Promise<void> {
       ...names.map((name) => `DROP ROLE IF EXISTS ${quoted(appRoleOf(name))}`),
     ];
     for (const drop of drops) {
-      await admin.query(drop).catch((err: Error) => console.error(`${drop}: ${err.message}`));
+      // The server's own vacuuming may be at work in a database for a moment.
+      // A user who is not a superuser may not end that, and the drop is then
+      // refused: tried again shortly, it goes through.
+      for (let attempt = 1; ; attempt++) {
+        const failed = await admin.query(drop).then(
+          () => null,
+          (err: Error) => err,
+        );
+        if (!failed) break;
+        if (attempt >= 20 || !/permission denied to terminate process|being accessed by other users/.test(failed.message)) {
+          console.error(`${drop}: ${failed.message}`);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
     }
   });
 }
