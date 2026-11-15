@@ -141,11 +141,35 @@ export function count(value: string | undefined): number | undefined {
 /** The settings of the connections to Postgres, each a count. */
 export const DB_COUNTS = ["SESSIONLY_DB_POOL", "SESSIONLY_DB_QUERY_SECONDS"] as const;
 
-/** What to say of each of `names` that is set to something `count` does not take. */
+/**
+ * The most a setting that is a length of time may be: a day, in seconds. A
+ * very large number, written to mean "no limit", is not one: past 24 days a
+ * timer here goes off at once, and a little further the database refuses the
+ * number. Either way every request would fail.
+ */
+const DAY_SECONDS = 86_400;
+const AT_MOST: Record<string, number> = { SESSIONLY_DB_QUERY_SECONDS: DAY_SECONDS };
+
+/** A setting that is a count, no larger than it may be. */
+export function capped(env: NodeJS.ProcessEnv, name: string): number | undefined {
+  const n = count(env[name]);
+  return n === undefined ? undefined : Math.min(n, AT_MOST[name] ?? n);
+}
+
+/**
+ * What to say of each of `names` that will not be used as it is set: one
+ * that `count` does not take, and one above what it may be.
+ */
 export function misset(env: NodeJS.ProcessEnv, names: readonly string[]): string[] {
-  return names
-    .filter((name) => env[name]?.trim() && count(env[name]) === undefined)
-    .map((name) => `${name} is "${env[name]}", which is not a whole number above 0: it is left out, and the default applies.`);
+  return names.flatMap((name) => {
+    if (!env[name]?.trim()) return [];
+    const n = count(env[name]);
+    if (n === undefined) {
+      return [`${name} is "${env[name]}", which is not a whole number above 0: it is left out, and the default applies.`];
+    }
+    const most = AT_MOST[name];
+    return most !== undefined && n > most ? [`${name} is ${n}, and may be ${most} at most (a day): ${most} is used.`] : [];
+  });
 }
 
 /**
@@ -211,7 +235,10 @@ export async function openDb(
   if (/^postgres(ql)?:\/\//.test(url)) {
     const max = options.pool ?? count(process.env.SESSIONLY_DB_POOL) ?? 10;
     const connectMs = options.connectMs ?? CONNECT_MS;
-    const queryMs = options.queryMs ?? (count(process.env.SESSIONLY_DB_QUERY_SECONDS) ?? QUERY_SECONDS) * 1000;
+    const queryMs = Math.min(
+      options.queryMs ?? (capped(process.env, "SESSIONLY_DB_QUERY_SECONDS") ?? QUERY_SECONDS) * 1000,
+      DAY_SECONDS * 1000,
+    );
     // The database is told the limit and ends a statement that passes it,
     // which leaves the connection usable. This side waits a little longer
     // than that before it gives up itself: by then the database is not
@@ -223,6 +250,19 @@ export async function openDb(
       connectionTimeoutMillis: connectMs,
       keepAlive: true,
       keepAliveInitialDelayMillis: KEEP_ALIVE_MS,
+      // The limit for a statement on its own, outside a transaction: the
+      // database then ends it too, and does not go on with it after this
+      // side has given up. Set on each connection before anyone is handed
+      // it. Through a pooler that hands out a connection per transaction it
+      // may land on another connection, where it is the same limit anyway.
+      // If the database will not have it set, this side's limit still holds.
+      onConnect: async (client: pg.ClientBase): Promise<void> => {
+        try {
+          await client.query(within(`SET statement_timeout = ${queryMs}`, undefined, giveUpMs));
+        } catch (err) {
+          if (!(err instanceof pg.DatabaseError)) throw err;
+        }
+      },
     });
     // A connection the database closes (a failover, a restart, an admin)
     // says so with an event, and an event nobody hears ends the process.
@@ -295,8 +335,9 @@ export async function openDb(
       }
     };
     db = {
-      // One statement on its own has only this side's limit. The pool throws
-      // away a connection whose statement failed, whatever the reason.
+      // One statement on its own has the connection's limit (see above) and
+      // this side's. The pool throws away a connection whose statement
+      // failed, whatever the reason.
       query: async (text, params) => (await pool.query(within(text, params, giveUpMs))).rows,
       transaction,
       asOrg: (orgId, fn) => transaction(async (tx) => fn(await enter(tx, appRole, orgId))),

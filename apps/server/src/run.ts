@@ -3,7 +3,7 @@
 //   HOST                   default 127.0.0.1 (use 0.0.0.0 in a container)
 //   DATABASE_URL           postgres://… ; default: an embedded database in apps/server/data
 //   SESSIONLY_DB_POOL      Postgres only: connections kept at most (default 10)
-//   SESSIONLY_DB_QUERY_SECONDS  Postgres only: how long a statement may take (default 30)
+//   SESSIONLY_DB_QUERY_SECONDS  Postgres only: how long a statement may take (default 30, a day at most)
 //   SESSIONLY_ADMIN_TOKEN  an admin token that always works (for first use)
 //   SESSIONLY_ADMIN_EMAIL  whose sessions uploads with that token belong to
 //   SESSIONLY_HOSTED       "true" for a service that many organisations share

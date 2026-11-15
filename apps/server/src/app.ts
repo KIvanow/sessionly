@@ -108,30 +108,67 @@ function wholeNumber(value: string | undefined, fallback: number, max: number, n
 
 /**
  * Writes out why requests failed: the first few in any ten seconds as they
- * are, and of the rest how many there were. With the database away every
- * request fails for one reason, thousands of them a second, and a log of
- * nothing else buries what began it.
+ * are, and of the rest how many there were, once the ten seconds are over.
+ * With the database away every request fails for one reason, thousands of
+ * them a second, and a log of nothing else buries what began it.
  */
 export function failureLog(
-  options: { each?: number; ms?: number; say?: (what: unknown) => void; now?: () => number } = {},
+  options: {
+    each?: number;
+    ms?: number;
+    say?: (what: unknown) => void;
+    now?: () => number;
+    /** Run `fn` in `ms`: a timer that does not keep the process alive, unless a test has its own. */
+    later?: (fn: () => void, ms: number) => void;
+  } = {},
 ): (err: unknown) => void {
-  const { each = 5, ms = 10_000, say = console.error, now = Date.now } = options;
+  const {
+    each = 5,
+    ms = 10_000,
+    say = console.error,
+    now = Date.now,
+    later = (fn, wait) => void setTimeout(fn, wait).unref(),
+  } = options;
   let began = -Infinity;
   let said = 0;
   let left = 0;
+  let waiting = false;
+  /** Say how many were left out, if any were. */
+  const count = () => {
+    if (left) say(`${left} more requests failed in those ${ms / 1000} seconds, and are not written out.`);
+    left = 0;
+  };
+  /**
+   * Have the count said when the ten seconds that are running end, whether
+   * or not anything fails after them. One timer at a time: if by then other
+   * ten seconds are running, with requests left out of their own, it waits
+   * for those to end too.
+   */
+  const sayAtTheEnd = () => {
+    if (waiting) return;
+    waiting = true;
+    later(
+      () => {
+        waiting = false;
+        if (now() - began >= ms) count();
+        else if (left) sayAtTheEnd();
+      },
+      Math.max(0, ms - (now() - began)),
+    );
+  };
   return (err) => {
     if (now() - began >= ms) {
-      if (left) say(`${left} more requests failed in the ${ms / 1000} seconds before this, and are not written out.`);
+      count();
       began = now();
       said = 0;
-      left = 0;
     }
     if (said < each) {
       said++;
       say(err);
-    } else {
-      left++;
+      return;
     }
+    left++;
+    sayAtTheEnd();
   };
 }
 

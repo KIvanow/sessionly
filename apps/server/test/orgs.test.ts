@@ -9,7 +9,7 @@ import type { Hono } from "hono";
 import pg from "pg";
 import { ApiError, createApp, failureLog, type Env } from "../src/app.ts";
 import { createToken } from "../src/auth.ts";
-import { APP_ROLE, appRoleOf, count, DB_COUNTS, FIRST_ORG_MIGRATION, misset, openDb, versionProblem, type Db } from "../src/db.ts";
+import { APP_ROLE, appRoleOf, capped, count, DB_COUNTS, FIRST_ORG_MIGRATION, misset, openDb, versionProblem, type Db } from "../src/db.ts";
 import { hostedProblems, reason } from "../src/run.ts";
 import { adminRuns, newOrg, renameTestDb, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
 
@@ -798,9 +798,13 @@ test("a statement that takes too long is ended by the database, and its connecti
     assert.ok(Date.now() - began < 360, `${Date.now() - began} ms: the database's limit comes before this side's`);
     // The database said no, so the connection is as good as it was.
     assert.equal(await connection(), before);
-    // One statement on its own has this side's limit, and its connection is not used again.
-    await assert.rejects(pooled.query(`SELECT pg_sleep(5)`), /Query read timeout/);
-    assert.notEqual(await connection(), before);
+    // One statement on its own has the limit too: the database ends it,
+    // and does not go on with it after this side has stopped waiting.
+    const alone = Date.now();
+    await assert.rejects(pooled.query(`SELECT pg_sleep(5)`), (err: Error & { code?: string }) => err.code === "57014");
+    assert.ok(Date.now() - alone < 360, `${Date.now() - alone} ms`);
+    assert.deepEqual(await pooled.query(`SHOW statement_timeout`), [{ statement_timeout: "300ms" }]);
+    assert.deepEqual(await adminRuns(new URL(url).pathname.slice(1), `SELECT 1 FROM pg_stat_activity WHERE query LIKE 'SELECT pg_sleep(5)%' AND state = 'active'`), []);
     // A transaction left open and unused is ended by the database too.
     await assert.rejects(
       pooled.transaction(async (tx) => {
@@ -811,7 +815,7 @@ test("a statement that takes too long is ended by the database, and its connecti
     );
     // Bringing the database up to date is not limited: a large table takes what it takes.
     await pooled.transaction((tx) => tx.query(`SELECT pg_sleep(0.7)`), { patient: true });
-    // And the limits are the transaction's own: none is left on the connection.
+    // It sets its own, for as long as it lasts.
     const [left] = await pooled.transaction(
       (tx) => tx.query<{ statement: string; idle: string }>(
         `SELECT current_setting('statement_timeout') AS statement, current_setting('idle_in_transaction_session_timeout') AS idle`,
@@ -819,6 +823,7 @@ test("a statement that takes too long is ended by the database, and its connecti
       { patient: true },
     );
     assert.deepEqual(left, { statement: "0", idle: "0" });
+    assert.deepEqual(await pooled.query(`SHOW idle_in_transaction_session_timeout`), [{ idle_in_transaction_session_timeout: "0" }]);
   } finally {
     const error = console.error;
     console.error = () => {};
@@ -896,10 +901,59 @@ test("a setting that is a count is a whole number in plain digits, or is left ou
   assert.match(notes[1] ?? "", /^SESSIONLY_DB_QUERY_SECONDS is "1e3"/);
 });
 
+test("a limit set very high, to mean none, is a day and is said", async (t) => {
+  // Two million seconds is 23 days. A fifth more, in milliseconds, is past
+  // what a timer here can count, which then goes off at once; a little more
+  // is past what the database takes. Every request would fail.
+  assert.equal(capped({ SESSIONLY_DB_QUERY_SECONDS: "2000000" }, "SESSIONLY_DB_QUERY_SECONDS"), 86_400);
+  assert.equal(capped({ SESSIONLY_DB_QUERY_SECONDS: "86400" }, "SESSIONLY_DB_QUERY_SECONDS"), 86_400);
+  assert.equal(capped({ SESSIONLY_DB_QUERY_SECONDS: "45" }, "SESSIONLY_DB_QUERY_SECONDS"), 45);
+  assert.equal(capped({ SESSIONLY_DB_POOL: "2000000" }, "SESSIONLY_DB_POOL"), 2_000_000);
+  assert.deepEqual(misset({ SESSIONLY_DB_QUERY_SECONDS: "2000000" }, DB_COUNTS), [
+    "SESSIONLY_DB_QUERY_SECONDS is 2000000, and may be 86400 at most (a day): 86400 is used.",
+  ]);
+  assert.deepEqual(misset({ SESSIONLY_DB_QUERY_SECONDS: "86400" }, DB_COUNTS), []);
+
+  const url = await testDbUrl();
+  if (url === "memory://") return t.skip("the rest needs a Postgres server (TEST_DATABASE_URL)");
+  const set = process.env.SESSIONLY_DB_QUERY_SECONDS;
+  const limits = (db: Db) =>
+    db.asOrg("default", (scoped) => scoped.query<{ limit: string }>(`SELECT current_setting('statement_timeout') AS limit`));
+  for (const seconds of ["2000000", "2147483647"]) {
+    process.env.SESSIONLY_DB_QUERY_SECONDS = seconds;
+    const pooled = await openDb(url, { pool: 1 }).finally(() => {
+      if (set === undefined) delete process.env.SESSIONLY_DB_QUERY_SECONDS;
+      else process.env.SESSIONLY_DB_QUERY_SECONDS = set;
+    });
+    try {
+      // Requests are answered, in a transaction and outside one, under a limit of a day.
+      assert.deepEqual(await limits(pooled), [{ limit: "1d" }]);
+      assert.deepEqual(await pooled.query(`SELECT 1 AS n`), [{ n: 1 }]);
+      assert.deepEqual(await pooled.query(`SHOW statement_timeout`), [{ statement_timeout: "1d" }]);
+    } finally {
+      await pooled.close();
+    }
+  }
+  // The same for a limit handed to openDb directly.
+  const direct = await openDb(url, { pool: 1, queryMs: 2_000_000_000 });
+  try {
+    assert.deepEqual(await limits(direct), [{ limit: "1d" }]);
+  } finally {
+    await direct.close();
+  }
+});
+
 test("requests that all fail are written out a few at a time, with a count of the rest", () => {
   const said: unknown[] = [];
+  const timers: { fn: () => void; ms: number }[] = [];
   let now = 1_000_000;
-  const failed = failureLog({ each: 2, ms: 10_000, say: (what) => void said.push(what), now: () => now });
+  const failed = failureLog({
+    each: 2,
+    ms: 10_000,
+    say: (what) => void said.push(what),
+    now: () => now,
+    later: (fn, ms) => void timers.push({ fn, ms }),
+  });
   const errors = Array.from({ length: 3000 }, (_, i) => new Error(`failed ${i}`));
   for (const err of errors) failed(err);
   // The first two as they are, and nothing of the other 2998 yet.
@@ -907,15 +961,52 @@ test("requests that all fail are written out a few at a time, with a count of th
   now += 9_999;
   failed(new Error("still within the ten seconds"));
   assert.equal(said.length, 2);
-  // The next one after that says how many there were, and is written out itself.
+  // One timer, for the end of the ten seconds, however many were left out.
+  assert.deepEqual(timers.map((timer) => timer.ms), [10_000]);
+  // The ten seconds end and nothing fails after them: the count is said all the same.
   now += 1;
+  timers.shift()?.fn();
+  assert.deepEqual(said.slice(2), ["2999 more requests failed in those 10 seconds, and are not written out."]);
+  // The next failure is written out itself, and the count is not said twice.
   const next = new Error("later");
   failed(next);
-  assert.deepEqual(said.slice(2), ["2999 more requests failed in the 10 seconds before this, and are not written out.", next]);
+  assert.deepEqual(said.slice(3), [next]);
+  // Failures that go on past the ten seconds: the next one says the count,
+  // and the timer that comes after it has nothing left to say.
+  failed(next);
+  failed(new Error("left out"));
+  now += 4_000;
+  failed(new Error("left out"));
+  assert.deepEqual(timers.map((timer) => timer.ms), [10_000]);
+  now += 6_000;
+  failed(next);
+  assert.deepEqual(said.slice(5), ["2 more requests failed in those 10 seconds, and are not written out.", next]);
+  timers.shift()?.fn();
+  assert.equal(said.length, 7);
   // A quiet stretch leaves nothing to say.
   now += 60_000;
   failed(next);
-  assert.equal(said.length, 5);
+  assert.equal(said.length, 8);
+  assert.equal(timers.length, 0);
+
+  // Ten seconds that begin while the timer of the ten before is still to
+  // go off: that timer finds them running, and waits for their end too.
+  // Their count is said then, though nothing fails afterwards.
+  failed(next);
+  failed(new Error("left out of the first"));
+  assert.deepEqual(timers.map((timer) => timer.ms), [10_000]);
+  now += 12_000;
+  for (let i = 0; i < 4; i++) failed(next);
+  assert.deepEqual(said.slice(8), [next, "1 more requests failed in those 10 seconds, and are not written out.", next, next]);
+  assert.equal(timers.length, 1);
+  now += 3_000;
+  timers.shift()?.fn();
+  assert.equal(said.length, 12);
+  assert.deepEqual(timers.map((timer) => timer.ms), [7_000]);
+  now += 7_000;
+  timers.shift()?.fn();
+  assert.deepEqual(said.slice(12), ["2 more requests failed in those 10 seconds, and are not written out."]);
+  assert.equal(timers.length, 0);
 });
 
 test("why the database could not be opened is said, whatever shape the error has", () => {
