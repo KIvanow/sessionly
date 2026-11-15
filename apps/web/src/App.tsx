@@ -14,6 +14,7 @@ import {
 } from "./api.ts";
 import { Connect } from "./Connect.tsx";
 import { Login } from "./Login.tsx";
+import { reads } from "./lookalike.ts";
 import { Overview } from "./Overview.tsx";
 import { Pulls } from "./Pulls.tsx";
 import { SessionView } from "./SessionView.tsx";
@@ -78,12 +79,17 @@ interface Link {
   org_id: string | null;
   /** The person has not signed in to this organisation before. */
   first_time: boolean;
-  /** Who added them to it, if they have not signed in to it before. */
+  /**
+   * Who added them to it, if they have not signed in to it before and it
+   * was someone who had signed in: that address is the adder's own.
+   */
   invited_by: string | null;
+  /**
+   * How they were added: by a person who had signed in, or with a token,
+   * which says nothing of who held it. Null if that was not recorded.
+   */
+  invited_via: "sign_in" | "token" | null;
 }
-
-/** Names as people read them: the same if they differ only in case, spacing or the form of a letter. */
-const reads = (name: string) => name.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
 
 /**
  * An organisation this browser is signed in to that has the name a link
@@ -248,7 +254,12 @@ export function App() {
             {!creating && link.first_time && (
               <>
                 <dt>Added by</dt>
-                <dd>{link.invited_by ?? "not recorded"}</dd>
+                <dd>
+                  {link.invited_by ??
+                    (link.invited_via === "token"
+                      ? "an admin token of that organisation, not a person who signed in"
+                      : "not recorded")}
+                </dd>
               </>
             )}
           </dl>
@@ -256,14 +267,17 @@ export function App() {
             <p role="alert">
               {creating
                 ? `This browser is already signed in to an organisation called ${twin.name} (${twin.org}). This creates a second, separate one with the same name.`
-                : `This is not the ${twin.name} this browser is signed in to: that one is ${twin.org}. Anyone can give an organisation any name. Go on only if you know who ${
-                    link.invited_by ?? "sent this"
-                  } is and expected this.`}
+                : `This is not the ${twin.name} this browser is signed in to: that one is ${twin.org}. Anyone can give an organisation any name. Go on only if you ${
+                    link.invited_by ? `know who ${link.invited_by} is and` : "know who sent this and"
+                  } expected it.`}
             </p>
           )}
           {!creating && link.first_time && !twin && (
             <p className="muted">
-              You have not signed in to this organisation before. A name can be anyone's choice: check who added you.
+              You have not signed in to this organisation before. A name can be anyone's choice
+              {link.invited_by
+                ? ": check who added you."
+                : ", and this page cannot say who added you: go on only if you were expecting this."}
             </p>
           )}
           <p className="muted">
