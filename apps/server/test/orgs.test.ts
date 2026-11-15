@@ -534,6 +534,31 @@ test("several copies of the server starting at once migrate once", async (t) => 
   }
 });
 
+test("connections the database closes do not end the server", async (t) => {
+  const url = await testDbUrl();
+  if (url === "memory://") return t.skip("needs a Postgres server (TEST_DATABASE_URL)");
+  const pooled = await openDb(url, { pool: 2 });
+  const lost: string[] = [];
+  const error = console.error;
+  console.error = (line: string) => void lost.push(String(line));
+  try {
+    // Two connections, sitting unused, closed from the database's side.
+    await Promise.all([pooled.query(`SELECT pg_sleep(0.05)`), pooled.query(`SELECT pg_sleep(0.05)`)]);
+    await adminRuns(
+      new URL(url).pathname.slice(1),
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Still here, and the next request gets a connection that works.
+    const [row] = await pooled.asOrg("default", (scoped) => scoped.query<{ n: unknown }>(`SELECT count(*) AS n FROM orgs`));
+    assert.equal(Number(row?.n), 1);
+    assert.ok(lost.some((line) => /connection was lost while idle/.test(line)), lost.join("\n"));
+  } finally {
+    console.error = error;
+    await pooled.close();
+  }
+});
+
 test("a hosted service refuses what only a single install may have", () => {
   const postgres = "postgres://app@db.internal/sessionly";
   assert.deepEqual(hostedProblems({ DATABASE_URL: postgres }), []);

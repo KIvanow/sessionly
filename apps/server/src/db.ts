@@ -146,6 +146,10 @@ export async function openDb(
   if (/^postgres(ql)?:\/\//.test(url)) {
     const max = options.pool ?? setting(process.env.SESSIONLY_DB_POOL, 10);
     const pool = new pg.Pool({ connectionString: url, max });
+    // A connection the database closes while it sits unused (a failover, a
+    // restart, an admin) is dropped by the pool, which says so with this
+    // event. Unheard, the event would end the process.
+    pool.on("error", (err) => console.error(`A database connection was lost while idle: ${err.message}`));
     const transaction: Db["transaction"] = async (fn) => {
       const client = await pool.connect();
       // Set if the connection may still be inside the transaction: it is
