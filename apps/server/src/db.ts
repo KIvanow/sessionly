@@ -613,6 +613,17 @@ const MIGRATIONS: string[] = [
      state_hash text PRIMARY KEY,
      expires_at timestamptz NOT NULL
    )`,
+  // When a person was last added, or let in anew: what the list of places
+  // someone was added to is ordered by. `created_at` stays when they first were.
+  `ALTER TABLE users ADD COLUMN invited_at timestamptz`,
+  // Having signed in means with an account that is kept. People who signed
+  // in before one was kept have none, and would be whoever came first under
+  // their address, taken straight in. They are as people who were added and
+  // have not signed in: asked, and shown that they have not been here
+  // before, and the account they then come with is theirs. (Nothing but
+  // trial databases has such people: no release kept sign-ins without it.)
+  `UPDATE users SET confirmed_at = NULL WHERE confirmed_at IS NOT NULL AND sign_in_account IS NULL`,
+  `ALTER TABLE users ADD CONSTRAINT users_confirmed_with_account CHECK (confirmed_at IS NULL OR sign_in_account IS NOT NULL)`,
 ];
 
 /**

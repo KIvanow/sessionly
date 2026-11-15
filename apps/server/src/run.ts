@@ -52,14 +52,14 @@ export interface RunOptions {
   edition?: string;
 }
 
+/** A plain-HTTP address that leads nowhere but to this machine. */
+const ON_THIS_MACHINE = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/;
+
 /**
  * What a service shared by many organisations must not be started with. A
  * self-hosted install has one organisation, "default", and none of this
  * applies to it.
  */
-/** A plain-HTTP address that leads nowhere but to this machine. */
-const ON_THIS_MACHINE = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/;
-
 export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
   const problems: string[] = [];
   if (env.SESSIONLY_ADMIN_TOKEN) {

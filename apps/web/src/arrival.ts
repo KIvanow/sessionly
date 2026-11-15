@@ -1,7 +1,7 @@
 // Coming back from Google or GitHub: what the dashboard does with it. Kept
 // apart from the pages, so that it can be tried without a browser.
 import type { Arrival, SignedIn } from "@sessionly/schema";
-import { open } from "./api.ts";
+import { open, savedSessions, savedToken } from "./api.ts";
 
 /** Where someone who has signed in goes on to: an organisation they are in, or a new one. */
 export type Where = { user_id: string } | { org_name: string; invite_code?: string };
@@ -67,6 +67,11 @@ export function straightIn(arrival: Arrival, signedIn: boolean): string | null {
   return only && !others.length && !only.first_time && !only.other_account ? only.user_id : null;
 }
 
+/** Whether this browser is signed in to anything: with a token it is using, or a session it has kept. */
+export function signedInHere(): boolean {
+  return savedToken() !== null || savedSessions().length > 0;
+}
+
 export type Outcome =
   /** Signed in, with nothing asked. */
   | { kind: "entered"; signed: SignedIn }
@@ -76,8 +81,13 @@ export type Outcome =
   /** Nothing to do or say. */
   | { kind: "nothing" };
 
-/** What to do with a landing, in a browser that is or is not signed in already. */
-export async function arrive(landing: Landing, signedIn: boolean, at: Pick<typeof doors, "check" | "enter"> = doors): Promise<Outcome> {
+/**
+ * What to do with a landing. Whether the browser is signed in already is
+ * looked up here, and not handed in by the page, so that the page cannot
+ * get it wrong: it decides whether anyone is taken in without being asked.
+ */
+export async function arrive(landing: Landing, at: Pick<typeof doors, "check" | "enter"> = doors): Promise<Outcome> {
+  const signedIn = signedInHere();
   if (!landing.arrived) return { kind: "problem", text: landing.problem };
   let arrival: Arrival;
   try {

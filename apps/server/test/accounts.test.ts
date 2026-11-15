@@ -5,12 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
-import { createApp, type Env } from "../src/app.ts";
+import { createApp, thisMachine, type Env } from "../src/app.ts";
 import { APP_ROLE, migrationAt, openDb, type Db } from "../src/db.ts";
 import { giveBack, take, tidy } from "../src/limits.ts";
 import { challengeOf, ProviderProblem, type Provider, type ProviderName } from "../src/oauth.ts";
 import { accountsFrom, hostedProblems, unheeded } from "../src/run.ts";
 import { emailFrom, INVITATIONS_SHOWN, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
+import { forgetAccount } from "../src/users.ts";
 import { testDb, testDbUrl, tokenFor } from "./helpers.ts";
 
 let db: Db;
@@ -180,16 +181,19 @@ test("what the server offers depends on how it is set up", async () => {
     providers: ["google", "github"],
     signup: true,
     inviteCode: false,
+    publicUrl: "https://app.test",
   });
   // A self-hosted install with one provider: people sign in, nobody signs up.
-  assert.deepEqual(offers({ providers: [provider("github")], publicUrl: "https://s.test" }), {
+  assert.deepEqual(offers({ providers: [provider("github")], publicUrl: "https://s.test/" }), {
     hosted: false,
     providers: ["github"],
     signup: false,
     inviteCode: false,
+    publicUrl: "https://s.test",
   });
   // Without a provider, or without an address for one to send people back to, there are only tokens.
-  assert.deepEqual(offers({ hosted: true }), { hosted: true, providers: [], signup: false, inviteCode: false });
+  assert.deepEqual(offers({ hosted: true }), { hosted: true, providers: [], signup: false, inviteCode: false, publicUrl: null });
+  assert.equal(offers({ hosted: true, publicUrl: "https://app.test" }).publicUrl, null);
   assert.deepEqual(offers({ hosted: true, providers: hosted.providers }).providers, []);
   assert.equal(offers({ ...hosted, signup: "off" }).signup, false);
   const plain = createApp(db, {});
@@ -737,6 +741,197 @@ test("being added to other people's organisations hides neither one's own nor th
   assert.deepEqual([left.orgs.map((org: any) => org.org_id), left.more], [[own.org.id, corp.org.id], 0]);
 });
 
+test("an owner whose account is gone is let in with another: by an admin, or by whoever runs the server", async () => {
+  const owner = await signUp("ona@lost.example", "Lost");
+  const ownerId = (await db.query<{ id: string }>(`SELECT id FROM users WHERE org_id = $1 AND role = 'owner'`, [owner.org.id]))[0]?.id ?? "";
+  const machine = await post("/me/tokens", { name: "laptop" }, owner.token);
+  assert.equal(machine.status, 201);
+  const people = async (token: string) =>
+    Object.fromEntries((await get("/users", token)).body.users.map((u: any) => [u.email, u.signed_in_with]));
+  // Her Google account is deleted and made again: the same address, another account.
+  const again = await arrive(["ona@lost.example"], { account: "ona-made-again" });
+  const refused = await post("/auth/verify", { code: again, user_id: ownerId });
+  assert.deepEqual([refused.status, refused.body.code], [403, "other_account"]);
+  // What she is told is true of an owner, who cannot be removed and added again.
+  assert.match(refused.body.error, /another admin of the organisation can let you in .* whoever runs this server can/);
+  assert.doesNotMatch(refused.body.error, /remove/);
+  // Nobody does it for themselves, and a member does it for nobody.
+  const self = await post(`/users/${ownerId}/forget-account`, {}, owner.token);
+  assert.deepEqual([self.status, self.body.code], [409, "not_yourself"]);
+  // Nor is it done for an owner with a token, which says nothing of who holds it.
+  const unsigned = (await post("/tokens", { email: "ops@lost.example", role: "admin" }, owner.token)).body.token;
+  const byToken = await post(`/users/${ownerId}/forget-account`, {}, unsigned);
+  assert.deepEqual([byToken.status, byToken.body.code], [403, "sign_in_needed"]);
+  assert.equal((await get("/me", owner.token)).status, 200);
+  await post("/users", { email: "adam@lost.example", role: "admin" }, owner.token);
+  await post("/users", { email: "mel@lost.example", role: "member" }, owner.token);
+  const adam = await signIn("adam@lost.example", owner.org.id);
+  const mel = await signIn("mel@lost.example", owner.org.id);
+  assert.equal((await post(`/users/${ownerId}/forget-account`, {}, mel.token)).status, 403);
+  assert.deepEqual(await people(adam.token), { "ona@lost.example": "google", "adam@lost.example": "google", "mel@lost.example": "google" });
+
+  // With a token it is done for someone who is not the owner.
+  const melId = (await get("/users", adam.token)).body.users.find((u: any) => u.email === "mel@lost.example").id;
+  assert.equal((await post(`/users/${melId}/forget-account`, {}, unsigned)).status, 200);
+  assert.equal((await get("/me", mel.token)).status, 401);
+  // Another admin, signed in, lets the owner in anew, and it is written
+  // down who did. Her sessions end; her machine's token does not.
+  const logged: string[] = [];
+  const log = console.log;
+  console.log = (line: string) => void logged.push(line);
+  const forgotten = await post(`/users/${ownerId}/forget-account`, {}, adam.token).finally(() => (console.log = log));
+  assert.deepEqual(logged, [
+    `"${owner.org.id}": the account of ona@lost.example (owner) was forgotten by adam@lost.example, signed in; whoever signs in under that address next is that person`,
+  ]);
+  assert.deepEqual([forgotten.status, forgotten.body.email, forgotten.body.role, forgotten.body.signed_in_with], [200, "ona@lost.example", "owner", null]);
+  assert.equal((await get("/me", owner.token)).status, 401);
+  assert.equal((await get("/ping", machine.body.token)).status, 200);
+  assert.equal((await people(adam.token))["ona@lost.example"], null);
+  // She is asked, as someone let in anew and told by whom, and the account she comes with is hers from then on.
+  const anew = await arrive(["ona@lost.example"], { account: "ona-made-again" });
+  const [place] = (await post("/auth/check", { code: anew })).body.orgs;
+  assert.deepEqual([place.first_time, place.other_account, place.invited_by], [true, null, "adam@lost.example"]);
+  const back = await post("/auth/verify", { code: anew, user_id: ownerId });
+  assert.deepEqual([back.status, back.body.role, back.body.org.id], [200, "admin", owner.org.id]);
+  const old = await arrive(["ona@lost.example"], { account: "google-account-of-ona@lost.example" });
+  assert.equal((await post("/auth/verify", { code: old, user_id: ownerId })).body.code, "other_account");
+  // Someone of another organisation is not there to be let in.
+  const elsewhere = await signUp("eli@elsewhere.example", "Elsewhere");
+  assert.equal((await post(`/users/${ownerId}/forget-account`, {}, elsewhere.token)).status, 404);
+  assert.equal((await post(`/users/usr_nobody/forget-account`, {}, adam.token)).status, 404);
+
+  // An owner who is the only admin there is: whoever runs the server does it, from the command line.
+  const solo = await signUp("sol@alone.example", "Alone");
+  const lost = await arrive(["sol@alone.example"], { account: "sol-new" });
+  const soloId = (await post("/auth/check", { code: lost })).body.orgs[0].user_id;
+  assert.equal((await post("/auth/verify", { code: lost, user_id: soloId })).body.code, "other_account");
+  const done = await db.asOrg(solo.org.id, (scoped) => forgetAccount(scoped, { email: " Sol@Alone.example " }, null));
+  assert.deepEqual([done.email, done.signed_in_with], ["sol@alone.example", null]);
+  const next = await arrive(["sol@alone.example"], { account: "sol-new" });
+  const [shown] = (await post("/auth/check", { code: next })).body.orgs;
+  assert.deepEqual([shown.first_time, shown.invited_by, shown.invited_via], [true, null, null]);
+  assert.equal((await post("/auth/verify", { code: next, user_id: soloId })).status, 200);
+  await assert.rejects(
+    db.asOrg(solo.org.id, (scoped) => forgetAccount(scoped, { email: "nobody@alone.example" }, null)),
+    /no such person/,
+  );
+});
+
+test("a server tried under one of this machine's names is found under the public one, and a proxy's name for it changes nothing", async () => {
+  const web = () => mkdtempSync(join(tmpdir(), "sessionly-web-"));
+  const at = (publicUrl: string) => createApp(db, { webRoot: web(), accounts: { ...hosted, publicUrl } });
+  const ask = (server: Hono<Env>, path: string, host: string | undefined, method = "GET") =>
+    server.request(path, { method, headers: { ...(host ? { host } : {}), "x-forwarded-for": nextCaller() } });
+  const moved = async (server: Hono<Env>, path: string, host: string | undefined) => {
+    const answer = await ask(server, path, host);
+    return answer.status === 307 ? answer.headers.get("location") : null;
+  };
+  // Under another name for the same machine the cookie of a sign-in would
+  // be kept for that name, and not shown at the one the provider sends
+  // people back to. So the browser is sent to the public one, to the same page.
+  const local = at("http://localhost:8080");
+  for (const [path, host] of [
+    ["/", "127.0.0.1:8080"],
+    ["/?x=1", "[::1]:8080"],
+    ["/assets/app.js", "127.0.0.1:8080"],
+    ["/api/v1/auth/google", "127.0.0.1:8080"],
+    ["/api/v1/auth/github?create", "[::1]:8080"],
+  ] as const) {
+    assert.equal(await moved(local, path, host), `http://localhost:8080${path}`, `${host}${path}`);
+    assert.deepEqual((await ask(local, path, host)).headers.getSetCookie(), [], `${host}${path}`);
+  }
+  assert.equal(await moved(at("http://127.0.0.1:8080"), "/", "localhost:8080"), "http://127.0.0.1:8080/");
+  assert.equal(await moved(at("http://localhost"), "/", "127.0.0.1"), "http://localhost/");
+  // At the public address itself, however the host is written, nothing is moved.
+  for (const host of ["localhost:8080", "LOCALHOST:8080", undefined]) {
+    assert.equal((await ask(local, "/api/v1/auth/google", host)).headers.get("location")?.startsWith("https://google.test/"), true, String(host));
+  }
+
+  // Behind a proxy, Host is often the proxy's own name for this server and
+  // not what the browser asked for. Sent to the public address for that,
+  // the browser would be handed straight back here, without end. So
+  // nothing is moved for a host that is not one of this machine's names,
+  // or when the public address is not one...
+  const proxied = at("https://app.example.com");
+  for (const host of ["127.0.0.1:8080", "localhost:8080", "server-1:8080", "sessionly_backend", "10.0.0.7:8080", "app.example.com"]) {
+    for (const path of ["/", "/api/v1/auth/google"]) assert.equal(await moved(proxied, path, host), null, `${host}${path}`);
+  }
+  for (const host of ["my-laptop.local:8080", "10.0.0.7:8080", "localhost.example.com:8080", "sessionly:8080"]) {
+    assert.equal(await moved(local, "/", host), null, host);
+  }
+  // ...and not for one of this machine's names on another port: that is a
+  // proxy on this machine, which listens on one port and passes on to another.
+  assert.equal(await moved(at("http://localhost"), "/", "127.0.0.1:8080"), null);
+  assert.equal(await moved(at("http://localhost:8080"), "/", "127.0.0.1:3000"), null);
+  assert.equal(await moved(at("https://localhost"), "/", "127.0.0.1:8080"), null);
+  // Followed as a browser would, through a proxy that names the server its
+  // own way, the dashboard is answered at once: there is nothing to follow.
+  const page = await ask(at("http://localhost"), "/", "127.0.0.1:8080");
+  assert.notEqual(page.status, 307);
+  assert.equal(thisMachine("LocalHost:8080", "http:")?.name, "localhost");
+  assert.deepEqual(thisMachine("[::1]", "https:"), { name: "[::1]", port: "443" });
+  assert.deepEqual([thisMachine("localhost.evil.example", "http:"), thisMachine("127.0.0.10", "http:"), thisMachine("", "http:")], [null, null, null]);
+
+  // The API is answered wherever it is asked, as is whatever keeps the server running.
+  assert.equal((await ask(local, "/readyz", "127.0.0.1:8080")).status, 200);
+  assert.equal((await ask(local, "/healthz", "127.0.0.1:8080")).status, 200);
+  assert.equal((await ask(local, "/api/v1/auth/options", "127.0.0.1:8080")).status, 200);
+  assert.equal((await ask(local, "/api/v1/ping", "127.0.0.1:8080")).status, 401);
+  assert.equal((await ask(local, "/api/v1/auth/check", "127.0.0.1:8080", "POST")).status, 415);
+  // A provider sends people back to the public address only, so the way back is not moved either.
+  assert.equal((await ask(local, "/api/v1/auth/google/callback?state=x", "127.0.0.1:8080")).headers.get("location"), "http://localhost:8080/#problem=not_started");
+  // A server nobody signs in to has no one address, and moves nothing.
+  const tokens = createApp(db, { webRoot: web(), accounts: { publicUrl: "http://localhost:8080" } });
+  assert.notEqual((await tokens.request("/", { headers: { host: "127.0.0.1:8080" } })).status, 307);
+  // Another site that sends a browser to sign in begins nothing: the dashboard is shown.
+  const sent = await app.request("/api/v1/auth/google", { headers: { "sec-fetch-site": "cross-site", "x-forwarded-for": nextCaller() } });
+  assert.deepEqual([sent.status, sent.headers.get("location"), sent.headers.getSetCookie()], [302, "https://app.test/", []]);
+  for (const site of ["same-origin", "none"]) {
+    const begun = await app.request("/api/v1/auth/google", { headers: { "sec-fetch-site": site, "x-forwarded-for": nextCaller() } });
+    assert.equal(new URL(begun.headers.get("location") ?? "").host, "google.test", site);
+  }
+});
+
+test("what the dashboard asks of a sign-in is taken from the dashboard only", async () => {
+  const browser = await arrive(["dana@site.example"], { create: true });
+  const ask = (path: string, headers: Record<string, string>, body = "{}") =>
+    app.request(`/api/v1/auth/${path}`, {
+      method: "POST",
+      headers: { cookie: browser, "x-forwarded-for": nextCaller(), ...headers },
+      body,
+    });
+  const json = { "content-type": "application/json" };
+  for (const path of ["check", "verify", "cancel"]) {
+    // A form on another site can send text, or a form; not JSON.
+    for (const type of ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", "application/jsonp", ""]) {
+      const refused = await ask(path, type ? { "content-type": type } : {}, `{"org_name":"Planted"}`);
+      assert.deepEqual([refused.status, ((await refused.json()) as any).code], [415, "not_json"], `${path} as ${type}`);
+    }
+    // A page of a neighbouring host is sent the cookie, and says where it is from.
+    const elsewhere: Record<string, string>[] = [
+      { origin: "https://evil.app.test" },
+      { origin: "https://test" },
+      { origin: "http://app.test" },
+      { origin: "null" },
+      { "sec-fetch-site": "same-site" },
+      { "sec-fetch-site": "cross-site" },
+      { origin: "https://app.test", "sec-fetch-site": "same-site" },
+    ];
+    for (const from of elsewhere) {
+      const refused = await ask(path, { ...json, ...from });
+      assert.deepEqual([refused.status, ((await refused.json()) as any).code], [403, "elsewhere"], `${path} from ${JSON.stringify(from)}`);
+    }
+  }
+  // Nothing was done in her name by any of it.
+  assert.equal((await db.query(`SELECT 1 FROM orgs WHERE name = 'Planted'`)).length, 0);
+  // The dashboard itself, as a browser sends it, and with a character set named.
+  const mine = await ask("check", { "content-type": "application/json; charset=utf-8", origin: "https://app.test", "sec-fetch-site": "same-origin" });
+  assert.equal(mine.status, 200);
+  assert.deepEqual(((await mine.json()) as any).emails, ["dana@site.example"]);
+  const made = await ask("verify", { ...json, origin: "https://app.test", "sec-fetch-site": "same-origin" }, JSON.stringify({ org_name: "Dana's" }));
+  assert.equal(made.status, 200);
+});
+
 test("an admin adds people, who sign in as what they were added as", async () => {
   const owner = await signUp("olive@team.example", "Team");
   const added = await post("/users", { email: "Mo@Team.example", role: "member" }, owner.token);
@@ -1048,6 +1243,50 @@ test("signing up can be closed, or need an invitation code", async () => {
   assert.equal((await ask("wrong")).body.code, "invite_required");
   // A wrong code did not use the sign-in up.
   assert.equal((await ask("early-2026")).status, 200);
+
+  // Whether a code is right is told only to someone who has signed in:
+  // without a sign-in the answer is the same for the right code and a wrong one.
+  const guess = (invite_code: string, from?: string, code?: string) =>
+    call(invited, "POST", "/auth/verify", { body: { ...(code ? { code } : {}), org_name: "Guess", invite_code }, from });
+  assert.deepEqual([(await guess("early-2026")).body.code, (await guess("wrong")).body.code], ["invalid_code", "invalid_code"]);
+  assert.deepEqual([(await guess("early-2026", undefined, "made-up")).status, (await guess("wrong", undefined, "made-up")).status], [400, 400]);
+  // And someone who has can only try so many an hour from one network: ten
+  // wrong ones, and then no code of theirs is looked at, the right one neither.
+  const guesser = await arrive(["guess@f.example"], { server: invited, create: true, account: "guesser" });
+  const tries = [];
+  for (let i = 0; i < 12; i++) tries.push((await guess(`try-${i}`, `198.51.100.${i + 1}`, guesser)).body.code);
+  assert.deepEqual(tries, [...Array(10).fill("invite_required"), "invite_limited", "invite_limited"]);
+  const locked = await guess("early-2026", "198.51.100.200", guesser);
+  assert.deepEqual([locked.status, locked.body.code], [429, "invite_limited"]);
+  // Nor from another network, with the same account: the account is counted too.
+  assert.equal((await guess("early-2026", "203.0.113.77", guesser)).body.code, "invite_limited");
+  // Another account from that network is refused there; from elsewhere its code is looked at.
+  const other = await arrive(["other@f.example"], { server: invited, create: true, account: "someone-else" });
+  assert.equal((await guess("early-2026", "198.51.100.201", other)).body.code, "invite_limited");
+  // Ten tries at the same moment are ten tries: each is counted before it is looked at.
+  const racer = await arrive(["race@f.example"], { server: invited, create: true, account: "racer" });
+  const together = await Promise.all(Array.from({ length: 18 }, (_, i) => guess(`race-${i}`, "192.0.2.50", racer)));
+  assert.equal(together.filter((each) => each.body.code === "invite_required").length, 10);
+  assert.equal(together.filter((each) => each.body.code === "invite_limited").length, 8);
+  // A right code is not a try: it can be given as often as there are organisations to make.
+  const counted = async (key: string) => (await db.query<{ n: number }>(`SELECT n FROM rate_counters WHERE key = $1`, [key]))[0]?.n ?? 0;
+  assert.equal((await guess("early-2026", "203.0.113.90", other)).status, 200);
+  assert.deepEqual([await counted("invite-wrong:203.0.113.0/24"), await counted("invite-wrong-by:google:someone-else")], [0, 0]);
+  // Many wrong ones from everywhere are said in the log, once, and close signing up for nobody.
+  await db.query(`UPDATE rate_counters SET n = 1000 WHERE key = 'invite-wrong'`);
+  const late = await arrive(["late@f.example"], { server: invited, create: true, account: "latecomer" });
+  const warned: string[] = [];
+  const warn = console.warn;
+  console.warn = (line: string) => void warned.push(line);
+  try {
+    assert.equal((await guess("nope", "198.18.77.9", late)).body.code, "invite_required");
+    assert.equal((await guess("nope", "198.18.77.9", late)).body.code, "invite_required");
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(warned.length, 1);
+  assert.match(warned[0] ?? "", /^More than 1000 wrong invitation codes were tried in an hour/);
+  assert.equal((await guess("early-2026", "198.18.77.9", late)).status, 200);
 });
 
 test("the server says whether it is alive and whether it can reach its database", async () => {
@@ -1079,7 +1318,7 @@ test("the environment sets how people get in", () => {
   const both = { ...env, SESSIONLY_GOOGLE_CLIENT_ID: "test.apps.googleusercontent.com", SESSIONLY_GOOGLE_CLIENT_SECRET: "secret-of-google" };
   assert.deepEqual(hostedProblems(env), []);
   const accounts = accountsFrom(env);
-  assert.deepEqual(offers(accounts), { hosted: true, providers: ["github"], signup: true, inviteCode: false });
+  assert.deepEqual(offers(accounts), { hosted: true, providers: ["github"], signup: true, inviteCode: false, publicUrl: "https://app.example.com" });
   assert.deepEqual(offers(accountsFrom(both)).providers, ["google", "github"]);
   // Each sends the browser to its own, with this server's id and never its secret.
   const [google, github] = accountsFrom(both).providers ?? [];
@@ -1129,23 +1368,24 @@ test("the environment sets how people get in", () => {
   assert.deepEqual(offers(accountsFrom({ ...env, SESSIONLY_GITHUB_CLIENT_SECRET: " " })).providers, []);
   // A single install: no limits, no signing up, and signing in only if it is set up.
   const single = accountsFrom({});
-  assert.deepEqual(offers(single), { hosted: false, providers: [], signup: false, inviteCode: false });
+  assert.deepEqual(offers(single), { hosted: false, providers: [], signup: false, inviteCode: false, publicUrl: null });
   assert.equal(single.ratePerMinute, undefined);
   assert.deepEqual(offers(accountsFrom({ ...both, SESSIONLY_HOSTED: undefined })), {
     hosted: false,
     providers: ["google", "github"],
     signup: false,
     inviteCode: false,
+    publicUrl: "https://app.example.com",
   });
   assert.throws(() => accountsFrom({ SESSIONLY_PUBLIC_URL: "app.example.com/x" }), /SESSIONLY_PUBLIC_URL/);
 });
 
-test("people from before sign-ins were noted are known to have signed in", async (t) => {
+test("people from before the account was kept are asked as someone new, and then have one", async (t) => {
   const fresh = await testDbUrl();
   const folder = fresh === "memory://" ? mkdtempSync(join(tmpdir(), "sessionly-confirmed-")) : undefined;
   t.after(() => folder && rmSync(folder, { recursive: true, force: true }));
   const url = folder ? `file:${join(folder, "db")}` : fresh;
-  // As a server just before this one left it: nobody's first sign-in noted.
+  // As a server from before first sign-ins were noted left it.
   const old = await openDb(url, { migrations: migrationAt("UPDATE users u") });
   await old.query(`INSERT INTO orgs (id, name) VALUES ('old-org', 'Old Org')`);
   await old.query(
@@ -1160,14 +1400,36 @@ test("people from before sign-ins were noted are known to have signed in", async
        ('old-org', 't2', 'h2', 'never@old.example', 'member', 'usr_never', NULL, NULL)`,
   );
   await old.close();
+  const known = (at: Db) =>
+    at
+      .query<{ id: string; known: boolean }>(`SELECT id, confirmed_at IS NOT NULL AS known FROM users WHERE org_id = 'old-org' ORDER BY id`)
+      .then((rows) => rows.map((row) => [row.id, row.known]));
+  // As the server that noted them left it, which kept no account yet: the
+  // owner signed up by a link; one member has had a session; the other
+  // only a token for a machine, which says nothing of the address.
+  const noted = await openDb(url, { migrations: migrationAt("UPDATE users SET confirmed_at = NULL") });
+  assert.deepEqual(await known(noted), [["usr_never", false], ["usr_owner", true], ["usr_seen", true]]);
+  await noted.close();
+  // Now: nobody has signed in with an account that is kept, the owner neither.
   const now = await openDb(url);
   try {
-    const rows = await now.query<{ id: string; known: boolean }>(
-      `SELECT id, confirmed_at IS NOT NULL AS known FROM users WHERE org_id = 'old-org' ORDER BY id`,
-    );
-    // The owner signed up by a link; one member has had a session; the
-    // other only a token for a machine, which says nothing of the address.
-    assert.deepEqual(rows.map((r) => [r.id, r.known]), [["usr_never", false], ["usr_owner", true], ["usr_seen", true]]);
+    assert.deepEqual(await known(now), [["usr_never", false], ["usr_owner", false], ["usr_seen", false]]);
+    // And nobody can be noted as having signed in without one.
+    await assert.rejects(now.query(`UPDATE users SET confirmed_at = now() WHERE id = 'usr_seen'`), /users_confirmed_with_account/);
+    // Whoever comes under the owner's address is not taken straight in:
+    // they are shown the organisation as one they have not signed in to,
+    // and asked. The account that goes on is the owner's from then on, and
+    // another that has the address is refused.
+    const upgraded = createApp(now, { accounts: hosted });
+    const ask = (code: string) => call(upgraded, "POST", "/auth/check", { body: { code } });
+    const first = await arrive(["owner@old.example"], { server: upgraded, account: "the-owner" });
+    const [place] = (await ask(first)).body.orgs;
+    assert.deepEqual([place.org_id, place.first_time, place.other_account], ["old-org", true, null]);
+    const entered = await call(upgraded, "POST", "/auth/verify", { body: { code: first, user_id: "usr_owner" } });
+    assert.deepEqual([entered.status, entered.body.role], [200, "admin"]);
+    const other = await arrive(["owner@old.example"], { server: upgraded, account: "someone-else" });
+    assert.deepEqual((await ask(other)).body.orgs.map((org: any) => [org.first_time, org.other_account]), [[false, "google"]]);
+    assert.equal((await call(upgraded, "POST", "/auth/verify", { body: { code: other, user_id: "usr_owner" } })).body.code, "other_account");
   } finally {
     await now.close();
   }

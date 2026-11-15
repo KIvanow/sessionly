@@ -74,6 +74,21 @@ export interface Accounts {
   signupsPerNetwork?: number;
 }
 
+/**
+ * Wrong invitation codes an hour from one network (a /24, or a /48 of
+ * IPv6), and by one account. Past either, no code of theirs is looked at
+ * until the hour is over, right or wrong, so that the code cannot be found
+ * by trying.
+ */
+const WRONG_CODES_PER_NETWORK = 10;
+const WRONG_CODES_PER_ACCOUNT = 10;
+/**
+ * Wrong codes an hour from everyone together, past which the log says so,
+ * once an hour. Nobody is refused for it: a limit here would let whoever
+ * guesses a lot close signing up for everyone else.
+ */
+const WRONG_CODES_TO_SAY = 1000;
+
 /** A request to these routes is a code and a name: this is plenty. */
 const MAX_BODY_BYTES = 16 * 1024;
 
@@ -130,6 +145,8 @@ export function offers(accounts: Accounts) {
     providers,
     signup: providers.length > 0 && accounts.hosted === true && accounts.signup !== "off",
     inviteCode: Boolean(accounts.signupCode),
+    // The one address people sign in at, to tell someone who was added where to go.
+    publicUrl: providers.length ? (accounts.publicUrl?.replace(/\/+$/, "") ?? null) : null,
   };
 }
 
@@ -295,7 +312,7 @@ async function membershipsOf(db: Queryable, who: Arrival, shown = 0): Promise<{ 
       );
   const added = await db.query<Membership & { in_all: unknown }>(
     `${MEMBERSHIP.replace("SELECT ", "SELECT count(*) OVER () AS in_all, ")} AND u.confirmed_at IS NULL
-     ORDER BY u.created_at DESC, u.id LIMIT ${INVITATIONS_SHOWN} OFFSET $4::int`,
+     ORDER BY coalesce(u.invited_at, u.created_at) DESC, u.id LIMIT ${INVITATIONS_SHOWN} OFFSET $4::int`,
     [...person, shown],
   );
   const inAll = added.length ? Number(added[0]?.in_all) : shown;
@@ -408,6 +425,26 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
   const notSetUp = (c: Context) => c.json({ error: "signing in that way is not set up here", code: "no_sign_in" }, 404);
   /** Back to the dashboard, which says what happened. */
   const back = (c: Context, problem: Problem) => c.redirect(`${home}/#problem=${problem}`);
+  const origin = home ? new URL(home).origin : undefined;
+  /**
+   * What only the dashboard asks: JSON, and from this very site if the
+   * browser says where from. A form on another site cannot send JSON, and a
+   * page of a neighbouring host (which the cookie's SameSite rule lets
+   * through) says it is not this one. Otherwise such a page could, in the
+   * name of whoever has just signed in, create an organisation or end
+   * their sign-in. What is not a browser says neither, and has no cookie.
+   */
+  const fromTheDashboard = async (c: Context, next: () => Promise<void>) => {
+    if (!/^application\/json\s*(;|$)/i.test(c.req.header("content-type") ?? "")) {
+      return c.json({ error: "this takes JSON (content-type: application/json)", code: "not_json" }, 415);
+    }
+    const from = c.req.header("origin");
+    const site = c.req.header("sec-fetch-site");
+    if ((from !== undefined && origin !== undefined && from !== origin) || (site !== undefined && site !== "same-origin" && site !== "none")) {
+      return c.json({ error: "this is asked by the dashboard itself, and by no other site", code: "elsewhere" }, 403);
+    }
+    await next();
+  };
 
   // Nobody here is known yet, so nothing large is read from them, and
   // nothing they are answered is kept by anything in between.
@@ -428,6 +465,11 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
   const leave = (name: ProviderName) => async (c: Context) => {
     const provider = providerOf(name);
     if (!provider) return notSetUp(c);
+    // Signing in is begun from the dashboard. Another site that sends a
+    // browser here gets it shown the dashboard, and nothing is begun: sent
+    // here over and over, it would otherwise use up what one network may
+    // begin in a minute, and push out the sign-ins that are under way.
+    if (c.req.header("sec-fetch-site") === "cross-site") return c.redirect(`${home}/`);
     if (!(await perMinute(c, "auth-leave", 20))) return back(c, "busy");
     const state = randomBytes(24).toString("base64url");
     const verifier = randomBytes(32).toString("base64url");
@@ -512,6 +554,8 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     open.get(`/${name}`, leave(name));
     open.get(`/${name}/callback`, comeBack(name));
   }
+
+  for (const path of ["/check", "/cancel", "/verify"]) open.use(path, fromTheDashboard);
 
   const invalid = (c: Context) => {
     deleteCookie(c, arrivedAs, { path: "/", secure });
@@ -606,7 +650,7 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
           if (user.sign_in_account !== null && (user.sign_in_provider !== found.provider || user.sign_in_account !== found.account)) {
             throw new Refused(
               "other_account",
-              `this organisation was signed in to before with another ${LABELS[user.sign_in_provider ?? found.provider]} account; sign in with that one, or ask an admin there to remove you and add you again`,
+              `this organisation was signed in to before with another ${LABELS[user.sign_in_provider ?? found.provider]} account; sign in with that one. If it is gone, another admin of the organisation can let you in with a new one from its Team page, and if there is none, whoever runs this server can`,
             );
           }
           await tx.query(
@@ -621,16 +665,44 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
       }
     }
 
-    // Signing up. What can be said without the code is said first, so that
-    // a name that will not do does not use the code up.
+    // Signing up. Only someone who has signed in is told anything more
+    // than whether it is open: whether an invitation code is right is not
+    // for anyone to try out. What can be said without using the sign-in is
+    // said first, so that a name that will not do does not use it up.
     if (!offers(accounts).signup) return c.json({ error: "signing up is not open here", code: "signup_closed" }, 403);
+    const arrival = code ? await stored(code) : undefined;
+    const owner = arrival?.emails[0];
+    if (!arrival || !owner) return invalid(c);
     const orgName = orgNameFrom(text(sent.org_name));
     if (!orgName) return c.json({ error: ORG_NAME_RULE, code: "bad_org_name" }, 400);
-    if (accounts.signupCode && !sameSecret(text(sent.invite_code), accounts.signupCode)) {
-      return c.json({ error: "signing up needs an invitation code", code: "invite_required" }, 403);
+    const limited = (error: string, code = "rate_limited") => c.json({ error, code }, 429);
+    if (accounts.signupCode) {
+      // A try is counted before the code is looked at, so that tries made
+      // at the same moment cannot all get in under the limit; a right one
+      // is given back. Counted by network and by account: one account
+      // cannot go on from other networks, nor one network with other accounts.
+      const tries: Taken[] = [];
+      for (const [key, max] of [
+        [`invite-wrong:${widerNetwork(callerOf(c, accounts.trustProxy))}`, WRONG_CODES_PER_NETWORK],
+        [`invite-wrong-by:${arrival.provider}:${arrival.account}`, WRONG_CODES_PER_ACCOUNT],
+      ] as const) {
+        const taken = await take(db, key, 3600, max);
+        if (!taken) {
+          for (const each of tries) await giveBack(db, each);
+          return limited("too many wrong invitation codes; none of yours is looked at until the hour is over", "invite_limited");
+        }
+        tries.push(taken);
+      }
+      if (!sameSecret(text(sent.invite_code), accounts.signupCode)) {
+        if (!(await allowed(db, "invite-wrong", 3600, WRONG_CODES_TO_SAY)) && (await allowed(db, "invite-wrong-said", 3600, 1))) {
+          console.warn(
+            `More than ${WRONG_CODES_TO_SAY} wrong invitation codes were tried in an hour: someone may be looking for SESSIONLY_SIGNUP_CODE. Each network and each account gets ten tries an hour.`,
+          );
+        }
+        return c.json({ error: "signing up needs an invitation code", code: "invite_required" }, 403);
+      }
+      for (const each of tries) await giveBack(db, each);
     }
-    const owner = code ? (await stored(code))?.emails[0] : undefined;
-    if (!owner) return invalid(c);
     // An organisation costs its maker nothing, so there are only so many an
     // hour: from one network, by one address, and in all. What is counted
     // is organisations that were made; a refusal gives back what it took.
@@ -641,7 +713,6 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
       else for (const each of counted.splice(0)) await giveBack(db, each);
       return taken !== null;
     };
-    const limited = (error: string, code = "rate_limited") => c.json({ error, code }, 429);
     if (!(await within(`signups-from:${widerNetwork(callerOf(c, accounts.trustProxy))}`, accounts.signupsPerNetwork ?? SIGNUPS_PER_NETWORK))) {
       return limited("too many organisations were created from your network; try again in an hour");
     }

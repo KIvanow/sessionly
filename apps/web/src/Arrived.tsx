@@ -36,7 +36,11 @@ export function Arrived({
 }) {
   const create = arrival.create;
   const maySignUp = options?.signup === true;
-  const [creating, setCreating] = useState(create && maySignUp);
+  // What they came for, until they choose otherwise; and never the form
+  // for creating one where that is not open, whenever that becomes known.
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const creating = (chosen ?? create) && maySignUp;
+  const setCreating = (value: boolean) => setChosen(value);
   const [orgName, setOrgName] = useState("");
   const [invite, setInvite] = useState("");
   const [failed, setFailed] = useState<string | null>(null);
@@ -211,8 +215,8 @@ function Place({ org, busy, onChoose }: { org: Membership; busy: boolean; onChoo
       {org.other_account ? (
         <p role="alert">
           This organisation was signed in to before with another {PROVIDERS[org.other_account]} account, and only that
-          account gets in. Sign in with that one. If it is gone, an admin of the organisation can remove you and add
-          you again.
+          account gets in. Sign in with that one. If it is gone, another admin of the organisation can let you in with
+          a new one from its Team page; if there is no other admin, whoever runs this server can.
         </p>
       ) : (
         <button type="button" disabled={busy} onClick={onChoose}>

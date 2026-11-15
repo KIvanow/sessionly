@@ -2,6 +2,7 @@ import type { CreatedToken, Role, TokenInfo, UserInfo } from "@sessionly/schema"
 import { useState } from "react";
 import { api } from "./api.ts";
 import { dateTime } from "./format.ts";
+import { PROVIDERS } from "./Login.tsx";
 import { useApi } from "./useApi.ts";
 
 /** What the Business and Enterprise server says about its license. */
@@ -96,7 +97,19 @@ function License({ token, onSignOut }: { token: string; onSignOut: () => void })
 }
 
 /** The people who can sign in. Adding one sends them nothing: they sign in, and are shown the organisation. */
-function People({ token, onSignOut }: { token: string; onSignOut: () => void }) {
+function People({
+  token,
+  address,
+  myEmail,
+  onSignOut,
+}: {
+  token: string;
+  /** Where people sign in. */
+  address: string;
+  /** Who is looking: nobody does for themselves what lets someone in anew. */
+  myEmail: string;
+  onSignOut: () => void;
+}) {
   const list = useApi<{ users: UserInfo[] }>(token, "/users", onSignOut);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"member" | "admin">("member");
@@ -131,6 +144,22 @@ function People({ token, onSignOut }: { token: string; onSignOut: () => void }) 
     }
   }
 
+  async function forget(user: UserInfo) {
+    const sure = window.confirm(
+      `Let ${user.email} sign in with another account? Do this if the ${user.signed_in_with ? PROVIDERS[user.signed_in_with] : ""} account they signed in with is gone, or was not theirs. ` +
+        `Whoever next signs in with a Google or GitHub account that has ${user.email} is asked, and is then that person here. ` +
+        "Their sessions end now; uploads from their machines go on.",
+    );
+    if (!sure) return;
+    setProblem(null);
+    try {
+      await api(token, `/users/${encodeURIComponent(user.id)}/forget-account`, { method: "POST", body: {} });
+      list.reload();
+    } catch (err) {
+      setProblem((err as Error).message);
+    }
+  }
+
   const people = (list.data?.users ?? []).filter((u) => !u.removed_at);
   return (
     <section className="card">
@@ -138,7 +167,8 @@ function People({ token, onSignOut }: { token: string; onSignOut: () => void }) 
       <p className="muted">
         People sign in with a Google or GitHub account that has the address they were added under, and connect
         their own machines from the Connect page. The account someone first signs in with is from then on the
-        only one that gets in as them here: to let them in with another, remove them and add them again.
+        only one that gets in as them here. If that account is gone, let them in with another from the list below;
+        nobody can do that for themselves.
         Members see their own sessions; admins see everyone's and manage this page.
       </p>
       <form className="inline" onSubmit={add}>
@@ -158,7 +188,7 @@ function People({ token, onSignOut }: { token: string; onSignOut: () => void }) 
       {problem && <p role="alert">{problem}</p>}
       {added && (
         <p role="status">
-          {added} can now sign in at {window.location.origin} with a Google or GitHub account that has this address.
+          {added} can now sign in at {address} with a Google or GitHub account that has this address.
           Nothing is sent to them: let them know.
         </p>
       )}
@@ -170,6 +200,7 @@ function People({ token, onSignOut }: { token: string; onSignOut: () => void }) 
               <tr>
                 <th scope="col">Person</th>
                 <th scope="col">Role</th>
+                <th scope="col">Signs in with</th>
                 <th scope="col">Added</th>
                 <th scope="col"></th>
               </tr>
@@ -179,8 +210,14 @@ function People({ token, onSignOut }: { token: string; onSignOut: () => void }) 
                 <tr key={u.id}>
                   <th scope="row">{u.email}</th>
                   <td>{u.role}</td>
+                  <td>{u.signed_in_with ? PROVIDERS[u.signed_in_with] : <span className="muted">has not signed in</span>}</td>
                   <td className="nowrap">{dateTime(u.created_at)}</td>
                   <td>
+                    {u.signed_in_with && u.email !== myEmail && (
+                      <button className="quiet" onClick={() => forget(u)}>
+                        Let in with another account
+                      </button>
+                    )}{" "}
                     {u.role !== "owner" && (
                       <button className="quiet" onClick={() => remove(u)}>
                         Remove
@@ -201,12 +238,18 @@ function People({ token, onSignOut }: { token: string; onSignOut: () => void }) 
 export function Team({
   token,
   people,
+  address,
+  myEmail,
   hosted,
   onSignOut,
 }: {
   token: string;
   /** Whether people sign in here, with Google or GitHub. */
   people: boolean;
+  /** Where people sign in. */
+  address: string;
+  /** The address of whoever is looking. */
+  myEmail: string;
   /** A hosted service: its organisations have no license files to install. */
   hosted: boolean;
   onSignOut: () => void;
@@ -243,7 +286,7 @@ export function Team({
 
   return (
     <>
-      {people && <People token={token} onSignOut={onSignOut} />}
+      {people && <People token={token} address={address} myEmail={myEmail} onSignOut={onSignOut} />}
       <section className="card">
         <h2>{people ? "Tokens for machines and services" : "Give someone access"}</h2>
         <p className="muted">

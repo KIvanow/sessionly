@@ -1,9 +1,27 @@
 // Coming back from Google or GitHub: what the dashboard reads from the
 // address, what it asks the server, and when it goes in without asking.
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import type { Arrival, Membership, SignedIn } from "@sessionly/schema";
-import { arrive, doors, landingOf, problemText, straightIn } from "../src/arrival.ts";
+import { arrive, doors, landingOf, problemText, signedInHere, straightIn } from "../src/arrival.ts";
+
+// What a browser keeps, for the tests to fill: nothing at the start of each.
+const kept = new Map<string, string>();
+Object.defineProperty(globalThis, "localStorage", {
+  configurable: true,
+  value: {
+    getItem: (key: string) => kept.get(key) ?? null,
+    setItem: (key: string, value: string) => void kept.set(key, value),
+    removeItem: (key: string) => void kept.delete(key),
+  },
+});
+beforeEach(() => kept.clear());
+/** A browser signed in with a token it is using, with a session it has kept, or with neither. */
+const browser = (how: "token" | "session" | "nothing") => {
+  kept.clear();
+  if (how === "token") kept.set("sessionly.token", "sl_in_use");
+  if (how === "session") kept.set("sessionly.sessions", JSON.stringify([{ org: "other-1", name: "Other", token: "sl_kept" }]));
+};
 
 const place = (over: Partial<Membership> = {}): Membership => ({
   user_id: "usr_1",
@@ -74,6 +92,21 @@ test("straight in only to the one organisation someone has signed in to before, 
   assert.equal(straightIn(arrival([place()], { create: true }), false), null);
 });
 
+test("a browser is signed in if it has a token in use or a session it kept", () => {
+  browser("nothing");
+  assert.equal(signedInHere(), false);
+  browser("token");
+  assert.equal(signedInHere(), true);
+  browser("session");
+  assert.equal(signedInHere(), true);
+  // A list of sessions that is empty, or is not a list, is no session.
+  kept.clear();
+  kept.set("sessionly.sessions", "[]");
+  assert.equal(signedInHere(), false);
+  kept.set("sessionly.sessions", "not json");
+  assert.equal(signedInHere(), false);
+});
+
 test("arriving: asked first, then in or shown what there is", async () => {
   const calls: string[] = [];
   const at = (found: Arrival | Error, entered: SignedIn | Error = signed) => ({
@@ -90,32 +123,43 @@ test("arriving: asked first, then in or shown what there is", async () => {
   });
   const back = { arrived: true } as const;
   // One organisation, known, and nobody signed in here: in, with nothing asked.
-  assert.deepEqual(await arrive(back, false, at(arrival([place()]))), { kind: "entered", signed });
+  browser("nothing");
+  assert.deepEqual(await arrive(back, at(arrival([place()]))), { kind: "entered", signed });
   assert.deepEqual(calls.splice(0), ["check", 'enter {"user_id":"usr_1"}']);
   // The same with someone signed in here already, as when a link to this
-  // page is opened in a browser that is in use: shown, asked, and nothing used.
+  // page is opened in a browser that is in use: shown, asked, and nothing
+  // used. Whether they are is what the browser has kept, and the page that
+  // calls this has no say in it.
   const shown = arrival([place()]);
-  assert.deepEqual(await arrive(back, true, at(shown)), { kind: "ask", arrival: shown });
-  assert.deepEqual(calls.splice(0), ["check"]);
+  for (const how of ["token", "session"] as const) {
+    browser(how);
+    assert.deepEqual(await arrive(back, at(shown)), { kind: "ask", arrival: shown }, how);
+    assert.deepEqual(calls.splice(0), ["check"], how);
+  }
   // Added somewhere by someone else: asked, signed in here or not.
   const added = arrival([place({ first_time: true, invited_via: "sign_in", invited_by: "eve@attack.example" })]);
-  for (const signedIn of [false, true]) assert.deepEqual(await arrive(back, signedIn, at(added)), { kind: "ask", arrival: added });
+  for (const how of ["nothing", "token"] as const) {
+    browser(how);
+    assert.deepEqual(await arrive(back, at(added)), { kind: "ask", arrival: added });
+  }
   assert.deepEqual(calls.splice(0), ["check", "check"]);
   // No sign-in of this browser's is waiting (the link was someone else's,
   // or it ran out). Someone signed in is told nothing and stays where they
   // are; someone who is not is told why.
   const none = new Error("that sign-in has run out or was used already; sign in again");
-  assert.deepEqual(await arrive(back, true, at(none)), { kind: "nothing" });
-  assert.deepEqual(await arrive(back, false, at(none)), { kind: "problem", text: none.message });
+  browser("token");
+  assert.deepEqual(await arrive(back, at(none)), { kind: "nothing" });
+  browser("nothing");
+  assert.deepEqual(await arrive(back, at(none)), { kind: "problem", text: none.message });
   assert.deepEqual(calls.splice(0), ["check", "check"]);
   // Going in can still be refused.
-  assert.deepEqual(await arrive(back, false, at(arrival([place()]), new Error("too many requests; try again in a minute"))), {
+  assert.deepEqual(await arrive(back, at(arrival([place()]), new Error("too many requests; try again in a minute"))), {
     kind: "problem",
     text: "too many requests; try again in a minute",
   });
   calls.length = 0;
   // A problem the server sent them back with is said, and the server is asked nothing.
-  assert.deepEqual(await arrive({ arrived: false, problem: "why" }, false, at(arrival([place()]))), { kind: "problem", text: "why" });
+  assert.deepEqual(await arrive({ arrived: false, problem: "why" }, at(arrival([place()]))), { kind: "problem", text: "why" });
   assert.deepEqual(calls, []);
 });
 
@@ -130,7 +174,7 @@ test("what the server is asked carries no sign-in: that is in the browser's cook
     sent.push({ url, method: init.method, body: JSON.parse(String(init.body)), credentials: init.credentials });
     return new Response(JSON.stringify(url.endsWith("/check") ? arrival([place()]) : url.endsWith("/verify") ? signed : { ok: true }));
   }) as typeof fetch;
-  assert.deepEqual(await arrive({ arrived: true }, false), { kind: "entered", signed });
+  assert.deepEqual(await arrive({ arrived: true }), { kind: "entered", signed });
   await doors.check(10);
   await doors.enter({ org_name: "Acme", invite_code: "welcome" });
   await doors.cancel();
@@ -144,9 +188,10 @@ test("what the server is asked carries no sign-in: that is in the browser's cook
   // The server's refusal is what is said.
   globalThis.fetch = (async () =>
     new Response(JSON.stringify({ error: "that sign-in has run out or was used already; sign in again", code: "invalid_code" }), { status: 400 })) as typeof fetch;
-  assert.deepEqual(await arrive({ arrived: true }, false), {
+  assert.deepEqual(await arrive({ arrived: true }), {
     kind: "problem",
     text: "that sign-in has run out or was used already; sign in again",
   });
-  assert.deepEqual(await arrive({ arrived: true }, true), { kind: "nothing" });
+  browser("session");
+  assert.deepEqual(await arrive({ arrived: true }), { kind: "nothing" });
 });

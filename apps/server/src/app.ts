@@ -14,8 +14,9 @@ import {
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
 import { allowed, giveBack, take } from "./limits.ts";
+import { PROVIDER_NAMES } from "./oauth.ts";
 import { emailFrom, newUserId, offers, openRoutes, type Accounts } from "./signup.ts";
-import { addUser, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
+import { addUser, forgetAccount, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
 import {
   Conflict,
   filterOptions,
@@ -177,6 +178,17 @@ export function failureLog(
     left++;
     sayAtTheEnd();
   };
+}
+
+/**
+ * A host (`localhost:8080`) as a name of this machine and a port, or null
+ * if it is anything else: another machine's name, or an address of this
+ * one that others can reach.
+ */
+export function thisMachine(host: string, protocol: string): { name: string; port: string } | null {
+  const found = /^(localhost|127\.0\.0\.1|\[::1\])(?::(\d{1,5}))?$/i.exec(host.trim());
+  if (!found?.[1]) return null;
+  return { name: found[1].toLowerCase(), port: found[2] ?? (protocol === "https:" ? "443" : "80") };
 }
 
 export interface Options {
@@ -523,6 +535,11 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     await removeUser(c.get("db"), c.req.param("id"), c.get("principal"));
     return c.json({ removed: true });
   });
+  // Let someone in with another account than the one they signed in with:
+  // for anyone but oneself, the owner included, who cannot be removed.
+  users.post("/:id/forget-account", async (c) =>
+    c.json(await forgetAccount(c.get("db"), { id: c.req.param("id") }, c.get("principal"))),
+  );
   api.route("/users", users);
 
   for (const extend of options.extensions ?? []) extend(api);
@@ -538,6 +555,35 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       return c.json({ ok: false }, 503);
     }
   });
+  // People sign in at one address, the public one: a provider sends them
+  // back there, and the cookie that says which browser left is kept for
+  // that host. A server tried on one's own machine has several names
+  // (localhost, 127.0.0.1, [::1]), and a browser at one of them would not
+  // show the cookie at another: nobody could finish signing in. So a
+  // browser that asks for the dashboard, or to leave for a provider, at
+  // another of this machine's names is sent to the same place at the
+  // public one.
+  //
+  // Only then, and only on the same port. What a proxy passes on as Host
+  // is often its own name for this server, not the one the browser asked
+  // for (nginx does so unless told otherwise): going by that would send the
+  // browser to the public address, and the proxy would hand it back here,
+  // without end. A proxy on this very machine listens on another port than
+  // this server does, so a Host that differs in the port is its doing too.
+  // Everything else is answered where it is asked.
+  const home = offers(accounts).publicUrl;
+  const known = home ? thisMachine(new URL(home).host, new URL(home).protocol) : null;
+  if (home && known) {
+    app.use("*", async (c, next) => {
+      const host = c.req.header("host") ?? "";
+      const asked = thisMachine(host, new URL(home).protocol);
+      if (c.req.method !== "GET" || !asked || asked.port !== known.port || asked.name === known.name) return next();
+      const { pathname, search } = new URL(c.req.url);
+      const leaving = PROVIDER_NAMES.some((name) => pathname === `/api/v1/auth/${name}`);
+      if (pathname.startsWith("/api/") && !leaving) return next();
+      return c.redirect(`${home}${pathname}${search}`, 307);
+    });
+  }
   // Signing in and signing up need no token, so they come before the API that does.
   app.route("/api/v1/auth", openRoutes(ownerDb, accounts));
   app.route("/api/v1", api);

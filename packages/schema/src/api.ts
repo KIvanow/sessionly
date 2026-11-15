@@ -36,6 +36,11 @@ export interface AuthOptions {
   signup: boolean;
   /** Signing up needs an invitation code. */
   inviteCode: boolean;
+  /**
+   * The one address people sign in at (`https://app.example.com`), if signing
+   * in is set up. Not there from a server from before it was said.
+   */
+  publicUrl?: string | null;
 }
 
 /** An organisation someone who has signed in can go on to (`/auth/check`). */
@@ -101,6 +106,11 @@ export interface UserInfo {
   role: "owner" | "admin" | "member";
   created_at: string;
   removed_at: string | null;
+  /**
+   * Whose account they sign in with here. Null until they have signed in,
+   * and again once their account was forgotten. Not there from an older server.
+   */
+  signed_in_with?: SignInProvider | null;
 }
 
 /** How much of what the agent wrote is still in the files. */

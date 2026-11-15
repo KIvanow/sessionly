@@ -157,7 +157,7 @@ export function App() {
       if (!landing) return;
       window.history.replaceState(null, "", window.location.pathname);
       if (landing.arrived) setArriving(true);
-      void arrive(landing, savedToken() !== null || savedSessions().length > 0)
+      void arrive(landing)
         .then((outcome) => {
           if (outcome.kind === "entered") signedIn(outcome.signed);
           else if (outcome.kind === "ask") (setProblem(null), setBack(outcome.arrival));
@@ -193,6 +193,15 @@ export function App() {
     return (
       <main className="center">
         <p>{leaving ? "Signing out…" : "Signing in…"}</p>
+      </main>
+    );
+  }
+  // Not until the server has said what it offers: whether an organisation
+  // may be created here decides which page this is.
+  if (back && !options) {
+    return (
+      <main className="center">
+        <p>Signing in…</p>
       </main>
     );
   }
@@ -246,6 +255,7 @@ export function App() {
       token={token}
       me={me}
       people={(options?.providers.length ?? 0) > 0}
+      address={options?.publicUrl || window.location.origin}
       hosted={options?.hosted === true}
       sessions={savedSessions()}
       onSwitch={use}
@@ -259,6 +269,7 @@ function Shell({
   token,
   me,
   people,
+  address,
   hosted,
   sessions,
   onSwitch,
@@ -269,6 +280,8 @@ function Shell({
   me: Me;
   /** Whether people can be added, to sign in with Google or GitHub. */
   people: boolean;
+  /** Where people sign in: what someone who was added is told. */
+  address: string;
   /** A service many organisations share: no license files there. */
   hosted: boolean;
   /** Sessions in other organisations, to switch to. */
@@ -290,7 +303,9 @@ function Shell({
     if (page === "session" && rest.length === 3) {
       return <SessionView token={token} address={rest.join("/")} onSignOut={onSignOut} />;
     }
-    if (page === "team" && isAdmin) return <Team token={token} people={people} hosted={hosted} onSignOut={onSignOut} />;
+    if (page === "team" && isAdmin) {
+      return <Team token={token} people={people} address={address} myEmail={me.email} hosted={hosted} onSignOut={onSignOut} />;
+    }
     if (page === "connect") return <Connect token={token} me={me} onSignOut={onSignOut} />;
     if (page === "pulls" && isAdmin) {
       return (
@@ -298,7 +313,7 @@ function Shell({
       );
     }
     return <Overview token={token} scope={scope} showUsers={isAdmin} onSignOut={onSignOut} />;
-  }, [page, rest.join("/"), token, scope, isAdmin, options.data, people, hosted, me]);
+  }, [page, rest.join("/"), token, scope, isAdmin, options.data, people, address, hosted, me]);
 
   const scoped = page === "" || page === "sessions";
   const link = (target: string, label: string) => (
