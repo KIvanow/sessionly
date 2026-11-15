@@ -53,27 +53,50 @@ machine.
 Each provider gives an id and a secret for this server, and has to be told the one address
 it may send people back to. With `app.example.com` as the domain:
 
-- **Google.** In the [Google Cloud console](https://console.cloud.google.com/apis/credentials),
-  create an OAuth client of type "Web application" with the authorised redirect URI
-  `https://app.example.com/api/v1/auth/google/callback`. The consent screen needs only the
-  `openid` and `email` scopes, and has to be published ("In production") for accounts outside
-  your own to get in. Its id and secret are `SESSIONLY_GOOGLE_CLIENT_ID` and
-  `SESSIONLY_GOOGLE_CLIENT_SECRET`.
+- **Google.** In the Google Cloud console, under
+  [Google Auth Platform](https://console.cloud.google.com/auth/overview):
+  - **Branding**: the app's name and a support address, which people see when they sign in.
+  - **Audience**: "External". While its status is "Testing", only the test users listed
+    there can sign in, a hundred at most; "In production" lets any Google account in. With
+    the two scopes below, publishing needs no review by Google.
+  - **Data access**: the scopes `openid` and `email`, and no others.
+  - **Clients**: create an OAuth client of type "Web application" with the authorised
+    redirect URI `https://app.example.com/api/v1/auth/google/callback`. Its id and secret are
+    `SESSIONLY_GOOGLE_CLIENT_ID` and `SESSIONLY_GOOGLE_CLIENT_SECRET`.
 - **GitHub.** Under Settings → Developer settings →
   [OAuth Apps](https://github.com/settings/developers), create an OAuth app with the
   authorization callback URL `https://app.example.com/api/v1/auth/github/callback`. Its id and
   a secret generated there are `SESSIONLY_GITHUB_CLIENT_ID` and
   `SESSIONLY_GITHUB_CLIENT_SECRET`.
 
-All that is asked of either is which email addresses are the person's: Google's one address,
-if Google has verified it, and every address GitHub has verified for a GitHub account (the
-`user:email` scope). Nothing else of the account is read, and nothing of it is kept. A
-person is known here by address: whoever signs in with an account that has an address is
-who that address is in each organisation it was added to.
+What is asked of either is which account this is and which email addresses are its:
+Google's one address, if Google has verified it, and every address GitHub has verified for a
+GitHub account (the `user:email` scope). Nothing else of the account is read. What is kept
+is the account's number (Google's `sub`, GitHub's user id), beside the person it signed in
+as.
 
-The browser carries one cookie, for the ten minutes at most between leaving for the provider
-and coming back, so that only the browser that left is signed in. It is the only cookie the
-service sets.
+**Who an address is.** A person is added to an organisation by address, and the first
+account that signs in to it under that address is from then on who that person is there. A
+provider goes on vouching for an address long after it was verified: Google for an address
+that is not its own, since the account was made; GitHub until its holder takes the address
+off. So an address alone would let in whoever had it once. After the first sign-in it does
+not: another account that has the address, of the same provider or the other, is told to
+use the first one and is not let in. An admin lets someone in with another account by
+removing them and adding them again.
+
+What this does not cover is the first sign-in itself. Whoever a provider vouches for under
+an address is taken to be its holder, so add people under addresses whose mailboxes are
+theirs now, and remove a person when they leave. Which Google Workspace an account belongs
+to (`hd`) is not looked at, and there is no rule that an organisation's people must come
+from one.
+
+**Cookies.** Two, both this host's alone (`__Host-`), not readable by scripts, and sent
+only over HTTPS: one for the ten minutes at most between leaving for a provider and coming
+back, so that only the browser that left is taken back; and one from coming back until the
+person has chosen where to sign in, ten minutes at most, which is what carries the sign-in.
+Nothing of it is in an address, so nothing of it is in a link, a history or a log. They are
+the only cookies the service sets. A hosted service does not start unless its public address
+is `https://`.
 
 ### The database's role
 
@@ -157,22 +180,35 @@ Limits that are not settings:
   back, and 20 looks at or uses of what coming back gives.
 - 10 organisations an hour created from one network, a /24 or a /48 of IPv6
   (`SESSIONLY_SIGNUPS_PER_NETWORK`). An office or a phone network shares one.
-- 5 organisations an hour created by one address.
+- 5 organisations an hour created by one address, and 20 owned by one person in all,
+  counted by their addresses and by the account they signed in with.
 - 100 organisations an hour in all (`SESSIONLY_SIGNUPS_PER_HOUR`). The server logs a warning,
   once an hour, when this is reached: until the hour is over nobody can sign up.
 - 30 people an hour added by one organisation.
 
 An organisation costs its maker nothing, and anyone can add anyone's address to one of
 theirs. So nobody is taken into an organisation they have not chosen: someone who signs in
-is shown the organisations their addresses were added to (ten at most, the ones they have
-signed in to before first), each with its name and id and who added them, and is asked. Who
+is shown the organisations they have signed in to before, and then the ones their addresses
+were added to, the newest first and ten at a time with the rest a click away, each with its
+name and id and who added them, and is asked. Adding an address to many organisations
+beforehand, or afterwards, hides neither the ones a person is in nor the one they were just
+told about. Someone in one organisation they have signed in to before goes straight in,
+unless the browser is signed in somewhere already: then they are asked too. Who
 added them is shown only if that was a person who had signed in, whose address is then their
 own; someone added with a token is told so and no more, since a token's address and name are
 whatever its maker typed. An organisation's name may not contain what could make a link, or
 letters that are styled forms of other letters. Being added sends nobody anything.
 
 A hosted service refuses to start with `SESSIONLY_ADMIN_TOKEN` set, without Postgres,
-without its public address, or with neither Google nor GitHub set up, and says which.
+without a public address that is `https://`, or with neither Google nor GitHub set up, and
+says which.
+
+**When signing in does not work.** The page says one of a few things, and the server's log
+says why. "Not set up right" means the provider named a setting: `redirect_uri_mismatch`
+(the address in the provider's settings is not the one above), `invalid_client` or
+`incorrect_client_credentials` (the id or the secret), `admin_policy_enforced` (a Google
+Workspace that does not allow the app). The log has the provider's own word and nothing
+else of what it sent.
 
 ## Updating
 
@@ -281,9 +317,10 @@ where `update.sh` was run while requests kept arriving:
   left as they were, and answering again within seconds of the database coming back.
 
 Signing in was checked against stand-ins for Google and GitHub that answer as their
-documentation says they do, and through Google and GitHub themselves on one machine, at
-`http://localhost:8080` against a local Postgres: creating an organisation with a Google
-account, and signing in with a Google and with a GitHub account. Not checked: either of them
-sending people back to a public address over HTTPS.
+documentation says they do, and in a browser against a stand-in: a link to the page someone
+comes back to, opened in another browser, signed in or not, does nothing there. An earlier
+version, which handed the sign-in over in the address, was tried through Google and GitHub
+themselves on one machine at `http://localhost:8080`. Not checked: this version through
+either of them, and either of them sending people back to a public address over HTTPS.
 
 Not checked: a real managed database, and Caddy getting a public certificate.

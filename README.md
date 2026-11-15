@@ -639,13 +639,17 @@ so give it only to those environments. An admin creates and revokes tokens throu
 line with `pnpm token create --email ann@example.com` (with the embedded database, stop the
 server first). Only a hash of each token is stored.
 
-**Signing in with Google or GitHub.** With the settings above for either, an admin adds
+**Signing in with Google or GitHub.** With the settings above for either (with Docker
+Compose, put them in a `.env` file beside `docker-compose.yml`, which passes them on), an
+admin adds
 people by their email address on the Team page (`POST /api/v1/users`), and each signs in with
 an account that has that address: a Google account's address, or any address GitHub has
-verified for a GitHub account. Nothing is sent to anyone, and no password is kept: all that is
-asked of Google or GitHub is which addresses are the person's. Signing in lasts a week. The
-first time someone signs in to an organisation, they are shown which one it is and who added
-them, and asked. People then make the tokens for their own machines on the Connect page
+verified for a GitHub account. Nothing is sent to anyone, and no password is kept: what is
+asked of Google or GitHub is which account this is and which addresses are its. Signing in
+lasts a week. The first time someone signs in to an organisation, they are shown which one
+it is and who added them, and asked; the account they sign in with then is from that time on
+the only one that gets in as them there, whoever else comes to have the address (to change
+it, remove the person and add them again). People then make the tokens for their own machines on the Connect page
 (`POST /api/v1/me/tokens`), and removing a person ends their sign-in and every token of
 theirs. Without those settings there are only tokens, as above.
 

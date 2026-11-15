@@ -1,6 +1,11 @@
 # Self-hosting: the server with the dashboard, and Postgres.
 #   SESSIONLY_ADMIN_TOKEN=choose-a-long-secret docker compose up -d
 # then open http://localhost:8080 and sign in with that token.
+#
+# For people to sign in with Google or GitHub, also set SESSIONLY_PUBLIC_URL
+# (where they reach the dashboard) and the id and secret of either, here in
+# the environment or in a .env file beside this one. See "Server" in
+# README.md.
 services:
   server:
     build: .
@@ -10,6 +15,12 @@ services:
       DATABASE_URL: postgres://sessionly:sessionly@db:5432/sessionly
       SESSIONLY_ADMIN_TOKEN: ${SESSIONLY_ADMIN_TOKEN:?set SESSIONLY_ADMIN_TOKEN to a long secret}
       SESSIONLY_ADMIN_EMAIL: ${SESSIONLY_ADMIN_EMAIL:-admin@localhost}
+      # Optional: signing in with Google or GitHub. Empty, there are only tokens.
+      SESSIONLY_PUBLIC_URL: ${SESSIONLY_PUBLIC_URL:-}
+      SESSIONLY_GOOGLE_CLIENT_ID: ${SESSIONLY_GOOGLE_CLIENT_ID:-}
+      SESSIONLY_GOOGLE_CLIENT_SECRET: ${SESSIONLY_GOOGLE_CLIENT_SECRET:-}
+      SESSIONLY_GITHUB_CLIENT_ID: ${SESSIONLY_GITHUB_CLIENT_ID:-}
+      SESSIONLY_GITHUB_CLIENT_SECRET: ${SESSIONLY_GITHUB_CLIENT_SECRET:-}
     depends_on:
       db:
         condition: service_healthy

@@ -60,8 +60,10 @@ services:
       retries: 6
       start_period: 20s
     restart: unless-stopped
-    # Stopping waits for requests in flight.
-    stop_grace_period: 30s
+    # Stopping waits for requests in flight. One that is waiting on a
+    # database that says nothing is given up on after 36 seconds
+    # (SESSIONLY_DB_QUERY_SECONDS and a fifth).
+    stop_grace_period: 45s
 
   caddy:
     # A named release and the digest of its image, so that what runs in front
