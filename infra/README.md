@@ -96,7 +96,8 @@ back, so that only the browser that left is taken back; and one from coming back
 person has chosen where to sign in, ten minutes at most, which is what carries the sign-in.
 Nothing of it is in an address, so nothing of it is in a link, a history or a log. They are
 the only cookies the service sets. A hosted service does not start unless its public address
-is `https://`.
+is `https://`. The one exception is `http://localhost` (or `127.0.0.1`, `[::1]`), for trying
+it on the machine it runs on; the cookies then have neither the prefix nor `Secure`.
 
 ### The database's role
 
@@ -200,8 +201,8 @@ whatever its maker typed. An organisation's name may not contain what could make
 letters that are styled forms of other letters. Being added sends nobody anything.
 
 A hosted service refuses to start with `SESSIONLY_ADMIN_TOKEN` set, without Postgres,
-without a public address that is `https://`, or with neither Google nor GitHub set up, and
-says which.
+without a public address that is `https://` (or this machine's own, to try it), or with
+neither Google nor GitHub set up, and says which.
 
 **When signing in does not work.** The page says one of a few things, and the server's log
 says why. "Not set up right" means the provider named a setting: `redirect_uri_mismatch`
@@ -318,9 +319,9 @@ where `update.sh` was run while requests kept arriving:
 
 Signing in was checked against stand-ins for Google and GitHub that answer as their
 documentation says they do, and in a browser against a stand-in: a link to the page someone
-comes back to, opened in another browser, signed in or not, does nothing there. An earlier
-version, which handed the sign-in over in the address, was tried through Google and GitHub
-themselves on one machine at `http://localhost:8080`. Not checked: this version through
-either of them, and either of them sending people back to a public address over HTTPS.
+comes back to, opened in another browser, signed in or not, does nothing there. It was then
+tried through Google and GitHub themselves on one machine, at `http://localhost:8080`
+against a local Postgres. Not checked: either of them sending people back to a public
+address over HTTPS, where the cookies have their `__Host-` names.
 
 Not checked: a real managed database, and Caddy getting a public certificate.

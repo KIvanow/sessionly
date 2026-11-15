@@ -57,6 +57,9 @@ export interface RunOptions {
  * self-hosted install has one organisation, "default", and none of this
  * applies to it.
  */
+/** A plain-HTTP address that leads nowhere but to this machine. */
+const ON_THIS_MACHINE = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/;
+
 export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
   const problems: string[] = [];
   if (env.SESSIONLY_ADMIN_TOKEN) {
@@ -68,10 +71,14 @@ export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
   const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim();
   if (!publicUrl) {
     problems.push("SESSIONLY_PUBLIC_URL is not set: nobody could sign in or sign up.");
-  } else if (!publicUrl.startsWith("https://")) {
+  } else if (!publicUrl.startsWith("https://") && !ON_THIS_MACHINE.test(publicUrl)) {
     // Over plain HTTP the cookies that carry a sign-in are not kept to this
     // host or to an encrypted connection, and every token crosses in clear.
-    problems.push("SESSIONLY_PUBLIC_URL must begin with https://: a hosted service is not reached over plain HTTP.");
+    // On this machine itself nothing crosses anything: that is how a hosted
+    // service is tried before it has a name and a certificate.
+    problems.push(
+      "SESSIONLY_PUBLIC_URL must begin with https://: a hosted service is not reached over plain HTTP, except on the machine it runs on (http://localhost).",
+    );
   }
   if (!PROVIDER_NAMES.some((name) => clientOf(env, name))) {
     problems.push(
@@ -154,7 +161,7 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
     }
   }
   const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim() ?? "";
-  if (/^http:\/\/(?!(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$)/.test(publicUrl) && PROVIDER_NAMES.some((name) => clientOf(env, name))) {
+  if (publicUrl.startsWith("http://") && !ON_THIS_MACHINE.test(publicUrl) && PROVIDER_NAMES.some((name) => clientOf(env, name))) {
     notes.push(
       "SESSIONLY_PUBLIC_URL is plain HTTP on a host that is not this machine: sign-ins and tokens cross the network in clear. Put it behind HTTPS.",
     );

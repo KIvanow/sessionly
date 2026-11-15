@@ -1118,9 +1118,13 @@ test("the environment sets how people get in", () => {
   assert.match(hostedProblems({ ...env, SESSIONLY_GITHUB_CLIENT_SECRET: "" }).join(), /No way of signing in is set \(SESSIONLY_GOOGLE_CLIENT_ID with SESSIONLY_GOOGLE_CLIENT_SECRET, or SESSIONLY_GITHUB_CLIENT_ID with SESSIONLY_GITHUB_CLIENT_SECRET\)/);
   assert.match(hostedProblems({ ...env, SESSIONLY_PUBLIC_URL: " " }).join(), /SESSIONLY_PUBLIC_URL is not set/);
   // Or one reached over plain HTTP, where the cookies of a sign-in are not
-  // kept to this host and every token crosses in clear.
-  for (const plain of ["http://app.example.com", "http://localhost:8080", "HTTP://app.example.com"]) {
+  // kept to this host and every token crosses in clear. On the machine it
+  // runs on nothing crosses anything, which is how one is tried.
+  for (const plain of ["http://app.example.com", "http://localhost.example.com", "http://10.0.0.5:8080", "HTTP://app.example.com"]) {
     assert.match(hostedProblems({ ...env, SESSIONLY_PUBLIC_URL: plain }).join(), /SESSIONLY_PUBLIC_URL must begin with https:\/\//, plain);
+  }
+  for (const here of ["http://localhost:8080", "http://127.0.0.1:8080/", "http://[::1]:8080", "http://localhost"]) {
+    assert.deepEqual(hostedProblems({ ...env, SESSIONLY_PUBLIC_URL: here }), [], here);
   }
   assert.deepEqual(offers(accountsFrom({ ...env, SESSIONLY_GITHUB_CLIENT_SECRET: " " })).providers, []);
   // A single install: no limits, no signing up, and signing in only if it is set up.
