@@ -44,6 +44,12 @@ jobs:
             *) echo "stable=true" >> "$GITHUB_OUTPUT" ;;
           esac
 
+  # Everything CI checks on a pull request, on exactly what is being
+  # released. Nothing is published unless it passes.
+  checks:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
   build:
     needs: version
     strategy:
@@ -96,7 +102,7 @@ jobs:
   # The server as a container image, for hosting it (infra/). A tag pushes
   # it; a run by hand only builds it.
   image:
-    needs: version
+    needs: [version, checks]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -124,7 +130,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   publish:
-    needs: [version, build]
+    needs: [version, build, checks]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
