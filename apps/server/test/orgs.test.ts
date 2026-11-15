@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer, type AddressInfo, type Socket } from "node:net";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { ApiError, createApp, type Env } from "../src/app.ts";
@@ -534,6 +535,10 @@ test("several copies of the server starting at once migrate once", async (t) => 
   }
 });
 
+/** Closes, from the database's side, every connection to this database but the one asking. A row for each. */
+const ENDED = `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+  WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'`;
+
 test("connections the database closes do not end the server", async (t) => {
   const url = await testDbUrl();
   if (url === "memory://") return t.skip("needs a Postgres server (TEST_DATABASE_URL)");
@@ -544,15 +549,13 @@ test("connections the database closes do not end the server", async (t) => {
   try {
     // Two connections, sitting unused, closed from the database's side.
     await Promise.all([pooled.query(`SELECT pg_sleep(0.05)`), pooled.query(`SELECT pg_sleep(0.05)`)]);
-    await adminRuns(
-      new URL(url).pathname.slice(1),
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()`,
-    );
+    await adminRuns(new URL(url).pathname.slice(1), ENDED);
     await new Promise((resolve) => setTimeout(resolve, 200));
     // Still here, and the next request gets a connection that works.
     const [row] = await pooled.asOrg("default", (scoped) => scoped.query<{ n: unknown }>(`SELECT count(*) AS n FROM orgs`));
     assert.equal(Number(row?.n), 1);
-    assert.ok(lost.some((line) => /connection was lost while idle/.test(line)), lost.join("\n"));
+    // Each of the two is said once, though a closing connection reports it twice.
+    assert.equal(lost.filter((line) => /^A database connection was lost: /.test(line)).length, 2, lost.join("\n"));
   } finally {
     console.error = error;
     await pooled.close();
@@ -564,21 +567,23 @@ test("a connection the database closes under a request fails that request and no
   if (url === "memory://") return t.skip("needs a Postgres server (TEST_DATABASE_URL)");
   const pooled = await openDb(url, { pool: 2 });
   const name = new URL(url).pathname.slice(1);
-  const cut = () =>
-    adminRuns(name, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()`);
+  // How many connections were closed.
+  const cut = async () => (await adminRuns(name, ENDED)).length;
   const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const lost: string[] = [];
   const error = console.error;
-  console.error = () => {};
+  console.error = (line: string) => void lost.push(String(line));
+  let closed = 0;
   try {
     // In the middle of a statement.
     const asking = assert.rejects(pooled.asOrg("default", (scoped) => scoped.query(`SELECT pg_sleep(5)`)));
     await pause(150);
-    await cut();
+    closed += await cut();
     await asking;
     // Between two statements of one transaction.
     const between = pooled.asOrg("default", async (scoped) => {
       await scoped.query(`SELECT 1`);
-      await cut();
+      closed += await cut();
       await pause(150);
       return scoped.query(`SELECT 2`);
     });
@@ -586,7 +591,7 @@ test("a connection the database closes under a request fails that request and no
     // And as the owner, in a transaction of its own.
     const owner = pooled.transaction(async (tx) => {
       await tx.query(`SELECT 1`);
-      await cut();
+      closed += await cut();
       await pause(150);
     });
     await assert.rejects(owner);
@@ -594,8 +599,89 @@ test("a connection the database closes under a request fails that request and no
     // The server is still here, and the next request gets a connection that works.
     const [row] = await pooled.asOrg("default", (scoped) => scoped.query<{ n: unknown }>(`SELECT count(*) AS n FROM orgs`));
     assert.equal(Number(row?.n), 1);
+    // Said once for each connection, however it was lost.
+    assert.ok(closed >= 3, `${closed} closed`);
+    assert.equal(lost.filter((line) => /^A database connection was lost: /.test(line)).length, closed, lost.join("\n"));
   } finally {
     console.error = error;
+    await pooled.close();
+  }
+});
+
+test("every connection closing again and again under many requests leaves the server standing", async (t) => {
+  const url = await testDbUrl();
+  if (url === "memory://") return t.skip("needs a Postgres server (TEST_DATABASE_URL)");
+  // Many more requests than connections, so that a connection one request
+  // gives back goes straight to the next: the moment at which, for an
+  // instant, neither the pool nor a request used to be listening to it.
+  const pooled = await openDb(url, { pool: 10 });
+  const name = new URL(url).pathname.slice(1);
+  const error = console.error;
+  console.error = () => {};
+  let answered = 0;
+  let failed = 0;
+  let over = false;
+  const asks = async (i: number) => {
+    while (!over) {
+      try {
+        // Half through the pool directly, half in a transaction as an organisation.
+        if (i % 2) await pooled.query(`SELECT pg_sleep(0.005)`);
+        else await pooled.asOrg("default", (scoped) => scoped.query(`SELECT count(*) FROM orgs`));
+        answered++;
+      } catch {
+        failed++;
+      }
+    }
+  };
+  try {
+    const asking = Array.from({ length: 200 }, (_, i) => asks(i));
+    const until = Date.now() + 5000;
+    while (Date.now() < until) {
+      await new Promise((resolve) => setTimeout(resolve, 100 + Math.random() * 100));
+      await adminRuns(name, ENDED);
+    }
+    over = true;
+    await Promise.all(asking);
+    assert.ok(failed > 0 && answered > failed, `${answered} answered, ${failed} failed`);
+    const [row] = await pooled.asOrg("default", (scoped) => scoped.query<{ n: unknown }>(`SELECT count(*) AS n FROM orgs`));
+    assert.equal(Number(row?.n), 1);
+  } finally {
+    over = true;
+    console.error = error;
+    await pooled.close();
+  }
+});
+
+test("a database that never answers is given up on, at the start and when every connection is taken", async (t) => {
+  // Something that takes the connection and says nothing, as a host behind a
+  // firewall that drops what it is sent.
+  const taken: Socket[] = [];
+  const silent = createServer((socket) => void taken.push(socket));
+  await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
+  const { port } = silent.address() as AddressInfo;
+  try {
+    const began = Date.now();
+    await assert.rejects(openDb(`postgres://app@127.0.0.1:${port}/sessionly`, { connectMs: 300 }), /timeout/);
+    assert.ok(Date.now() - began < 3000, `${Date.now() - began} ms`);
+  } finally {
+    for (const socket of taken) socket.destroy();
+    await new Promise((resolve) => silent.close(resolve));
+  }
+
+  const url = await testDbUrl();
+  if (url === "memory://") return t.skip("the rest needs a Postgres server (TEST_DATABASE_URL)");
+  const pooled = await openDb(url, { pool: 1, connectMs: 300 });
+  try {
+    const holding = pooled.transaction((tx) => tx.query(`SELECT pg_sleep(1)`));
+    await assert.rejects(pooled.query(`SELECT 1`), /timeout/);
+    await assert.rejects(
+      pooled.asOrg("default", (scoped) => scoped.query(`SELECT 1`)),
+      /timeout/,
+    );
+    await holding;
+    // Free again, and it answers.
+    assert.deepEqual(await pooled.query(`SELECT 1 AS n`), [{ n: 1 }]);
+  } finally {
     await pooled.close();
   }
 });

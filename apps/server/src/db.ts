@@ -128,6 +128,14 @@ function setting(value: string | undefined, fallback: number): number {
 }
 
 /**
+ * How long a request waits for a connection: for the server to answer a new
+ * one, or for one of the pool's to come free. Without a limit, a host that
+ * never answers hangs the start, and a pool with every connection taken
+ * holds its requests for good.
+ */
+const CONNECT_MS = 10_000;
+
+/**
  * `postgres://…` connects to a Postgres server. `memory://` is an in-memory
  * database for tests. Anything else is a folder for an embedded database.
  */
@@ -138,6 +146,8 @@ export async function openDb(
     migrations?: number;
     /** Connections kept at most (Postgres only). Default: SESSIONLY_DB_POOL, or 10. */
     pool?: number;
+    /** How long to wait for a connection, in milliseconds (Postgres only). Default: ten seconds. */
+    connectMs?: number;
   } = {},
 ): Promise<Db> {
   let db: Db;
@@ -145,26 +155,36 @@ export async function openDb(
   let appRole = "";
   if (/^postgres(ql)?:\/\//.test(url)) {
     const max = options.pool ?? setting(process.env.SESSIONLY_DB_POOL, 10);
-    const pool = new pg.Pool({ connectionString: url, max });
-    // A connection the database closes while it sits unused (a failover, a
-    // restart, an admin) is dropped by the pool, which says so with this
-    // event. Unheard, the event would end the process.
-    pool.on("error", (err) => console.error(`A database connection was lost while idle: ${err.message}`));
+    const pool = new pg.Pool({ connectionString: url, max, connectionTimeoutMillis: options.connectMs ?? CONNECT_MS });
+    // A connection the database closes (a failover, a restart, an admin)
+    // says so with an event, and an event nobody hears ends the process.
+    // The pool hears it only while the connection sits unused, and a
+    // connection passes between a request and the pool at moments when
+    // neither a request nor the pool is listening yet. So each connection
+    // gets a listener of its own for as long as it lives.
+    const said = new WeakSet<object>();
+    // A connection closing says so more than once: said here once.
+    const lost = (client: object, err: Error) => {
+      if (said.has(client)) return;
+      said.add(client);
+      console.error(`A database connection was lost: ${err.message}`);
+    };
+    pool.on("connect", (client) => client.on("error", (err) => lost(client, err)));
+    // What the pool says of a connection it dropped while unused, which
+    // must be heard as well.
+    pool.on("error", (err, client) => lost(client, err));
     const transaction: Db["transaction"] = async (fn) => {
       const client = await pool.connect();
       // Set if the connection may still be inside the transaction: it is
       // then thrown away, not handed to the next request with a role and an
       // organisation still set on it.
       let unsure: Error | undefined;
-      // The pool listens only while a connection is unused. While a request
-      // has it, a connection the database closes says so here, and whatever
-      // statement comes next fails for that request. Unheard, this too
-      // would end the process, and every other request with it.
-      const lost = (err: Error) => {
+      // A connection lost while a request has it is one of those: whatever
+      // statement comes next fails for that request, and no other.
+      const mine = (err: Error) => {
         unsure ??= err;
-        console.error(`A database connection was lost under a request: ${err.message}`);
       };
-      client.on("error", lost);
+      client.on("error", mine);
       try {
         await client.query("BEGIN");
         const out = await fn({ query: async (text, params) => (await client.query(text, params as unknown[])).rows });
@@ -183,7 +203,7 @@ export async function openDb(
         }
         throw err;
       } finally {
-        client.removeListener("error", lost);
+        client.removeListener("error", mine);
         client.release(unsure);
       }
     };

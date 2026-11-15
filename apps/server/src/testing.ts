@@ -60,9 +60,9 @@ export async function testDbUrl(options: { provision?: boolean; prefix?: string 
   return url.toString();
 }
 
-/** Run a statement on the server's database `database`, as the admin if the tests have one. */
-export async function adminRuns(database: string, sql: string): Promise<void> {
-  await onServer(database, (admin) => admin.query(sql));
+/** Run a statement on the server's database `database`, as the admin if the tests have one. Its rows. */
+export async function adminRuns<T = unknown>(database: string, sql: string): Promise<T[]> {
+  return onServer(database, async (admin) => (await admin.query(sql)).rows as T[]);
 }
 
 /** Give the database at `url` (no one connected to it) another name. Its new address. */

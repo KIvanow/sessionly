@@ -2,9 +2,10 @@
 // organisation sees it. The owner's view, `Db`, sees every organisation's
 // rows, so only the few files that must run before an organisation is known
 // may import it. This fails if any other file does, however it spells the
-// import, if `app.ts` uses the owner's database anywhere but where it finds
-// a request's organisation, and if starting the server hands the owner's
-// database to anything an edition supplies.
+// import (comments between its words, a `?query`, a %-escape), if `app.ts`
+// uses the owner's database anywhere but where it finds a request's
+// organisation, and if starting the server hands the owner's database to
+// anything an edition supplies.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -33,18 +34,71 @@ const IN_APP = [
 ];
 const COMMENT = /^\s*(\/\/|\*|\/\*)/;
 
+/**
+ * The text without its comments, which can sit between any two words of an
+ * import. Strings are kept as they are. This reads no grammar, so a file is
+ * checked both ways, as written and like this: it can add to what is found
+ * and never hide it.
+ */
+function uncommented(text) {
+  let out = "";
+  for (let i = 0; i < text.length; ) {
+    const ch = text[i];
+    if (text.startsWith("//", i)) {
+      while (i < text.length && text[i] !== "\n") i++;
+    } else if (text.startsWith("/*", i)) {
+      const end = text.indexOf("*/", i + 2);
+      i = end < 0 ? text.length : end + 2;
+      out += " ";
+    } else if (ch === '"' || ch === "'" || ch === "`") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== ch && (ch === "`" || text[j] !== "\n")) j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j + 1;
+    } else {
+      out += ch;
+      i++;
+    }
+  }
+  return out;
+}
+
+/**
+ * A module as the loader will find it: `./db.ts?again`, `./db.ts#x` and
+ * `./d%62.ts` are all `./db.ts`. Null for one written with `\` escapes,
+ * which are not read here.
+ */
+function moduleOf(from) {
+  if (from.includes("\\")) return null;
+  const file = from.replace(/(?!^)[?#].*$/s, "");
+  try {
+    return decodeURIComponent(file);
+  } catch {
+    return file;
+  }
+}
+
 /** What is wrong with a file that is not one of the allowed ones. */
 function imports(text) {
+  return [...new Set([text, uncommented(text)].flatMap(importsAsWritten))];
+}
+
+function importsAsWritten(text) {
   const found = [];
+  const unread = (whole) => `${whole.replace(/\s+/g, " ")}: a module's name is written plainly, without \\ escapes`;
   for (const [whole, names, from] of text.matchAll(FROM)) {
-    if (!DATABASE.test(from)) continue;
+    const module = moduleOf(from);
+    if (module === null) found.push(unread(whole));
+    if (module === null || !DATABASE.test(module)) continue;
     // A whole module is everything in it, the owner's view included.
     if (!names.startsWith("{") || OWNER.test(whole)) found.push(whole.replace(/\s+/g, " "));
   }
   for (const [whole, from] of text.matchAll(CALLED)) {
+    const module = from === undefined ? undefined : moduleOf(from);
     // One whose module cannot be read here could be the database's.
-    if (from === undefined) found.push(`${whole.trim()}…): only import("a literal") can be checked`);
-    else if (DATABASE.test(from)) found.push(whole);
+    if (module === undefined) found.push(`${whole.trim()}…): only import("a literal") can be checked`);
+    else if (module === null) found.push(unread(whole));
+    else if (DATABASE.test(module)) found.push(whole);
   }
   if (REQUIRE.test(text)) found.push("require(): modules are imported, where this check can read what from");
   return found;
@@ -107,6 +161,17 @@ const MUST_FAIL = [
   ["imports", `import type { Db } from "../lib.js";`],
   ["imports", `import { createRequire } from "node:module";\nconst { openDb } = createRequire(import.meta.url)("./db.ts");`],
   ["imports", `const db = require("./db.ts");`],
+  ["imports", `import { openDb } /* the owner's */ from "./db.ts";`],
+  ["imports", `import { openDb } from /* the owner's */ "./db.ts";`],
+  ["imports", `import { openDb/**/ } from "./db.ts";`],
+  ["imports", `import { openDb } // the owner's\n  from "./db.ts";`],
+  ["imports", `const { openDb } = await import(/* the owner's */ "./db.ts");`],
+  ["imports", `import { openDb } from "./db.ts?again";`],
+  ["imports", `import type { Db } from "./db.ts#x";`],
+  ["imports", `const { openDb } = await import("./d%62.ts");`],
+  ["imports", `import { testDb } from "./%74esting.ts?a#b";`],
+  ["imports", `import { openDb } from "./d\\u0062.ts";`],
+  ["imports", `const { openDb } = await import("./d\\x62.ts");`],
   ["inApp", `${APP}\n  api.get("/all", async (c) => c.json(await ownerDb.query("SELECT * FROM sessions")));`],
   ["inApp", `${APP}\n  await ownerDb.asOrg(c.req.query("org"), async (orgDb) => {});`],
   ["inApp", `${APP}\n  const db = ownerDb;`],
@@ -121,6 +186,8 @@ const MUST_PASS = [
   ["imports", `import type { OrgDb, Queryable } from "./db.ts";\nexport { toApp } from "./db.ts";`],
   ["imports", `const fs = await import("node:fs");`],
   ["imports", `import { toApp } from "./lib.ts";\nawait ent.require(db, "content_policy", "read");\nclass E {\n  async require(db, feature) {}\n}`],
+  ["imports", `// More at https://example.com/db.ts\nimport { toApp } /* not the owner's */ from "./db.ts?again";`],
+  ["imports", `const docs = "https://example.com//db.ts";\nimport { helper } from "./other.ts?from=db.ts";`],
   ["inApp", APP],
   ["inRun", RUN],
 ];
