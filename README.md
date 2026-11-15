@@ -600,7 +600,9 @@ for anything but localhost.
 | `SESSIONLY_DB_QUERY_SECONDS` | Postgres only: how long a statement may take. Default 30, and a day (86400) at most. |
 | `SESSIONLY_ADMIN_TOKEN` | An admin token that always works, for first use. |
 | `SESSIONLY_ADMIN_EMAIL` | Who uploads made with that token belong to. |
-| `RESEND_API_KEY`, `SESSIONLY_EMAIL_FROM`, `SESSIONLY_PUBLIC_URL` | Optional, all three together: people then sign in by a link sent to their address (see below). The links are sent through [Resend](https://resend.com): the key needs "Sending access" only, and the address the links come from (e.g. `Sessionly <sign-in@example.com>`) must be on a domain verified there. The last is where people reach the dashboard, e.g. `https://sessionly.example.com`. |
+| `SESSIONLY_PUBLIC_URL` | Where people reach the dashboard, e.g. `https://sessionly.example.com`. Needed for signing in with Google or GitHub, which send people back there. |
+| `SESSIONLY_GOOGLE_CLIENT_ID`, `SESSIONLY_GOOGLE_CLIENT_SECRET` | Optional, both together: people then sign in with Google (see below). From an OAuth client of type "Web application" in Google Cloud, whose redirect URI is the public address followed by `/api/v1/auth/google/callback`. |
+| `SESSIONLY_GITHUB_CLIENT_ID`, `SESSIONLY_GITHUB_CLIENT_SECRET` | Optional, both together: people then sign in with GitHub. From an OAuth app on GitHub, whose callback URL is the public address followed by `/api/v1/auth/github/callback`. |
 | `SESSIONLY_HOSTED` | `true` for a service many organisations sign up to. See [`infra/`](infra/README.md). |
 
 **The database's user.** On Postgres, requests run as a second role that cannot log in, which
@@ -637,13 +639,15 @@ so give it only to those environments. An admin creates and revokes tokens throu
 line with `pnpm token create --email ann@example.com` (with the embedded database, stop the
 server first). Only a hash of each token is stored.
 
-**Signing in by email.** With the mail settings above, an admin adds people on the Team page
-(`POST /api/v1/users`), and each gets a link to sign in with. A link works once, for 15
-minutes; signing in lasts a week. The page a link opens says which organisation it is for
-and who added the address, and asks before signing in. While a link someone asked for still
-works, asking again sends no second one. People then make the tokens for their own machines on the
-Connect page (`POST /api/v1/me/tokens`), and removing a person ends their sign-in and every
-token of theirs. Without the mail settings there are only tokens, as above.
+**Signing in with Google or GitHub.** With the settings above for either, an admin adds
+people by their email address on the Team page (`POST /api/v1/users`), and each signs in with
+an account that has that address: a Google account's address, or any address GitHub has
+verified for a GitHub account. Nothing is sent to anyone, and no password is kept: all that is
+asked of Google or GitHub is which addresses are the person's. Signing in lasts a week. The
+first time someone signs in to an organisation, they are shown which one it is and who added
+them, and asked. People then make the tokens for their own machines on the Connect page
+(`POST /api/v1/me/tokens`), and removing a person ends their sign-in and every token of
+theirs. Without those settings there are only tokens, as above.
 
 **Organisations.** Every token, session and pull request belongs to an organisation, and a
 request sees only its own organisation's: each query names it, and in Postgres row-level
@@ -653,8 +657,8 @@ to run one.
 
 ### Dashboard
 
-Sign in with a token, or by a link sent to your address where the server is set up to send
-them. An admin sees the whole team; a member sees their own sessions.
+Sign in with a token, or with Google or GitHub where the server is set up for them. An admin
+sees the whole team; a member sees their own sessions.
 
 - **Overview:** total cost, sessions, active time, prompts, tool calls and failure rate, files
   changed, the share of files rewritten since and of agent lines still there; cost per day (per
@@ -668,7 +672,7 @@ them. An admin sees the whole team; a member sees their own sessions.
   cloud has been uploaded, a further filter separates those from sessions on people's machines.
 - **One session:** cost and tokens per model, prompts with how long each took and how it ended,
   files changed with how much of each survives, tools, and subagents.
-- **Team** (admins): add and remove people where they sign in by email, and create and
+- **Team** (admins): add and remove people where they sign in with Google or GitHub, and create and
   revoke tokens for what cannot sign in: a cloud environment, CI, or a machine set up for
   someone.
 - **Connect:** a token of your own for each of your machines, with the commands to run.
@@ -815,6 +819,6 @@ under the SIL Open Font License) are served from `website/fonts/`. `python3 -m h
 7. ✅ Cursor and Grok sessions beside Claude Code's
 8. ✅ Pull requests: how much agents wrote, with which models, and how it fared in review
 9. ✅ Sessions in the cloud: Claude Code's cloud sessions and Cursor's cloud agents
-10. ✅ Organisations, signing in by email, and a hosted mode anyone can sign up to
+10. ✅ Organisations, signing in with Google or GitHub, and a hosted mode anyone can sign up to
 11. Plans and billing for the hosted service; deleting and exporting an organisation's data
 12. Polish, docs, example data
