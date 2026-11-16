@@ -414,10 +414,11 @@ all keep the same files) are read from the rollout files under `~/.codex/session
 `~/.codex/archived_sessions/`, or under `$CODEX_HOME`. `sessionly import --tool codex` brings in
 the ones already there.
 
-Written from Codex's source at 0.169.0 and checked against a `codex exec` session of that
-version: its prompt, commands with their durations, files and lines changed, model and tokens
-came out as Codex reported them. Not yet checked: the interactive terminal agent, the editor
-extension, subagents, and the hooks actually firing.
+Written from Codex's source at 0.169.0 and checked against sessions of that version, one run
+with `codex exec` and one in the terminal agent with the hooks approved: prompts, commands with
+their durations, files and lines changed, model, tokens and the thread's name came out as Codex
+reported them, and the second arrived and was uploaded with no command run. Not yet checked:
+the editor extension, subagents and MCP tools.
 
 Codex writes two layouts, and both are read. The newer one (`paginated`, what 0.169.0 writes)
 keeps a record of each command that ran and each patch that was applied; those records are
@@ -426,7 +427,7 @@ is read from its output and a patch's files from the patch text.
 
 | Read from | Has | Does not have |
 |---|---|---|
-| `~/.codex/sessions/<year>/<month>/<day>/rollout-<time>-<thread>.jsonl` | prompts, tool calls with their outcome and how long they took, files and lines changed, subagents, times, the model of each turn, tokens per model, the Codex version and where it was started from (`cli`, `exec`, `vscode`), the git branch, and the thread's name if it was given one | cost; permission prompts that were approved; in the older layout, the lines of a file a patch deleted |
+| `~/.codex/sessions/<year>/<month>/<day>/rollout-<time>-<thread>.jsonl` | prompts, tool calls with their outcome and how long they took, files and lines changed, subagents, times, the model of each turn, tokens per model, the Codex version and where it was started from (`cli`, `exec`, `vscode`), the git branch, and the thread's name if it was given one | cost; in the older layout, the lines of a file a patch deleted |
 
 - **Tools** are mapped to the common names: a command is Bash, `view_image` is Read,
   `spawn_agent` is Agent, `update_plan` is TodoWrite, and a web search is WebSearch. One patch
@@ -452,7 +453,8 @@ SubagentStart, SubagentStop, PreCompact and PostCompact), marked `async` (all bu
 which Codex runs in step regardless) so Codex neither waits for it nor shows it running. `sessionly uninstall` removes them and `sessionly status` counts
 them. A session the hooks have seen is brought in from its rollout at the next sync without
 running `import`; as with Cursor and Grok, the agent's own file is the record and the hooks say
-that the session happened.
+that the session happened. One thing is taken from the hooks: how often Codex asked for
+permission, which the rollout does not keep. A session the hooks did not see has 0.
 
 **Codex does not run a new or changed hook until you have approved it.** After `sessionly
 install`, start `codex` and accept the hooks in the review it shows (or run `/hooks`). Moving

@@ -96,7 +96,8 @@ fn size(path: Option<&PathBuf>) -> u64 {
 /// better source (it has permission prompts and exact timing); one that began
 /// partway covers less than the transcript does, so an import wins over it.
 /// For other agents the hooks only say that a session happened: their own
-/// session files hold more, so an import always wins.
+/// session files hold more, so an import always wins. Codex's files leave out
+/// one thing its hooks do say: that it asked for permission.
 fn build(
     dirs: &SourceDirs,
     raw: Option<&PathBuf>,
@@ -107,7 +108,14 @@ fn build(
         None => Ok(None),
     };
     if dirs.source != crate::paths::CLAUDE_CODE {
-        if let Some(built) = from(imported)? {
+        if let Some(mut built) = from(imported)? {
+            if let Some(raw) = raw.filter(|_| dirs.source == crate::paths::CODEX) {
+                let mut asked = 0;
+                crate::jsonl::for_each(raw, |record| {
+                    asked += u64::from(record["hook"] == "PermissionRequest");
+                })?;
+                built.session.counts.permission_requests = asked;
+            }
             return Ok(Some(built));
         }
         return from(raw);
@@ -481,6 +489,43 @@ mod tests {
         assert_eq!(imported.counts.prompts, 2);
         assert_eq!(imported.captured_by, crate::session::CapturedBy::Transcript);
         assert_eq!(imported.source, "grok");
+    }
+
+    #[test]
+    fn a_codex_import_takes_its_permission_requests_from_the_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = SourceDirs::in_data_dir(dir.path(), "codex");
+        fs::create_dir_all(&dirs.raw).unwrap();
+        fs::create_dir_all(&dirs.imported).unwrap();
+        let record = |hook: &str, origin: &str| {
+            json!({ "hook": hook, "origin": origin, "received_at": "2026-11-16T10:00:00Z",
+                    "payload": { "session_id": "x1", "prompt_id": "t1", "prompt": "x", "tool_name": "Bash" } })
+            .to_string()
+                + "\n"
+        };
+        fs::write(
+            dirs.imported.join("x1.jsonl"),
+            record("UserPromptSubmit", "transcript"),
+        )
+        .unwrap();
+        let mut ledger = Ledger::open(&dir.path().join("l.db")).unwrap();
+        run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
+        let asked = |ledger: &Ledger| {
+            let session = ledger.get("x1").unwrap().unwrap();
+            (session.captured_by, session.counts.permission_requests)
+        };
+        use crate::session::CapturedBy::Transcript;
+        assert_eq!(asked(&ledger), (Transcript, 0));
+
+        fs::write(
+            dirs.raw.join("x1.jsonl"),
+            record("PermissionRequest", "hook")
+                + &record("PreToolUse", "hook")
+                + &record("PermissionRequest", "hook"),
+        )
+        .unwrap();
+        run(&[dirs], &mut ledger, "m", false).unwrap();
+        assert_eq!(asked(&ledger), (Transcript, 2));
     }
 
     #[test]
