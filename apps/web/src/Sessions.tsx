@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { query } from "./api.ts";
 import { scopeParams, type Scope } from "./App.tsx";
 import { activeTime, cost, count, dateTime, modelName, repoName, toolName } from "./format.ts";
+import { Loader } from "./Loader.tsx";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -80,7 +81,7 @@ export function Sessions({ token, scope, onSignOut }: { token: string; scope: Sc
           </div>
         </>
       )}
-      {!list.data && !list.error && <p className="muted">Loading…</p>}
+      {!list.data && !list.error && <Loader />}
     </section>
   );
 }

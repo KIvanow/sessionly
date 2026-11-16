@@ -1,7 +1,9 @@
 import type { CreatedToken, Me, TokenInfo } from "@sessionly/schema";
 import { useState } from "react";
 import { api } from "./api.ts";
+import { CopyButton } from "./CopyButton.tsx";
 import { dateTime } from "./format.ts";
+import { Loader } from "./Loader.tsx";
 import { useApi } from "./useApi.ts";
 
 /**
@@ -62,9 +64,12 @@ export function Connect({ token, me, onSignOut }: { token: string; me: Me; onSig
             <pre className="command">
               {`sessionly install\nsessionly connect ${origin} --token ${created.token}\nsessionly upload`}
             </pre>
-            <button onClick={() => navigator.clipboard?.writeText(`sessionly connect ${origin} --token ${created.token}`)}>
+            <CopyButton
+              text={`sessionly connect ${origin} --token ${created.token}`}
+              copiedLabel="Command copied"
+            >
               Copy the connect command
-            </button>
+            </CopyButton>
             <button className="quiet" onClick={() => setCreated(null)}>
               Done
             </button>
@@ -74,6 +79,7 @@ export function Connect({ token, me, onSignOut }: { token: string; me: Me; onSig
             </p>
           </div>
         )}
+        {!list.data && !list.error && <Loader label="Loading machines" />}
         {active.length > 0 && (
           <div className="scroll">
             <table>

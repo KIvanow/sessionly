@@ -460,6 +460,74 @@ td.names { min-width: 210px; }
 .tooltip strong { font-size: 15px; font-weight: 600; }
 .tooltip span { color: var(--muted); }
 
+/* Loading: an indeterminate strip sweeping a track, under a small-caps label.
+   Shown while a request is in flight with nothing yet to put in its place. */
+.loader { display: grid; justify-items: center; gap: 12px; padding: 32px 0; }
+.loader-bar { position: relative; width: min(220px, 60vw); height: 6px; background: var(--track); overflow: hidden; }
+.loader-bar i {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 40%;
+  background: var(--blue);
+  animation: loader-sweep 1.1s ease-in-out infinite;
+}
+.loader-label {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+@keyframes loader-sweep {
+  0% { transform: translateX(-110%); }
+  50% { transform: translateX(165%); }
+  100% { transform: translateX(-110%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .loader-bar i { animation: none; width: 100%; opacity: 0.55; }
+}
+
+/* A copy button and the tooltip that confirms the copy: a dark bubble on a hard
+   blue shadow, as the dark band, that fades in above the button. */
+.copy { position: relative; display: inline-flex; }
+.copy-tip {
+  position: absolute;
+  bottom: calc(100% + 9px);
+  left: 50%;
+  transform: translate(-50%, 4px);
+  pointer-events: none;
+  opacity: 0;
+  white-space: nowrap;
+  padding: 5px 10px;
+  background: var(--band);
+  color: var(--band-text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  box-shadow: 3px 3px 0 var(--blue);
+  transition: opacity 0.14s ease, transform 0.14s ease;
+  z-index: 5;
+}
+.copy-tip::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: var(--band);
+}
+.copy-tip.show { opacity: 1; transform: translate(-50%, 0); }
+.copy-tip.failed { box-shadow: 3px 3px 0 var(--alert); }
+@media (prefers-reduced-motion: reduce) {
+  .copy-tip { transition: opacity 0.14s ease; transform: translate(-50%, 0); }
+}
+
 /* Session facts, team */
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 8px 22px; margin: 4px 0 0; align-items: baseline; }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
