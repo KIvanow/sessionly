@@ -96,7 +96,7 @@ export function buildReport({ pull, files, reviews, comments, commits, event, ho
   };
 }
 
-const TOOLS = { "claude-code": "Claude Code", cursor: "Cursor", grok: "Grok" };
+const TOOLS = { "claude-code": "Claude Code", cursor: "Cursor", grok: "Grok", codex: "Codex" };
 const count = (n) => n.toLocaleString("en-US");
 /** A share as a whole percentage: 100% only for all of it, 0% only for none. */
 function percent(part, whole) {

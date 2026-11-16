@@ -1,4 +1,5 @@
-//! Install and remove the Sessionly capture hooks in Claude Code settings files.
+//! Install and remove the Sessionly capture hooks in Claude Code settings
+//! files, and in Codex's `hooks.json`, which has the same layout.
 //!
 //! Edits are surgical: only hook entries that run our own `capture` command are
 //! added or removed. Other hooks, other settings, key order and number
@@ -45,6 +46,52 @@ pub const OTHER_EVENTS: &[&str] = &[
 
 pub fn all_events() -> impl Iterator<Item = &'static str> {
     TOOL_EVENTS.iter().chain(OTHER_EVENTS).copied()
+}
+
+/// The events Codex has (read from its source at 0.169.0), tool events
+/// first. Left out: PreModelRequest and PostModelRequest fire for every
+/// request to the model, and Interrupt adds nothing the session file lacks.
+pub const CODEX_TOOL_EVENTS: &[&str] = &["PreToolUse", "PostToolUse", "PermissionRequest"];
+pub const CODEX_OTHER_EVENTS: &[&str] = &[
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "Stop",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "PostCompact",
+];
+
+/// Whose hooks file is being written.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Agent {
+    Claude,
+    Codex,
+}
+
+impl Agent {
+    fn tool_events(self) -> &'static [&'static str] {
+        match self {
+            Agent::Claude => TOOL_EVENTS,
+            Agent::Codex => CODEX_TOOL_EVENTS,
+        }
+    }
+
+    pub fn events(self) -> impl Iterator<Item = &'static str> {
+        let other = match self {
+            Agent::Claude => OTHER_EVENTS,
+            Agent::Codex => CODEX_OTHER_EVENTS,
+        };
+        self.tool_events().iter().chain(other).copied()
+    }
+}
+
+/// Codex's hooks file: `$CODEX_HOME/hooks.json`, or `~/.codex/hooks.json`.
+pub fn codex_hooks_path() -> Result<PathBuf> {
+    Ok(crate::paths::codex_home()
+        .context("cannot find the home directory")?
+        .join("hooks.json"))
 }
 
 /// Quote a string as one POSIX shell word. Hook commands are run by a shell,
@@ -155,7 +202,7 @@ pub fn strip_ours(settings: &mut Value, kind: Kind) {
 }
 
 /// Append one Sessionly hook group per event.
-pub fn add_ours(settings: &mut Value, command: &str) -> Result<()> {
+pub fn add_ours(settings: &mut Value, command: &str, agent: Agent) -> Result<()> {
     let root = settings
         .as_object_mut()
         .context("settings file is not a JSON object")?;
@@ -164,15 +211,18 @@ pub fn add_ours(settings: &mut Value, command: &str) -> Result<()> {
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
         .context("\"hooks\" in settings is not an object")?;
-    for event in all_events() {
+    for event in agent.events() {
+        let mut handler = json!({ "type": "command", "command": command });
+        // Codex then neither waits for the capture nor shows it running. It
+        // runs SessionEnd in step whatever is asked, and warns if asked otherwise.
+        if agent == Agent::Codex && event != "SessionEnd" {
+            handler["async"] = json!(true);
+        }
         let mut group = Map::new();
-        if TOOL_EVENTS.contains(&event) {
+        if agent.tool_events().contains(&event) {
             group.insert("matcher".into(), json!("*"));
         }
-        group.insert(
-            "hooks".into(),
-            json!([{ "type": "command", "command": command }]),
-        );
+        group.insert("hooks".into(), json!([handler]));
         let list = hooks
             .entry(event)
             .or_insert_with(|| json!([]))
@@ -186,11 +236,16 @@ pub fn add_ours(settings: &mut Value, command: &str) -> Result<()> {
 /// Install `command`, replacing an earlier hook of the same kind. Returns
 /// whether the file was changed.
 pub fn install(path: &Path, command: &str) -> Result<bool> {
+    install_for(path, command, Agent::Claude)
+}
+
+/// `install`, into the hooks file of `agent`.
+pub fn install_for(path: &Path, command: &str, agent: Agent) -> Result<bool> {
     let kind = kind_of(command).context("not a Sessionly hook command")?;
     let before = load(path)?;
     let mut settings = before.clone();
     strip_ours(&mut settings, kind);
-    add_ours(&mut settings, command)?;
+    add_ours(&mut settings, command, agent)?;
     if settings == before {
         return Ok(false);
     }
@@ -334,8 +389,8 @@ mod tests {
         }
         // Each kind is installed and removed without touching the other.
         let mut s = json!({});
-        add_ours(&mut s, CMD).unwrap();
-        add_ours(&mut s, ".sessionly/hook.sh claude").unwrap();
+        add_ours(&mut s, CMD, Agent::Claude).unwrap();
+        add_ours(&mut s, ".sessionly/hook.sh claude", Agent::Claude).unwrap();
         strip_ours(&mut s, Kind::Repo);
         assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 1);
         assert_eq!(s["hooks"]["Stop"][0]["hooks"][0]["command"], CMD);
@@ -354,7 +409,7 @@ mod tests {
     #[test]
     fn install_keeps_other_hooks_and_settings() {
         let mut s = existing();
-        add_ours(&mut s, CMD).unwrap();
+        add_ours(&mut s, CMD, Agent::Claude).unwrap();
         assert_eq!(s["model"], "opus");
         assert_eq!(s["hooks"]["SessionStart"].as_array().unwrap().len(), 2);
         assert_eq!(
@@ -369,7 +424,7 @@ mod tests {
     #[test]
     fn uninstall_restores_original() {
         let mut s = existing();
-        add_ours(&mut s, CMD).unwrap();
+        add_ours(&mut s, CMD, Agent::Claude).unwrap();
         strip_ours(&mut s, Kind::Machine);
         assert_eq!(s, existing());
         // key order is preserved too
@@ -382,7 +437,7 @@ mod tests {
     #[test]
     fn strip_removes_hooks_key_when_only_ours() {
         let mut s = json!({ "theme": "dark" });
-        add_ours(&mut s, CMD).unwrap();
+        add_ours(&mut s, CMD, Agent::Claude).unwrap();
         strip_ours(&mut s, Kind::Machine);
         assert_eq!(s, json!({ "theme": "dark" }));
     }
@@ -399,7 +454,7 @@ mod tests {
         assert_eq!(untouched, json!({ "hooks": {} }));
         // After an install, removing our hook keeps the other tool's group.
         let mut s = original.clone();
-        add_ours(&mut s, CMD).unwrap();
+        add_ours(&mut s, CMD, Agent::Claude).unwrap();
         strip_ours(&mut s, Kind::Machine);
         assert_eq!(s["hooks"]["Stop"], original["hooks"]["Stop"]);
     }
@@ -422,6 +477,45 @@ mod tests {
         assert!(!is_ours_machine(
             &json!({ "type": "http", "url": "http://x" })
         ));
+    }
+
+    #[test]
+    fn codex_gets_its_own_events_in_the_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks.json");
+        fs::write(
+            &path,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/opt/other/stop"}]}]}}"#,
+        )
+        .unwrap();
+        assert!(install_for(&path, CMD, Agent::Codex).unwrap());
+        assert!(!install_for(&path, CMD, Agent::Codex).unwrap());
+        let file = load(&path).unwrap();
+        // Codex refuses a hooks file with any other key at the top.
+        let keys: Vec<&String> = file.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["hooks"]);
+        let events: Vec<&str> = Agent::Codex.events().collect();
+        assert_eq!(
+            installed_events(&path, Kind::Machine).unwrap().len(),
+            events.len()
+        );
+        assert!(!events.contains(&"PostToolUseFailure"));
+        assert_eq!(file["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            file["hooks"]["PostToolUse"][0],
+            json!({ "matcher": "*", "hooks": [{ "type": "command", "command": CMD, "async": true }] })
+        );
+        assert_eq!(file["hooks"]["Stop"][1].get("matcher"), None);
+        assert_eq!(
+            file["hooks"]["SessionEnd"][0]["hooks"][0].get("async"),
+            None
+        );
+
+        assert!(uninstall(&path, Kind::Machine).unwrap());
+        assert_eq!(
+            load(&path).unwrap(),
+            json!({ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "/opt/other/stop" }] }] } })
+        );
     }
 
     #[test]

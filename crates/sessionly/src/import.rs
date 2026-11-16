@@ -8,8 +8,8 @@
 //! the agent deleting its files. Tool results are reduced to what normalizing
 //! needs, so the saved file is far smaller than the original.
 //!
-//! This file has the shared parts and Claude Code's transcripts; Grok and
-//! Cursor are in `import_grok` and `import_cursor`.
+//! This file has the shared parts and Claude Code's transcripts; Grok,
+//! Cursor and Codex are in `import_grok`, `import_cursor` and `import_codex`.
 //!
 //! What a Claude Code transcript cannot tell us: permission prompts that were
 //! approved, and when the session ended.
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::paths::{CLAUDE_CODE, CURSOR, GROK};
+use crate::paths::{CLAUDE_CODE, CODEX, CURSOR, GROK};
 use crate::transcript::{self, Facts};
 
 /// Rows a user row can be besides a prompt the person typed.
@@ -445,6 +445,8 @@ pub struct AgentHomes {
     pub grok_sessions: Option<PathBuf>,
     /// `~/.cursor/projects`
     pub cursor_projects: Option<PathBuf>,
+    /// `~/.codex`, which has `sessions` and `archived_sessions`
+    pub codex_home: Option<PathBuf>,
 }
 
 impl AgentHomes {
@@ -460,7 +462,8 @@ impl AgentHomes {
                     .or(home.as_ref().map(|h| h.join(".grok")))
                     .map(|d| d.join("sessions")),
             ),
-            cursor_projects: existing(home.map(|h| h.join(".cursor").join("projects"))),
+            cursor_projects: existing(home.as_ref().map(|h| h.join(".cursor").join("projects"))),
+            codex_home: existing(crate::paths::codex_home()),
         }
     }
 }
@@ -519,6 +522,8 @@ struct Found {
     path: PathBuf,
     /// A Cursor session with no transcript yet: `path` is its hook capture.
     hooks_only: bool,
+    /// A Codex session's subagents: each is a thread with a file of its own.
+    subagents: Vec<PathBuf>,
 }
 
 /// The raw hook capture of a session, which a Cursor import also reads.
@@ -536,6 +541,7 @@ fn source_bytes(found: &Found, data_dir: &Path) -> u64 {
     let size = |path: &Path| fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     match found.source {
         GROK => crate::import_grok::session_bytes(&found.path),
+        CODEX => crate::import_codex::session_bytes(&found.path, &found.subagents),
         CURSOR if found.hooks_only => size(&found.path),
         CURSOR => {
             crate::import_cursor::session_bytes(&found.path) + size(&capture_of(found, data_dir))
@@ -558,6 +564,7 @@ fn import_one(found: &Found, data_dir: &Path, report: &mut Report) {
     }
     let built: Result<(Vec<Value>, Option<Facts>)> = match found.source {
         GROK => crate::import_grok::session(&found.path),
+        CODEX => crate::import_codex::session(&found.path, &found.subagents),
         CURSOR if found.hooks_only => crate::import_cursor::session_from_hooks(&found.path),
         CURSOR => {
             let capture = capture_of(found, data_dir);
@@ -637,6 +644,7 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
                 session_id,
                 path,
                 hooks_only: false,
+                subagents: Vec::new(),
             });
         }
     }
@@ -650,6 +658,7 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
                     session_id: name_of(&session),
                     path,
                     hooks_only: false,
+                    subagents: Vec::new(),
                 });
             }
         }
@@ -665,9 +674,56 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
                     session_id,
                     path,
                     hooks_only: false,
+                    subagents: Vec::new(),
                 });
             }
         }
+    }
+    // Codex: <home>/sessions/<year>/<month>/<day>/rollout-<time>-<thread>.jsonl,
+    // and archived ones side by side in <home>/archived_sessions.
+    let mut rollouts: BTreeMap<String, PathBuf> = BTreeMap::new();
+    if let Some(home) = &homes.codex_home {
+        let days = subdirs(&home.join("sessions"))
+            .into_iter()
+            .flat_map(|year| subdirs(&year))
+            .flat_map(|month| subdirs(&month));
+        for dir in days.chain([home.join("archived_sessions")]) {
+            let mut files: Vec<PathBuf> = fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect();
+            files.sort();
+            for path in files {
+                // A thread that was reverted has a second file: the later one counts.
+                if let Some(thread) = crate::import_codex::thread_id(&path) {
+                    rollouts.insert(thread, path);
+                }
+            }
+        }
+    }
+    // A subagent's thread belongs to the session of the thread that began it.
+    // One whose session's file is gone stands on its own.
+    let threads: Vec<String> = rollouts.keys().cloned().collect();
+    let mut subagents: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    rollouts.retain(|thread, path| {
+        let root = crate::import_codex::root_of(path);
+        match root.filter(|root| root != thread && threads.contains(root)) {
+            Some(root) => {
+                subagents.entry(root).or_default().push(path.clone());
+                false
+            }
+            None => true,
+        }
+    });
+    for (session_id, path) in rollouts {
+        found.push(Found {
+            source: CODEX,
+            subagents: subagents.remove(&session_id).unwrap_or_default(),
+            session_id,
+            path,
+            hooks_only: false,
+        });
     }
     // Cursor writes a transcript when a turn ends. A session the hooks have
     // captured and that has none yet is read from its capture alone.
@@ -694,6 +750,7 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
                 session_id,
                 path,
                 hooks_only: true,
+                subagents: Vec::new(),
             });
         }
     }
@@ -1105,6 +1162,47 @@ mod tests {
         assert_eq!(refresh(&homes, &data).imported, 1);
         assert_eq!(prompts(&imported), 4);
         assert_eq!(imported_from(&imported).unwrap().0, transcript);
+    }
+
+    #[test]
+    fn a_codex_session_takes_its_subagents_threads_with_it() {
+        use crate::import_codex::tests::{sample, subagent, MAIN};
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("codex");
+        let (rollout, child) = (sample(&home), subagent(&home));
+        fs::write(home.join("sessions/2026/11/16/notes.jsonl"), "{}\n").unwrap();
+        let data = dir.path().join("data");
+        let homes = AgentHomes {
+            codex_home: Some(home),
+            ..Default::default()
+        };
+        // nothing is imported for the first time by a sync
+        assert_eq!(refresh(&homes, &data), Report::default());
+
+        let report = import_all(&homes, &data, &["codex".to_string()], &[]);
+        assert_eq!((report.imported, report.failed.len()), (1, 0));
+        assert_eq!(report.by_source["codex"], 1);
+        let imported = data.join(format!("imported/codex/{MAIN}.jsonl"));
+        let saved = fs::read_to_string(&imported).unwrap();
+        assert!(saved.contains("SubagentStart") && saved.contains("rg TODO"));
+        assert!(data
+            .join(format!("transcript-facts/codex/{MAIN}.json"))
+            .exists());
+        assert_eq!(imported_from(&imported).unwrap().0, rollout);
+        assert_eq!(refresh(&homes, &data).up_to_date, 1);
+
+        // the subagent goes on: its session is imported again
+        let mut f = fs::OpenOptions::new().append(true).open(&child).unwrap();
+        writeln!(f, "{{}}").unwrap();
+        assert_eq!(refresh(&homes, &data).imported, 1);
+
+        // a session the hooks have seen is imported without being asked for
+        let data = dir.path().join("fresh");
+        write_rows(
+            &data.join(format!("raw/codex/{MAIN}.jsonl")),
+            &[json!({ "hook": "Stop", "payload": { "session_id": MAIN } })],
+        );
+        assert_eq!(refresh(&homes, &data).imported, 1);
     }
 
     #[test]

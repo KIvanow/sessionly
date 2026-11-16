@@ -27,7 +27,16 @@ pub fn data_dir() -> Result<PathBuf> {
 pub const CLAUDE_CODE: &str = "claude-code";
 pub const CURSOR: &str = "cursor";
 pub const GROK: &str = "grok";
-pub const SOURCES: &[&str] = &[CLAUDE_CODE, CURSOR, GROK];
+pub const CODEX: &str = "codex";
+pub const SOURCES: &[&str] = &[CLAUDE_CODE, CURSOR, GROK, CODEX];
+
+/// Where Codex keeps its settings and sessions: `$CODEX_HOME`, or `~/.codex`.
+pub fn codex_home() -> Option<PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|h| h.join(".codex")))
+}
 
 /// Folder holding every agent's raw hook payloads.
 pub fn raw_root() -> Result<PathBuf> {

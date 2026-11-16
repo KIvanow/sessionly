@@ -135,7 +135,7 @@ export interface Filters {
   model?: string;
   /** The session's main model exactly, as a summary by model names it. */
   model_is?: string;
-  /** The agent exactly: `claude-code`, `cursor` or `grok`. */
+  /** The agent exactly: `claude-code`, `cursor`, `grok` or `codex`. */
   tool?: string;
   /** Where it ran: `cloud`, or `local` for a person's own machine. */
   runtime?: string;

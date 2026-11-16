@@ -22,8 +22,9 @@ pub const RECORD_VERSION: u64 = 1;
 const LOCK_WAIT: Duration = Duration::from_millis(1500);
 
 /// Which agent sent a hook payload. Cursor and Grok both run hooks written
-/// for Claude Code (they read `~/.claude/settings.json`), so one capture
-/// command hears from all three and has to tell them apart by the payload.
+/// for Claude Code (they read `~/.claude/settings.json`), and Codex sends
+/// payloads of the same shape from its own hooks file, so one capture
+/// command hears from all four and has to tell them apart by the payload.
 pub fn detect_source(payload: &Value) -> &'static str {
     let has = |key: &str| payload.get(key).is_some();
     let transcript = payload["transcript_path"].as_str().unwrap_or_default();
@@ -31,9 +32,18 @@ pub fn detect_source(payload: &Value) -> &'static str {
         crate::paths::CURSOR
     } else if has("workspaceRoot") || has("hookEventName") || transcript.contains("/.grok/") {
         crate::paths::GROK
+    } else if is_codex_rollout(transcript) {
+        crate::paths::CODEX
     } else {
         crate::paths::CLAUDE_CODE
     }
+}
+
+/// True for the path of a Codex session file: `…/rollout-<time>-<thread>.jsonl`,
+/// wherever `CODEX_HOME` puts it.
+fn is_codex_rollout(transcript: &str) -> bool {
+    let name = transcript.rsplit(['/', '\\']).next().unwrap_or_default();
+    name.starts_with("rollout-") || transcript.contains("/.codex/")
 }
 
 /// Wrap a raw hook payload in the envelope stored on disk. A payload that
@@ -288,7 +298,7 @@ mod tests {
     #[test]
     fn files_each_agent_under_its_own_name() {
         let dir = tempfile::tempdir().unwrap();
-        let cases: [(&str, &str, &str); 3] = [
+        let cases: [(&str, &str, &str); 4] = [
             (
                 r#"{"session_id":"c1","hook_event_name":"Stop","transcript_path":"/home/u/.claude/projects/p/c1.jsonl"}"#,
                 "claude-code",
@@ -304,6 +314,11 @@ mod tests {
                 r#"{"conversation_id":"k1","hook_event_name":"stop","cursor_version":"2.0"}"#,
                 "cursor",
                 "k1",
+            ),
+            (
+                r#"{"session_id":"x1","turn_id":"t1","hook_event_name":"Stop","transcript_path":"/data/codex/sessions/2026/11/16/rollout-2026-11-16T12-00-00-x1.jsonl"}"#,
+                "codex",
+                "x1",
             ),
         ];
         for (payload, source, id) in cases {

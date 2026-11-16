@@ -152,7 +152,7 @@ export interface Totals {
   lines_removed: number;
   input_tokens: number;
   output_tokens: number;
-  /** The agents the sessions ran in (`claude-code`, `cursor`, `grok`), in name order. */
+  /** The agents the sessions ran in (`claude-code`, `cursor`, `grok`, `codex`), in name order. */
   tools: string[];
   /** The main model of each session, in name order. Agents that record none add nothing. */
   models: string[];
@@ -170,7 +170,7 @@ export interface Summary {
 
 export interface SessionRow {
   machine_id: string;
-  /** The agent the session ran in: `claude-code`, `cursor` or `grok`. */
+  /** The agent the session ran in: `claude-code`, `cursor`, `grok` or `codex`. */
   source: string;
   session_id: string;
   /**
@@ -336,7 +336,7 @@ export interface PullReport {
 
 /** Lines an agent wrote, by which agent and model. */
 export interface LinesBy {
-  /** The agent: `claude-code`, `cursor`, `grok`. */
+  /** The agent: `claude-code`, `cursor`, `grok`, `codex`. */
   tool: string;
   /** Null if the model is not known. */
   model: string | null;

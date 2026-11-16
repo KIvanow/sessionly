@@ -13,6 +13,7 @@ mod cursor_hooks;
 mod git;
 mod hooks;
 mod import;
+mod import_codex;
 mod import_cursor;
 mod import_grok;
 mod jsonl;
@@ -65,11 +66,11 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Bring in past sessions from the files Claude Code, Cursor and Grok keep
+    /// Bring in past sessions from the files Claude Code, Cursor, Grok and Codex keep
     Import {
         /// Session ids (or the start of one) to import [default: every session]
         sessions: Vec<String>,
-        /// Only this tool's sessions: claude-code, cursor or grok (repeatable)
+        /// Only this tool's sessions: claude-code, cursor, grok or codex (repeatable)
         #[arg(long = "tool", value_name = "TOOL")]
         tools: Vec<String>,
     },
@@ -212,7 +213,7 @@ struct Target {
 /// Which sessions to include. Text filters match substrings, ignoring case.
 #[derive(Args)]
 struct FilterArgs {
-    /// Tool: claude-code, cursor or grok
+    /// Tool: claude-code, cursor, grok or codex
     #[arg(long)]
     tool: Option<String>,
     /// Repository: part of its remote (owner/name) or its path
@@ -414,6 +415,27 @@ fn run(command: Command) -> Result<()> {
                     "Note: that path is specific to this machine. If this settings file is \
                      committed, use .claude/settings.local.json for the hooks instead."
                 );
+            } else if paths::codex_home().is_some_and(|home| home.is_dir()) {
+                // Codex reads its own file, not Claude Code's.
+                let path = hooks::codex_hooks_path()?;
+                let command = hooks::capture_command(&exe);
+                let changed = hooks::install_for(&path, &command, hooks::Agent::Codex)?;
+                println!(
+                    "{} for {} events in {}",
+                    if changed {
+                        "Installed Sessionly hooks for Codex"
+                    } else {
+                        "Sessionly hooks for Codex already installed"
+                    },
+                    hooks::Agent::Codex.events().count(),
+                    path.display()
+                );
+                if changed {
+                    println!(
+                        "Codex runs new or changed hooks only once you have approved them: \
+                         start codex and accept them in the review it shows, or run /hooks there."
+                    );
+                }
             }
         }
         Command::Uninstall(target) => {
@@ -435,6 +457,12 @@ fn run(command: Command) -> Result<()> {
                 println!("Removed Sessionly hooks from {}", path.display());
             } else {
                 println!("No Sessionly hooks in {}", path.display());
+            }
+            if target.project.is_none() {
+                let path = hooks::codex_hooks_path()?;
+                if hooks::uninstall(&path, hooks::Kind::Machine)? {
+                    println!("Removed Sessionly hooks from {}", path.display());
+                }
             }
         }
         Command::Status(target) => status(&target)?,
@@ -783,6 +811,15 @@ fn status(target: &Target) -> Result<()> {
         .collect();
     if !installed.is_empty() && !missing.is_empty() {
         println!("Missing:    {}", missing.join(", "));
+    }
+    if target.project.is_none() && paths::codex_home().is_some_and(|home| home.is_dir()) {
+        let path = hooks::codex_hooks_path()?;
+        println!(
+            "Codex:      {}/{} events in {}",
+            hooks::installed_events(&path, hooks::Kind::Machine)?.len(),
+            hooks::Agent::Codex.events().count(),
+            path.display()
+        );
     }
     let raw = paths::raw_root()?;
     let (mut sessions, mut bytes) = (0u64, 0u64);
