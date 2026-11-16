@@ -291,7 +291,14 @@ fn item_parts(item: &Value, cwd: Option<&str>, ended: &str, mut like: Part) -> V
         "CommandExecution" if item["source"] != "unified_exec_interaction" => {
             let output = item["aggregated_output"].as_str().unwrap_or_default();
             let code = item["exit_code"].as_i64();
-            let failed = match (output.trim(), code) {
+            let trimmed = output.trim();
+            let tail = trimmed
+                .char_indices()
+                .rev()
+                .nth(199)
+                .map(|(start, _)| &trimmed[start..])
+                .unwrap_or(trimmed);
+            let failed = match (tail, code) {
                 ("", Some(code)) => format!("Exit code {code}"),
                 ("", None) => "failed".to_string(),
                 (said, _) => said.to_string(),
@@ -1406,7 +1413,7 @@ pub(crate) mod tests {
                 "t1",
                 json!({ "type": "CommandExecution", "id": "exec-1", "command": ["/bin/bash", "-lc", "make"],
                         "cwd": "file:///work/repo", "source": "unified_exec_startup", "status": "completed",
-                        "aggregated_output": "error: nope\n", "exit_code": 2,
+                        "aggregated_output": format!("{}useful tail\n", "x".repeat(250)), "exit_code": 2,
                         "duration": { "secs": 2, "nanos": 500_000_000 } }),
             ),
             item(
@@ -1489,7 +1496,9 @@ pub(crate) mod tests {
         );
         assert_eq!(s.tool_calls[0].input_summary.as_deref(), Some("make"));
         assert_eq!(s.tool_calls[0].duration_ms, Some(2500));
-        assert_eq!(s.tool_calls[0].error.as_deref(), Some("error: nope"));
+        let error = s.tool_calls[0].error.as_deref().unwrap();
+        assert_eq!(error.chars().count(), 200);
+        assert!(error.ends_with("useful tail"), "{error:?}");
         assert_eq!(s.tool_calls[0].model.as_deref(), Some("gpt-6-sol"));
         assert_eq!(s.tool_calls[6].input_summary.as_deref(), Some("rust lark"));
         let file = |p: &str| s.files.iter().find(|f| f.path == p).unwrap();

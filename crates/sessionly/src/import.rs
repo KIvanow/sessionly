@@ -14,7 +14,7 @@
 //! What a Claude Code transcript cannot tell us: permission prompts that were
 //! approved, and when the session ended.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -704,7 +704,7 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
     }
     // A subagent's thread belongs to the session of the thread that began it.
     // One whose session's file is gone stands on its own.
-    let threads: Vec<String> = rollouts.keys().cloned().collect();
+    let threads: HashSet<String> = rollouts.keys().cloned().collect();
     let mut subagents: HashMap<String, Vec<PathBuf>> = HashMap::new();
     rollouts.retain(|thread, path| {
         let root = crate::import_codex::root_of(path);

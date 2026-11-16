@@ -9,6 +9,7 @@ fn sessionly(home: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_sessionly"));
     cmd.env("HOME", home)
         .env("SESSIONLY_HOME", home.join("data"))
+        .env_remove("CODEX_HOME")
         // no background runs unless a test asks for them
         .env("SESSIONLY_NO_AUTO", "1")
         .env_remove("SESSIONLY_TOKEN")
@@ -97,7 +98,8 @@ fn capture_without_a_home_writes_nothing() {
         .current_dir(cwd.path())
         .env_remove("HOME")
         .env_remove("USERPROFILE")
-        .env_remove("SESSIONLY_HOME");
+        .env_remove("SESSIONLY_HOME")
+        .env_remove("CODEX_HOME");
     let out = run_with_stdin(cmd, br#"{"session_id":"s1"}"#);
     assert_silent_success(&out, "no home");
     assert_eq!(fs::read_dir(cwd.path()).unwrap().count(), 0);
@@ -190,6 +192,7 @@ fn the_installed_command_really_runs_capture() {
     install
         .env("HOME", home.path())
         .env("SESSIONLY_HOME", home.path().join("data"))
+        .env_remove("CODEX_HOME")
         .args(["install", "--project"])
         .arg(&project);
     // Running a file right after copying it can fail with "text file busy"
@@ -216,10 +219,41 @@ fn the_installed_command_really_runs_capture() {
         .arg(command)
         .env("SESSIONLY_NO_AUTO", "1")
         .env("HOME", home.path())
-        .env("SESSIONLY_HOME", home.path().join("data"));
+        .env("SESSIONLY_HOME", home.path().join("data"))
+        .env_remove("CODEX_HOME");
     let out = run_with_stdin(hook, br#"{"session_id":"s9","hook_event_name":"Stop"}"#);
     assert_silent_success(&out, "installed hook command");
     assert!(home.path().join("data/raw/claude-code/s9.jsonl").exists());
+}
+
+#[test]
+fn codex_hooks_are_installed_only_when_codex_home_exists() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+    let run = |args: &[&str]| stdout(sessionly(home.path()).args(args).output().unwrap());
+    run(&["install"]);
+    let hooks_path = home.path().join(".codex/hooks.json");
+    let installed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    assert!(installed.to_string().contains("sessionly capture"));
+    assert!(run(&["status"])
+        .lines()
+        .any(|line| line.starts_with("Codex:")));
+
+    run(&["uninstall"]);
+    let uninstalled: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    assert!(!uninstalled.to_string().contains("sessionly capture"));
+
+    let empty_home = tempfile::tempdir().unwrap();
+    stdout(
+        sessionly(empty_home.path())
+            .arg("install")
+            .output()
+            .unwrap(),
+    );
+    assert!(!empty_home.path().join(".codex/hooks.json").exists());
 }
 
 #[test]
