@@ -21,6 +21,7 @@
       type="font/woff2"
       crossorigin
     />
+    <script defer src="/_vercel/insights/script.js"></script>
   </head>
   <body>
     <header class="top">
@@ -60,7 +61,7 @@
       <section class="legal">
         <div class="wrap">
           <h1>Security</h1>
-          <p class="meta">Last updated 15 November 2026</p>
+          <p class="meta">Last updated 16 November 2026</p>
 
           <div class="summary">
             <h2>In short</h2>
@@ -93,7 +94,8 @@
               <li>
                 The program and the server phone nothing home: no telemetry, no update checks,
                 and licenses are verified offline. The dashboard counts which of its pages are
-                opened, and nothing of what they show; a self-hosted server can turn that off.
+                opened, and nothing of what they show or of where it runs; a self-hosted server
+                can turn that off.
               </li>
               <li>
                 Found a problem? Email
@@ -291,12 +293,31 @@
             </li>
             <li>
               <strong>The dashboard</strong> keeps the token in the browser's local storage and
-              sends it as a header. It sets no cookies and loads nothing from other sites. It
-              counts which of its pages are opened by sending the page's name to PostHog's EU
-              cloud (<code>https://eu.i.posthog.com</code>), with code bundled in the dashboard
-              itself. Its Content Security Policy allows that one address only while counting is
-              on. The address it runs at, organisations, people and what pages show are never
-              sent, and nothing is stored in the browser for it.
+              sends it as a header. It loads nothing from other sites. Its only cookies belong to
+              signing in with Google or GitHub: one from leaving for the provider until coming
+              back, so that only the browser that left is taken back, and one from coming back
+              until an org is chosen, which is what carries the sign-in. Both last ten minutes at
+              most, cannot be read by scripts (<code>HttpOnly</code>), are sent only on same-site
+              requests (<code>SameSite=Lax</code>), and are removed when the sign-in ends. Served
+              over HTTPS, as the hosted service always is, they are also limited to the
+              dashboard's own host and to HTTPS (the <code>__Host-</code> prefix and
+              <code>Secure</code>). Nothing is tracked with them, and signing in with a token
+              sets none.
+              It counts which of its pages are opened by sending a count to PostHog's EU cloud
+              (<code>https://eu.i.posthog.com</code>). The count is written out in the
+              dashboard's own code, with no analytics library: the page's name, whether the
+              server is hosted or self-hosted, and an id made up for that one load of the page.
+              Nothing is read from the browser to put in it. It is sent as a <code>GET</code>
+              request made with no referrer and no credentials, so the browser adds no
+              <code>Origin</code> header, no <code>Referer</code> and no cookie: nothing in the
+              request names the address the dashboard runs at, which for a self-hosted server is
+              a name inside someone's network. (A <code>POST</code> would not do: Chromium sends
+              the page's origin with every cross-site <code>POST</code>.) PostHog's servers see
+              the IP address the request comes from and the browser's standard headers, as any
+              server does. The dashboard's Content Security Policy allows that one address only
+              while counting is on. Organisations, people and what pages show are never sent,
+              nothing is stored in the browser for it, and a browser that sends Do Not Track or
+              Global Privacy Control is not counted.
             </li>
           </ul>
           <h3>Self-hosting defaults</h3>
@@ -347,10 +368,12 @@
 
           <h2>This website</h2>
           <p>
-            The website is static HTML, one stylesheet and two typefaces, all served from the site
-            itself. It runs no scripts, sets no cookies and has no analytics. It is served with a
-            Content Security Policy of <code>default-src 'none'</code> that allows only its own
-            stylesheet, fonts and images, and sends <code>X-Content-Type-Options</code>, <code>X-Frame-Options</code> and
+            The website is static HTML, one stylesheet, two typefaces and one script, all served
+            from the site itself. The script is Vercel Web Analytics, which counts page visits
+            without cookies and without keeping IP addresses. The website sets no cookies. It is
+            served with a Content Security Policy of <code>default-src 'none'</code> that allows
+            only its own script, stylesheet, fonts and images, and connections back to itself, and
+            sends <code>X-Content-Type-Options</code>, <code>X-Frame-Options</code> and
             <code>Referrer-Policy</code> headers. It is hosted by Vercel, which keeps request logs.
           </p>
 
