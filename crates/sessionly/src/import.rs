@@ -524,6 +524,8 @@ struct Found {
     hooks_only: bool,
     /// A Codex session's subagents: each is a thread with a file of its own.
     subagents: Vec<PathBuf>,
+    /// What a Codex thread was called: Codex keeps that apart from the session.
+    name: Option<String>,
 }
 
 /// The raw hook capture of a session, which a Cursor import also reads.
@@ -541,7 +543,9 @@ fn source_bytes(found: &Found, data_dir: &Path) -> u64 {
     let size = |path: &Path| fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     match found.source {
         GROK => crate::import_grok::session_bytes(&found.path),
-        CODEX => crate::import_codex::session_bytes(&found.path, &found.subagents),
+        CODEX => {
+            crate::import_codex::session_bytes(&found.path, &found.subagents, found.name.as_deref())
+        }
         CURSOR if found.hooks_only => size(&found.path),
         CURSOR => {
             crate::import_cursor::session_bytes(&found.path) + size(&capture_of(found, data_dir))
@@ -564,7 +568,7 @@ fn import_one(found: &Found, data_dir: &Path, report: &mut Report) {
     }
     let built: Result<(Vec<Value>, Option<Facts>)> = match found.source {
         GROK => crate::import_grok::session(&found.path),
-        CODEX => crate::import_codex::session(&found.path, &found.subagents),
+        CODEX => crate::import_codex::session(&found.path, &found.subagents, found.name.as_deref()),
         CURSOR if found.hooks_only => crate::import_cursor::session_from_hooks(&found.path),
         CURSOR => {
             let capture = capture_of(found, data_dir);
@@ -645,6 +649,7 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
                 path,
                 hooks_only: false,
                 subagents: Vec::new(),
+                name: None,
             });
         }
     }
@@ -659,6 +664,7 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
                     path,
                     hooks_only: false,
                     subagents: Vec::new(),
+                    name: None,
                 });
             }
         }
@@ -675,6 +681,7 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
                     path,
                     hooks_only: false,
                     subagents: Vec::new(),
+                    name: None,
                 });
             }
         }
@@ -716,10 +723,15 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
             None => true,
         }
     });
+    let mut names = match &homes.codex_home {
+        Some(home) if !rollouts.is_empty() => crate::import_codex::thread_names(home),
+        _ => HashMap::new(),
+    };
     for (session_id, path) in rollouts {
         found.push(Found {
             source: CODEX,
             subagents: subagents.remove(&session_id).unwrap_or_default(),
+            name: names.remove(&session_id),
             session_id,
             path,
             hooks_only: false,
@@ -751,6 +763,7 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
                 path,
                 hooks_only: true,
                 subagents: Vec::new(),
+                name: None,
             });
         }
     }
@@ -1195,6 +1208,22 @@ mod tests {
         let mut f = fs::OpenOptions::new().append(true).open(&child).unwrap();
         writeln!(f, "{{}}").unwrap();
         assert_eq!(refresh(&homes, &data).imported, 1);
+
+        // the thread is given another name, and nothing else changes
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(
+                homes
+                    .codex_home
+                    .as_ref()
+                    .unwrap()
+                    .join("session_index.jsonl"),
+            )
+            .unwrap();
+        writeln!(f, "{}", json!({ "id": MAIN, "thread_name": "Renamed" })).unwrap();
+        assert_eq!(refresh(&homes, &data).imported, 1);
+        assert!(fs::read_to_string(&imported).unwrap().contains("Renamed"));
+        assert_eq!(refresh(&homes, &data).up_to_date, 1);
 
         // a session the hooks have seen is imported without being asked for
         let data = dir.path().join("fresh");

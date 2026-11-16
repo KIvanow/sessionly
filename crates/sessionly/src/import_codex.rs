@@ -21,6 +21,12 @@
 //! what ran: the model may reach its tools through a script (a call to `exec`
 //! holding JavaScript), which says little by itself. Both are read.
 //!
+//! Going back to an earlier turn (a revert) starts a new file for the thread,
+//! `…-<thread>_<rollout>.jsonl`, whose `history_base` says how much of the
+//! file before it still stands. That much is read first, then the new file.
+//! A fork is a thread of its own and can point at its parent's file the same
+//! way: that part is the parent's session and is not read again here.
+//!
 //! A subagent is a thread of its own with its own rollout, whose
 //! `session_id` is the thread that started it all. Those are folded into that
 //! session, as Claude Code's subagents are.
@@ -35,7 +41,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -72,6 +78,83 @@ pub fn root_of(path: &Path) -> Option<String> {
     let after = &text[text.find("\"session_id\":\"")? + "\"session_id\":\"".len()..];
     let id = &after[..after.find('"')?];
     (!id.is_empty()).then(|| id.to_string())
+}
+
+/// Which of a thread's files this is, from its name: the part a revert adds
+/// after `_`, and for a thread's first file the thread itself.
+fn rollout_id(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    let id = stem.get(20..)?.rsplit('_').next()?;
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// The Codex folder a rollout is kept in.
+fn home_of(rollout: &Path) -> Option<&Path> {
+    rollout
+        .ancestors()
+        .find(|dir| {
+            dir.file_name()
+                .is_some_and(|n| n == "sessions" || n == "archived_sessions")
+        })?
+        .parent()
+}
+
+fn entries(dir: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Every file in the day folders and among the archived ones.
+fn files_in(home: &Path) -> Vec<PathBuf> {
+    let days = entries(&home.join("sessions"))
+        .into_iter()
+        .flat_map(|year| entries(&year))
+        .flat_map(|month| entries(&month));
+    days.chain([home.join("archived_sessions")])
+        .flat_map(|dir| entries(&dir))
+        .collect()
+}
+
+/// The earlier file a rollout carries on from, and how many bytes of it
+/// still stand: the `history_base` of its first record.
+fn history_base(path: &Path) -> Option<(String, u64)> {
+    let mut line = String::new();
+    BufReader::new(fs::File::open(path).ok()?)
+        .read_line(&mut line)
+        .ok()?;
+    let row: Value = serde_json::from_str(&line).ok()?;
+    let base = &row["payload"]["history_base"];
+    Some((
+        base["thread_id"].as_str()?.to_string(),
+        base["end_byte_offset"].as_u64()?,
+    ))
+}
+
+/// The files a thread's history is in, oldest first, each with how far into
+/// it the history goes (`None`: all of it). Only the thread's own files: what
+/// a fork has from its parent is the parent's.
+fn history(path: &Path, thread: &str) -> Vec<(PathBuf, Option<u64>)> {
+    let mut files = vec![(path.to_path_buf(), None)];
+    let mut others: Option<Vec<PathBuf>> = None;
+    while let Some((base, end)) = history_base(&files[0].0) {
+        let others = others.get_or_insert_with(|| home_of(path).map(files_in).unwrap_or_default());
+        let earlier = others.iter().find(|p| {
+            thread_id(p).as_deref() == Some(thread) && rollout_id(p).as_deref() == Some(&*base)
+        });
+        match earlier {
+            Some(p) if files.iter().all(|(seen, _)| seen != p) => {
+                files.insert(0, (p.clone(), Some(end)));
+            }
+            _ => break,
+        }
+    }
+    files
 }
 
 fn parse_time(text: &str) -> Option<DateTime<Utc>> {
@@ -373,7 +456,7 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
     let mut growth: Vec<(Option<String>, Tokens)> = Vec::new();
     let mut searches = 0;
 
-    crate::jsonl::for_each(path, |row| {
+    let mut record = |row: Value| {
         let kind = row["type"].as_str().unwrap_or_default();
         let p = &row["payload"];
         if kind == "session_meta" {
@@ -616,7 +699,10 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
             },
             _ => {}
         }
-    })?;
+    };
+    for (file, end) in history(path, thread) {
+        crate::jsonl::for_each_within(&file, end, &mut record)?;
+    }
 
     t.responses = if records.is_empty() {
         growth
@@ -962,39 +1048,49 @@ fn add_usage(usage: &mut Vec<ModelUsage>, model: Option<&str>, tokens: &Tokens) 
     entry.cache_write_5m_tokens += tokens.cache_write;
 }
 
-/// The name a thread was given, from the list of names Codex keeps beside
-/// its session folders. The newest entry for a thread is the one that counts.
-fn thread_name(rollout: &Path, thread: &str) -> Option<String> {
-    let home = rollout
-        .ancestors()
-        .find(|dir| {
-            dir.file_name()
-                .is_some_and(|n| n == "sessions" || n == "archived_sessions")
-        })?
-        .parent()?;
-    let mut name = None;
-    crate::jsonl::for_each(&home.join("session_index.jsonl"), |row| {
-        if row["id"] == thread {
-            name = row["thread_name"].as_str().map(String::from);
-        }
-    })
-    .ok()?;
-    name.filter(|n| !n.is_empty())
+/// The names threads were given, from the list Codex keeps beside its
+/// session folders. The newest entry for a thread is the one that counts.
+pub fn thread_names(home: &Path) -> HashMap<String, String> {
+    let mut names = HashMap::new();
+    // No list: no thread has been named.
+    let _ = crate::jsonl::for_each(&home.join("session_index.jsonl"), |row| {
+        let Some(id) = row["id"].as_str() else {
+            return;
+        };
+        match row["thread_name"].as_str() {
+            Some(name) if !name.is_empty() => names.insert(id.to_string(), name.to_string()),
+            _ => names.remove(id),
+        };
+    });
+    names
 }
 
-/// Combined size of the files a session is imported from.
-pub fn session_bytes(rollout: &Path, subagents: &[PathBuf]) -> u64 {
-    std::iter::once(rollout)
+/// What an import is redone for: the combined size of the files a session is
+/// imported from, and its name, which changes without any of them changing.
+pub fn session_bytes(rollout: &Path, subagents: &[PathBuf], name: Option<&str>) -> u64 {
+    let files: u64 = std::iter::once(rollout)
         .chain(subagents.iter().map(PathBuf::as_path))
         .filter_map(|p| fs::metadata(p).ok())
         .map(|m| m.len())
-        .sum()
+        .sum();
+    // FNV-1a, kept to 32 bits so it cannot push the sum past what fits
+    let named = name
+        .unwrap_or_default()
+        .bytes()
+        .fold(0x811c_9dc5_u32, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+        });
+    files + u64::from(named) * u64::from(name.is_some())
 }
 
 /// The session's events and what its rollout says about tokens. `rollout` is
 /// the file of the thread the session began as; `subagents` are the files of
-/// the threads it spawned.
-pub fn session(rollout: &Path, subagents: &[PathBuf]) -> Result<(Vec<Value>, Option<Facts>)> {
+/// the threads it spawned, `name` what the thread was called.
+pub fn session(
+    rollout: &Path,
+    subagents: &[PathBuf],
+    name: Option<&str>,
+) -> Result<(Vec<Value>, Option<Facts>)> {
     let session_id = thread_id(rollout).unwrap_or_default();
     let main = read(rollout, &session_id)?;
     let session_id = match main.meta["id"].as_str() {
@@ -1064,7 +1160,7 @@ pub fn session(rollout: &Path, subagents: &[PathBuf]) -> Result<(Vec<Value>, Opt
     if let Some(model) = &main.model {
         start["model"] = json!(model);
     }
-    if let Some(title) = thread_name(rollout, &session_id) {
+    if let Some(title) = name {
         start["session_title"] = json!(title);
     }
     out.push(&first, "SessionStart", start);
@@ -1283,7 +1379,13 @@ pub(crate) mod tests {
         assert_eq!(thread_id(&main).as_deref(), Some(MAIN));
         assert_eq!(root_of(&child).as_deref(), Some(MAIN));
 
-        let (events, facts) = session(&main, &[child]).unwrap();
+        let names = thread_names(dir.path());
+        let name = names.get(MAIN).map(String::as_str);
+        assert_ne!(
+            session_bytes(&main, &[], name),
+            session_bytes(&main, &[], Some("Another"))
+        );
+        let (events, facts) = session(&main, &[child], name).unwrap();
         let facts = facts.unwrap();
         assert!(events
             .iter()
@@ -1366,6 +1468,62 @@ pub(crate) mod tests {
             ),
             (2, 600 + 1600, 800, 100, 40)
         );
+    }
+
+    #[test]
+    fn a_reverted_thread_keeps_what_came_before_the_revert() {
+        const LATER: &str = "019a8f00-0000-7000-8000-000000000003";
+        const FORK: &str = "019a8f00-0000-7000-8000-000000000004";
+        let dir = tempfile::tempdir().unwrap();
+        let turn = |second: u32, id: &str, prompt: &str, thread: &str| {
+            [
+                event(second, "task_started", json!({ "turn_id": id })),
+                event(second, "user_message", json!({ "message": prompt })),
+                tokens(second + 1, id, &format!("r-{id}"), thread, 1000),
+                event(second + 2, "task_complete", json!({ "turn_id": id })),
+            ]
+        };
+        let mut before = vec![meta(MAIN, json!({}))];
+        before.extend(turn(1, "t1", "first", MAIN));
+        // what stands: everything up to the second turn
+        let kept: usize = before.iter().map(|row| row.to_string().len() + 1).sum();
+        before.extend(turn(10, "t2", "taken back", MAIN));
+        write(
+            &dir.path().join(format!(
+                "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{MAIN}.jsonl"
+            )),
+            &before,
+        );
+        let base = json!({ "history_base":
+            { "thread_id": MAIN, "end_ordinal_exclusive": 5, "end_byte_offset": kept } });
+
+        let mut after = vec![meta(MAIN, base.clone())];
+        after.extend(turn(20, "t3", "instead", MAIN));
+        let reverted = dir.path().join(format!(
+            "sessions/2026/11/17/rollout-2026-11-17T09-00-00-{MAIN}_{LATER}.jsonl"
+        ));
+        write(&reverted, &after);
+        assert_eq!(thread_id(&reverted).as_deref(), Some(MAIN));
+
+        let (events, facts) = session(&reverted, &[], None).unwrap();
+        let facts = facts.unwrap();
+        let s = crate::normalize::from_events(&events, Some(&facts), CODEX).unwrap();
+        assert_eq!(s.session_id, MAIN);
+        let prompts: Vec<&str> = s.prompts.iter().map(|p| p.text.preview.as_str()).collect();
+        assert_eq!(prompts, ["first", "instead"]);
+        assert_eq!(facts.usage[0].requests, 2);
+
+        // a fork has its own thread: what it has from its parent stays there
+        let mut forked = vec![meta(FORK, base)];
+        forked.extend(turn(30, "f1", "another way", FORK));
+        let fork = dir.path().join(format!(
+            "sessions/2026/11/17/rollout-2026-11-17T10-00-00-{FORK}.jsonl"
+        ));
+        write(&fork, &forked);
+        let (events, facts) = session(&fork, &[], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        let prompts: Vec<&str> = s.prompts.iter().map(|p| p.text.preview.as_str()).collect();
+        assert_eq!(prompts, ["another way"]);
     }
 
     #[test]
@@ -1471,7 +1629,7 @@ pub(crate) mod tests {
         }
         write(&path, &rows);
 
-        let (events, facts) = session(&path, &[]).unwrap();
+        let (events, facts) = session(&path, &[], None).unwrap();
         let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
         let prompts: Vec<&str> = s.prompts.iter().map(|p| p.text.preview.as_str()).collect();
         assert_eq!(prompts, ["fix it"]);
@@ -1575,7 +1733,7 @@ pub(crate) mod tests {
             .path()
             .join(format!("rollout-2026-11-16T12-00-00-{MAIN}.jsonl"));
         write(&path, &[meta(MAIN, json!({}))]);
-        let (events, facts) = session(&path, &[]).unwrap();
+        let (events, facts) = session(&path, &[], None).unwrap();
         assert!(events.is_empty() && facts.is_none());
         assert_eq!(thread_id(Path::new("notes.jsonl")), None);
         assert_eq!(

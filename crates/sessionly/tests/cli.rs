@@ -226,6 +226,21 @@ fn the_installed_command_really_runs_capture() {
     assert!(home.path().join("data/raw/claude-code/s9.jsonl").exists());
 }
 
+/// Every command in a hooks file, wherever it sits.
+fn hook_commands(value: &serde_json::Value) -> Vec<&str> {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .flat_map(|(key, child)| match (key.as_str(), child.as_str()) {
+                ("command", Some(command)) => vec![command],
+                _ => hook_commands(child),
+            })
+            .collect(),
+        serde_json::Value::Array(items) => items.iter().flat_map(hook_commands).collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[test]
 fn codex_hooks_are_installed_only_when_codex_home_exists() {
     let home = tempfile::tempdir().unwrap();
@@ -236,7 +251,12 @@ fn codex_hooks_are_installed_only_when_codex_home_exists() {
     let hooks_path = home.path().join(".codex/hooks.json");
     let installed: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
-    assert!(installed.to_string().contains("sessionly capture"));
+    // the path is quoted when it has a space or the like in it
+    let exe = env!("CARGO_BIN_EXE_sessionly");
+    let ours = [format!("{exe} capture"), format!("'{exe}' capture")];
+    let commands = hook_commands(&installed);
+    assert_eq!(commands.len(), 11);
+    assert!(commands.iter().all(|c| ours.iter().any(|o| o == c)));
     assert!(run(&["status"])
         .lines()
         .any(|line| line.starts_with("Codex:")));
@@ -244,7 +264,7 @@ fn codex_hooks_are_installed_only_when_codex_home_exists() {
     run(&["uninstall"]);
     let uninstalled: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
-    assert!(!uninstalled.to_string().contains("sessionly capture"));
+    assert!(hook_commands(&uninstalled).is_empty());
 
     let empty_home = tempfile::tempdir().unwrap();
     stdout(

@@ -418,7 +418,7 @@ Written from Codex's source at 0.169.0 and checked against sessions of that vers
 with `codex exec` and one in the terminal agent with the hooks approved: prompts, commands with
 their durations, files and lines changed, model, tokens and the thread's name came out as Codex
 reported them, and the second arrived and was uploaded with no command run. Not yet checked:
-the editor extension, subagents and MCP tools.
+the editor extension, subagents, MCP tools, and reverted and forked threads.
 
 Codex writes two layouts, and both are read. The newer one (`paginated`, what 0.169.0 writes)
 keeps a record of each command that ran and each patch that was applied; those records are
@@ -439,6 +439,12 @@ is read from its output and a patch's files from the patch text.
   such a session has its edits but not its commands.
 - **A subagent** is a thread with a rollout file of its own. It is folded into the session
   that started it, with its tool calls and tokens, as Claude Code's subagents are.
+- **Going back to an earlier turn** (a revert) makes Codex start a new file for the thread
+  that points at the part of the old one that still stands. The session is that part and
+  what came after: the turns taken back are not in it. A fork is a thread of its own, so a
+  session of its own, with what was done after the fork; what came before is in the session
+  it was forked from and is not counted twice.
+- **A new name** for a thread is picked up at the next import or sync.
 - **There is no cost.** Codex records tokens and nothing about money, and the price table here
   has Anthropic's models only. A Codex session shows its tokens per model, has no cost figure
   and adds nothing to cost totals.
