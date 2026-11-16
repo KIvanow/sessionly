@@ -22,8 +22,9 @@ pub const RECORD_VERSION: u64 = 1;
 const LOCK_WAIT: Duration = Duration::from_millis(1500);
 
 /// Which agent sent a hook payload. Cursor and Grok both run hooks written
-/// for Claude Code (they read `~/.claude/settings.json`), so one capture
-/// command hears from all three and has to tell them apart by the payload.
+/// for Claude Code (they read `~/.claude/settings.json`), and Codex sends
+/// payloads of the same shape from its own hooks file, so one capture
+/// command hears from all four and has to tell them apart by the payload.
 pub fn detect_source(payload: &Value) -> &'static str {
     let has = |key: &str| payload.get(key).is_some();
     let transcript = payload["transcript_path"].as_str().unwrap_or_default();
@@ -31,9 +32,29 @@ pub fn detect_source(payload: &Value) -> &'static str {
         crate::paths::CURSOR
     } else if has("workspaceRoot") || has("hookEventName") || transcript.contains("/.grok/") {
         crate::paths::GROK
+    } else if is_codex_rollout(transcript)
+        // Codex's `transcript_path` can be null, as for a session with no
+        // rollout file. Its payloads still name the turn (`turn_id`) where
+        // Claude Code's name the prompt (`prompt_id`), and its SessionStart,
+        // which has no turn yet, has `permission_mode` but not the
+        // `scratchpad_dir` Claude Code adds.
+        || (transcript.is_empty()
+            && !has("prompt_id")
+            && (has("turn_id") || (has("permission_mode") && !has("scratchpad_dir"))))
+    {
+        crate::paths::CODEX
     } else {
         crate::paths::CLAUDE_CODE
     }
+}
+
+/// True for the path of a Codex session file: `…/rollout-<time>-<thread>.jsonl`,
+/// wherever `CODEX_HOME` puts it.
+fn is_codex_rollout(transcript: &str) -> bool {
+    let name = transcript.rsplit(['/', '\\']).next().unwrap_or_default();
+    name.starts_with("rollout-")
+        || transcript.contains("/.codex/sessions/")
+        || transcript.contains("/.codex/archived_sessions/")
 }
 
 /// Wrap a raw hook payload in the envelope stored on disk. A payload that
@@ -115,6 +136,26 @@ pub fn capture(
         .unwrap_or(crate::paths::CLAUDE_CODE)
         .to_string();
     let source = source.as_str();
+    // A payload with no transcript path may be either agent's. If the
+    // session already has events filed under exactly one of them, it stays
+    // there, so that it is not in two places. Sessions with no id of their
+    // own are not one session, and are left where they were detected.
+    let no_path = record["payload"]["transcript_path"]
+        .as_str()
+        .is_none_or(str::is_empty);
+    let source = if no_path && stem != "_unknown" {
+        let filed: Vec<&str> = [crate::paths::CODEX, crate::paths::CLAUDE_CODE]
+            .into_iter()
+            .filter(|other| raw_root.join(other).join(format!("{stem}.jsonl")).exists())
+            .collect();
+        match filed.as_slice() {
+            [only] => only,
+            _ => source,
+        }
+    } else {
+        source
+    };
+    record["source"] = json!(source);
     surroundings(&mut record);
     let path = raw_root.join(source).join(format!("{stem}.jsonl"));
     let mut line = serde_json::to_string(&record)?;
@@ -288,7 +329,7 @@ mod tests {
     #[test]
     fn files_each_agent_under_its_own_name() {
         let dir = tempfile::tempdir().unwrap();
-        let cases: [(&str, &str, &str); 3] = [
+        let cases: [(&str, &str, &str); 8] = [
             (
                 r#"{"session_id":"c1","hook_event_name":"Stop","transcript_path":"/home/u/.claude/projects/p/c1.jsonl"}"#,
                 "claude-code",
@@ -305,6 +346,35 @@ mod tests {
                 "cursor",
                 "k1",
             ),
+            // Claude Code names the prompt, not the turn
+            (
+                r#"{"session_id":"c2","prompt_id":"p1","turn_id":"t1","hook_event_name":"Stop","transcript_path":null}"#,
+                "claude-code",
+                "c2",
+            ),
+            // a project that happens to be called .codex
+            (
+                r#"{"session_id":"c3","hook_event_name":"Stop","transcript_path":"/home/u/.codex/projects/c3.jsonl"}"#,
+                "claude-code",
+                "c3",
+            ),
+            // its SessionStart has no turn yet
+            (
+                r#"{"session_id":"x3","hook_event_name":"SessionStart","permission_mode":"default","transcript_path":null}"#,
+                "codex",
+                "x3",
+            ),
+            // A session with no rollout file has no path to tell it by.
+            (
+                r#"{"session_id":"x2","turn_id":"t1","hook_event_name":"Stop","transcript_path":null}"#,
+                "codex",
+                "x2",
+            ),
+            (
+                r#"{"session_id":"x1","turn_id":"t1","hook_event_name":"Stop","transcript_path":"/data/codex/sessions/2026/11/16/rollout-2026-11-16T12-00-00-x1.jsonl"}"#,
+                "codex",
+                "x1",
+            ),
         ];
         for (payload, source, id) in cases {
             let (path, _) = capture(dir.path(), &mut payload.as_bytes(), "t", local).unwrap();
@@ -314,6 +384,43 @@ mod tests {
             assert_eq!(record["source"], source);
             assert_eq!(record["session_id"], id);
         }
+    }
+
+    #[test]
+    fn a_session_stays_where_its_first_events_were_filed() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = |source: &str| fs::read_dir(dir.path().join(source)).map_or(0, Iterator::count);
+        for payload in [
+            r#"{"session_id":"k9","hook_event_name":"SessionStart","transcript_path":"/home/u/.claude/projects/p/k9.jsonl"}"#,
+            // no path, and a field only Codex sends: it is still k9
+            r#"{"session_id":"k9","turn_id":"t1","hook_event_name":"Stop","transcript_path":null}"#,
+        ] {
+            capture(dir.path(), &mut payload.as_bytes(), "t", local).unwrap();
+        }
+        assert_eq!((files("claude-code"), files("codex")), (1, 0));
+        let lines = fs::read_to_string(dir.path().join("claude-code/k9.jsonl")).unwrap();
+        assert_eq!(lines.lines().count(), 2);
+        assert!(lines
+            .lines()
+            .all(|l| l.contains("\"source\":\"claude-code\"")));
+    }
+
+    #[test]
+    fn a_session_filed_in_both_places_is_left_where_it_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        for source in ["codex", "claude-code"] {
+            fs::create_dir_all(dir.path().join(source)).unwrap();
+            fs::write(dir.path().join(source).join("k8.jsonl"), "").unwrap();
+        }
+        // no path, no way to tell: Claude Code's by default
+        let payload = r#"{"session_id":"k8","hook_event_name":"Stop","transcript_path":null}"#;
+        let (path, _) = capture(dir.path(), &mut payload.as_bytes(), "t", local).unwrap();
+        assert_eq!(path, dir.path().join("claude-code/k8.jsonl"));
+        // sessions with no id are not one session
+        fs::create_dir_all(dir.path().join("codex")).unwrap();
+        fs::write(dir.path().join("codex/_unknown.jsonl"), "").unwrap();
+        let (path, _) = capture(dir.path(), &mut &b"{"[..], "t", local).unwrap();
+        assert_eq!(path, dir.path().join("claude-code/_unknown.jsonl"));
     }
 
     #[test]

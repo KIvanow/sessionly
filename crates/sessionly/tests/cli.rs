@@ -9,6 +9,7 @@ fn sessionly(home: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_sessionly"));
     cmd.env("HOME", home)
         .env("SESSIONLY_HOME", home.join("data"))
+        .env_remove("CODEX_HOME")
         // no background runs unless a test asks for them
         .env("SESSIONLY_NO_AUTO", "1")
         .env_remove("SESSIONLY_TOKEN")
@@ -97,7 +98,8 @@ fn capture_without_a_home_writes_nothing() {
         .current_dir(cwd.path())
         .env_remove("HOME")
         .env_remove("USERPROFILE")
-        .env_remove("SESSIONLY_HOME");
+        .env_remove("SESSIONLY_HOME")
+        .env_remove("CODEX_HOME");
     let out = run_with_stdin(cmd, br#"{"session_id":"s1"}"#);
     assert_silent_success(&out, "no home");
     assert_eq!(fs::read_dir(cwd.path()).unwrap().count(), 0);
@@ -190,6 +192,7 @@ fn the_installed_command_really_runs_capture() {
     install
         .env("HOME", home.path())
         .env("SESSIONLY_HOME", home.path().join("data"))
+        .env_remove("CODEX_HOME")
         .args(["install", "--project"])
         .arg(&project);
     // Running a file right after copying it can fail with "text file busy"
@@ -216,10 +219,85 @@ fn the_installed_command_really_runs_capture() {
         .arg(command)
         .env("SESSIONLY_NO_AUTO", "1")
         .env("HOME", home.path())
-        .env("SESSIONLY_HOME", home.path().join("data"));
+        .env("SESSIONLY_HOME", home.path().join("data"))
+        .env_remove("CODEX_HOME");
     let out = run_with_stdin(hook, br#"{"session_id":"s9","hook_event_name":"Stop"}"#);
     assert_silent_success(&out, "installed hook command");
     assert!(home.path().join("data/raw/claude-code/s9.jsonl").exists());
+}
+
+/// Every command in a hooks file, wherever it sits.
+fn hook_commands(value: &serde_json::Value) -> Vec<&str> {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .flat_map(|(key, child)| match (key.as_str(), child.as_str()) {
+                ("command", Some(command)) => vec![command],
+                _ => hook_commands(child),
+            })
+            .collect(),
+        serde_json::Value::Array(items) => items.iter().flat_map(hook_commands).collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn codex_hooks_are_installed_only_when_codex_home_exists() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+    let run = |args: &[&str]| stdout(sessionly(home.path()).args(args).output().unwrap());
+    run(&["install"]);
+    let hooks_path = home.path().join(".codex/hooks.json");
+    let installed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    // the path is quoted when it has a space or the like in it
+    let exe = env!("CARGO_BIN_EXE_sessionly");
+    let ours = [format!("{exe} capture"), format!("'{exe}' capture")];
+    let commands = hook_commands(&installed);
+    assert_eq!(commands.len(), 11);
+    assert!(commands.iter().all(|c| ours.iter().any(|o| o == c)));
+    assert!(run(&["status"])
+        .lines()
+        .any(|line| line.starts_with("Codex:")));
+
+    run(&["uninstall"]);
+    let uninstalled: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    assert!(hook_commands(&uninstalled).is_empty());
+
+    let empty_home = tempfile::tempdir().unwrap();
+    stdout(
+        sessionly(empty_home.path())
+            .arg("install")
+            .output()
+            .unwrap(),
+    );
+    assert!(!empty_home.path().join(".codex/hooks.json").exists());
+}
+
+#[test]
+fn a_broken_codex_hooks_file_does_not_break_the_rest() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join(".codex")).unwrap();
+    fs::write(home.path().join(".codex/hooks.json"), "{ not json").unwrap();
+
+    for args in [["install"], ["status"], ["uninstall"]] {
+        let out = run(home.path(), &args);
+        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
+    }
+    // Claude's hooks went in and out as usual, and the broken file was left alone
+    let settings = fs::read_to_string(home.path().join(".claude/settings.json")).unwrap();
+    assert!(!settings.contains("sessionly"));
+    assert_eq!(
+        fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap(),
+        "{ not json"
+    );
+    let installed = run(home.path(), &["install"]);
+    assert!(stderr(&installed).contains("Codex hooks not installed"));
+    assert!(stdout(run(home.path(), &["status"]))
+        .lines()
+        .any(|line| line.starts_with("Codex:") && line.contains("unreadable")));
 }
 
 #[test]

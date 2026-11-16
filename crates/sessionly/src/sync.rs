@@ -1,11 +1,12 @@
 //! `sessionly sync`: normalize captured sessions into the ledger.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::import_codex::Roots;
 use crate::ledger::{Fingerprint, Ledger};
 use crate::normalize;
 use crate::transcript;
@@ -17,7 +18,8 @@ pub struct Report {
     /// Capture files with no usable events.
     pub empty: u64,
     /// Sessions dropped from the ledger because their capture is gone
-    /// (only a full rebuild does this).
+    /// (only a full rebuild does this), or because they turned out to be a
+    /// Codex subagent's thread.
     pub removed: u64,
     pub failed: Vec<(PathBuf, String)>,
 }
@@ -85,9 +87,75 @@ fn jsonl_files(dir: &Path) -> BTreeMap<String, PathBuf> {
         .collect()
 }
 
+/// The thread a Codex session file began as, when that is another thread:
+/// the file is of a subagent.
+fn codex_root(file: &Path, stem: &str, roots: &mut Roots) -> Option<String> {
+    let rollout = roots.rollout_of(file)?;
+    roots
+        .root_of(&rollout)
+        .filter(|root| crate::capture::file_stem(Some(root)) != stem)
+}
+
+/// What `take_subagents` found: the captures of each session's subagents, and
+/// each subagent's own stem with its session's.
+#[derive(Default)]
+struct Subagents {
+    captures: BTreeMap<String, Vec<PathBuf>>,
+    folded: Vec<(String, String)>,
+}
+
+/// Codex's hooks run in a subagent's thread too, so its capture is a file of
+/// its own, and a subagent whose session was missing once may have been
+/// imported alone. Neither is a session while the session that spawned it
+/// is: take their stems out of `stems`. That is the importer's rule too: a
+/// subagent belongs to a session that has an import, which is when the
+/// session's rollout exists. Otherwise it stands alone.
+fn take_subagents(
+    raw: &BTreeMap<String, PathBuf>,
+    imported: &BTreeMap<String, PathBuf>,
+    stems: &mut BTreeSet<&String>,
+    roots: &mut Roots,
+) -> Subagents {
+    let mut found = Subagents::default();
+    let all: Vec<String> = stems.iter().map(|s| (*s).clone()).collect();
+    for stem in all {
+        let Some(file) = raw.get(&stem).or(imported.get(&stem)) else {
+            continue;
+        };
+        let Some(root) = codex_root(file, &stem, roots) else {
+            continue;
+        };
+        let root = crate::capture::file_stem(Some(&root));
+        if imported.contains_key(&root) {
+            stems.remove(&stem);
+            if let Some(capture) = raw.get(&stem) {
+                found
+                    .captures
+                    .entry(root.clone())
+                    .or_default()
+                    .push(capture.clone());
+            }
+            found.folded.push((stem, root));
+        }
+    }
+    found
+}
+
 fn size(path: Option<&PathBuf>) -> u64 {
     path.and_then(|p| fs::metadata(p).ok())
         .map_or(0, |m| m.len())
+}
+
+/// How many times Codex asked for permission, from its hook captures: the
+/// session's own and its subagents'. One that cannot be read counts for none.
+fn permission_requests<'a>(captures: impl Iterator<Item = &'a PathBuf>) -> u64 {
+    let mut asked = 0;
+    for path in captures {
+        let _ = crate::jsonl::for_each(path, |record| {
+            asked += u64::from(record["hook"] == "PermissionRequest");
+        });
+    }
+    asked
 }
 
 /// Build a session from its hook capture, its import, or both.
@@ -96,21 +164,32 @@ fn size(path: Option<&PathBuf>) -> u64 {
 /// better source (it has permission prompts and exact timing); one that began
 /// partway covers less than the transcript does, so an import wins over it.
 /// For other agents the hooks only say that a session happened: their own
-/// session files hold more, so an import always wins.
+/// session files hold more, so an import always wins. Codex's files leave out
+/// one thing its hooks do say: that it asked for permission. A subagent's
+/// thread has a capture of its own, which counts toward the session that
+/// spawned it (`subagent_raw`).
 fn build(
     dirs: &SourceDirs,
     raw: Option<&PathBuf>,
     imported: Option<&PathBuf>,
+    subagent_raw: &[PathBuf],
 ) -> Result<Option<normalize::Built>> {
     let from = |path: Option<&PathBuf>| match path {
         Some(path) => normalize::build_from_raw(path, &dirs.facts, &dirs.source),
         None => Ok(None),
     };
     if dirs.source != crate::paths::CLAUDE_CODE {
-        if let Some(built) = from(imported)? {
-            return Ok(Some(built));
+        let mut built = match from(imported)? {
+            Some(built) => Some(built),
+            None => from(raw)?,
+        };
+        if let (Some(built), true) = (&mut built, dirs.source == crate::paths::CODEX) {
+            if raw.is_some() || !subagent_raw.is_empty() {
+                built.session.counts.permission_requests =
+                    permission_requests(raw.into_iter().chain(subagent_raw));
+            }
         }
-        return from(raw);
+        return Ok(built);
     }
     let from_raw = from(raw)?;
     if from_raw
@@ -129,6 +208,105 @@ fn build(
     Ok(from_import.or(from_raw))
 }
 
+/// What became of one session in a sync.
+enum Outcome {
+    /// Already in the ledger as it should be.
+    Unchanged(String),
+    /// The session's id, and the name of its files.
+    Synced(String, String),
+    /// Nothing usable in its files.
+    Empty,
+    Failed(PathBuf, String),
+}
+
+/// The sessions that are in the ledger once a sync is done: their ids, and
+/// the names of their files.
+#[derive(Default)]
+struct Present {
+    ids: Vec<String>,
+    stems: HashSet<String>,
+}
+
+/// Count `outcome` in `report`, and note the sessions that are in the ledger.
+fn record(outcome: Outcome, report: &mut Report, present: &mut Present) {
+    match outcome {
+        Outcome::Unchanged(stem) => {
+            report.unchanged += 1;
+            present.ids.push(stem.clone());
+            present.stems.insert(stem);
+        }
+        Outcome::Synced(id, stem) => {
+            report.synced += 1;
+            present.ids.push(id);
+            present.stems.insert(stem);
+        }
+        Outcome::Empty => report.empty += 1,
+        Outcome::Failed(source, reason) => report.failed.push((source, reason)),
+    }
+}
+
+/// What syncing the sessions of one agent has in common.
+struct Pass<'a> {
+    dirs: &'a SourceDirs,
+    raw: &'a BTreeMap<String, PathBuf>,
+    imported: &'a BTreeMap<String, PathBuf>,
+    built_with: &'a str,
+    machine_id: &'a str,
+    force: bool,
+}
+
+impl Pass<'_> {
+    /// Bring one session up to date. `subagent_raw` are the captures of
+    /// subagents that are part of it.
+    fn stem(&self, ledger: &mut Ledger, stem: &str, subagent_raw: &[PathBuf]) -> Result<Outcome> {
+        let (raw, imported) = (self.raw.get(stem), self.imported.get(stem));
+        let source_bytes =
+            size(raw) + size(imported) + subagent_raw.iter().map(|p| size(Some(p))).sum::<u64>();
+        if !self.force {
+            if let Some(stored) = ledger.fingerprint(stem)? {
+                let transcript_bytes = stored
+                    .transcript_path
+                    .as_deref()
+                    .map_or(0, |p| transcript::tree_size(Path::new(p)));
+                if stored.built_with == self.built_with
+                    && stored.raw_bytes == source_bytes
+                    && stored.transcript_bytes == transcript_bytes
+                {
+                    return Ok(Outcome::Unchanged(stem.to_string()));
+                }
+            }
+        }
+        let source = raw.or(imported).cloned().unwrap_or_default();
+        Ok(match build(self.dirs, raw, imported, subagent_raw) {
+            Ok(Some(mut built)) => {
+                built.session.machine_id = self.machine_id.to_string();
+                // Files are named after their session. Anything else (a copy,
+                // a renamed file) must not overwrite the real session.
+                let expected = crate::capture::file_stem(Some(&built.session.session_id));
+                if expected != stem {
+                    let reason = format!("file name does not match its session id ({expected})");
+                    return Ok(Outcome::Failed(source, reason));
+                }
+                let fingerprint = Fingerprint {
+                    built_with: self.built_with.to_string(),
+                    raw_bytes: source_bytes,
+                    transcript_bytes: built
+                        .transcript_path
+                        .as_deref()
+                        .map_or(0, transcript::tree_size),
+                    transcript_path: built
+                        .transcript_path
+                        .map(|p| p.to_string_lossy().into_owned()),
+                };
+                ledger.upsert(&built.session, &fingerprint, &built.added_lines)?;
+                Outcome::Synced(built.session.session_id, stem.to_string())
+            }
+            Ok(None) => Outcome::Empty,
+            Err(err) => Outcome::Failed(source, format!("{err:#}")),
+        })
+    }
+}
+
 /// Normalize every session whose capture, import or transcript changed since
 /// it was last stored (or all of them with `force`).
 pub fn run(
@@ -139,68 +317,50 @@ pub fn run(
 ) -> Result<Report> {
     let mut report = Report::default();
     let built_with = built_with(machine_id);
-    let mut present: Vec<String> = Vec::new();
+    let mut present = Present::default();
 
     for dirs in sources {
         let raw = jsonl_files(&dirs.raw);
         let imported = jsonl_files(&dirs.imported);
-        let stems: BTreeSet<&String> = raw.keys().chain(imported.keys()).collect();
+        let mut stems: BTreeSet<&String> = raw.keys().chain(imported.keys()).collect();
+        let mut roots = Roots::load(&dirs.imported);
+        let subagents = if dirs.source == crate::paths::CODEX {
+            take_subagents(&raw, &imported, &mut stems, &mut roots)
+        } else {
+            Subagents::default()
+        };
+        roots.save();
+        let pass = Pass {
+            dirs,
+            raw: &raw,
+            imported: &imported,
+            built_with: &built_with,
+            machine_id,
+            force,
+        };
         for stem in stems {
-            let (raw, imported) = (raw.get(stem), imported.get(stem));
-            let source_bytes = size(raw) + size(imported);
-            if !force {
-                if let Some(stored) = ledger.fingerprint(stem)? {
-                    let transcript_bytes = stored
-                        .transcript_path
-                        .as_deref()
-                        .map_or(0, |p| transcript::tree_size(Path::new(p)));
-                    if stored.built_with == built_with
-                        && stored.raw_bytes == source_bytes
-                        && stored.transcript_bytes == transcript_bytes
-                    {
-                        report.unchanged += 1;
-                        present.push(stem.clone());
-                        continue;
-                    }
+            let extra = subagents.captures.get(stem).map_or(&[][..], Vec::as_slice);
+            record(pass.stem(ledger, stem, extra)?, &mut report, &mut present);
+        }
+        // A thread that was left out of the sessions for its parent's sake
+        // goes once the parent is in the ledger. Until then it keeps what it
+        // has, which is all there is of the subagent's work: a parent that
+        // came to nothing leaves it to stand alone.
+        for (subagent, parent) in &subagents.folded {
+            let parent_is_in = present.stems.contains(parent);
+            if parent_is_in {
+                if ledger.fingerprint(subagent)?.is_some() {
+                    report.removed += u64::from(ledger.remove(subagent)?);
                 }
-            }
-            let source = raw.or(imported).cloned().unwrap_or_default();
-            match build(dirs, raw, imported) {
-                Ok(Some(mut built)) => {
-                    built.session.machine_id = machine_id.to_string();
-                    // Files are named after their session. Anything else (a copy,
-                    // a renamed file) must not overwrite the real session.
-                    let expected = crate::capture::file_stem(Some(&built.session.session_id));
-                    if expected != *stem {
-                        let reason =
-                            format!("file name does not match its session id ({expected})");
-                        report.failed.push((source, reason));
-                        continue;
-                    }
-                    let fingerprint = Fingerprint {
-                        built_with: built_with.clone(),
-                        raw_bytes: source_bytes,
-                        transcript_bytes: built
-                            .transcript_path
-                            .as_deref()
-                            .map_or(0, transcript::tree_size),
-                        transcript_path: built
-                            .transcript_path
-                            .map(|p| p.to_string_lossy().into_owned()),
-                    };
-                    ledger.upsert(&built.session, &fingerprint, &built.added_lines)?;
-                    present.push(built.session.session_id);
-                    report.synced += 1;
-                }
-                Ok(None) => report.empty += 1,
-                Err(err) => report.failed.push((source, format!("{err:#}"))),
+            } else {
+                record(pass.stem(ledger, subagent, &[])?, &mut report, &mut present);
             }
         }
     }
     // A full rebuild makes the ledger match the captures and imports exactly.
     // A normal sync never removes anything.
     if force {
-        report.removed = ledger.retain(&present)?;
+        report.removed += ledger.retain(&present.ids)?;
     }
     Ok(report)
 }
@@ -273,6 +433,96 @@ mod tests {
             let record = self.ledger.get(session).unwrap().unwrap();
             record.cost.map(|c| c.total_usd)
         }
+    }
+
+    #[test]
+    fn a_codex_subagents_capture_is_part_of_its_session() {
+        let mut env = env();
+        let main = env
+            .transcripts
+            .join("rollout-2026-11-16T12-00-00-main.jsonl");
+        let child = env
+            .transcripts
+            .join("rollout-2026-11-16T12-00-05-sub.jsonl");
+        fs::create_dir_all(&env.transcripts).unwrap();
+        fs::write(&main, "{\"payload\":{\"session_id\":\"main\"}}\n").unwrap();
+        fs::write(&child, "{\"payload\":{\"session_id\":\"main\"}}\n").unwrap();
+        let capture = |session: &str, rollout: &Path, hook: &str| {
+            let line = json!({
+                "hook": hook, "received_at": "2026-11-16T12:00:00Z",
+                "payload": { "session_id": session, "prompt_id": "p", "prompt": "hi",
+                             "transcript_path": rollout }
+            });
+            let mut f = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(env.raw.join(format!("{session}.jsonl")))
+                .unwrap();
+            writeln!(f, "{line}").unwrap();
+        };
+        let dirs = || SourceDirs {
+            source: "codex".into(),
+            raw: env.raw.clone(),
+            imported: env.raw.with_file_name("imported"),
+            facts: env.facts.clone(),
+        };
+        // until its parent is known, the subagent's thread is a session
+        capture("sub", &child, "UserPromptSubmit");
+        capture("sub", &child, "PermissionRequest");
+        let alone = run(&[dirs()], &mut env.ledger, "machine-1", false).unwrap();
+        assert_eq!(alone.synced, 1);
+        assert!(env.ledger.get("sub").unwrap().is_some());
+
+        // the parent's own import is what makes it a session with subagents
+        capture("main", &main, "UserPromptSubmit");
+        let imports = env.raw.with_file_name("imported");
+        fs::create_dir_all(&imports).unwrap();
+        fs::copy(env.raw.join("main.jsonl"), imports.join("main.jsonl")).unwrap();
+        let report = run(&[dirs()], &mut env.ledger, "machine-1", false).unwrap();
+        assert_eq!((report.synced, report.removed), (1, 1));
+        assert!(env.ledger.get("sub").unwrap().is_none());
+        // a rebuild reports it once, not twice
+        let forced = run(&[dirs()], &mut env.ledger, "machine-1", true).unwrap();
+        assert_eq!(forced.removed, 0);
+        let session = env.ledger.get("main").unwrap().unwrap();
+        assert_eq!(session.counts.permission_requests, 1);
+    }
+
+    #[test]
+    fn a_codex_subagent_stands_alone_while_its_parent_has_nothing() {
+        let mut env = env();
+        let main = env
+            .transcripts
+            .join("rollout-2026-11-16T12-00-00-main.jsonl");
+        let child = env
+            .transcripts
+            .join("rollout-2026-11-16T12-00-05-sub.jsonl");
+        fs::create_dir_all(&env.transcripts).unwrap();
+        for path in [&main, &child] {
+            fs::write(path, "{\"payload\":{\"session_id\":\"main\"}}\n").unwrap();
+        }
+        let line = json!({
+            "hook": "UserPromptSubmit", "received_at": "2026-11-16T12:00:00Z",
+            "payload": { "session_id": "sub", "prompt_id": "p", "prompt": "hi", "transcript_path": child }
+        });
+        fs::write(env.raw.join("sub.jsonl"), format!("{line}\n")).unwrap();
+        // the parent has an import, but one with nothing to build a session from
+        let imports = env.raw.with_file_name("imported");
+        fs::create_dir_all(&imports).unwrap();
+        fs::write(
+            imports.join("main.jsonl"),
+            "{\"payload\":{\"_unparsed\":\"x\"}}\n",
+        )
+        .unwrap();
+        let dirs = SourceDirs {
+            source: "codex".into(),
+            raw: env.raw.clone(),
+            imported: imports,
+            facts: env.facts.clone(),
+        };
+        let report = run(&[dirs], &mut env.ledger, "machine-1", false).unwrap();
+        assert_eq!((report.synced, report.empty), (1, 1));
+        assert!(env.ledger.get("sub").unwrap().is_some());
     }
 
     #[test]
@@ -481,6 +731,43 @@ mod tests {
         assert_eq!(imported.counts.prompts, 2);
         assert_eq!(imported.captured_by, crate::session::CapturedBy::Transcript);
         assert_eq!(imported.source, "grok");
+    }
+
+    #[test]
+    fn a_codex_import_takes_its_permission_requests_from_the_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = SourceDirs::in_data_dir(dir.path(), "codex");
+        fs::create_dir_all(&dirs.raw).unwrap();
+        fs::create_dir_all(&dirs.imported).unwrap();
+        let record = |hook: &str, origin: &str| {
+            json!({ "hook": hook, "origin": origin, "received_at": "2026-11-16T10:00:00Z",
+                    "payload": { "session_id": "x1", "prompt_id": "t1", "prompt": "x", "tool_name": "Bash" } })
+            .to_string()
+                + "\n"
+        };
+        fs::write(
+            dirs.imported.join("x1.jsonl"),
+            record("UserPromptSubmit", "transcript"),
+        )
+        .unwrap();
+        let mut ledger = Ledger::open(&dir.path().join("l.db")).unwrap();
+        run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
+        let asked = |ledger: &Ledger| {
+            let session = ledger.get("x1").unwrap().unwrap();
+            (session.captured_by, session.counts.permission_requests)
+        };
+        use crate::session::CapturedBy::Transcript;
+        assert_eq!(asked(&ledger), (Transcript, 0));
+
+        fs::write(
+            dirs.raw.join("x1.jsonl"),
+            record("PermissionRequest", "hook")
+                + &record("PreToolUse", "hook")
+                + &record("PermissionRequest", "hook"),
+        )
+        .unwrap();
+        run(&[dirs], &mut ledger, "m", false).unwrap();
+        assert_eq!(asked(&ledger), (Transcript, 2));
     }
 
     #[test]

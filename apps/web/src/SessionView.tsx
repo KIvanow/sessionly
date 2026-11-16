@@ -98,7 +98,9 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
                   ? "unknown: Cursor's cloud agents do not report usage to hooks"
                   : s.source === "cursor"
                     ? "unknown: Cursor reports usage only to hooks, and they saw none of this session"
-                    : "unknown"
+                    : s.source === "codex"
+                      ? "unknown: Codex records tokens, not what they cost"
+                      : "unknown"
             }
           />
           <Fact label="Models" value={(s.models ?? []).join(", ") || "–"} />

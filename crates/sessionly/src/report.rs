@@ -265,6 +265,11 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
             "unknown (Cursor reports usage to hooks when a turn ends, and they saw no turn of this session end)"
                 .into(),
         ),
+        None if s.source == crate::paths::CODEX => field(
+            &mut out,
+            "Cost",
+            "unknown (Codex records tokens, not what they cost)".into(),
+        ),
         None => field(&mut out, "Cost", "unknown (no transcript found)".into()),
     }
     if let Some(n) = s
@@ -529,6 +534,7 @@ pub fn tool_name(source: &str) -> &str {
         "claude-code" => "Claude Code",
         "cursor" => "Cursor",
         "grok" => "Grok",
+        "codex" => "Codex",
         other => other,
     }
 }

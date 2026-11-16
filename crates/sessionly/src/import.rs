@@ -8,20 +8,20 @@
 //! the agent deleting its files. Tool results are reduced to what normalizing
 //! needs, so the saved file is far smaller than the original.
 //!
-//! This file has the shared parts and Claude Code's transcripts; Grok and
-//! Cursor are in `import_grok` and `import_cursor`.
+//! This file has the shared parts and Claude Code's transcripts; Grok,
+//! Cursor and Codex are in `import_grok`, `import_cursor` and `import_codex`.
 //!
 //! What a Claude Code transcript cannot tell us: permission prompts that were
 //! approved, and when the session ended.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::paths::{CLAUDE_CODE, CURSOR, GROK};
+use crate::paths::{CLAUDE_CODE, CODEX, CURSOR, GROK};
 use crate::transcript::{self, Facts};
 
 /// Rows a user row can be besides a prompt the person typed.
@@ -445,6 +445,8 @@ pub struct AgentHomes {
     pub grok_sessions: Option<PathBuf>,
     /// `~/.cursor/projects`
     pub cursor_projects: Option<PathBuf>,
+    /// `~/.codex`, which has `sessions` and `archived_sessions`
+    pub codex_home: Option<PathBuf>,
 }
 
 impl AgentHomes {
@@ -460,18 +462,19 @@ impl AgentHomes {
                     .or(home.as_ref().map(|h| h.join(".grok")))
                     .map(|d| d.join("sessions")),
             ),
-            cursor_projects: existing(home.map(|h| h.join(".cursor").join("projects"))),
+            cursor_projects: existing(home.as_ref().map(|h| h.join(".cursor").join("projects"))),
+            codex_home: existing(crate::paths::codex_home()),
         }
     }
 }
 
 /// Raised when an importer reads more, or differently, from the same files,
 /// so that sessions imported by an older binary are imported again.
-const IMPORT_VERSION: u64 = 5;
+const IMPORT_VERSION: u64 = 6;
 
-/// The source file, its size and the importer's version recorded in an
-/// import file's first record.
-fn imported_from(import_file: &Path) -> Option<(PathBuf, u64, u64)> {
+/// The source file, its size, the importer's version and the stamp of the
+/// session's name recorded in an import file's first record.
+fn imported_from(import_file: &Path) -> Option<(PathBuf, u64, u64, u64)> {
     use std::io::BufRead;
     let mut line = String::new();
     std::io::BufReader::new(fs::File::open(import_file).ok()?)
@@ -483,6 +486,10 @@ fn imported_from(import_file: &Path) -> Option<(PathBuf, u64, u64)> {
         PathBuf::from(payload["transcript_path"].as_str()?),
         payload["transcript_bytes"].as_u64()?,
         payload["import_version"].as_u64().unwrap_or(1),
+        payload["name_hash"]
+            .as_str()
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+            .unwrap_or(0),
     ))
 }
 
@@ -519,6 +526,10 @@ struct Found {
     path: PathBuf,
     /// A Cursor session with no transcript yet: `path` is its hook capture.
     hooks_only: bool,
+    /// A Codex session's subagents: each is a thread with a file of its own.
+    subagents: Vec<PathBuf>,
+    /// What a Codex thread was called: Codex keeps that apart from the session.
+    name: Option<String>,
 }
 
 /// The raw hook capture of a session, which a Cursor import also reads.
@@ -536,11 +547,21 @@ fn source_bytes(found: &Found, data_dir: &Path) -> u64 {
     let size = |path: &Path| fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     match found.source {
         GROK => crate::import_grok::session_bytes(&found.path),
+        CODEX => crate::import_codex::session_bytes(&found.path, &found.subagents),
         CURSOR if found.hooks_only => size(&found.path),
         CURSOR => {
             crate::import_cursor::session_bytes(&found.path) + size(&capture_of(found, data_dir))
         }
         _ => transcript::tree_size(&found.path),
+    }
+}
+
+/// What a session is called, as a stamp: only Codex keeps that apart from the
+/// files, so a rename there has to redo the import.
+fn name_hash(found: &Found) -> u64 {
+    match found.source {
+        CODEX => crate::import_codex::name_hash(found.name.as_deref()),
+        _ => 0,
     }
 }
 
@@ -552,12 +573,14 @@ fn import_one(found: &Found, data_dir: &Path, report: &mut Report) {
         .join(found.source)
         .join(format!("{stem}.jsonl"));
     let bytes = source_bytes(found, data_dir);
-    if imported_from(&target) == Some((found.path.clone(), bytes, IMPORT_VERSION)) {
+    let named = name_hash(found);
+    if imported_from(&target) == Some((found.path.clone(), bytes, IMPORT_VERSION, named)) {
         report.up_to_date += 1;
         return;
     }
     let built: Result<(Vec<Value>, Option<Facts>)> = match found.source {
         GROK => crate::import_grok::session(&found.path),
+        CODEX => crate::import_codex::session(&found.path, &found.subagents, found.name.as_deref()),
         CURSOR if found.hooks_only => crate::import_cursor::session_from_hooks(&found.path),
         CURSOR => {
             let capture = capture_of(found, data_dir);
@@ -573,6 +596,10 @@ fn import_one(found: &Found, data_dir: &Path, report: &mut Report) {
         start["payload"]["transcript_path"] = json!(found.path);
         start["payload"]["transcript_bytes"] = json!(bytes);
         start["payload"]["import_version"] = json!(IMPORT_VERSION);
+        if named != 0 {
+            // text: a 64-bit number is more than JSON readers keep exactly
+            start["payload"]["name_hash"] = json!(format!("{named:016x}"));
+        }
         if let Some(facts) = facts {
             let facts_path = data_dir
                 .join("transcript-facts")
@@ -637,6 +664,8 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
                 session_id,
                 path,
                 hooks_only: false,
+                subagents: Vec::new(),
+                name: None,
             });
         }
     }
@@ -650,6 +679,8 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
                     session_id: name_of(&session),
                     path,
                     hooks_only: false,
+                    subagents: Vec::new(),
+                    name: None,
                 });
             }
         }
@@ -665,9 +696,60 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
                     session_id,
                     path,
                     hooks_only: false,
+                    subagents: Vec::new(),
+                    name: None,
                 });
             }
         }
+    }
+    // Codex: <home>/sessions/<year>/<month>/<day>/rollout-<time>-<thread>.jsonl,
+    // and archived ones side by side in <home>/archived_sessions.
+    let mut files_of: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    if let Some(home) = &homes.codex_home {
+        for path in crate::import_codex::files_in(home) {
+            if let Some(thread) = crate::import_codex::thread_id(&path) {
+                files_of.entry(thread).or_default().push(path);
+            }
+        }
+    }
+    // A thread that was reverted has more than one file: the one nothing
+    // else carries on from counts.
+    let mut rollouts: BTreeMap<String, PathBuf> = files_of
+        .into_iter()
+        .filter_map(|(thread, files)| {
+            let latest = crate::import_codex::latest_rollout(&files)?.clone();
+            Some((thread, latest))
+        })
+        .collect();
+    // A subagent's thread belongs to the session of the thread that began it.
+    // One whose session's file is gone stands on its own.
+    let mut roots = crate::import_codex::Roots::load(&data_dir.join("imported").join(CODEX));
+    let threads: HashSet<String> = rollouts.keys().cloned().collect();
+    let mut subagents: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    rollouts.retain(|thread, path| {
+        let root = roots.root_of(path);
+        match root.filter(|root| root != thread && threads.contains(root)) {
+            Some(root) => {
+                subagents.entry(root).or_default().push(path.clone());
+                false
+            }
+            None => true,
+        }
+    });
+    roots.save();
+    let mut names = match &homes.codex_home {
+        Some(home) if !rollouts.is_empty() => crate::import_codex::thread_names(home),
+        _ => HashMap::new(),
+    };
+    for (session_id, path) in rollouts {
+        found.push(Found {
+            source: CODEX,
+            subagents: subagents.remove(&session_id).unwrap_or_default(),
+            name: names.remove(&session_id),
+            session_id,
+            path,
+            hooks_only: false,
+        });
     }
     // Cursor writes a transcript when a turn ends. A session the hooks have
     // captured and that has none yet is read from its capture alone.
@@ -694,6 +776,8 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
                 session_id,
                 path,
                 hooks_only: true,
+                subagents: Vec::new(),
+                name: None,
             });
         }
     }
@@ -1105,6 +1189,63 @@ mod tests {
         assert_eq!(refresh(&homes, &data).imported, 1);
         assert_eq!(prompts(&imported), 4);
         assert_eq!(imported_from(&imported).unwrap().0, transcript);
+    }
+
+    #[test]
+    fn a_codex_session_takes_its_subagents_threads_with_it() {
+        use crate::import_codex::tests::{sample, subagent, MAIN};
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("codex");
+        let (rollout, child) = (sample(&home), subagent(&home));
+        fs::write(home.join("sessions/2026/11/16/notes.jsonl"), "{}\n").unwrap();
+        let data = dir.path().join("data");
+        let homes = AgentHomes {
+            codex_home: Some(home),
+            ..Default::default()
+        };
+        // nothing is imported for the first time by a sync
+        assert_eq!(refresh(&homes, &data), Report::default());
+
+        let report = import_all(&homes, &data, &["codex".to_string()], &[]);
+        assert_eq!((report.imported, report.failed.len()), (1, 0));
+        assert_eq!(report.by_source["codex"], 1);
+        let imported = data.join(format!("imported/codex/{MAIN}.jsonl"));
+        let saved = fs::read_to_string(&imported).unwrap();
+        assert!(saved.contains("SubagentStart") && saved.contains("rg TODO"));
+        assert!(data
+            .join(format!("transcript-facts/codex/{MAIN}.json"))
+            .exists());
+        assert_eq!(imported_from(&imported).unwrap().0, rollout);
+        assert_eq!(refresh(&homes, &data).up_to_date, 1);
+
+        // the subagent goes on: its session is imported again
+        let mut f = fs::OpenOptions::new().append(true).open(&child).unwrap();
+        writeln!(f, "{{}}").unwrap();
+        assert_eq!(refresh(&homes, &data).imported, 1);
+
+        // the thread is given another name, and nothing else changes
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(
+                homes
+                    .codex_home
+                    .as_ref()
+                    .unwrap()
+                    .join("session_index.jsonl"),
+            )
+            .unwrap();
+        writeln!(f, "{}", json!({ "id": MAIN, "thread_name": "Renamed" })).unwrap();
+        assert_eq!(refresh(&homes, &data).imported, 1);
+        assert!(fs::read_to_string(&imported).unwrap().contains("Renamed"));
+        assert_eq!(refresh(&homes, &data).up_to_date, 1);
+
+        // a session the hooks have seen is imported without being asked for
+        let data = dir.path().join("fresh");
+        write_rows(
+            &data.join(format!("raw/codex/{MAIN}.jsonl")),
+            &[json!({ "hook": "Stop", "payload": { "session_id": MAIN } })],
+        );
+        assert_eq!(refresh(&homes, &data).imported, 1);
     }
 
     #[test]

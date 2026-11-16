@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{bail, Context, Result};
@@ -13,6 +13,7 @@ mod cursor_hooks;
 mod git;
 mod hooks;
 mod import;
+mod import_codex;
 mod import_cursor;
 mod import_grok;
 mod jsonl;
@@ -65,11 +66,11 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Bring in past sessions from the files Claude Code, Cursor and Grok keep
+    /// Bring in past sessions from the files Claude Code, Cursor, Grok and Codex keep
     Import {
         /// Session ids (or the start of one) to import [default: every session]
         sessions: Vec<String>,
-        /// Only this tool's sessions: claude-code, cursor or grok (repeatable)
+        /// Only this tool's sessions: claude-code, cursor, grok or codex (repeatable)
         #[arg(long = "tool", value_name = "TOOL")]
         tools: Vec<String>,
     },
@@ -212,7 +213,7 @@ struct Target {
 /// Which sessions to include. Text filters match substrings, ignoring case.
 #[derive(Args)]
 struct FilterArgs {
-    /// Tool: claude-code, cursor or grok
+    /// Tool: claude-code, cursor, grok or codex
     #[arg(long)]
     tool: Option<String>,
     /// Repository: part of its remote (owner/name) or its path
@@ -414,6 +415,12 @@ fn run(command: Command) -> Result<()> {
                     "Note: that path is specific to this machine. If this settings file is \
                      committed, use .claude/settings.local.json for the hooks instead."
                 );
+            } else if paths::codex_home().is_some_and(|home| home.is_dir()) {
+                // Codex reads its own file, not Claude Code's. A file that
+                // cannot be changed is no reason to undo the install above.
+                if let Err(err) = install_codex(&exe) {
+                    eprintln!("warning: Codex hooks not installed: {err:#}");
+                }
             }
         }
         Command::Uninstall(target) => {
@@ -435,6 +442,11 @@ fn run(command: Command) -> Result<()> {
                 println!("Removed Sessionly hooks from {}", path.display());
             } else {
                 println!("No Sessionly hooks in {}", path.display());
+            }
+            if target.project.is_none() {
+                if let Err(err) = uninstall_codex() {
+                    eprintln!("warning: Codex hooks not removed: {err:#}");
+                }
             }
         }
         Command::Status(target) => status(&target)?,
@@ -751,6 +763,38 @@ fn print_settings(config: &config::Config) {
     );
 }
 
+/// Install the hooks in Codex's own file.
+fn install_codex(exe: &Path) -> Result<()> {
+    let path = hooks::codex_hooks_path()?;
+    let changed = hooks::install_for(&path, &hooks::capture_command(exe), hooks::Agent::Codex)?;
+    println!(
+        "{} for {} events in {}",
+        if changed {
+            "Installed Sessionly hooks for Codex"
+        } else {
+            "Sessionly hooks for Codex already installed"
+        },
+        hooks::Agent::Codex.events().count(),
+        path.display()
+    );
+    if changed {
+        println!(
+            "Codex runs new or changed hooks only once you have approved them: \
+             start codex and accept them in the review it shows, or run /hooks there."
+        );
+    }
+    Ok(())
+}
+
+/// Remove the hooks from Codex's own file, if it has any.
+fn uninstall_codex() -> Result<()> {
+    let path = hooks::codex_hooks_path()?;
+    if path.exists() && hooks::uninstall(&path, hooks::Kind::Machine)? {
+        println!("Removed Sessionly hooks from {}", path.display());
+    }
+    Ok(())
+}
+
 fn status(target: &Target) -> Result<()> {
     if let Some(dir) = target.repo_dir() {
         let found = repo::status(&dir)?;
@@ -783,6 +827,20 @@ fn status(target: &Target) -> Result<()> {
         .collect();
     if !installed.is_empty() && !missing.is_empty() {
         println!("Missing:    {}", missing.join(", "));
+    }
+    if target.project.is_none() && paths::codex_home().is_some_and(|home| home.is_dir()) {
+        let total = hooks::Agent::Codex.events().count();
+        match hooks::codex_hooks_path() {
+            Ok(path) => match hooks::installed_events(&path, hooks::Kind::Machine) {
+                Ok(installed) => println!(
+                    "Codex:      {}/{total} events in {}",
+                    installed.len(),
+                    path.display()
+                ),
+                Err(err) => println!("Codex:      unreadable, {}: {err:#}", path.display()),
+            },
+            Err(err) => println!("Codex:      {err:#}"),
+        }
     }
     let raw = paths::raw_root()?;
     let (mut sessions, mut bytes) = (0u64, 0u64);
