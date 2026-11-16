@@ -2,7 +2,9 @@
 node_modules/
 # local captures: full prompts and file contents, never commit
 /sessions/
-.sessionly/
+.sessionly/*
+# what `sessionly install --repo` writes, which the hooks in .claude and .cursor run
+!.sessionly/hook.sh
 # working notes, kept locally
 /docs/
 dist/
