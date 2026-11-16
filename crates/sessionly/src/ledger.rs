@@ -568,6 +568,17 @@ impl Ledger {
         Ok(removed as u64)
     }
 
+    /// Remove one session, with its files and measurements. Returns whether
+    /// it was there.
+    pub fn remove(&mut self, session_id: &str) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM rewrite WHERE session_id = ?1", [session_id])?;
+        tx.execute("DELETE FROM uploads WHERE session_id = ?1", [session_id])?;
+        let removed = tx.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
+        tx.commit()?;
+        Ok(removed > 0)
+    }
+
     pub fn count(&self) -> Result<u64> {
         Ok(self
             .conn

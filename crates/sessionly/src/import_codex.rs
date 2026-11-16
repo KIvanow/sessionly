@@ -65,32 +65,20 @@ pub fn thread_id(path: &Path) -> Option<String> {
 }
 
 /// The thread that started the session a rollout is part of: for a subagent
-/// that is another thread. Read from the start of the file without parsing
-/// it, since the first record also holds the whole system prompt.
+/// that is another thread. Read from the first record's `payload.session_id`,
+/// which holds the whole system prompt as well, so it is read for this only.
 pub fn root_of(path: &Path) -> Option<String> {
-    let mut start = Vec::new();
-    fs::File::open(path)
-        .ok()?
-        .take(4096)
-        .read_to_end(&mut start)
-        .ok()?;
-    let text = String::from_utf8_lossy(&start);
-    if let Some(at) = text.find("\"session_id\":\"") {
-        let after = &text[at + "\"session_id\":\"".len()..];
-        if let Some(id) = after.find('"').map(|end| &after[..end]) {
-            return (!id.is_empty()).then(|| id.to_string());
-        }
-    }
-    // The key is not among the first bytes (another field came first, or the
-    // file was written differently): read the whole first record instead.
     let mut line = String::new();
-    BufReader::new(fs::File::open(path).ok()?)
+    BufReader::new(fs::File::open(path).ok()?.take(FIRST_RECORD_LIMIT))
         .read_line(&mut line)
         .ok()?;
     let row: Value = serde_json::from_str(&line).ok()?;
     let id = row["payload"]["session_id"].as_str()?;
     (!id.is_empty()).then(|| id.to_string())
 }
+
+/// The most a first record is read to: it is a few tens of kilobytes.
+const FIRST_RECORD_LIMIT: u64 = 4 << 20;
 
 /// Which of a thread's files this is, from its name: the part a revert adds
 /// after `_`, and for a thread's first file the thread itself.
@@ -150,8 +138,9 @@ fn history_base(path: &Path) -> Option<(String, u64)> {
 
 /// The file that holds a thread as it stands now, among all of its files: the
 /// one no other file carries on from. A revert starts a new file whose
-/// `history_base` names the one before, whichever folder either is in. Falls
-/// back to the last of `files` when the chain says nothing.
+/// `history_base` names the one before, whichever folder either is in. Where
+/// the chain leaves more than one (or none), the latest by the time in the
+/// file name wins, and the last of `files` among equals.
 pub fn latest_rollout(files: &[PathBuf]) -> Option<&PathBuf> {
     if files.len() < 2 {
         return files.first();
@@ -161,11 +150,24 @@ pub fn latest_rollout(files: &[PathBuf]) -> Option<&PathBuf> {
         .filter_map(|p| history_base(p))
         .map(|(base, _)| base)
         .collect();
-    files
+    let started = |p: &&PathBuf| {
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        name.strip_prefix("rollout-")
+            .and_then(|rest| rest.get(..19))
+            .unwrap_or_default()
+            .to_string()
+    };
+    let standing: Vec<&PathBuf> = files
         .iter()
-        .rev()
-        .find(|p| rollout_id(p).is_some_and(|id| !based_on.contains(&id)))
-        .or(files.last())
+        .filter(|p| rollout_id(p).is_some_and(|id| !based_on.contains(&id)))
+        .collect();
+    let candidates = if standing.is_empty() {
+        files.iter().collect()
+    } else {
+        standing
+    };
+    // `max_by_key` keeps the last of equal keys
+    candidates.into_iter().max_by_key(started)
 }
 
 /// The files a thread's history is in, oldest first, each with how far into
@@ -1578,15 +1580,24 @@ pub(crate) mod tests {
         let files = vec![second.clone(), first.clone()];
         assert_eq!(latest_rollout(&files), Some(&second));
         assert_eq!(latest_rollout(&files[1..]), Some(&first));
+
+        // with no chain to go by, the later file name wins, not the folder order
+        let (a, b) = (dir.path().join("sessions/a"), dir.path().join("archived/b"));
+        let early = a.join(format!("rollout-2026-11-16T12-00-00-{MAIN}.jsonl"));
+        let late = b.join(format!("rollout-2026-11-18T12-00-00-{MAIN}_x.jsonl"));
+        write(&early, &[json!({})]);
+        write(&late, &[json!({})]);
+        assert_eq!(latest_rollout(&[late.clone(), early]), Some(&late));
     }
 
     #[test]
-    fn finds_the_root_session_when_its_key_is_not_among_the_first_bytes() {
+    fn finds_the_root_session_whatever_comes_before_its_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir
             .path()
             .join(format!("rollout-2026-11-16T12-00-00-{CHILD}.jsonl"));
-        let mut payload = json!({ "base_instructions": { "text": "x".repeat(6000) } });
+        let mut payload = json!({ "source": { "subagent": { "session_id": "someone-else" } },
+            "base_instructions": { "text": "x".repeat(6000) } });
         payload["session_id"] = json!(MAIN);
         write(&path, &[row(0, "session_meta", payload)]);
         assert_eq!(root_of(&path).as_deref(), Some(MAIN));

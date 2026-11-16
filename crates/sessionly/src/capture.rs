@@ -32,16 +32,17 @@ pub fn detect_source(payload: &Value) -> &'static str {
         crate::paths::CURSOR
     } else if has("workspaceRoot") || has("hookEventName") || transcript.contains("/.grok/") {
         crate::paths::GROK
-    } else if is_codex_rollout(transcript) || (transcript.is_empty() && has("turn_id")) {
+    } else if is_codex_rollout(transcript)
+        // Codex's `transcript_path` can be null, as for a session with no
+        // rollout file; its payloads still say which turn they belong to.
+        || (transcript.is_empty() && has("turn_id"))
+    {
         crate::paths::CODEX
     } else {
         crate::paths::CLAUDE_CODE
     }
 }
 
-/// Codex's `transcript_path` can be null, as for a session with no rollout
-/// file; its payloads then still say which turn they belong to (`turn_id`).
-///
 /// True for the path of a Codex session file: `…/rollout-<time>-<thread>.jsonl`,
 /// wherever `CODEX_HOME` puts it.
 fn is_codex_rollout(transcript: &str) -> bool {

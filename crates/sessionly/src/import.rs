@@ -486,7 +486,10 @@ fn imported_from(import_file: &Path) -> Option<(PathBuf, u64, u64, u64)> {
         PathBuf::from(payload["transcript_path"].as_str()?),
         payload["transcript_bytes"].as_u64()?,
         payload["import_version"].as_u64().unwrap_or(1),
-        payload["name_hash"].as_u64().unwrap_or(0),
+        payload["name_hash"]
+            .as_str()
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+            .unwrap_or(0),
     ))
 }
 
@@ -593,7 +596,10 @@ fn import_one(found: &Found, data_dir: &Path, report: &mut Report) {
         start["payload"]["transcript_path"] = json!(found.path);
         start["payload"]["transcript_bytes"] = json!(bytes);
         start["payload"]["import_version"] = json!(IMPORT_VERSION);
-        start["payload"]["name_hash"] = json!(named);
+        if named != 0 {
+            // text: a 64-bit number is more than JSON readers keep exactly
+            start["payload"]["name_hash"] = json!(format!("{named:016x}"));
+        }
         if let Some(facts) = facts {
             let facts_path = data_dir
                 .join("transcript-facts")
