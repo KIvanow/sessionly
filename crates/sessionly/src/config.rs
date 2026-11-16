@@ -46,6 +46,10 @@ pub struct Config {
     /// Upload hashes of the lines agents added, so the server can tell which
     /// lines of a pull request an agent wrote. Off unless switched on.
     pub upload_line_hashes: bool,
+    /// Count what an agent's shell commands change in the working tree, on
+    /// this machine too (see `changes`). Off unless switched on: whatever
+    /// else changes a file while a command runs is put down to the agent.
+    pub shell_edits: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,8 +66,19 @@ impl Default for Config {
             upload_content: Content::Metadata,
             auto_sync: true,
             upload_line_hashes: false,
+            shell_edits: false,
         }
     }
+}
+
+/// Whether `shell_edits` is switched on in the config at `path`. For the
+/// capture hook, which runs for every event: it reads the one setting and
+/// never creates the file.
+pub fn shell_edits(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .is_some_and(|config| config["shell_edits"] == true)
 }
 
 impl Config {

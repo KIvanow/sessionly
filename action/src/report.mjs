@@ -179,7 +179,8 @@ export function render(report, attribution, server) {
     "Added lines that have a letter or digit are counted. A line counts as an agent's when a session " +
       "uploaded to Sessionly added it to the same file; everything else, including agents nobody " +
       "captured, counts as not an agent's. On a person's own machine, what an agent changed with a shell " +
-      "command is not counted, only what it changed with its file tools.",
+      "command is not counted, only what it changed with its file tools, unless that person has " +
+      "switched shell edits on.",
     "",
     "</details>",
   );

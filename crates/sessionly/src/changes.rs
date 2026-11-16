@@ -11,9 +11,12 @@
 //! kept under the data directory. The repository's own index, objects and
 //! HEAD are never written.
 //!
-//! This is done only in a sandbox (see `runtime`), where the agent is the
-//! only one working. On a person's machine whatever the person saved while a
-//! command ran would be put down to the agent.
+//! This is done in a sandbox (see `runtime`), where the agent is the only
+//! one working. On a person's machine whatever the person saved while a
+//! command ran would be put down to the agent, and so would what another
+//! session changed meanwhile. There it is done only when the person has
+//! switched it on (`sessionly settings --shell-edits on`), and what is kept
+//! for a session is removed when the session ends.
 //!
 //! Deliberate limits:
 //! - A command that moves HEAD to commits it did not make itself (`git pull`,
@@ -157,6 +160,13 @@ pub fn observe(data_dir: &Path, record: &Value) -> Option<Value> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
     step(&data_dir.join("snapshots").join(stem), event, now)
+}
+
+/// The session of `record` is over: drop what was kept to compare against.
+/// One that starts again begins with a fresh look.
+pub fn forget(data_dir: &Path, record: &Value) {
+    let stem = crate::capture::file_stem(record["session_id"].as_str());
+    let _ = fs::remove_dir_all(data_dir.join("snapshots").join(stem));
 }
 
 /// A path as the file system knows it, as far as it exists yet, so that two
