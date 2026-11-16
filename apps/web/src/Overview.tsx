@@ -27,8 +27,6 @@ export function Overview({ token, scope, showUsers, onPick, onSignOut }: Props) 
 
   if (byDay.error) return <p role="alert">{byDay.error}</p>;
   if (!byDay.data) return <p className="muted">Loading…</p>;
-  // With a column picked, the headline is that column's: any summary of the narrowed scope has its total.
-  const total = (scope.pick ? byTool.data?.total : null) ?? byDay.data.total;
   if (byDay.data.total.sessions === 0) {
     return (
       <section className="card">
@@ -40,63 +38,35 @@ export function Overview({ token, scope, showUsers, onPick, onSignOut }: Props) 
       </section>
     );
   }
-  const estimated = total.sessions_with_estimated_cost;
+  // With a column picked, the headline is that column's, from a summary of the
+  // narrowed scope. Until that summary is in, or if it fails, there is no
+  // headline: the whole period's figures under a picked day would be wrong.
+  const picked = scope.pick ? byTool : null;
+  let headline: ReactNode;
+  if (picked?.error) {
+    headline = <p role="alert">{picked.error}</p>;
+  } else if (picked && (picked.loading || !picked.data)) {
+    headline = <p className="muted">Loading…</p>;
+  } else {
+    const total = picked?.data ? picked.data.total : byDay.data.total;
+    headline =
+      total.sessions === 0 ? (
+        <section className="card">
+          <h2>No sessions {scope.pick?.span === "week" ? "in this week" : "on this day"}</h2>
+          <p className="muted">
+            Nothing in the picked {scope.pick?.span ?? "range"} matches these filters.{" "}
+            <button className="quiet" onClick={() => onPick(null)}>
+              Show the whole period
+            </button>
+          </p>
+        </section>
+      ) : (
+        <Headline total={total} />
+      );
+  }
   return (
     <>
-      <section className="headline" aria-label="Totals">
-        <div className="hero">
-          <div>
-            <span className="label">Cost</span>
-            <span className="value" title={usd(total.cost_usd)}>{usdCompact(total.cost_usd)}</span>
-          </div>
-          <dl className="facts">
-            <dt>A session</dt>
-            <dd>{usd(total.cost_usd / total.sessions)}</dd>
-            {total.active_ms > 0 && (
-              <>
-                <dt>An active hour</dt>
-                <dd>{usd(total.cost_usd / (total.active_ms / 3_600_000))}</dd>
-              </>
-            )}
-          </dl>
-          <span className="note">
-            {estimated > 0 && `${count(estimated)} of ${count(total.sessions)} sessions are estimates. `}
-            {total.sessions_without_cost > 0 && `${count(total.sessions_without_cost)} have no cost figure.`}
-          </span>
-        </div>
-        <div className="tiles">
-          <Tile label="Sessions" value={compact(total.sessions)} />
-          <Tile label="Active time" value={duration(total.active_ms)} note="time the agent spent working" />
-          <Tile label="Prompts" value={compact(total.prompts)} />
-          <Tile
-            label="Tool calls"
-            value={compact(total.tool_calls)}
-            note={`${percent(share(total.tool_failures, total.tool_calls))} failed`}
-          />
-          <Tile
-            label="Tokens"
-            value={compact(total.input_tokens + total.output_tokens)}
-            note={`${compact(total.input_tokens)} in, ${compact(total.output_tokens)} out`}
-          />
-          <Tile
-            label="Files changed"
-            value={compact(total.files_changed)}
-            note={`+${compact(total.lines_added)} −${compact(total.lines_removed)} lines`}
-          />
-          <Tile
-            label="Files rewritten since"
-            value={percent(rewriteRate(total.rewrite))}
-            part={rewriteRate(total.rewrite)}
-            note={`${count(total.rewrite.files_rewritten)} of ${count(total.rewrite.files_measured)} measured`}
-          />
-          <Tile
-            label="Agent lines still there"
-            value={percent(linesKept(total.rewrite))}
-            part={linesKept(total.rewrite)}
-            note={`of ${compact(total.rewrite.lines_added)} tracked lines`}
-          />
-        </div>
-      </section>
+      {headline}
       <CostChart days={byDay.data.groups} picked={scope.pick} onPick={onPick} />
       {/* Worth a table only once there is more than one agent to compare. */}
       {(byTool.data?.groups.length ?? 0) > 1 && (
@@ -115,6 +85,67 @@ export function Overview({ token, scope, showUsers, onPick, onSignOut }: Props) 
       />
       <Breakdown title="By model" heading="Model" summary={byModel.data} name={modelName} />
     </>
+  );
+}
+
+/** The figures at the top: the cost on a sheet of its own, the rest beside it. */
+function Headline({ total }: { total: Totals }) {
+  const estimated = total.sessions_with_estimated_cost;
+  return (
+    <section className="headline" aria-label="Totals">
+      <div className="hero">
+        <div>
+          <span className="label">Cost</span>
+          <span className="value" title={usd(total.cost_usd)}>{usdCompact(total.cost_usd)}</span>
+        </div>
+        <dl className="facts">
+          <dt>A session</dt>
+          <dd>{usd(total.cost_usd / total.sessions)}</dd>
+          {total.active_ms > 0 && (
+            <>
+              <dt>An active hour</dt>
+              <dd>{usd(total.cost_usd / (total.active_ms / 3_600_000))}</dd>
+            </>
+          )}
+        </dl>
+        <span className="note">
+          {estimated > 0 && `${count(estimated)} of ${count(total.sessions)} sessions are estimates. `}
+          {total.sessions_without_cost > 0 && `${count(total.sessions_without_cost)} have no cost figure.`}
+        </span>
+      </div>
+      <div className="tiles">
+        <Tile label="Sessions" value={compact(total.sessions)} />
+        <Tile label="Active time" value={duration(total.active_ms)} note="time the agent spent working" />
+        <Tile label="Prompts" value={compact(total.prompts)} />
+        <Tile
+          label="Tool calls"
+          value={compact(total.tool_calls)}
+          note={`${percent(share(total.tool_failures, total.tool_calls))} failed`}
+        />
+        <Tile
+          label="Tokens"
+          value={compact(total.input_tokens + total.output_tokens)}
+          note={`${compact(total.input_tokens)} in, ${compact(total.output_tokens)} out`}
+        />
+        <Tile
+          label="Files changed"
+          value={compact(total.files_changed)}
+          note={`+${compact(total.lines_added)} −${compact(total.lines_removed)} lines`}
+        />
+        <Tile
+          label="Files rewritten since"
+          value={percent(rewriteRate(total.rewrite))}
+          part={rewriteRate(total.rewrite)}
+          note={`${count(total.rewrite.files_rewritten)} of ${count(total.rewrite.files_measured)} measured`}
+        />
+        <Tile
+          label="Agent lines still there"
+          value={percent(linesKept(total.rewrite))}
+          part={linesKept(total.rewrite)}
+          note={`of ${compact(total.rewrite.lines_added)} tracked lines`}
+        />
+      </div>
+    </section>
   );
 }
 
