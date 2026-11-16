@@ -17,6 +17,113 @@ export interface Me {
   email: string;
   name: string | null;
   role: Role;
+  /** The organisation's name. From `/me` only. */
+  org_name?: string;
+  /** Whether the token is a person's own: they signed in, or it is for their machines. */
+  signed_in?: boolean;
+}
+
+/** A service people sign in with. */
+export type SignInProvider = "google" | "github";
+
+/** What a server offers someone who is not signed in (`/auth/options`). */
+export interface AuthOptions {
+  /** A service many organisations share. */
+  hosted: boolean;
+  /** What people can sign in with. Empty: by token only. */
+  providers: SignInProvider[];
+  /** Anyone can create an organisation. */
+  signup: boolean;
+  /** Signing up needs an invitation code. */
+  inviteCode: boolean;
+  /**
+   * The one address people sign in at (`https://app.example.com`), if signing
+   * in is set up. Not there from a server from before it was said.
+   */
+  publicUrl?: string | null;
+}
+
+/**
+ * Where the dashboard counts which of its pages are opened (`/telemetry`),
+ * or null when whoever runs the server has turned that off.
+ */
+export interface Telemetry {
+  /** A PostHog project's public key. */
+  key: string;
+  /** PostHog's address for events, e.g. `https://eu.i.posthog.com`. */
+  host: string;
+  /** A service many organisations share, rather than a team's own server. */
+  hosted: boolean;
+}
+
+/** An organisation someone who has signed in can go on to (`/auth/check`). */
+export interface Membership {
+  user_id: string;
+  /** The organisation's id, which unlike its name is its own. */
+  org_id: string;
+  org_name: string;
+  /** The address they are in it under. */
+  email: string;
+  /** The person has not signed in to this organisation before. */
+  first_time: boolean;
+  /**
+   * Who added them to it, if they have not signed in to it before and it
+   * was someone who had signed in: that address is the adder's own.
+   */
+  invited_by: string | null;
+  /**
+   * How they were added: by a person who had signed in, or with a token,
+   * which says nothing of who held it. Null if that was not recorded.
+   */
+  invited_via: "sign_in" | "token" | null;
+  /**
+   * Set if this organisation was signed in to before with another account
+   * than the one just signed in with: the provider of that account. Only
+   * that account gets in.
+   */
+  other_account: SignInProvider | null;
+}
+
+/** Who a provider said someone is, and where they can sign in (`/auth/check`). */
+export interface Arrival {
+  provider: SignInProvider;
+  /** The addresses the provider vouches for, the main one first. */
+  emails: string[];
+  /** They came to create an organisation. */
+  create: boolean;
+  /**
+   * The organisations they have signed in to before, and then the ones they
+   * were added to and have not, newest first: a few of those at a time,
+   * from the `shown`th on that was asked for (when it is not 0, only those).
+   */
+  orgs: Membership[];
+  /** How many more they were added to, beyond the ones listed. */
+  more: number;
+}
+
+/** What signing in to an organisation, or creating one, gives (`/auth/verify`). */
+export interface SignedIn {
+  token: string;
+  org: { id: string; name: string };
+  email: string;
+  role: Role;
+  expires_at: string;
+  /** True if this created the organisation. */
+  created: boolean;
+}
+
+/** A person of an organisation (`/users`). */
+export interface UserInfo {
+  id: string;
+  email: string;
+  role: "owner" | "admin" | "member";
+  created_at: string;
+  removed_at: string | null;
+  /**
+   * Whose account they sign in with here. Null until they have signed in,
+   * and again once their account was forgotten. Not there from an older server.
+   */
+  signed_in_with?: SignInProvider | null;
 }
 
 /** How much of what the agent wrote is still in the files. */

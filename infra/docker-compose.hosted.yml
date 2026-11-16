@@ -1,0 +1,93 @@
+# The hosted service: copies of the server behind Caddy, which gets and
+# renews the certificate. The database is a managed Postgres, named in .env:
+# nothing here keeps data.
+#
+#   cd infra && cp .env.example .env    # then fill it in
+#   ./update.sh                         # starts it, and later updates it
+#
+# Start it with update.sh and not with `docker compose up`: Caddy sends to
+# the copies of the server that script writes down (caddy/copies).
+#
+# See infra/README.md. A single team hosting for itself wants the
+# docker-compose.yml at the top of the repository instead.
+
+# A name of its own, and not this folder's: "infra" is what any other
+# project kept in a folder called that would be named too, and the two would
+# be taken for one, each clearing away the other's containers.
+name: sessionly
+
+services:
+  server:
+    # The published image of a release, by its tag; `--build` builds this
+    # checkout under that name instead. Always a named version: what runs
+    # should not change because something else was released.
+    image: ghcr.io/kivanow/sessionly-server:${SESSIONLY_VERSION:?set SESSIONLY_VERSION in .env}
+    build:
+      context: ..
+      target: ee
+    environment:
+      SESSIONLY_HOSTED: "true"
+      # Caddy is the only way in, so the address it reports is the caller's.
+      SESSIONLY_TRUST_PROXY: "true"
+      HOST: 0.0.0.0
+      PORT: "8080"
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      SESSIONLY_DB_POOL: ${SESSIONLY_DB_POOL:-8}
+      SESSIONLY_DB_QUERY_SECONDS: ${SESSIONLY_DB_QUERY_SECONDS:-30}
+      # One of the two pairs at least: the server says so and stops without.
+      SESSIONLY_GOOGLE_CLIENT_ID: ${SESSIONLY_GOOGLE_CLIENT_ID:-}
+      SESSIONLY_GOOGLE_CLIENT_SECRET: ${SESSIONLY_GOOGLE_CLIENT_SECRET:-}
+      SESSIONLY_GITHUB_CLIENT_ID: ${SESSIONLY_GITHUB_CLIENT_ID:-}
+      SESSIONLY_GITHUB_CLIENT_SECRET: ${SESSIONLY_GITHUB_CLIENT_SECRET:-}
+      SESSIONLY_PUBLIC_URL: https://${SESSIONLY_DOMAIN:?set SESSIONLY_DOMAIN in .env}
+      SESSIONLY_SIGNUP: ${SESSIONLY_SIGNUP:-open}
+      SESSIONLY_SIGNUP_CODE: ${SESSIONLY_SIGNUP_CODE:-}
+      SESSIONLY_RATE_PER_MINUTE: ${SESSIONLY_RATE_PER_MINUTE:-600}
+      SESSIONLY_SIGNUPS_PER_HOUR: ${SESSIONLY_SIGNUPS_PER_HOUR:-100}
+      SESSIONLY_SIGNUPS_PER_NETWORK: ${SESSIONLY_SIGNUPS_PER_NETWORK:-10}
+    volumes:
+      # The certificate authority of the managed database, if DATABASE_URL names it.
+      - ${DATABASE_CA_FILE:-/dev/null}:/etc/sessionly/db-ca.crt:ro
+    deploy:
+      replicas: ${SESSIONLY_REPLICAS:-2}
+      resources:
+        limits:
+          memory: 768M
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+    # Stopping waits for requests in flight. One that is waiting on a
+    # database that says nothing is given up on after 36 seconds
+    # (SESSIONLY_DB_QUERY_SECONDS and a fifth).
+    stop_grace_period: 45s
+
+  caddy:
+    # A named release and the digest of its image, so that what runs in front
+    # of everything is what was looked at. To move on: the new tag, and the
+    # digest `docker buildx imagetools inspect caddy:<tag>` prints for it.
+    image: caddy:2.11.9@sha256:4e2425f6009577e7c651010f16679c28f7d12df3e7b1914f941a7a3370746b3c
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SESSIONLY_DOMAIN: ${SESSIONLY_DOMAIN:?set SESSIONLY_DOMAIN in .env}
+    volumes:
+      # The folder, not the file: a file mounted alone stays the one it was
+      # when the container started, however it is edited or replaced since.
+      - ./caddy:/etc/caddy:ro
+      # certificates: keep these, or every restart asks for new ones
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
+  caddy-config:

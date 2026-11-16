@@ -571,12 +571,15 @@ pnpm build      # builds the dashboard; the server then serves it
 SESSIONLY_ADMIN_TOKEN=choose-a-long-secret SESSIONLY_ADMIN_EMAIL=you@example.com pnpm server
 ```
 
+Settings can also be kept in a file named `.env` at the top of the repository, one
+`NAME=value` a line; `pnpm server` reads it, and git ignores it.
+
 That starts it on `http://127.0.0.1:8080` with an embedded database in `apps/server/data`, which
 is enough to try it or for a small team. Open that address and sign in with the token. Set `DATABASE_URL=postgres://…` to use a Postgres
 server. Then, on a developer's machine:
 
 ```sh
-sessionly connect http://127.0.0.1:8080   # paste the token
+sessionly connect http://127.0.0.1:8080   # paste the token, or pass it with --token
 sessionly upload
 ```
 
@@ -597,6 +600,10 @@ for anything but localhost.
 | `SESSIONLY_DB_QUERY_SECONDS` | Postgres only: how long a statement may take. Default 30, and a day (86400) at most. |
 | `SESSIONLY_ADMIN_TOKEN` | An admin token that always works, for first use. |
 | `SESSIONLY_ADMIN_EMAIL` | Who uploads made with that token belong to. |
+| `SESSIONLY_PUBLIC_URL` | Where people reach the dashboard, e.g. `https://sessionly.example.com`. Needed for signing in with Google or GitHub, which send people back there; open the dashboard at exactly this address. (A server on your own machine sends a browser at `127.0.0.1` on to `localhost`, or the other way; behind a proxy it sends nobody anywhere, whatever `Host` the proxy passes on.) Google takes a plain `http://` address only for `localhost`, `127.0.0.1` and `[::1]`. |
+| `SESSIONLY_GOOGLE_CLIENT_ID`, `SESSIONLY_GOOGLE_CLIENT_SECRET` | Optional, both together: people then sign in with Google (see below). From an OAuth client of type "Web application" in Google Cloud, whose redirect URI is the public address followed by `/api/v1/auth/google/callback`. |
+| `SESSIONLY_GITHUB_CLIENT_ID`, `SESSIONLY_GITHUB_CLIENT_SECRET` | Optional, both together: people then sign in with GitHub. From an OAuth app on GitHub, whose callback URL is the public address followed by `/api/v1/auth/github/callback`. |
+| `SESSIONLY_HOSTED` | `true` for a service many organisations sign up to. See [`infra/`](infra/README.md). |
 
 **The database's user.** On Postgres, requests run as a second role that cannot log in, which
 the server makes at its first start; its name comes from the database's name. If the
@@ -632,9 +639,35 @@ so give it only to those environments. An admin creates and revokes tokens throu
 line with `pnpm token create --email ann@example.com` (with the embedded database, stop the
 server first). Only a hash of each token is stored.
 
+**Signing in with Google or GitHub.** With the settings above for either (with Docker
+Compose, put them in a `.env` file beside `docker-compose.yml`, which passes them on), an
+admin adds
+people by their email address on the Team page (`POST /api/v1/users`), and each signs in with
+an account that has that address: a Google account's address, or any address GitHub has
+verified for a GitHub account. Nothing is sent to anyone, and no password is kept: what is
+asked of Google or GitHub is which account this is and which addresses are its. Signing in
+lasts a week. The first time someone signs in to an organisation, they are shown which one
+it is and who added them, and asked; the account they sign in with then is from that time on
+the only one that gets in as them there, whoever else comes to have the address. If that
+account is gone, another admin lets them in with a new one from the Team page (for the
+owner, an admin who has signed in, not one with a token); for an owner with no other admin,
+`pnpm person forget-account --email owner@example.com` does (with the embedded database,
+stop the server first). People then make the tokens for their own machines on the Connect page
+(`POST /api/v1/me/tokens`), and removing a person ends their sign-in and every token of
+theirs. Without those settings there are only tokens, as above.
+
+**Organisations.** Every token, session and pull request belongs to an organisation, and a
+request sees only its own organisation's: each query names it, and in Postgres row-level
+security enforces it underneath. A server you host for your team has one, `default`, and you
+never see the word. A hosted service has one per sign-up: [`infra/`](infra/README.md) is how
+to run one.
+
 ### Dashboard
 
-Sign in with a token. An admin sees the whole team; a member sees their own sessions.
+Sign in with a token, or with Google or GitHub where the server is set up for them. An admin
+sees the whole team; a member sees their own sessions. The dashboard has the website's look,
+light or dark as the system is, and serves the same two typefaces itself, from
+`apps/web/public/fonts/`.
 
 - **Overview:** total cost, sessions, active time, prompts, tool calls and failure rate, files
   changed, the share of files rewritten since and of agent lines still there; cost per day (per
@@ -648,11 +681,36 @@ Sign in with a token. An admin sees the whole team; a member sees their own sess
   cloud has been uploaded, a further filter separates those from sessions on people's machines.
 - **One session:** cost and tokens per model, prompts with how long each took and how it ended,
   files changed with how much of each survives, tools, and subagents.
-- **Team** (admins): create a token for someone and revoke tokens.
+- **Team** (admins): add and remove people where they sign in with Google or GitHub, and create and
+  revoke tokens for what cannot sign in: a cloud environment, CI, or a machine set up for
+  someone.
+- **Connect:** a token of your own for each of your machines, with the commands to run.
 
 What it shows depends on what was uploaded. With the default `metadata` level there is no text:
 sessions are listed by id and prompts show only their length. Sessions uploaded with `previews`
 show titles and the first 200 characters of each prompt.
+
+**Page counts.** The dashboard counts which of its pages are opened, with PostHog's EU cloud, so
+that I can see which parts are used. A count is three things: the page's name (overview,
+sessions, session, team, connect, pulls), whether the server is hosted or self-hosted, and an id
+made up for that one load of the page. Nothing is read from the browser to put in it, and it
+never carries the address the dashboard runs at, an organisation, a person, a session, a token
+or anything a page shows. Nothing is kept in the browser: no cookie, no local storage and no id
+that lasts past the page.
+
+The count is written out and sent by the dashboard's own code (`apps/web/src/telemetry.ts`, some
+thirty lines of sending), with no analytics library. It goes as a `GET` made with no referrer
+and no credentials, so the browser adds no `Origin`, no `Referer` and no cookie: nothing in the
+request names where the dashboard runs. A `POST` would not do: Chromium sends the page's origin
+with every cross-site `POST`, which for a self-hosted server is a name inside your network.
+PostHog's servers see the IP address a count comes from and the browser's standard headers, as
+any server does; each count asks for the address not to be looked up for a location. The
+dashboard's Content Security Policy lets it reach only `https://eu.i.posthog.com`, and only
+while counting is on. Browsers that send Do Not Track or Global Privacy Control are not counted.
+
+To turn it off on a server of your own, set `SESSIONLY_TELEMETRY=off`. `DO_NOT_TRACK=1` does the
+same. The dashboard then counts nothing and its policy allows no address but its own. The
+`sessionly` program and the server send nothing either way.
 
 While working on the dashboard, `pnpm dev` runs it with live reload and passes API calls to a
 server on port 8080.
@@ -792,4 +850,6 @@ under the SIL Open Font License) are served from `website/fonts/`. `python3 -m h
 7. ✅ Cursor and Grok sessions beside Claude Code's
 8. ✅ Pull requests: how much agents wrote, with which models, and how it fared in review
 9. ✅ Sessions in the cloud: Claude Code's cloud sessions and Cursor's cloud agents
-10. Polish, docs, example data
+10. ✅ Organisations, signing in with Google or GitHub, and a hosted mode anyone can sign up to
+11. Plans and billing for the hosted service; deleting and exporting an organisation's data
+12. Polish, docs, example data

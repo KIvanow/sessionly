@@ -1,15 +1,20 @@
-// Token management from the command line, straight against the database:
+// Tokens and people from the command line, straight against the database:
 //   node src/cli.ts token create --email ann@example.com [--name Ann] [--role admin]
 //   node src/cli.ts token list
 //   node src/cli.ts token revoke <id>
-// Each takes --org <id> for an organisation other than a self-hosted
-// install's own, "default".
+//   node src/cli.ts person list
+//   node src/cli.ts person forget-account --email ann@example.com
+// The last lets a person sign in with another Google or GitHub account than
+// the one they have here: for an owner whose account is gone, whom nobody
+// in the organisation can let in. Each takes --org <id> for an organisation
+// other than a self-hosted install's own, "default".
 // With the embedded database, stop the server first (one process at a time),
 // or use the /api/v1/tokens endpoints with an admin token instead.
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createToken, DEFAULT_ORG, listTokens, revokeToken, type Role } from "./auth.ts";
 import { openDb } from "./db.ts";
+import { forgetAccount, listUsers, UserProblem } from "./users.ts";
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -24,11 +29,13 @@ const [group, action, id] = positionals;
 
 function usage(): never {
   console.error(
-    "usage: token create --email <email> [--name <name>] [--role admin|member] | token list | token revoke <id>  (each with [--org <id>])",
+    "usage: token create --email <email> [--name <name>] [--role admin|member] | token list | token revoke <id>\n" +
+      "       person list | person forget-account --email <email>\n" +
+      "       (each with [--org <id>])",
   );
   process.exit(2);
 }
-if (group !== "token") usage();
+if (group !== "token" && group !== "person") usage();
 
 const embedded = fileURLToPath(new URL("../data/pglite", import.meta.url));
 const db = await openDb(process.env.DATABASE_URL ?? `file:${embedded}`);
@@ -38,6 +45,27 @@ try {
   if (!known) {
     console.error(`There is no organisation "${org}".`);
     process.exitCode = 1;
+  } else if (group === "person" && action === "list") {
+    for (const u of await db.asOrg(org, listUsers)) {
+      const how = u.removed_at ? "removed" : u.signed_in_with ? `signs in with ${u.signed_in_with}` : "has not signed in";
+      console.log(`${u.id}  ${u.role.padEnd(6)}  ${u.email}  (${how})`);
+    }
+  } else if (group === "person" && action === "forget-account") {
+    const email = values.email;
+    if (!email) usage();
+    try {
+      const user = await db.asOrg(org, (scoped) => forgetAccount(scoped, { email }, null));
+      console.log(
+        `${user.email} (${user.role}) of "${org}" can now sign in with any Google or GitHub account that has that address.\n` +
+          "Whoever does so first is asked, and is then who that person is here. Their sessions were ended; the tokens of their machines were not.",
+      );
+    } catch (err) {
+      if (!(err instanceof UserProblem)) throw err;
+      console.error(`${err.message}.`);
+      process.exitCode = 1;
+    }
+  } else if (group === "person") {
+    usage();
   } else if (action === "create") {
     const role = (values.role ?? "member") as Role;
     const email = values.email;

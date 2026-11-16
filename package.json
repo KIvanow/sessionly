@@ -12,6 +12,7 @@
     "test": "pnpm -r test",
     "server": "pnpm --filter @sessionly/server start",
     "token": "pnpm --filter @sessionly/server token",
+    "person": "pnpm --filter @sessionly/server person",
     "build": "pnpm --filter @sessionly/web build",
     "dev": "pnpm --filter @sessionly/web dev"
   }

@@ -1,0 +1,6 @@
+.env
+*.crt
+# Written by update.sh: the copies of the server Caddy sends to.
+caddy/copies
+# Held by update.sh while it runs.
+.update.lock

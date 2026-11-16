@@ -13,6 +13,10 @@ import {
   type Role,
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
+import { allowed, giveBack, take } from "./limits.ts";
+import { PROVIDER_NAMES } from "./oauth.ts";
+import { emailFrom, newUserId, offers, openRoutes, type Accounts } from "./signup.ts";
+import { addUser, forgetAccount, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
 import {
   Conflict,
   filterOptions,
@@ -24,7 +28,7 @@ import {
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
-import type { PullReport } from "@sessionly/schema";
+import type { PullReport, Telemetry } from "@sessionly/schema";
 import { BadReport, checkReport, listPulls, storePull, summarizePulls, type PullFilters } from "./pulls.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
@@ -57,8 +61,12 @@ export type Extension = (api: Api) => void;
 
 class BadRequest extends Error {}
 
+
 /** Thrown to undo what a request wrote, once its answer is already decided. */
 class Undo extends Error {}
+
+/** People an organisation may add an hour: each is a message to an address nobody confirmed. */
+const INVITES_PER_HOUR = 30;
 
 /** An error an extension wants answered with a given status and a stable code. */
 export class ApiError extends Error {
@@ -172,11 +180,46 @@ export function failureLog(
   };
 }
 
+/**
+ * A host (`localhost:8080`) as a name of this machine and a port, or null
+ * if it is anything else: another machine's name, or an address of this
+ * one that others can reach.
+ */
+export function thisMachine(host: string, protocol: string): { name: string; port: string } | null {
+  const found = /^(localhost|127\.0\.0\.1|\[::1\])(?::(\d{1,5}))?$/i.exec(host.trim());
+  if (!found?.[1]) return null;
+  return { name: found[1].toLowerCase(), port: found[2] ?? (protocol === "https:" ? "443" : "80") };
+}
+
 export interface Options {
   bootstrap?: Bootstrap;
   /** Folder with the built dashboard, served at the root if given. */
   webRoot?: string;
   extensions?: Extension[];
+  /** Signing in and signing up with Google or GitHub, and what limits them. */
+  accounts?: Accounts;
+  /** Where the dashboard counts which of its pages are opened; none: it counts nothing. */
+  telemetry?: Telemetry | null;
+}
+
+/**
+ * What the dashboard may load and talk to: itself, and the address it counts
+ * its pages at if it does. Its token is kept in the browser's storage, so a
+ * script from anywhere else must never run there: the counting is part of the
+ * dashboard's own code, and only sends.
+ */
+export function dashboardPolicy(telemetry?: Telemetry | null): string {
+  return [
+    "default-src 'none'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self'",
+    telemetry ? `connect-src 'self' ${new URL(telemetry.host).origin}` : "connect-src 'self'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join("; ");
 }
 
 /**
@@ -186,10 +229,15 @@ export interface Options {
  */
 export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
+  const accounts = options.accounts ?? {};
 
   api.use("*", async (c, next) => {
     const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap);
     if (!principal) return c.json({ error: "missing or unknown token" }, 401);
+    if (accounts.ratePerMinute) {
+      const within = await allowed(ownerDb, `token:${principal.tokenId ?? "environment"}`, 60, accounts.ratePerMinute);
+      if (!within) return c.json({ error: "too many requests; try again in a minute", code: "rate_limited" }, 429);
+    }
     // A ci token reports pull requests and does nothing else.
     if (principal.role === "ci") {
       const reporting = c.req.method === "PUT" && c.req.path.endsWith("/prs");
@@ -257,6 +305,24 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     await next();
   });
 
+  // Adding a person puts an organisation in front of them the next time
+  // they sign in, on an admin's word, and anyone can be the admin of an
+  // organisation they just made. So it is limited per organisation. Taken
+  // here, outside the transaction, and given back unless someone really
+  // was added.
+  api.post("/users", async (c, next) => {
+    const p = c.get("principal");
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const email = emailFrom(body.email);
+    // Anything else is refused further on, uncounted.
+    if (p.role !== "admin" || !email) return next();
+    const limited = (error: string) => c.json({ error, code: "rate_limited" }, 429);
+    const perOrg = await take(ownerDb, `invites:${p.orgId}`, 3600, INVITES_PER_HOUR);
+    if (!perOrg) return limited(`an organisation can add ${INVITES_PER_HOUR} people an hour; try again later`);
+    await next();
+    if (c.res.status !== 201) await giveBack(ownerDb, perOrg);
+  });
+
   // The rest of the request runs in one transaction, as the organisation of
   // its token: `c.get("db")` sees that organisation's rows and no others.
   api.use("*", async (c, next) => {
@@ -282,13 +348,66 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     if (err instanceof BadRequest) return c.json({ error: err.message }, 400);
     if (err instanceof BadReport) return c.json({ error: err.message }, 422);
     if (err instanceof ApiError) return c.json({ error: err.message, code: err.code }, err.status);
+    if (err instanceof UserProblem) return c.json({ error: err.message, code: err.code }, err.status);
     failed(err);
     return c.json({ error: "internal error" }, 500);
   });
 
   const whoami = (p: Principal) => ({ ok: true, org: p.orgId, email: p.email, name: p.name, role: p.role });
   api.get("/ping", (c) => c.json(whoami(c.get("principal"))));
-  api.get("/me", (c) => c.json(whoami(c.get("principal"))));
+  api.get("/me", async (c) => {
+    const p = c.get("principal");
+    return c.json({ ...whoami(p), org_name: await orgName(c.get("db")), signed_in: p.userId !== null });
+  });
+
+  // Sign out: the token someone got by signing in stops working.
+  api.delete("/auth/session", async (c) => {
+    const p = c.get("principal");
+    const db = c.get("db");
+    if (p.tokenId) {
+      await db.query(
+        `UPDATE tokens SET revoked_at = now() WHERE org_id = $1 AND id = $2 AND sign_in IS NOT NULL`,
+        [db.orgId, p.tokenId],
+      );
+    }
+    return c.json({ signed_out: true });
+  });
+
+  // A person's own tokens, for their machines: what `sessionly connect` is given.
+  const mine = new Hono<Env>();
+  mine.use("*", async (c, next) => {
+    const role = c.get("principal").role;
+    if (role !== "admin" && role !== "member") return c.json({ error: "this token is not a person's" }, 403);
+    await next();
+  });
+  mine.get("/", async (c) => {
+    const db = c.get("db");
+    const tokens = await db.query(
+      `SELECT id, email, name, role, created_at, last_used_at, revoked_at FROM tokens
+       WHERE org_id = $1 AND email = $2 AND role = 'member' AND sign_in IS NULL ORDER BY created_at`,
+      [db.orgId, c.get("principal").email],
+    );
+    return c.json({ tokens });
+  });
+  mine.post("/", async (c) => {
+    const p = c.get("principal");
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const name = typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 80) : null;
+    // Always a member's: it uploads this person's sessions and reads only those.
+    const created = await createToken(c.get("db"), { email: p.email, name, role: "member", userId: p.userId });
+    return c.json({ ...created, email: p.email, name, role: "member" }, 201);
+  });
+  mine.delete("/:id", async (c) => {
+    const db = c.get("db");
+    const rows = await db.query(
+      `UPDATE tokens SET revoked_at = now()
+       WHERE org_id = $1 AND id = $2 AND email = $3 AND role = 'member' AND sign_in IS NULL AND revoked_at IS NULL
+       RETURNING id`,
+      [db.orgId, c.req.param("id"), c.get("principal").email],
+    );
+    return rows.length ? c.json({ revoked: true }) : c.json({ error: "no such active token" }, 404);
+  });
+  api.route("/me/tokens", mine);
 
   api.put("/sessions/:machine/:source/:session", async (c) => {
     const upload = c.get("upload");
@@ -379,16 +498,16 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   admin.get("/", async (c) => c.json({ tokens: await listTokens(c.get("db")) }));
   admin.post("/", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const email = typeof body.email === "string" ? body.email.trim() : "";
+    const email = emailFrom(body.email);
     const role = (body.role ?? "member") as Role;
-    if (!/^\S+@\S+$/.test(email)) throw new BadRequest("email is required");
+    if (!email) throw new BadRequest("email is required, as a plain address of 254 characters at most");
     if (role !== "admin" && role !== "member" && role !== "ci" && role !== "env") {
       throw new BadRequest("role must be admin, member, ci or env");
     }
     const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : null;
     const created = await createToken(c.get("db"), { email, name, role });
     // The only time the token itself is returned.
-    return c.json({ ...created, email: email.toLowerCase(), name, role }, 201);
+    return c.json({ ...created, email, name, role }, 201);
   });
   admin.delete("/:id", async (c) =>
     (await revokeToken(c.get("db"), c.req.param("id")))
@@ -397,12 +516,95 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   );
   api.route("/tokens", admin);
 
+  // The people of the organisation, for admins. Someone who was added signs
+  // in with an account that has the address they were added under, and is
+  // shown the organisation then; nothing is sent to them.
+  const users = new Hono<Env>();
+  users.use("*", async (c, next) => {
+    if (c.get("principal").role !== "admin") return c.json({ error: "admins only" }, 403);
+    await next();
+  });
+  users.get("/", async (c) => c.json({ users: await listUsers(c.get("db")) }));
+  users.post("/", async (c) => {
+    if (!offers(accounts).providers.length) {
+      return c.json({ error: "signing in is not set up here; create a token instead", code: "no_sign_in" }, 409);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const email = emailFrom(body.email);
+    const role = body.role ?? "member";
+    if (!email) throw new BadRequest("email is required, as a plain address of 254 characters at most");
+    if (role !== "admin" && role !== "member") throw new BadRequest("role must be admin or member");
+    const user = await addUser(c.get("db"), newUserId(), email, role, c.get("principal"));
+    return c.json(user, 201);
+  });
+  users.delete("/:id", async (c) => {
+    await removeUser(c.get("db"), c.req.param("id"), c.get("principal"));
+    return c.json({ removed: true });
+  });
+  // Let someone in with another account than the one they signed in with:
+  // for anyone but oneself, the owner included, who cannot be removed.
+  users.post("/:id/forget-account", async (c) =>
+    c.json(await forgetAccount(c.get("db"), { id: c.req.param("id") }, c.get("principal"))),
+  );
+  api.route("/users", users);
+
   for (const extend of options.extensions ?? []) extend(api);
 
   const app = new Hono<Env>();
+  // For whatever keeps the server running: alive, and able to reach its database.
+  app.get("/healthz", (c) => c.json({ ok: true }));
+  app.get("/readyz", async (c) => {
+    try {
+      await ownerDb.query(`SELECT 1`);
+      return c.json({ ok: true });
+    } catch {
+      return c.json({ ok: false }, 503);
+    }
+  });
+  // People sign in at one address, the public one: a provider sends them
+  // back there, and the cookie that says which browser left is kept for
+  // that host. A server tried on one's own machine has several names
+  // (localhost, 127.0.0.1, [::1]), and a browser at one of them would not
+  // show the cookie at another: nobody could finish signing in. So a
+  // browser that asks for the dashboard, or to leave for a provider, at
+  // another of this machine's names is sent to the same place at the
+  // public one.
+  //
+  // Only then, and only on the same port. What a proxy passes on as Host
+  // is often its own name for this server, not the one the browser asked
+  // for (nginx does so unless told otherwise): going by that would send the
+  // browser to the public address, and the proxy would hand it back here,
+  // without end. A proxy on this very machine listens on another port than
+  // this server does, so a Host that differs in the port is its doing too.
+  // Everything else is answered where it is asked.
+  const home = offers(accounts).publicUrl;
+  const known = home ? thisMachine(new URL(home).host, new URL(home).protocol) : null;
+  if (home && known) {
+    app.use("*", async (c, next) => {
+      const host = c.req.header("host") ?? "";
+      const asked = thisMachine(host, new URL(home).protocol);
+      if (c.req.method !== "GET" || !asked || asked.port !== known.port || asked.name === known.name) return next();
+      const { pathname, search } = new URL(c.req.url);
+      const leaving = PROVIDER_NAMES.some((name) => pathname === `/api/v1/auth/${name}`);
+      if (pathname.startsWith("/api/") && !leaving) return next();
+      return c.redirect(`${home}${pathname}${search}`, 307);
+    });
+  }
+  // Signing in and signing up need no token, so they come before the API that does.
+  app.route("/api/v1/auth", openRoutes(ownerDb, accounts));
+  // Asked before anyone signs in, so that a page is counted whoever opens it.
+  const telemetry = options.telemetry ?? null;
+  app.get("/api/v1/telemetry", (c) => c.json(telemetry));
   app.route("/api/v1", api);
   app.all("/api/*", (c) => c.json({ error: "not found" }, 404));
   if (options.webRoot) {
+    const policy = dashboardPolicy(telemetry);
+    app.use("/*", async (c, next) => {
+      await next();
+      c.header("Content-Security-Policy", policy);
+      c.header("X-Content-Type-Options", "nosniff");
+      c.header("Referrer-Policy", "no-referrer");
+    });
     app.use("/*", serveStatic({ root: options.webRoot }));
   }
   return app;
