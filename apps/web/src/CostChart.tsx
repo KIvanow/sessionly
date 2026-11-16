@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { Pick } from "./App.tsx";
 import { costSeries, count, dayLabel, ticks, usd, usdCompact, type Bucket } from "./format.ts";
 
 const HEIGHT = 220;
@@ -17,9 +18,18 @@ function column(x: number, y: number, width: number, height: number): string {
 /**
  * Cost over time: one column per day, or per week for long ranges. One
  * series, so no legend; the heading names it. Every value is also in the
- * table view.
+ * table view. Clicking a column narrows the rest of the page to it; clicking
+ * it again goes back to the whole period.
  */
-export function CostChart({ days }: { days: { key: string; cost_usd: number; sessions: number }[] }) {
+export function CostChart({
+  days,
+  picked,
+  onPick,
+}: {
+  days: { key: string; cost_usd: number; sessions: number }[];
+  picked: Pick | null;
+  onPick: (pick: Pick | null) => void;
+}) {
   const frame = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(720);
   const [active, setActive] = useState<number | null>(null);
@@ -45,14 +55,26 @@ export function CostChart({ days }: { days: { key: string; cost_usd: number; ses
   const y = (value: number) => MARGIN.top + plot.height * (1 - value / top);
   const everyNth = Math.max(1, Math.ceil(buckets.length / Math.max(2, Math.floor(plot.width / 80))));
   const shown = active == null ? null : buckets[active];
+  const isPicked = (b: Bucket) => picked?.start === b.start && picked.span === b.span;
+  // A column with no sessions has nothing to narrow to.
+  const pick = (b: Bucket) => b.sessions > 0 && onPick(isPicked(b) ? null : { start: b.start, span: b.span });
 
   return (
     <section className="card" aria-labelledby="cost-chart-title">
       <div className="card-head">
         <h2 id="cost-chart-title">Cost per {span}</h2>
-        <button className="quiet" onClick={() => setAsTable(!asTable)} aria-pressed={asTable}>
-          {asTable ? "Show chart" : "Show as table"}
-        </button>
+        <span className="card-actions">
+          {picked ? (
+            <button className="quiet" onClick={() => onPick(null)}>
+              Show the whole period
+            </button>
+          ) : (
+            buckets.length > 0 && <span className="muted">Click a {span} to filter by it</span>
+          )}
+          <button className="quiet" onClick={() => setAsTable(!asTable)} aria-pressed={asTable}>
+            {asTable ? "Show chart" : "Show as table"}
+          </button>
+        </span>
       </div>
       {buckets.length === 0 ? (
         <p className="muted">No dated sessions in this range.</p>
@@ -68,8 +90,16 @@ export function CostChart({ days }: { days: { key: string; cost_usd: number; ses
             </thead>
             <tbody>
               {buckets.map((b) => (
-                <tr key={b.start}>
-                  <th scope="row">{b.start}</th>
+                <tr key={b.start} className={isPicked(b) ? "picked" : undefined}>
+                  <th scope="row">
+                    {b.sessions > 0 ? (
+                      <button className="quiet" aria-pressed={isPicked(b)} onClick={() => pick(b)}>
+                        {b.start}
+                      </button>
+                    ) : (
+                      b.start
+                    )}
+                  </th>
                   <td className="num">{usd(b.cost_usd)}</td>
                   <td className="num">{count(b.sessions)}</td>
                 </tr>
@@ -95,7 +125,9 @@ export function CostChart({ days }: { days: { key: string; cost_usd: number; ses
                 <g key={b.start}>
                   {height > 0 && (
                     <path
-                      className={active === i ? "bar active" : "bar"}
+                      className={
+                        active === i ? "bar active" : picked && !isPicked(b) ? "bar dim" : "bar"
+                      }
                       d={column(x + (band - bar) / 2, y(b.cost_usd), bar, height)}
                     />
                   )}
@@ -107,8 +139,17 @@ export function CostChart({ days }: { days: { key: string; cost_usd: number; ses
                     width={band}
                     height={plot.height}
                     tabIndex={0}
-                    role="img"
+                    role={b.sessions > 0 ? "button" : "img"}
+                    aria-pressed={b.sessions > 0 ? isPicked(b) : undefined}
                     aria-label={`${label(b)}: ${usd(b.cost_usd)}, ${count(b.sessions)} sessions`}
+                    style={b.sessions > 0 ? { cursor: "pointer" } : undefined}
+                    onClick={() => pick(b)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        pick(b);
+                      }
+                    }}
                     onPointerEnter={() => setActive(i)}
                     onFocus={() => setActive(i)}
                     onBlur={() => setActive(null)}

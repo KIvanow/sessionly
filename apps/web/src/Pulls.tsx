@@ -25,7 +25,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
   const [state, setState] = useState("merged");
   const [offset, setOffset] = useState(0);
   useEffect(() => setOffset(0), [state, scope]);
-  const params = { since: scopeParams(scope).since, repo: scope.repo || undefined, state: state || undefined };
+  const params = { since: scopeParams(scope, true).since, repo: scope.repo || undefined, state: state || undefined };
   const summary = useApi<PullSummary>(token, `/prs/summary${query(params)}`, onSignOut);
   const list = useApi<PullList>(token, `/prs${query({ ...params, limit: PAGE, offset })}`, onSignOut);
   const everything = useApi<PullList>(token, "/prs?limit=1", onSignOut);
@@ -36,7 +36,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
       <form className="filters" aria-label="Filters" onSubmit={(e) => e.preventDefault()}>
         <label>
           Period
-          <select value={scope.period} onChange={(e) => setScope({ ...scope, period: e.target.value })}>
+          <select value={scope.period} onChange={(e) => setScope({ ...scope, period: e.target.value, pick: null })}>
             <option value="7">Last 7 days</option>
             <option value="30">Last 30 days</option>
             <option value="90">Last 90 days</option>

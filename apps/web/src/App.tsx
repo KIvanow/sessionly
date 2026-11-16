@@ -22,7 +22,7 @@ import { Pulls } from "./Pulls.tsx";
 import { SessionView } from "./SessionView.tsx";
 import { Sessions } from "./Sessions.tsx";
 import { Team } from "./Team.tsx";
-import { modelName, toolName } from "./format.ts";
+import { dayLabel, modelName, toolName } from "./format.ts";
 import { useApi } from "./useApi.ts";
 
 export interface Scope {
@@ -36,17 +36,43 @@ export interface Scope {
   model: string;
   /** Where sessions ran: "local", "cloud", or "" for both. */
   where: string;
+  /** One day or week picked on the cost chart, or null for the whole period. */
+  pick: Pick | null;
 }
 
-/** The scope as query parameters for the API. */
-export function scopeParams(scope: Scope): Record<string, string | undefined> {
+/** A column of the cost chart: the UTC day (YYYY-MM-DD) it starts, and how long it is. */
+export interface Pick {
+  start: string;
+  span: "day" | "week";
+}
+
+/** The first and last moment of a picked column, as an ISO range (end exclusive). */
+export function pickRange(pick: Pick): { since: string; until: string } {
+  const start = Date.parse(`${pick.start}T00:00:00Z`);
+  const end = start + (pick.span === "week" ? 7 : 1) * 86_400_000;
+  return { since: new Date(start).toISOString(), until: new Date(end).toISOString() };
+}
+
+/**
+ * The scope as query parameters for the API. With `wholePeriod`, a column
+ * picked on the cost chart is left out: the chart itself still shows them all.
+ */
+export function scopeParams(scope: Scope, wholePeriod = false): Record<string, string | undefined> {
   const days = Number(scope.period);
   // Rounded to the hour so the same scope gives the same request.
-  const since = Number.isFinite(days)
+  let since = Number.isFinite(days)
     ? new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000 - days * 86_400_000).toISOString()
     : undefined;
+  let until: string | undefined;
+  if (scope.pick && !wholePeriod) {
+    const range = pickRange(scope.pick);
+    // A week's column can start before the period does: only the part inside it counts.
+    if (!since || range.since > since) since = range.since;
+    until = range.until;
+  }
   return {
     since,
+    until,
     user: scope.user || undefined,
     repo: scope.repo || undefined,
     tool: scope.tool || undefined,
@@ -305,7 +331,15 @@ function Shell({
   onLeave: () => void;
 }) {
   const route = useHash();
-  const [scope, setScope] = useState<Scope>({ period: "30", user: "", repo: "", tool: "", model: "", where: "" });
+  const [scope, setScope] = useState<Scope>({
+    period: "30",
+    user: "",
+    repo: "",
+    tool: "",
+    model: "",
+    where: "",
+    pick: null,
+  });
   const options = useApi<FilterOptions>(token, "/filters", onSignOut);
   const [page, ...rest] = route.split("/");
   const isAdmin = me.role === "admin";
@@ -324,7 +358,15 @@ function Shell({
         <Pulls token={token} scope={scope} setScope={setScope} repos={options.data?.repos ?? []} onSignOut={onSignOut} />
       );
     }
-    return <Overview token={token} scope={scope} showUsers={isAdmin} onSignOut={onSignOut} />;
+    return (
+      <Overview
+        token={token}
+        scope={scope}
+        showUsers={isAdmin}
+        onPick={(pick) => setScope((current) => ({ ...current, pick }))}
+        onSignOut={onSignOut}
+      />
+    );
   }, [page, rest.join("/"), token, scope, isAdmin, options.data, people, address, hosted, me]);
 
   const scoped = page === "" || page === "sessions";
@@ -379,7 +421,7 @@ function Shell({
           <form className="filters" aria-label="Filters" onSubmit={(e) => e.preventDefault()}>
             <label>
               Period
-              <select value={scope.period} onChange={(e) => setScope({ ...scope, period: e.target.value })}>
+              <select value={scope.period} onChange={(e) => setScope({ ...scope, period: e.target.value, pick: null })}>
                 <option value="7">Last 7 days</option>
                 <option value="30">Last 30 days</option>
                 <option value="90">Last 90 days</option>
@@ -436,6 +478,19 @@ function Shell({
                 ))}
               </select>
             </label>
+            {scope.pick && (
+              <div className="picked">
+                <span className="label">{scope.pick.span === "week" ? "Week" : "Day"}</span>
+                <span>
+                  <span className="chip">
+                    {scope.pick.span === "week" ? `Week of ${dayLabel(scope.pick.start)}` : dayLabel(scope.pick.start)}
+                  </span>{" "}
+                  <button type="button" className="quiet" onClick={() => setScope({ ...scope, pick: null })}>
+                    Clear
+                  </button>
+                </span>
+              </div>
+            )}
           </form>
         )}
         {view}
