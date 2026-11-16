@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { all, github } from "../src/github.mjs";
 import { addedHashes, ignoring, lineHash } from "../src/lines.mjs";
 import { eventName, run, send, whenOpened } from "../src/main.mjs";
-import { buildReport, MARKER, render, reviewRounds } from "../src/report.mjs";
+import { buildReport, feedbackOf, MARKER, render, reviewRounds } from "../src/report.mjs";
 
 test("lines hash exactly as in the sessionly binary", () => {
   const { cases } = JSON.parse(readFileSync(new URL("./line-hashes.json", import.meta.url), "utf8"));
@@ -129,6 +129,15 @@ test("a report says where the pull request stands and what it adds", () => {
     review_rounds: 1,
     files: [{ path: "src/parser.rs", hashes: [lineHash("one();"), lineHash("two();")] }],
     files_without_diff: 1,
+    feedback: [
+      { kind: "review", url: null, author: "coderabbitai[bot]", bot: true, at: at(5), state: "commented" },
+      { kind: "inline", url: null, author: "coderabbitai[bot]", bot: true, at: at(5), path: null, line: null, reply: false },
+      { kind: "inline", url: null, author: "coderabbitai[bot]", bot: true, at: at(5), path: null, line: null, reply: false },
+      { kind: "review", url: null, author: "bob", bot: false, at: at(6), state: "changes_requested" },
+      { kind: "inline", url: null, author: "bob", bot: false, at: at(6), path: null, line: null, reply: false },
+      { kind: "review", url: null, author: "ann", bot: false, at: at(7), state: "commented" },
+      { kind: "inline", url: null, author: "ann", bot: false, at: at(7), path: null, line: null, reply: false },
+    ],
   });
   const merged = build({ pull: { ...PULL, state: "closed", merged: true, merged_at: at(40), closed_at: at(40) } });
   assert.deepEqual([merged.state, merged.merged_at], ["merged", at(40)]);
@@ -154,6 +163,43 @@ const ATTRIBUTION = {
     { tool: "cursor", model: null, lines: 100, surviving: 100 },
   ],
 };
+
+test("reviews and comments are reported as who, when, where and a link, never as what they say", () => {
+  const said = "this parser leaks SECRET_TEXT";
+  const reviews = [
+    { id: 1, user: { login: "bob", type: "User" }, state: "APPROVED", submitted_at: at(9), body: said, html_url: "https://github.com/acme/web/pull/7#pullrequestreview-1" },
+    // not submitted yet: nobody else can see it
+    { id: 2, user: { login: "bob", type: "User" }, state: "PENDING", body: said },
+  ];
+  const comments = [
+    { id: 3, user: { login: "coderabbitai[bot]", type: "Bot" }, created_at: at(4), body: said, diff_hunk: said, path: "src/parser.rs", line: 12, html_url: "https://github.com/acme/web/pull/7#discussion_r3" },
+    // an answer, on a line that has since changed
+    { id: 4, user: { login: "ann", type: "User" }, created_at: at(6), body: said, path: "src/parser.rs", line: null, original_line: 12, in_reply_to_id: 3, html_url: "https://github.com/acme/web/pull/7#discussion_r4" },
+  ];
+  const conversation = [
+    { id: 5, user: { login: "vercel[bot]", type: "Bot" }, created_at: at(1), body: said, html_url: "https://github.com/acme/web/pull/7#issuecomment-5" },
+    // the Action's own comment is not feedback
+    { id: 6, user: { login: "github-actions[bot]", type: "Bot" }, created_at: at(2), body: `${MARKER}\n### Sessionly` },
+  ];
+  const feedback = feedbackOf(reviews, comments, conversation);
+  assert.deepEqual(feedback, [
+    { kind: "conversation", url: "https://github.com/acme/web/pull/7#issuecomment-5", author: "vercel[bot]", bot: true, at: at(1) },
+    { kind: "inline", url: "https://github.com/acme/web/pull/7#discussion_r3", author: "coderabbitai[bot]", bot: true, at: at(4), path: "src/parser.rs", line: 12, reply: false },
+    { kind: "inline", url: "https://github.com/acme/web/pull/7#discussion_r4", author: "ann", bot: false, at: at(6), path: "src/parser.rs", line: 12, reply: true },
+    { kind: "review", url: "https://github.com/acme/web/pull/7#pullrequestreview-1", author: "bob", bot: false, at: at(9), state: "approved" },
+  ]);
+  // Nothing anyone wrote is in the report, whatever else changes in it.
+  const report = buildReport({ ...GITHUB, reviews, comments, conversation, event: "review", host: "github.com", ignored: ignoring("") });
+  assert.deepEqual(report.feedback, feedback);
+  assert.doesNotMatch(JSON.stringify(report), /SECRET_TEXT|leaks/);
+  // The comments under a pull request change none of the counts.
+  assert.deepEqual([report.reviews, report.review_comments, report.bot_review_comments], [1, 0, 1]);
+  // More than the server takes: the latest are sent.
+  const many = Array.from({ length: 2100 }, (_, i) => ({ user: { login: "bob" }, created_at: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString() }));
+  const latest = feedbackOf([], [], many);
+  assert.equal(latest.length, 2000);
+  assert.equal(latest.at(-1).at, "2026-01-01T00:34:59.000Z");
+});
 
 test("the figures as text", () => {
   const text = render(build(), ATTRIBUTION);
@@ -279,12 +325,14 @@ test("the figures are posted as one comment, kept up to date rather than repeate
   await run(environment(), { api: current, deliver, log() {} });
   assert.deepEqual(writes(current), []);
 
-  // Switched off: nothing is written to the pull request, and its comments are not even read.
+  // Switched off: nothing is written to the pull request.
   for (const off of ["false", "FALSE", "0", "no", "off", ""]) {
     const quiet = fakeGithub();
     await run(environment({ SESSIONLY_COMMENT: off }), { api: quiet, deliver, log() {} });
-    assert.ok(quiet.calls.every(([method, path]) => method === "GET" && !path.includes("/issues/")), `"${off}"`);
+    assert.ok(quiet.calls.every(([method]) => method === "GET"), `"${off}"`);
   }
+  // The comments under the pull request are read once, for the report and for finding the Action's own.
+  assert.equal(fresh.calls.filter(([method, path]) => method === "GET" && path.includes("/issues/")).length, 1);
 });
 
 test("a job that may not comment still reports, and says what to change", async () => {

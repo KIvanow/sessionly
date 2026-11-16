@@ -38,12 +38,50 @@ export function reviewRounds(author, reviews, comments, commits) {
   return rounds;
 }
 
+/** Marks the comment this Action keeps up to date. */
+export const MARKER = "<!-- sessionly-pull-request-report -->";
+
+/** The server takes no more reviews and comments than this for one pull request. */
+const MAX_FEEDBACK = 2000;
+
 /**
- * The report for one pull request. `pull`, `files`, `reviews`, `comments`
- * and `commits` are GitHub's REST answers; `host` is the host of the GitHub
+ * A pull request's reviews and comments, oldest first: who, when, where, and
+ * the address of each on GitHub. What they say is not among it, and is never
+ * sent. The Action's own comment is left out.
+ */
+export function feedbackOf(reviews, comments, conversation) {
+  const who = (item) => ({ url: item.html_url ?? null, author: item.user?.login ?? "unknown", bot: isBot(item.user) });
+  const all = [];
+  for (const review of reviews) {
+    if (review.state === "PENDING" || !review.submitted_at) continue;
+    all.push({ kind: "review", ...who(review), at: review.submitted_at, state: String(review.state ?? "").toLowerCase() || null });
+  }
+  for (const comment of comments) {
+    if (!comment.created_at) continue;
+    all.push({
+      kind: "inline",
+      ...who(comment),
+      at: comment.created_at,
+      path: comment.path ?? null,
+      line: comment.line ?? comment.original_line ?? null,
+      reply: comment.in_reply_to_id != null,
+    });
+  }
+  for (const comment of conversation) {
+    if (!comment.created_at || comment.body?.includes(MARKER)) continue;
+    all.push({ kind: "conversation", ...who(comment), at: comment.created_at });
+  }
+  all.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  // On a pull request with more than the server takes, the latest are sent.
+  return all.slice(-MAX_FEEDBACK);
+}
+
+/**
+ * The report for one pull request. `pull`, `files`, `reviews`, `comments`,
+ * `conversation` and `commits` are GitHub's REST answers; `host` is the host of the GitHub
  * server (`github.com`); `ignored` says which paths to leave out.
  */
-export function buildReport({ pull, files, reviews, comments, commits, event, host, ignored }) {
+export function buildReport({ pull, files, reviews, comments, conversation = [], commits, event, host, ignored }) {
   const author = pull.user?.login ?? "unknown";
   const submitted = reviews.filter((r) => r.user?.login !== author && r.state !== "PENDING");
   const others = comments.filter((c) => c.user?.login !== author);
@@ -93,6 +131,7 @@ export function buildReport({ pull, files, reviews, comments, commits, event, ho
     review_rounds: reviewRounds(author, reviews, comments, commits),
     files: reported,
     files_without_diff: withoutDiff,
+    feedback: feedbackOf(reviews, comments, conversation),
   };
 }
 
@@ -104,9 +143,6 @@ function percent(part, whole) {
   const rounded = Math.round((part / whole) * 100);
   return `${part < whole ? Math.min(rounded, 99) : part > 0 ? Math.max(rounded, 1) : rounded}%`;
 }
-
-/** Marks the comment this Action keeps up to date. */
-export const MARKER = "<!-- sessionly-pull-request-report -->";
 
 /** Sessionly's mark, which GitHub shows in a comment through its own image proxy. */
 const MARK = "https://www.sessionly.dev/favicon.svg";

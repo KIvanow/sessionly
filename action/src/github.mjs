@@ -37,19 +37,24 @@ export async function all(api, path, limit = 5000) {
 /** Everything about a pull request that goes into a report. */
 export async function readPull(api, repo, number) {
   const base = `/repos/${repo}/pulls/${number}`;
-  const [pull, files, reviews, comments, commits] = await Promise.all([
+  const [pull, files, reviews, comments, commits, conversation] = await Promise.all([
     api.request("GET", base),
     all(api, `${base}/files`),
     all(api, `${base}/reviews`),
     all(api, `${base}/comments`),
     all(api, `${base}/commits`),
+    // The comments under the pull request, which are not on a line of its diff.
+    all(api, `/repos/${repo}/issues/${number}/comments`),
   ]);
-  return { pull, files, reviews, comments, commits };
+  return { pull, files, reviews, comments, commits, conversation };
 }
 
-/** Create the Action's comment on a pull request, or bring it up to date. */
-export async function upsertComment(api, repo, number, marker, body) {
-  const comments = await all(api, `/repos/${repo}/issues/${number}/comments`);
+/**
+ * Create the Action's comment on a pull request, or bring it up to date.
+ * `comments` are the pull request's, if they were read already.
+ */
+export async function upsertComment(api, repo, number, marker, body, comments) {
+  comments ??= await all(api, `/repos/${repo}/issues/${number}/comments`);
   const mine = comments.find((c) => c.body?.includes(marker));
   if (mine) {
     if (mine.body !== body) await api.request("PATCH", `/repos/${repo}/issues/comments/${mine.id}`, { body });

@@ -5,6 +5,7 @@ import { scopeParams, type Scope } from "./App.tsx";
 import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
+import { pullHref, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -110,7 +111,8 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
                   <th scope="col">Written with</th>
                   <th scope="col" className="num">Agent lines that survived review</th>
                   <th scope="col" className="num">Review rounds</th>
-                  <th scope="col" className="num">Review comments</th>
+                  <th scope="col" className="num">Comments by people</th>
+                  <th scope="col" className="num">by bots</th>
                 </tr>
               </thead>
               <tbody>{list.data.pulls.map((p) => <Row key={`${p.repo}#${p.number}`} p={p} />)}</tbody>
@@ -219,9 +221,17 @@ function Row({ p }: { p: PullRow }) {
   return (
     <tr>
       <td className="title">
-        {p.url ? <a href={p.url} target="_blank" rel="noreferrer">{name}</a> : name}
+        <a href={pullHref(p)}>{name}</a>
         {p.title && <span className="muted"> {p.title}</span>}
         {p.state !== "merged" && <span className="muted"> ({p.state})</span>}
+        {web(p.url) && (
+          <>
+            {" "}
+            <a className="out" href={web(p.url)} target="_blank" rel="noreferrer" aria-label={`${name} on GitHub`} title="On GitHub">
+              ↗
+            </a>
+          </>
+        )}
       </td>
       <td className="nowrap">{p.author}</td>
       <td className="nowrap">{dateTime(p.created_at)}</td>
@@ -247,9 +257,8 @@ function Row({ p }: { p: PullRow }) {
           : "–"}
       </td>
       <td className="num">{count(p.review_rounds)}</td>
-      <td className="num" title="By people, then by bots">
-        {count(p.review_comments)} + {count(p.bot_review_comments)}
-      </td>
+      <td className="num">{count(p.review_comments)}</td>
+      <td className="num">{count(p.bot_review_comments)}</td>
     </tr>
   );
 }

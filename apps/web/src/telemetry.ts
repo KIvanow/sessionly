@@ -12,7 +12,7 @@
 import type { Telemetry } from "@sessionly/schema";
 
 /** The pages there are, by the first part of the address after `#/`. */
-const PAGES = new Set(["", "sessions", "session", "team", "connect", "pulls"]);
+const PAGES = new Set(["", "sessions", "session", "team", "connect", "pulls", "pull"]);
 
 /** A page's name from the address's `#` part: one of PAGES, or "other". Ids and the rest are left out. */
 export function pageOf(hash: string): string {

@@ -29,7 +29,7 @@ import {
   type GroupBy,
 } from "./sessions.ts";
 import type { PullReport, Telemetry } from "@sessionly/schema";
-import { BadReport, checkReport, listPulls, storePull, summarizePulls, type PullFilters } from "./pulls.ts";
+import { BadReport, checkReport, getPull, listPulls, storePull, summarizePulls, type PullFilters } from "./pulls.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
 /** A record lists every tool call, so a long session is several megabytes. */
@@ -478,6 +478,15 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   api.get("/prs/summary", async (c) => {
     adminsOnly(c.get("principal"));
     return c.json(await summarizePulls(c.get("db"), pullFilters(c.req.query())));
+  });
+  // The repository's name has slashes in it, so it is asked for by query.
+  api.get("/prs/detail", async (c) => {
+    adminsOnly(c.get("principal"));
+    const query = c.req.query();
+    if (!query.repo) throw new BadRequest("repo is required");
+    const number = wholeNumber(query.number, 0, 2 ** 31 - 1, "number");
+    const pull = await getPull(c.get("db"), query.repo, number);
+    return pull ? c.json(pull) : c.json({ error: "no such pull request" }, 404);
   });
   api.get("/prs", async (c) => {
     adminsOnly(c.get("principal"));

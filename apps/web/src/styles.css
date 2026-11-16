@@ -302,6 +302,8 @@ main > p { margin: 0; }
 .card-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 24px; }
 .card-head button.quiet { font-family: var(--mono); font-size: 12.5px; }
 .card > p.hint { margin: -4px 0 12px; font-size: 14px; }
+/* A note under a table, not over it. */
+.card > .scroll + p.hint { margin: 14px 0 0; }
 
 /* Headline figures: the cost on a sheet of its own, the rest as the cells of one sheet */
 .headline { display: grid; grid-template-columns: minmax(250px, 1fr) 3fr; gap: 26px; align-items: stretch; }
@@ -382,6 +384,12 @@ table.rows tbody tr:hover > * { background: var(--tint); }
 .nowrap { white-space: nowrap; }
 td.title, th[scope="row"] { max-width: 420px; overflow-wrap: anywhere; }
 td.title a { font-weight: 600; }
+/* Out to the same thing on another site, beside the link to its page here. */
+td.title a.out { font-weight: 400; text-decoration: none; }
+/* A file's path, whole: it breaks rather than widening the table. */
+th.path { font-family: var(--mono); font-size: 13.5px; font-weight: 500; overflow-wrap: anywhere; min-width: 200px; }
+/* On a narrow screen a table scrolls sideways before its wording is squeezed to a letter a line. */
+table.rows td.title { min-width: 200px; }
 /* A row's name stays on one line; the whole of a long one is in its title. */
 th.name { white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 /* Cost with a bar: bars share a left edge, amounts share a right edge. */
@@ -418,6 +426,13 @@ td.names { min-width: 210px; }
   color: var(--ink);
   white-space: nowrap;
 }
+td .chip { margin-left: 6px; }
+/* A choice of which rows to show: the chosen one is ink on paper turned round. */
+.pick { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0 12px; }
+.pick button { min-height: 32px; font-family: var(--sans); gap: 8px; }
+td.who { min-width: 160px; }
+.pick button[aria-pressed="true"] { background: var(--ink); color: var(--sheet); }
+.pick button[aria-pressed="true"] .muted { color: inherit; }
 .pager {
   display: flex;
   align-items: center;

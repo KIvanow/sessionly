@@ -849,6 +849,11 @@ The **Pull requests** page (admins) then shows, for the period and repository ch
 - per pull request: lines added, how many an agent wrote and with which tool and model, how
   many of the agent's lines survived review, review rounds, and review comments by people and
   by bots (CodeRabbit and the like);
+- on a pull request's own page (its name in the list leads there): the sessions that wrote its
+  lines, each a link to the session; its files, with how much of each an agent wrote; and its
+  reviews and comments, counted apart for people, bots and the author, each with who, when,
+  which line, and a link to it on GitHub. What reviews and comments say is not sent to the
+  server and not stored;
 - **by model**: the same summed, so you can see whose lines get through review as written and
   whose take several rounds.
 

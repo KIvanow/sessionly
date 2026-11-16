@@ -4,7 +4,7 @@ import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
 import type { Db } from "../src/db.ts";
 import { testDb, tokenFor } from "./helpers.ts";
-import { attribute, type Claim } from "../src/pulls.ts";
+import { attribute, breakdown, type Claim } from "../src/pulls.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
 const h = (n: number) => n.toString(16).padStart(16, "0");
@@ -80,6 +80,33 @@ test("review survival: the agents' first lines that are still there", () => {
   assert.deepEqual(a.now, { lines: 6, agent_lines: 3, by: [{ tool: "claude-code", model: "opus", lines: 3 }] });
   // nothing claimed, nothing attributed
   assert.deepEqual(attribute(first, now, []).by, []);
+});
+
+test("a pull request's lines, file by file and session by session", () => {
+  const from = (id: string, c: Claim): Claim => ({ ...c, session: { machine_id: "m1", source: c.tool, session_id: id } });
+  const claims = [
+    from("s1", claim("claude-code", "opus", "src/a.ts", 1, 1, 2, 3)),
+    from("s1", claim("claude-code", "haiku", "src/b.ts", 1, 10)),
+    // a later session wrote line 3 again: it is that session's
+    from("s2", claim("cursor", null, "src/a.ts", 2, 3, 4)),
+    // a claim that names no session still counts for the file
+    claim("grok", "grok-4", "src/b.ts", 3, 11),
+  ];
+  const now = [file("src/b.ts", 10, 11), file("src/a.ts", 1, 2, 3, 4, 99), file("README.md", 60)];
+  assert.deepEqual(breakdown(now, claims), {
+    files: [
+      { path: "src/a.ts", lines: 5, agent_lines: 4 },
+      { path: "src/b.ts", lines: 2, agent_lines: 2 },
+      { path: "README.md", lines: 1, agent_lines: 0 },
+    ],
+    sessions: [
+      { machine_id: "m1", source: "claude-code", session_id: "s1", lines: 3 },
+      { machine_id: "m1", source: "cursor", session_id: "s2", lines: 2 },
+    ],
+  });
+  // the sessions add up to what `attribute` counts for agents with a session
+  assert.equal(attribute(now, now, claims).now.agent_lines, 6);
+  assert.deepEqual(breakdown([], claims), { files: [], sessions: [] });
 });
 
 let db: Db;
@@ -291,6 +318,88 @@ test("only sessions of the people who committed to a pull request count toward i
   assert.equal(await lines(["CY@example.com ", "ann@example.com"]), 2);
   assert.equal(await lines(["someone@else.example"]), 0);
   assert.equal((await call(tokens.ci, "PUT", "/prs", report({ commit_emails: "cy@example.com" }))).status, 422);
+});
+
+test("a pull request's page: its files, the sessions that wrote it, and links to its reviews and comments", async () => {
+  const sessionOf = (id: string, source: string, line: number) =>
+    call(tokens.ann, "PUT", `/sessions/m1/${source}/${id}`, {
+      ...session(id, source, "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "page.ts", model: null, hashes: [h(line), h(line + 1)] }]),
+    });
+  await sessionOf("p-one", "claude-code", 900);
+  await sessionOf("p-two", "codex", 910);
+  const files = [file("page.ts", 900, 901, 910, 999), file("notes.md", 950)];
+  const feedback = [
+    { kind: "conversation", url: "https://github.com/acme/web/pull/30#issuecomment-1", author: "vercel[bot]", bot: true, at: "2026-11-10T12:01:00Z" },
+    {
+      kind: "inline", url: "https://github.com/acme/web/pull/30#discussion_r2", author: "bob", bot: false, at: "2026-11-10T12:05:00+02:00",
+      path: "page.ts", line: 3, reply: false,
+      // none of this is kept
+      body: "what the comment says", diff_hunk: "+ the code it is about",
+    },
+    { kind: "review", url: "javascript:alert(1)", author: "bob", bot: false, at: "2026-11-10T12:06:00Z", state: "changes_requested", body: "what the review says" },
+  ];
+  const sent = await call(tokens.ci, "PUT", "/prs", report({ number: 30, head_ref: "page", base_ref: "main", draft: true, files, feedback }));
+  assert.equal(sent.status, 200);
+
+  const at = (number: number, repo = "github.com/acme/web") => call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(repo)}&number=${number}`);
+  const page = (await at(30)).body;
+  assert.deepEqual([page.number, page.title, page.draft, page.head_ref, page.base_ref, page.closed_at], [30, "Add the parser", true, "page", "main", null]);
+  assert.deepEqual(page.attribution.now.agent_lines, 3);
+  assert.deepEqual(page.files, [
+    { path: "page.ts", lines: 4, agent_lines: 3 },
+    { path: "notes.md", lines: 1, agent_lines: 0 },
+  ]);
+  assert.deepEqual(page.sessions.map((s: any) => [s.source, s.session_id, s.lines, s.session.owner_email, s.session.primary_model, s.session.started_at]), [
+    ["claude-code", "p-one", 2, "ann@example.com", "claude-opus-5-5", "2026-11-10T11:00:00.000Z"],
+    ["codex", "p-two", 1, "ann@example.com", "claude-opus-5-5", "2026-11-10T11:00:00.000Z"],
+  ]);
+  // Who, when, where and a link: a link that is not a web address is dropped, and so is any text.
+  assert.deepEqual(page.feedback, [
+    { kind: "conversation", url: "https://github.com/acme/web/pull/30#issuecomment-1", author: "vercel[bot]", bot: true, at: "2026-11-10T12:01:00.000Z" },
+    { kind: "inline", url: "https://github.com/acme/web/pull/30#discussion_r2", author: "bob", bot: false, at: "2026-11-10T10:05:00.000Z", path: "page.ts", line: 3, reply: false },
+    { kind: "review", url: null, author: "bob", bot: false, at: "2026-11-10T12:06:00.000Z", state: "changes_requested" },
+  ]);
+  const [stored] = await db.query<{ all: string }>(`SELECT row_to_json(p)::text AS all FROM pull_requests p WHERE number = 30`);
+  assert.doesNotMatch(stored!.all, /what the|the code it is about|javascript/);
+
+  // An Action from before reviews and comments were sent says nothing of them: what is known stays.
+  await call(tokens.ci, "PUT", "/prs", report({ number: 30, event: "synchronize", files }));
+  assert.equal((await at(30)).body.feedback.length, 3);
+  // One that sends none says there are none.
+  await call(tokens.ci, "PUT", "/prs", report({ number: 30, event: "synchronize", files, feedback: [] }));
+  assert.deepEqual((await at(30)).body.feedback, []);
+
+  // A session that was deleted since is still counted, and leads nowhere.
+  await db.query(`DELETE FROM sessions WHERE session_id = 'p-two'`);
+  assert.deepEqual((await at(30)).body.sessions.map((s: any) => [s.session_id, s.lines, s.session?.owner_email ?? null]), [
+    ["p-one", 2, "ann@example.com"],
+    ["p-two", 1, null],
+  ]);
+
+  // A pull request stored before any of this was kept has none of it, rather than nothing.
+  await db.query(`UPDATE pull_requests SET detail = NULL, feedback = NULL WHERE number = 30`);
+  const old = (await at(30)).body;
+  assert.deepEqual([old.files, old.sessions, old.feedback, old.attribution.now.agent_lines], [null, null, null, 3]);
+
+  assert.equal((await at(31)).status, 404);
+  assert.equal((await at(30, "github.com/acme/other")).status, 404);
+  assert.equal((await call(tokens.admin, "GET", "/prs/detail?number=30")).status, 400);
+  assert.equal((await call(tokens.admin, "GET", "/prs/detail?repo=github.com/acme/web&number=x")).status, 400);
+  // Admins only, like the list.
+  assert.equal((await at(30)).status, 200);
+  for (const token of [tokens.ann, tokens.ci]) {
+    assert.equal((await call(token, "GET", "/prs/detail?repo=github.com/acme/web&number=30")).status, 403);
+  }
+  // Reviews and comments that make no sense are refused.
+  for (const bad of [
+    "none",
+    [{ kind: "note", author: "bob", at: "2026-11-10T12:00:00Z" }],
+    [{ kind: "review", author: "", at: "2026-11-10T12:00:00Z" }],
+    [{ kind: "review", author: "bob", at: "soon" }],
+    Array.from({ length: 2001 }, () => ({ kind: "review", author: "bob", at: "2026-11-10T12:00:00Z" })),
+  ]) {
+    assert.equal((await call(tokens.ci, "PUT", "/prs", report({ number: 30, feedback: bad }))).status, 422);
+  }
 });
 
 test("who may do what with pull requests", async () => {
