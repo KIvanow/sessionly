@@ -13,10 +13,10 @@ import {
   type Role,
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
-import { allowed, giveBack, take, type Taken } from "./limits.ts";
-import { inviteMail } from "./mail.ts";
-import { emailFrom, LINKS_PER_HOUR, mailbox, newLink, newUserId, openRoutes, unsend, type Accounts } from "./signup.ts";
-import { addUser, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
+import { allowed, giveBack, take } from "./limits.ts";
+import { PROVIDER_NAMES } from "./oauth.ts";
+import { emailFrom, newUserId, offers, openRoutes, type Accounts } from "./signup.ts";
+import { addUser, forgetAccount, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
 import {
   Conflict,
   filterOptions,
@@ -28,7 +28,7 @@ import {
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
-import type { PullReport } from "@sessionly/schema";
+import type { PullReport, Telemetry } from "@sessionly/schema";
 import { BadReport, checkReport, listPulls, storePull, summarizePulls, type PullFilters } from "./pulls.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
@@ -42,10 +42,6 @@ export type Env = {
     /** An upload or a pull request report, already parsed and checked. */
     upload?: Upload;
     report?: PullReport;
-    /** What to do once the request's transaction has been committed, and only then. */
-    after: (() => void)[];
-    /** What adding a person was counted against, to be given back if no invitation goes out. */
-    invitation?: Taken[];
   };
 };
 
@@ -184,30 +180,47 @@ export function failureLog(
   };
 }
 
+/**
+ * A host (`localhost:8080`) as a name of this machine and a port, or null
+ * if it is anything else: another machine's name, or an address of this
+ * one that others can reach.
+ */
+export function thisMachine(host: string, protocol: string): { name: string; port: string } | null {
+  const found = /^(localhost|127\.0\.0\.1|\[::1\])(?::(\d{1,5}))?$/i.exec(host.trim());
+  if (!found?.[1]) return null;
+  return { name: found[1].toLowerCase(), port: found[2] ?? (protocol === "https:" ? "443" : "80") };
+}
+
 export interface Options {
   bootstrap?: Bootstrap;
   /** Folder with the built dashboard, served at the root if given. */
   webRoot?: string;
   extensions?: Extension[];
-  /** Signing in and signing up by email, and what limits them. */
+  /** Signing in and signing up with Google or GitHub, and what limits them. */
   accounts?: Accounts;
+  /** Where the dashboard counts which of its pages are opened; none: it counts nothing. */
+  telemetry?: Telemetry | null;
 }
 
 /**
- * What the dashboard may load and talk to: itself. Its token is kept in the
- * browser's storage, so a script from anywhere else must never run there.
+ * What the dashboard may load and talk to: itself, and the address it counts
+ * its pages at if it does. Its token is kept in the browser's storage, so a
+ * script from anywhere else must never run there: the counting is part of the
+ * dashboard's own code, and only sends.
  */
-const DASHBOARD_POLICY = [
-  "default-src 'none'",
-  "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data:",
-  "font-src 'self'",
-  "connect-src 'self'",
-  "base-uri 'none'",
-  "form-action 'self'",
-  "frame-ancestors 'none'",
-].join("; ");
+export function dashboardPolicy(telemetry?: Telemetry | null): string {
+  return [
+    "default-src 'none'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self'",
+    telemetry ? `connect-src 'self' ${new URL(telemetry.host).origin}` : "connect-src 'self'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}
 
 /**
  * `ownerDb` sees every organisation's rows. Here it only finds whose token a
@@ -217,10 +230,6 @@ const DASHBOARD_POLICY = [
 export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
   const accounts = options.accounts ?? {};
-  // Work an answer does not wait for: sending a message that follows it.
-  const defer =
-    accounts.defer ??
-    ((work: () => Promise<void>) => void work().catch((err: unknown) => console.error("work after an answer failed:", err)));
 
   api.use("*", async (c, next) => {
     const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap);
@@ -296,12 +305,11 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     await next();
   });
 
-  // Adding a person sends a message to an address on an admin's word, and
-  // anyone can be the admin of an organisation they just made. So it is
-  // limited per organisation and per mailbox written to. Both are taken
-  // here, outside the transaction, and given back unless a message really
-  // goes out: asking to add someone who is already there, say, sends none,
-  // and must not use up what their address may be sent.
+  // Adding a person puts an organisation in front of them the next time
+  // they sign in, on an admin's word, and anyone can be the admin of an
+  // organisation they just made. So it is limited per organisation. Taken
+  // here, outside the transaction, and given back unless someone really
+  // was added.
   api.post("/users", async (c, next) => {
     const p = c.get("principal");
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
@@ -311,17 +319,8 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const limited = (error: string) => c.json({ error, code: "rate_limited" }, 429);
     const perOrg = await take(ownerDb, `invites:${p.orgId}`, 3600, INVITES_PER_HOUR);
     if (!perOrg) return limited(`an organisation can add ${INVITES_PER_HOUR} people an hour; try again later`);
-    const perMailbox = await take(ownerDb, `invite:${mailbox(email)}`, 3600, LINKS_PER_HOUR);
-    if (!perMailbox) {
-      await giveBack(ownerDb, perOrg);
-      return limited("that address has been sent enough invitations for now; try again in an hour");
-    }
-    c.set("invitation", [perOrg, perMailbox]);
     await next();
-    if (c.res.status !== 201) {
-      await giveBack(ownerDb, perOrg);
-      await giveBack(ownerDb, perMailbox);
-    }
+    if (c.res.status !== 201) await giveBack(ownerDb, perOrg);
   });
 
   // The rest of the request runs in one transaction, as the organisation of
@@ -331,7 +330,6 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     // connection. As text, which is what an upload or a report was parsed
     // from and is kept: asking for bytes would make a second copy of it.
     if (c.req.raw.body) await c.req.text();
-    c.set("after", []);
     try {
       await ownerDb.asOrg(c.get("principal").orgId, async (orgDb) => {
         c.set("db", orgDb);
@@ -342,11 +340,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       });
     } catch (err) {
       if (!(err instanceof Undo)) throw err;
-      return;
     }
-    // Committed: now what depended on it, such as a message with a link to
-    // a row that had to exist first.
-    for (const act of c.get("after")) act();
   });
 
   const failed = failureLog();
@@ -522,8 +516,9 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   );
   api.route("/tokens", admin);
 
-  // The people of the organisation, for admins. Adding someone sends them a
-  // link to sign in with.
+  // The people of the organisation, for admins. Someone who was added signs
+  // in with an account that has the address they were added under, and is
+  // shown the organisation then; nothing is sent to them.
   const users = new Hono<Env>();
   users.use("*", async (c, next) => {
     if (c.get("principal").role !== "admin") return c.json({ error: "admins only" }, 403);
@@ -531,40 +526,26 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   });
   users.get("/", async (c) => c.json({ users: await listUsers(c.get("db")) }));
   users.post("/", async (c) => {
-    const { mailer, publicUrl } = accounts;
-    if (!mailer || !publicUrl) {
-      return c.json({ error: "signing in by email is not set up here; create a token instead", code: "no_email" }, 409);
+    if (!offers(accounts).providers.length) {
+      return c.json({ error: "signing in is not set up here; create a token instead", code: "no_sign_in" }, 409);
     }
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
     const email = emailFrom(body.email);
     const role = body.role ?? "member";
     if (!email) throw new BadRequest("email is required, as a plain address of 254 characters at most");
     if (role !== "admin" && role !== "member") throw new BadRequest("role must be admin or member");
-    const db = c.get("db");
-    const p = c.get("principal");
-    const user = await addUser(db, newUserId(), email, role, p);
-    const link = await newLink(db, publicUrl, { purpose: "invite", userId: user.id });
-    const mail = inviteMail(email, link.url);
-    const counted = c.get("invitation") ?? [];
-    // Sent once the person and their link are really there. If it cannot
-    // be sent, the link is forgotten and the message is not one of those
-    // counted: the person is in, and asks for a link on the sign-in page.
-    c.get("after").push(() =>
-      defer(async () => {
-        try {
-          await mailer.send(mail);
-        } catch (err) {
-          console.error("an invitation was not sent:", err instanceof Error ? err.message : err);
-          await unsend(ownerDb, [link], counted);
-        }
-      }),
-    );
+    const user = await addUser(c.get("db"), newUserId(), email, role, c.get("principal"));
     return c.json(user, 201);
   });
   users.delete("/:id", async (c) => {
     await removeUser(c.get("db"), c.req.param("id"), c.get("principal"));
     return c.json({ removed: true });
   });
+  // Let someone in with another account than the one they signed in with:
+  // for anyone but oneself, the owner included, who cannot be removed.
+  users.post("/:id/forget-account", async (c) =>
+    c.json(await forgetAccount(c.get("db"), { id: c.req.param("id") }, c.get("principal"))),
+  );
   api.route("/users", users);
 
   for (const extend of options.extensions ?? []) extend(api);
@@ -580,14 +561,47 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       return c.json({ ok: false }, 503);
     }
   });
+  // People sign in at one address, the public one: a provider sends them
+  // back there, and the cookie that says which browser left is kept for
+  // that host. A server tried on one's own machine has several names
+  // (localhost, 127.0.0.1, [::1]), and a browser at one of them would not
+  // show the cookie at another: nobody could finish signing in. So a
+  // browser that asks for the dashboard, or to leave for a provider, at
+  // another of this machine's names is sent to the same place at the
+  // public one.
+  //
+  // Only then, and only on the same port. What a proxy passes on as Host
+  // is often its own name for this server, not the one the browser asked
+  // for (nginx does so unless told otherwise): going by that would send the
+  // browser to the public address, and the proxy would hand it back here,
+  // without end. A proxy on this very machine listens on another port than
+  // this server does, so a Host that differs in the port is its doing too.
+  // Everything else is answered where it is asked.
+  const home = offers(accounts).publicUrl;
+  const known = home ? thisMachine(new URL(home).host, new URL(home).protocol) : null;
+  if (home && known) {
+    app.use("*", async (c, next) => {
+      const host = c.req.header("host") ?? "";
+      const asked = thisMachine(host, new URL(home).protocol);
+      if (c.req.method !== "GET" || !asked || asked.port !== known.port || asked.name === known.name) return next();
+      const { pathname, search } = new URL(c.req.url);
+      const leaving = PROVIDER_NAMES.some((name) => pathname === `/api/v1/auth/${name}`);
+      if (pathname.startsWith("/api/") && !leaving) return next();
+      return c.redirect(`${home}${pathname}${search}`, 307);
+    });
+  }
   // Signing in and signing up need no token, so they come before the API that does.
   app.route("/api/v1/auth", openRoutes(ownerDb, accounts));
+  // Asked before anyone signs in, so that a page is counted whoever opens it.
+  const telemetry = options.telemetry ?? null;
+  app.get("/api/v1/telemetry", (c) => c.json(telemetry));
   app.route("/api/v1", api);
   app.all("/api/*", (c) => c.json({ error: "not found" }, 404));
   if (options.webRoot) {
+    const policy = dashboardPolicy(telemetry);
     app.use("/*", async (c, next) => {
       await next();
-      c.header("Content-Security-Policy", DASHBOARD_POLICY);
+      c.header("Content-Security-Policy", policy);
       c.header("X-Content-Type-Options", "nosniff");
       c.header("Referrer-Policy", "no-referrer");
     });

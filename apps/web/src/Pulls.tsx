@@ -69,7 +69,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
       )}
       {total && total.pulls > 0 && (
         <>
-          <section className="tiles" aria-label="Totals">
+          <section className="tiles three" aria-label="Totals">
             <Tile
               label="Pull requests"
               value={count(total.pulls)}
@@ -78,11 +78,13 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
             <Tile
               label="Lines written by agents"
               value={percent(share(total.agent_lines, total.lines))}
+              part={share(total.agent_lines, total.lines)}
               note={`${count(total.agent_lines)} of ${count(total.lines)} added lines`}
             />
             <Tile
               label="Agent lines that survived review"
               value={shareOf(total.agent_lines_surviving, total.opened_agent_lines)}
+              part={share(total.agent_lines_surviving, total.opened_agent_lines)}
               note={`${count(total.agent_lines_surviving)} of ${count(total.opened_agent_lines)}, in ${count(total.pulls_from_open)} pull requests reported since they were opened`}
             />
           </section>

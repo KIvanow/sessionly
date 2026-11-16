@@ -34,8 +34,11 @@ services:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
       SESSIONLY_DB_POOL: ${SESSIONLY_DB_POOL:-8}
       SESSIONLY_DB_QUERY_SECONDS: ${SESSIONLY_DB_QUERY_SECONDS:-30}
-      RESEND_API_KEY: ${RESEND_API_KEY:?set RESEND_API_KEY in .env}
-      SESSIONLY_EMAIL_FROM: ${SESSIONLY_EMAIL_FROM:?set SESSIONLY_EMAIL_FROM in .env}
+      # One of the two pairs at least: the server says so and stops without.
+      SESSIONLY_GOOGLE_CLIENT_ID: ${SESSIONLY_GOOGLE_CLIENT_ID:-}
+      SESSIONLY_GOOGLE_CLIENT_SECRET: ${SESSIONLY_GOOGLE_CLIENT_SECRET:-}
+      SESSIONLY_GITHUB_CLIENT_ID: ${SESSIONLY_GITHUB_CLIENT_ID:-}
+      SESSIONLY_GITHUB_CLIENT_SECRET: ${SESSIONLY_GITHUB_CLIENT_SECRET:-}
       SESSIONLY_PUBLIC_URL: https://${SESSIONLY_DOMAIN:?set SESSIONLY_DOMAIN in .env}
       SESSIONLY_SIGNUP: ${SESSIONLY_SIGNUP:-open}
       SESSIONLY_SIGNUP_CODE: ${SESSIONLY_SIGNUP_CODE:-}
@@ -57,9 +60,10 @@ services:
       retries: 6
       start_period: 20s
     restart: unless-stopped
-    # Stopping waits for requests in flight, and for a message that is on
-    # its way out: up to 40 seconds for one that Resend keeps not answering.
-    stop_grace_period: 60s
+    # Stopping waits for requests in flight. One that is waiting on a
+    # database that says nothing is given up on after 36 seconds
+    # (SESSIONLY_DB_QUERY_SECONDS and a fifth).
+    stop_grace_period: 45s
 
   caddy:
     # A named release and the digest of its image, so that what runs in front

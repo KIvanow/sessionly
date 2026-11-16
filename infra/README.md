@@ -7,8 +7,8 @@ that.
 
 What a hosted service is, in the server's terms: `SESSIONLY_HOSTED=true`. Signing up creates an
 organisation, each organisation sees only its own rows (every query names it, and Postgres
-row-level security enforces it underneath), people sign in by a link sent to their address,
-and there is no admin of everything.
+row-level security enforces it underneath), people sign in with Google or GitHub, and there
+is no admin of everything.
 
 ## What you need
 
@@ -19,10 +19,8 @@ and there is no admin of everything.
 - **A managed Postgres**, version 16 or later, in the same region, with a database and a user
   for Sessionly. One statement has to be run in it by its admin before the first start: see
   [The database's role](#the-databases-role).
-- **A [Resend](https://resend.com) account** for the sign-in links, with the domain the links
-  come from verified there (Resend gives the DNS records to add), and an API key with
-  "Sending access" only. Messages leave over HTTPS, so the outgoing mail ports that cloud
-  providers block on new accounts do not matter.
+- **A way for people to sign in**: Google, GitHub, or both. See
+  [Signing in](#signing-in) for what to create at each. The server sends no email.
 
 ## First start
 
@@ -46,8 +44,106 @@ curl -s https://app.example.com/readyz             # {"ok":true}: it reaches its
 curl -s https://app.example.com/api/v1/auth/options
 ```
 
-Open `https://app.example.com`, choose "Create an organisation", and use the link that
-arrives. You are that organisation's owner. The first page is how to connect a machine.
+Open `https://app.example.com`, choose "Create an organisation", sign in with Google or
+GitHub, and name it. You are that organisation's owner. The first page is how to connect a
+machine.
+
+### Signing in
+
+Each provider gives an id and a secret for this server, and has to be told the one address
+it may send people back to. With `app.example.com` as the domain:
+
+- **Google.** In the Google Cloud console, under
+  [Google Auth Platform](https://console.cloud.google.com/auth/overview):
+  - **Branding**: the app's name and a support address, which people see when they sign in.
+  - **Audience**: "External". While its status is "Testing", only the test users listed
+    there can sign in, a hundred at most; "In production" lets any Google account in. With
+    the two scopes below, publishing needs no review by Google.
+  - **Data access**: the scopes `openid` and `email`, and no others.
+  - **Clients**: create an OAuth client of type "Web application" with the authorised
+    redirect URI `https://app.example.com/api/v1/auth/google/callback`. Its id and secret are
+    `SESSIONLY_GOOGLE_CLIENT_ID` and `SESSIONLY_GOOGLE_CLIENT_SECRET`.
+- **GitHub.** Under Settings → Developer settings →
+  [OAuth Apps](https://github.com/settings/developers), create an OAuth app with the
+  authorization callback URL `https://app.example.com/api/v1/auth/github/callback`. Its id and
+  a secret generated there are `SESSIONLY_GITHUB_CLIENT_ID` and
+  `SESSIONLY_GITHUB_CLIENT_SECRET`.
+
+What is asked of either is which account this is and which email addresses are its:
+Google's one address, if Google has verified it, and every address GitHub has verified for a
+GitHub account (the `user:email` scope). Nothing else of the account is read. What is kept
+is the account's number (Google's `sub`, GitHub's user id), beside the person it signed in
+as.
+
+**Who an address is.** A person is added to an organisation by address, and the first
+account that signs in to it under that address is from then on who that person is there. A
+provider goes on vouching for an address long after it was verified: Google for an address
+that is not its own, since the account was made; GitHub until its holder takes the address
+off. So an address alone would let in whoever had it once. After the first sign-in it does
+not: another account that has the address, of the same provider or the other, is told to
+use the first one and is not let in.
+
+When that account is gone (deleted and made again, or the person now uses the other
+provider), someone else lets them in with another: an admin of the organisation, from its
+Team page ("Let in with another account"), for anyone but themselves. For the owner that
+takes an admin who has signed in: an admin token does it for anyone else, and not for the
+owner, since a token says nothing of who holds it. An owner who is the only admin has
+nobody to ask there, and whoever runs the service does it:
+
+```sh
+docker compose --env-file .env -f docker-compose.hosted.yml run --rm --no-deps -w /app/apps/server \
+  server node src/cli.ts person forget-account --org acme-x7k2p9 --email owner@acme.example
+```
+
+(`person list --org …` shows who signs in with what.) Either way the person is then as
+someone who was just added: whoever next signs in under their address is asked first, and
+is that person from then on. Their sessions are ended; the tokens of their machines are not.
+So do it for someone you know has lost the account, not on the word of a message from the
+address. Each time it is done the server's log has a line saying for whom, in which
+organisation, and by whom.
+
+People who signed in before the account was kept (no release did that; a trial database
+may have some) are treated the same way by the migration: asked as someone new at their
+next sign-in, and never taken straight in.
+
+What this does not cover is the first sign-in itself. Whoever a provider vouches for under
+an address is taken to be its holder, so add people under addresses whose mailboxes are
+theirs now, and remove a person when they leave. Which Google Workspace an account belongs
+to (`hd`) is not looked at, and there is no rule that an organisation's people must come
+from one.
+
+**Cookies.** Two, both this host's alone (`__Host-`), not readable by scripts, and sent
+only over HTTPS: one for the ten minutes at most between leaving for a provider and coming
+back, so that only the browser that left is taken back; and one from coming back until the
+person has chosen where to sign in, ten minutes at most, which is what carries the sign-in.
+Nothing of it is in an address, so nothing of it is in a link, a history or a log. They are
+the only cookies the service sets. A hosted service does not start unless its public address
+is `https://`. The one exception is `http://localhost` (or `127.0.0.1`, `[::1]`), for trying
+it on the machine it runs on; the cookies then have neither the prefix nor `Secure`.
+
+**One address.** People sign in at `SESSIONLY_PUBLIC_URL` and nowhere else: a provider sends
+them back there, and the cookies are kept for that host. So open the dashboard at exactly
+that address. A server tried on its own machine has several names, and there the server
+helps: with `http://localhost:8080` as the public address, a browser at
+`http://127.0.0.1:8080` or `http://[::1]:8080` is sent on to the same page at `localhost`.
+That is the only case in which it sends a browser anywhere: for any other host, and for
+one of the machine's names on another port, it answers where it is asked.
+
+That matters behind a proxy. Many pass on their own name for the server as `Host`, not the
+one the browser asked for (nginx unless told `proxy_set_header Host $host;`, Apache without
+`ProxyPreserveHost On`, a tunnel with a host override), and a server that went by it would
+send every browser to the public address, to be handed straight back. The server does not
+go by it, so such a proxy works as it is; passing the browser's `Host` on is still the
+better setup, and is what the Caddyfile here does.
+
+Google takes a plain `http://` address to send people back to only for this machine's own
+names (`localhost`, `127.0.0.1`, `[::1]`); a server reached over plain HTTP under any other
+name can offer GitHub alone.
+
+What the dashboard asks while someone signs in is taken from the dashboard only: as JSON,
+and from this very origin where the browser says where from. A page on a neighbouring host
+of the same domain cannot create an organisation, or end a sign-in, in the name of someone
+who has just signed in.
 
 ### The database's role
 
@@ -127,36 +223,44 @@ A setting that is a count (this one, the two below, `SESSIONLY_DB_POOL`,
 
 Limits that are not settings:
 
-- 5 requests for a link a minute from one caller (an IPv6 caller is its /64), and 20 looks at
-  or uses of a link.
-- 10 sign-ups an hour asked for from one network, a /24 or a /48 of IPv6
+- 20 times a minute off to a provider from one caller (an IPv6 caller is its /64), 20 times
+  back, and 20 looks at or uses of what coming back gives.
+- 10 organisations an hour created from one network, a /24 or a /48 of IPv6
   (`SESSIONLY_SIGNUPS_PER_NETWORK`). An office or a phone network shares one.
-- 5 messages an hour to one mailbox to finish signing up, and 5 on being added to
-  organisations. Only messages that go out are counted, and a mailbox is counted once however
-  its address is spelt (`+tag`, and Gmail's dots).
-- A link to sign in is not sent again while one that was asked for still works (15 minutes).
-  So asking in someone's name gets them four messages an hour at most, and cannot leave them
-  without a link that works. Links to organisations someone has signed in to come out of an
-  allowance of their address's own, 12 messages an hour. Every other link to sign in (to an
-  organisation they were added to and never signed in to, or to a spelling of the mailbox
-  nobody confirmed) comes out of another 12 that the whole mailbox shares, so that being
-  added to other people's organisations cannot use up the links to one's own.
-- A message that could not be sent is not counted, and its link is forgotten, so the next
-  ask sends at once.
-- 100 sign-up messages an hour in all (`SESSIONLY_SIGNUPS_PER_HOUR`). The server logs a
-  warning, once an hour, when this is reached: until the hour is over nobody can sign up.
+- 5 organisations an hour created by one address, and 20 owned by one person in all,
+  counted by their addresses and by the account they signed in with.
+- 100 organisations an hour in all (`SESSIONLY_SIGNUPS_PER_HOUR`). The server logs a warning,
+  once an hour, when this is reached: until the hour is over nobody can sign up.
 - 30 people an hour added by one organisation.
+- 10 wrong invitation codes an hour from one network, and 10 by one account
+  (`SESSIONLY_SIGNUP_CODE`). Past either, no code of theirs is looked at until the hour is
+  over. Only someone who has signed in is told whether a code is right, and a try is counted
+  before the code is looked at. Past 1,000 wrong ones an hour from everyone, the log says
+  so once; nobody is refused for that, or one guesser could close signing up for all.
 
-These exist because the service sends mail on a stranger's word. No message carries what its
-asker wrote: not a name, not an address, and an organisation's name only to someone who has
-signed in to that organisation before. The page a link opens shows the organisation's name
-and id and who added the address, and asks before going on. Who added it is shown only if
-that was a person who had signed in, whose address is then their own; someone added with a
-token is told so and no more, since a token's address and name are whatever its maker typed. An organisation's name may not
-contain what could make a link, or letters that are styled forms of other letters.
+An organisation costs its maker nothing, and anyone can add anyone's address to one of
+theirs. So nobody is taken into an organisation they have not chosen: someone who signs in
+is shown the organisations they have signed in to before, and then the ones their addresses
+were added to, the newest first and ten at a time with the rest a click away, each with its
+name and id and who added them, and is asked. Adding an address to many organisations
+beforehand, or afterwards, hides neither the ones a person is in nor the one they were just
+told about. Someone in one organisation they have signed in to before goes straight in,
+unless the browser is signed in somewhere already: then they are asked too. Who
+added them is shown only if that was a person who had signed in, whose address is then their
+own; someone added with a token is told so and no more, since a token's address and name are
+whatever its maker typed. An organisation's name may not contain what could make a link, or
+letters that are styled forms of other letters. Being added sends nobody anything.
 
-A hosted service refuses to start with `SESSIONLY_ADMIN_TOKEN` set, without Postgres, or
-without the mail settings, and says which.
+A hosted service refuses to start with `SESSIONLY_ADMIN_TOKEN` set, without Postgres,
+without a public address that is `https://` (or this machine's own, to try it), or with
+neither Google nor GitHub set up, and says which.
+
+**When signing in does not work.** The page says one of a few things, and the server's log
+says why. "Not set up right" means the provider named a setting: `redirect_uri_mismatch`
+(the address in the provider's settings is not the one above), `invalid_client` or
+`incorrect_client_credentials` (the id or the secret), `admin_policy_enforced` (a Google
+Workspace that does not allow the app). The log has the provider's own word and nothing
+else of what it sent.
 
 ## Updating
 
@@ -231,8 +335,8 @@ Compose then warns that it did not make that volume itself, and uses it all the 
 - **The machine keeps** Caddy's certificates (the `caddy-data` volume) and `.env`. Losing the
   volume only means new certificates.
 - **Logs** are the containers' own (`docker compose logs server`). The server writes no log of
-  requests; errors go to standard error. A message that could not be sent is logged with the
-  address's domain only, never the link.
+  requests; errors go to standard error. A sign-in that failed at Google or GitHub is logged
+  with what the provider answered, never the code or an address.
 
 ## Not built yet
 
@@ -240,6 +344,9 @@ Compose then warns that it did not make that volume itself, and uses it all the 
 - **Deleting an organisation and exporting its data** from the dashboard. An operator can
   delete one in the database: `DELETE FROM orgs WHERE id = '…'` takes everything of it along.
 - **A deploy job.** Updating is the commands above, by hand.
+- **Inviting someone by a link.** A person is added by address, and has to sign in with a
+  Google or GitHub account that has that address. Nothing tells them they were added.
+- **Other ways to sign in**: Microsoft, or a company's own single sign-on.
 
 ## Checked, and not
 
@@ -261,8 +368,11 @@ where `update.sh` was run while requests kept arriving:
 - every copy cut off from the database, and `update.sh` run meanwhile: exit 1, both copies
   left as they were, and answering again within seconds of the database coming back.
 
-Mail was checked against Resend itself: one message from its test sender to its test inbox
-was taken, and one from a domain not verified there was refused and logged as such. Not
-checked: a message from a verified domain of your own arriving in a real inbox.
+Signing in was checked against stand-ins for Google and GitHub that answer as their
+documentation says they do, and in a browser against a stand-in: a link to the page someone
+comes back to, opened in another browser, signed in or not, does nothing there. It was then
+tried through Google and GitHub themselves on one machine, at `http://localhost:8080`
+against a local Postgres. Not checked: either of them sending people back to a public
+address over HTTPS, where the cookies have their `__Host-` names.
 
 Not checked: a real managed database, and Caddy getting a public certificate.

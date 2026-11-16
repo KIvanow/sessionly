@@ -1,4 +1,4 @@
-import type { AuthOptions, FilterOptions, Me, SignedIn } from "@sessionly/schema";
+import type { Arrival, AuthOptions, FilterOptions, Me, SignedIn } from "@sessionly/schema";
 import { useEffect, useMemo, useState } from "react";
 import {
   api,
@@ -12,9 +12,11 @@ import {
   saveToken,
   type Saved,
 } from "./api.ts";
+import { arrive, doors, landingOf } from "./arrival.ts";
+import { Arrived } from "./Arrived.tsx";
+import { Brand } from "./Brand.tsx";
 import { Connect } from "./Connect.tsx";
 import { Login } from "./Login.tsx";
-import { reads } from "./lookalike.ts";
 import { Overview } from "./Overview.tsx";
 import { Pulls } from "./Pulls.tsx";
 import { SessionView } from "./SessionView.tsx";
@@ -63,50 +65,13 @@ function useHash(): string {
   return hash.replace(/^#\/?/, "");
 }
 
-/** The code of a link someone signed in or signed up with: `#login=<code>`. */
-function linkCode(): string | null {
-  return /^#login=([\w-]+)$/.exec(window.location.hash)?.[1] ?? null;
-}
-
-/** A link someone arrived by, and what the server says it is for. */
-interface Link {
-  code: string;
-  /** Asked for by the person, sent on being added, or to create an organisation. */
-  purpose: "sign_in" | "invite" | "signup";
-  email: string;
-  org_name: string;
-  /** The organisation's id, which unlike its name is its own. None yet when creating one. */
-  org_id: string | null;
-  /** The person has not signed in to this organisation before. */
-  first_time: boolean;
-  /**
-   * Who added them to it, if they have not signed in to it before and it
-   * was someone who had signed in: that address is the adder's own.
-   */
-  invited_by: string | null;
-  /**
-   * How they were added: by a person who had signed in, or with a token,
-   * which says nothing of who held it. Null if that was not recorded.
-   */
-  invited_via: "sign_in" | "token" | null;
-}
-
-/**
- * An organisation this browser is signed in to that has the name a link
- * shows and is not the one the link is for. Anyone can make an organisation
- * with any name, so a name alone does not say which one this is.
- */
-function sameNameElsewhere(link: Link): Saved | undefined {
-  return savedSessions().find((s) => s.org !== link.org_id && reads(s.name) === reads(link.org_name));
-}
-
 export function App() {
   const [token, setToken] = useState<string | null>(savedToken);
   const [me, setMe] = useState<Me | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [options, setOptions] = useState<AuthOptions | null>(null);
-  const [arriving, setArriving] = useState(() => linkCode() !== null);
-  const [link, setLink] = useState<Link | null>(null);
+  const [arriving, setArriving] = useState(() => landingOf(window.location.hash)?.arrived === true);
+  const [back, setBack] = useState<Arrival | null>(null);
   const [leaving, setLeaving] = useState(false);
   /** Sessions the server could not be told to end, kept (not stored) to try again. */
   const [unended, setUnended] = useState<string[]>([]);
@@ -164,46 +129,47 @@ export function App() {
 
   useEffect(() => {
     open<AuthOptions>("/auth/options")
-      .then(setOptions)
+      // A server from before signing in with Google or GitHub names no providers.
+      .then((offered) => setOptions({ ...offered, providers: offered.providers ?? [] }))
       // An older server, or none: a token is the way in.
-      .catch(() => setOptions({ hosted: false, emailSignIn: false, signup: false, inviteCode: false }));
+      .catch(() => setOptions({ hosted: false, providers: [], signup: false, inviteCode: false }));
   }, []);
 
-  // Arriving by a link. It may open a new page or only change the address of
-  // this one. The link is not used yet: first the server is asked what it is
-  // for, and the person is shown and asked. A link is whatever its sender
-  // made it, and must not sign anyone in to a place they did not choose.
+  /** Signed in: this browser keeps the session, and shows the organisation. */
+  const signedIn = (signed: SignedIn) => {
+    keepSession({ org: signed.org.id, name: signed.org.name, token: signed.token });
+    setProblem(null);
+    setBack(null);
+    use(signed.token);
+    window.location.hash = signed.created ? "#/connect" : "#/";
+  };
+
+  // Back from Google or GitHub. The address says only that: the sign-in is
+  // in a cookie the server gave this browser, and a link to this page has
+  // nothing in it for anyone else. First the server is asked where this
+  // person can sign in. Someone in one organisation, which they have signed
+  // in to before, goes straight there, unless this browser is signed in
+  // somewhere already. Anyone else is shown what there is and asked: being
+  // added to an organisation is someone else's doing, and must not sign
+  // anyone in to a place they did not choose.
   useEffect(() => {
-    const arrive = () => {
-      const code = linkCode();
-      if (!code) return;
-      setArriving(true);
-      // The code leaves the address bar and the history straight away.
+    const land = () => {
+      const landing = landingOf(window.location.hash);
+      if (!landing) return;
       window.history.replaceState(null, "", window.location.pathname);
-      open<Omit<Link, "code">>("/auth/check", { code })
-        .then((what) => (setProblem(null), setLink({ code, ...what })))
-        .catch((err: Error) => setProblem(err.message))
+      if (landing.arrived) setArriving(true);
+      void arrive(landing)
+        .then((outcome) => {
+          if (outcome.kind === "entered") signedIn(outcome.signed);
+          else if (outcome.kind === "ask") (setProblem(null), setBack(outcome.arrival));
+          else if (outcome.kind === "problem") setProblem(outcome.text);
+        })
         .finally(() => setArriving(false));
     };
-    arrive();
-    window.addEventListener("hashchange", arrive);
-    return () => window.removeEventListener("hashchange", arrive);
+    land();
+    window.addEventListener("hashchange", land);
+    return () => window.removeEventListener("hashchange", land);
   }, []);
-
-  /** The person said yes: now the link is used. */
-  const follow = (chosen: Link) => {
-    setArriving(true);
-    setLink(null);
-    open<SignedIn>("/auth/verify", { code: chosen.code })
-      .then((signed) => {
-        keepSession({ org: signed.org.id, name: signed.org.name, token: signed.token });
-        setProblem(null);
-        use(signed.token);
-        window.location.hash = signed.created ? "#/connect" : "#/";
-      })
-      .catch((err: Error) => setProblem(err.message))
-      .finally(() => setArriving(false));
-  };
 
   useEffect(() => {
     if (!token) return;
@@ -227,71 +193,37 @@ export function App() {
   if (arriving || leaving) {
     return (
       <main className="center">
-        <p>{leaving ? "Signing out…" : "Opening the link…"}</p>
+        <Brand />
+        <p>{leaving ? "Signing out…" : "Signing in…"}</p>
       </main>
     );
   }
-  if (link) {
-    const creating = link.purpose === "signup";
-    const twin = sameNameElsewhere(link);
+  // Not until the server has said what it offers: whether an organisation
+  // may be created here decides which page this is.
+  if (back && !options) {
     return (
       <main className="center">
-        <div className="card login">
-          <h1>{creating ? "Create this organisation?" : "Sign in here?"}</h1>
-          <dl className="facts">
-            <dt>Organisation</dt>
-            <dd>{link.org_name}</dd>
-            {link.org_id && (
-              <>
-                <dt>Its id</dt>
-                <dd>
-                  <code>{link.org_id}</code>
-                </dd>
-              </>
-            )}
-            <dt>{creating ? "Its owner" : "As"}</dt>
-            <dd>{link.email}</dd>
-            {!creating && link.first_time && (
-              <>
-                <dt>Added by</dt>
-                <dd>
-                  {link.invited_by ??
-                    (link.invited_via === "token"
-                      ? "an admin token of that organisation, not a person who signed in"
-                      : "not recorded")}
-                </dd>
-              </>
-            )}
-          </dl>
-          {twin && (
-            <p role="alert">
-              {creating
-                ? `This browser is already signed in to an organisation called ${twin.name} (${twin.org}). This creates a second, separate one with the same name.`
-                : `This is not the ${twin.name} this browser is signed in to: that one is ${twin.org}. Anyone can give an organisation any name. Go on only if you ${
-                    link.invited_by ? `know who ${link.invited_by} is and` : "know who sent this and"
-                  } expected it.`}
-            </p>
-          )}
-          {!creating && link.first_time && !twin && (
-            <p className="muted">
-              You have not signed in to this organisation before. A name can be anyone's choice
-              {link.invited_by
-                ? ": check who added you."
-                : ", and this page cannot say who added you: go on only if you were expecting this."}
-            </p>
-          )}
-          <p className="muted">
-            {creating
-              ? "The organisation is created now, with this address as its owner."
-              : "Sessions you upload after signing in here belong to this organisation."}{" "}
-            If this is not what you expected, or the address is not yours, do not go on.
-          </p>
-          <button onClick={() => follow(link)}>{creating ? "Create it" : "Sign in"}</button>
-          <button className="quiet" onClick={() => setLink(null)}>
-            Not now
-          </button>
-        </div>
+        <p>Signing in…</p>
       </main>
+    );
+  }
+  if (back) {
+    return (
+      <Arrived
+        arrival={back}
+        options={options}
+        enter={(where) => doors.enter(where).then(signedIn)}
+        onMore={() =>
+          doors.check(back.orgs.filter((org) => org.first_time).length).then((next) =>
+            setBack({ ...back, orgs: [...back.orgs, ...next.orgs], more: next.more }),
+          )
+        }
+        onCancel={() => {
+          // Over on the server too. If it cannot be told, it runs out by itself in minutes.
+          void doors.cancel().catch(() => {});
+          setBack(null);
+        }}
+      />
     );
   }
   if (!token) {
@@ -310,6 +242,7 @@ export function App() {
   if (!me) {
     return (
       <main className="center">
+        <Brand />
         {problem ? (
           <p role="alert">
             {problem} <button onClick={signOut}>Sign in again</button>
@@ -324,7 +257,8 @@ export function App() {
     <Shell
       token={token}
       me={me}
-      emailSignIn={options?.emailSignIn === true}
+      people={(options?.providers.length ?? 0) > 0}
+      address={options?.publicUrl || window.location.origin}
       hosted={options?.hosted === true}
       sessions={savedSessions()}
       onSwitch={use}
@@ -334,10 +268,20 @@ export function App() {
   );
 }
 
+/** What each page is, said at its top. A single session names itself. */
+const HEADINGS: Record<string, { title: string; about: string }> = {
+  "": { title: "Overview", about: "What the agents did, what it cost, and how much of what they wrote is still there." },
+  sessions: { title: "Sessions", about: "Every session that was uploaded, newest first." },
+  pulls: { title: "Pull requests", about: "How much of each pull request agents wrote, and how those lines fared in review." },
+  team: { title: "Team", about: "Who can sign in, and the tokens for what cannot." },
+  connect: { title: "Connect", about: "A token for each of your machines, and how to capture sessions elsewhere." },
+};
+
 function Shell({
   token,
   me,
-  emailSignIn,
+  people,
+  address,
   hosted,
   sessions,
   onSwitch,
@@ -346,8 +290,10 @@ function Shell({
 }: {
   token: string;
   me: Me;
-  /** Whether people can be added to sign in by email. */
-  emailSignIn: boolean;
+  /** Whether people can be added, to sign in with Google or GitHub. */
+  people: boolean;
+  /** Where people sign in: what someone who was added is told. */
+  address: string;
   /** A service many organisations share: no license files there. */
   hosted: boolean;
   /** Sessions in other organisations, to switch to. */
@@ -369,7 +315,9 @@ function Shell({
     if (page === "session" && rest.length === 3) {
       return <SessionView token={token} address={rest.join("/")} onSignOut={onSignOut} />;
     }
-    if (page === "team" && isAdmin) return <Team token={token} emailSignIn={emailSignIn} hosted={hosted} onSignOut={onSignOut} />;
+    if (page === "team" && isAdmin) {
+      return <Team token={token} people={people} address={address} myEmail={me.email} hosted={hosted} onSignOut={onSignOut} />;
+    }
     if (page === "connect") return <Connect token={token} me={me} onSignOut={onSignOut} />;
     if (page === "pulls" && isAdmin) {
       return (
@@ -377,9 +325,11 @@ function Shell({
       );
     }
     return <Overview token={token} scope={scope} showUsers={isAdmin} onSignOut={onSignOut} />;
-  }, [page, rest.join("/"), token, scope, isAdmin, options.data, emailSignIn, hosted, me]);
+  }, [page, rest.join("/"), token, scope, isAdmin, options.data, people, address, hosted, me]);
 
   const scoped = page === "" || page === "sessions";
+  const orgName = me.org !== "default" && me.org_name ? me.org_name : null;
+  const heading = HEADINGS[page === "team" || page === "pulls" ? (isAdmin ? page : "") : (page ?? "")];
   const link = (target: string, label: string) => (
     <a href={`#/${target}`} aria-current={page === target ? "page" : undefined}>
       {label}
@@ -389,35 +339,42 @@ function Shell({
   return (
     <>
       <header className="top">
-        <strong className="brand">Sessionly</strong>
-        <nav aria-label="Main">
-          {link("", "Overview")}
-          {link("sessions", "Sessions")}
-          {isAdmin && link("pulls", "Pull requests")}
-          {isAdmin && link("team", "Team")}
-          {link("connect", "Connect")}
-        </nav>
-        <span className="who">
-          {sessions.length > 1 ? (
-            <select aria-label="Organisation" value={token} onChange={(e) => onSwitch(e.target.value)}>
-              {sessions.map((s) => (
-                <option key={s.org} value={s.token}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          ) : (
-            me.org !== "default" && me.org_name
-          )}
-          <span>
-            {me.email} · {me.role}
+        <div>
+          <Brand />
+          <nav aria-label="Main">
+            {link("", "Overview")}
+            {link("sessions", "Sessions")}
+            {isAdmin && link("pulls", "Pull requests")}
+            {isAdmin && link("team", "Team")}
+            {link("connect", "Connect")}
+          </nav>
+          <span className="who">
+            {sessions.length > 1 ? (
+              <select aria-label="Organisation" value={token} onChange={(e) => onSwitch(e.target.value)}>
+                {sessions.map((s) => (
+                  <option key={s.org} value={s.token}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              orgName && <span className="org">{orgName}</span>
+            )}
+            <span>
+              {me.email} · {me.role}
+            </span>
+            <button onClick={onLeave}>Sign out</button>
           </span>
-          <button className="quiet" onClick={onLeave}>
-            Sign out
-          </button>
-        </span>
+        </div>
       </header>
       <main>
+        {heading && (
+          <div className="page-head">
+            <p className="eyebrow">{orgName ?? "Your team"}</p>
+            <h1>{heading.title}</h1>
+            <p>{heading.about}</p>
+          </div>
+        )}
         {scoped && (
           <form className="filters" aria-label="Filters" onSubmit={(e) => e.preventDefault()}>
             <label>

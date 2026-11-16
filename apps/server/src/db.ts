@@ -577,6 +577,53 @@ const MIGRATIONS: string[] = [
      (SELECT min(t.created_at) FROM tokens t WHERE t.user_id = u.id AND t.sign_in = 'email'),
      CASE WHEN u.role = 'owner' THEN u.created_at END)
    WHERE u.confirmed_at IS NULL`,
+  // Signing in is with Google or GitHub now, and no link is sent to anyone.
+  // What a provider says of someone who has just come back from it (the
+  // addresses it vouches for, the main one first) is kept for the few
+  // minutes they take to choose an organisation or name a new one. Like the
+  // links before it, it is read by the owner alone; a request can do
+  // nothing with it.
+  `DROP TABLE login_codes`,
+  `CREATE TABLE sign_in_codes (
+     code_hash  text PRIMARY KEY,
+     provider   text NOT NULL CHECK (provider IN ('google', 'github')),
+     emails     text[] NOT NULL CHECK (cardinality(emails) > 0),
+     expires_at timestamptz NOT NULL
+   )`,
+  // A session says which of them it was made with. Sessions from links
+  // ('email') stay as they are until they run out.
+  `ALTER TABLE tokens DROP CONSTRAINT tokens_sign_in_check`,
+  `ALTER TABLE tokens ADD CONSTRAINT tokens_sign_in_check CHECK (sign_in IN ('email', 'google', 'github'))`,
+  // Which account a provider said someone is, by the provider's own number
+  // for it, beside the addresses. A sign-in that was waiting for its
+  // organisation to be chosen when this is added is started again.
+  `DELETE FROM sign_in_codes`,
+  `ALTER TABLE sign_in_codes ADD COLUMN account text NOT NULL`,
+  // The account a person first signed in to an organisation with. From then
+  // on only that account gets in as them: a provider goes on vouching for
+  // an address after its mailbox has passed to someone else.
+  `ALTER TABLE users ADD COLUMN sign_in_provider text CHECK (sign_in_provider IN ('google', 'github'))`,
+  `ALTER TABLE users ADD COLUMN sign_in_account text`,
+  `ALTER TABLE users ADD CONSTRAINT users_sign_in_account_check CHECK ((sign_in_provider IS NULL) = (sign_in_account IS NULL))`,
+  // how many organisations an account owns is counted when it makes another
+  `CREATE INDEX users_sign_in_account ON users (sign_in_provider, sign_in_account) WHERE sign_in_account IS NOT NULL`,
+  // A sign-in that has come back from its provider, so that the same one
+  // does not come back twice. Like the codes, no request reaches it.
+  `CREATE TABLE sign_in_states (
+     state_hash text PRIMARY KEY,
+     expires_at timestamptz NOT NULL
+   )`,
+  // When a person was last added, or let in anew: what the list of places
+  // someone was added to is ordered by. `created_at` stays when they first were.
+  `ALTER TABLE users ADD COLUMN invited_at timestamptz`,
+  // Having signed in means with an account that is kept. People who signed
+  // in before one was kept have none, and would be whoever came first under
+  // their address, taken straight in. They are as people who were added and
+  // have not signed in: asked, and shown that they have not been here
+  // before, and the account they then come with is theirs. (Nothing but
+  // trial databases has such people: no release kept sign-ins without it.)
+  `UPDATE users SET confirmed_at = NULL WHERE confirmed_at IS NOT NULL AND sign_in_account IS NULL`,
+  `ALTER TABLE users ADD CONSTRAINT users_confirmed_with_account CHECK (confirmed_at IS NULL OR sign_in_account IS NOT NULL)`,
 ];
 
 /**

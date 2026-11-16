@@ -7,25 +7,40 @@
 //   SESSIONLY_ADMIN_TOKEN  an admin token that always works (for first use)
 //   SESSIONLY_ADMIN_EMAIL  whose sessions uploads with that token belong to
 //   SESSIONLY_HOSTED       "true" for a service that many organisations share
-// Signing in by email (and, hosted, signing up) needs these two and the next:
-//   RESEND_API_KEY         a key of resend.com with sending access: the links are sent through it
-//   SESSIONLY_EMAIL_FROM   the address the links come from, e.g. "Sessionly <sign-in@example.com>",
-//                          on a domain verified in Resend
+// Signing in with Google or GitHub (and, hosted, signing up) needs the public
+// address and the id and secret of at least one of the two:
 //   SESSIONLY_PUBLIC_URL   where people reach the dashboard, e.g. https://app.example.com
+//   SESSIONLY_GOOGLE_CLIENT_ID, SESSIONLY_GOOGLE_CLIENT_SECRET
+//                          of an OAuth client (a "Web application") in Google Cloud, whose redirect
+//                          URI is <public address>/api/v1/auth/google/callback
+//   SESSIONLY_GITHUB_CLIENT_ID, SESSIONLY_GITHUB_CLIENT_SECRET
+//                          of an OAuth app on GitHub, whose callback URL is
+//                          <public address>/api/v1/auth/github/callback
 //   SESSIONLY_SIGNUP       hosted only: "open" (the default) or "off"
 //   SESSIONLY_SIGNUP_CODE  if set, signing up needs this code too
 //   SESSIONLY_TRUST_PROXY  "true" behind a proxy of your own, to count requests by its X-Forwarded-For
 //   SESSIONLY_RATE_PER_MINUTE  requests a token may make a minute (hosted default: 600)
-//   SESSIONLY_SIGNUPS_PER_HOUR links to finish signing up sent an hour, in all (default 100)
-//   SESSIONLY_SIGNUPS_PER_NETWORK  sign-ups asked for an hour from one network (default 10)
+//   SESSIONLY_SIGNUPS_PER_HOUR organisations created an hour, in all (default 100)
+//   SESSIONLY_SIGNUPS_PER_NETWORK  organisations created an hour from one network (default 10)
+//   SESSIONLY_TELEMETRY    "off" for the dashboard not to count which of its pages are opened
+//                          (also off when DO_NOT_TRACK is set)
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp, type Extension } from "./app.ts";
 import { count, DB_COUNTS, misset, openDb, runMigrations, type Migrations } from "./db.ts";
 import { tidy } from "./limits.ts";
-import { resendMailer, SEND_MS } from "./mail.ts";
+import {
+  github,
+  google,
+  PROVIDER_LABELS as LABELS,
+  PROVIDER_NAMES,
+  type Client,
+  type Provider,
+  type ProviderName,
+} from "./oauth.ts";
 import { offers, type Accounts } from "./signup.ts";
+import { telemetryFrom } from "./telemetry.ts";
 
 export interface RunOptions {
   /**
@@ -40,6 +55,9 @@ export interface RunOptions {
   edition?: string;
 }
 
+/** A plain-HTTP address that leads nowhere but to this machine. */
+const ON_THIS_MACHINE = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/;
+
 /**
  * What a service shared by many organisations must not be started with. A
  * self-hosted install has one organisation, "default", and none of this
@@ -53,11 +71,39 @@ export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
   if (!/^postgres(ql)?:\/\//.test(env.DATABASE_URL ?? "")) {
     problems.push("DATABASE_URL must be a postgres:// address: the embedded database is for one install.");
   }
-  for (const name of ["RESEND_API_KEY", "SESSIONLY_EMAIL_FROM", "SESSIONLY_PUBLIC_URL"]) {
-    if (!env[name]) problems.push(`${name} is not set: nobody could sign in or sign up.`);
+  const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim();
+  if (!publicUrl) {
+    problems.push("SESSIONLY_PUBLIC_URL is not set: nobody could sign in or sign up.");
+  } else if (!publicUrl.startsWith("https://") && !ON_THIS_MACHINE.test(publicUrl)) {
+    // Over plain HTTP the cookies that carry a sign-in are not kept to this
+    // host or to an encrypted connection, and every token crosses in clear.
+    // On this machine itself nothing crosses anything: that is how a hosted
+    // service is tried before it has a name and a certificate.
+    problems.push(
+      "SESSIONLY_PUBLIC_URL must begin with https://: a hosted service is not reached over plain HTTP, except on the machine it runs on (http://localhost).",
+    );
+  }
+  if (!PROVIDER_NAMES.some((name) => clientOf(env, name))) {
+    problems.push(
+      `No way of signing in is set (${PROVIDER_NAMES.map((name) => settingsOf(name).join(" with ")).join(", or ")}): nobody could sign in or sign up.`,
+    );
   }
   return problems;
 }
+
+/** The two settings a provider needs. */
+function settingsOf(name: ProviderName): [id: string, secret: string] {
+  const prefix = `SESSIONLY_${name.toUpperCase()}_CLIENT`;
+  return [`${prefix}_ID`, `${prefix}_SECRET`];
+}
+
+/** What the environment has for a provider, if it has both halves. */
+function clientOf(env: NodeJS.ProcessEnv, name: ProviderName): Client | undefined {
+  const [id, secret] = settingsOf(name).map((setting) => env[setting]?.trim());
+  return id && secret ? { id, secret } : undefined;
+}
+
+const MAKERS: Record<ProviderName, (client: Client) => Provider> = { google, github };
 
 /**
  * Why something failed, in words. A connection that was refused comes as
@@ -88,10 +134,10 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
   }
   return {
     hosted,
-    mailer:
-      env.RESEND_API_KEY && env.SESSIONLY_EMAIL_FROM
-        ? resendMailer(env.RESEND_API_KEY.trim(), env.SESSIONLY_EMAIL_FROM)
-        : undefined,
+    providers: PROVIDER_NAMES.flatMap((name) => {
+      const client = clientOf(env, name);
+      return client ? [MAKERS[name](client)] : [];
+    }),
     publicUrl,
     signup: env.SESSIONLY_SIGNUP === "off" ? "off" : "open",
     signupCode: env.SESSIONLY_SIGNUP_CODE?.trim() || undefined,
@@ -109,35 +155,27 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
  */
 export function unheeded(env: NodeJS.ProcessEnv): string[] {
   const notes = misset(env, COUNTS);
-  if (env.SMTP_URL && !env.RESEND_API_KEY) {
+  for (const name of PROVIDER_NAMES) {
+    const [id, secret] = settingsOf(name);
+    if (Boolean(env[id]?.trim()) !== Boolean(env[secret]?.trim())) {
+      notes.push(`Only one of ${id} and ${secret} is set: signing in with ${LABELS[name]} needs both, and is off.`);
+    } else if (clientOf(env, name) && !env.SESSIONLY_PUBLIC_URL?.trim()) {
+      notes.push(`${id} is set, but SESSIONLY_PUBLIC_URL is not: signing in with ${LABELS[name]} is off, since it has nowhere to send people back to.`);
+    }
+  }
+  const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim() ?? "";
+  if (publicUrl.startsWith("http://") && !ON_THIS_MACHINE.test(publicUrl) && PROVIDER_NAMES.some((name) => clientOf(env, name))) {
     notes.push(
-      "SMTP_URL is set, but email is sent through Resend now and not over SMTP: signing in by email is off until RESEND_API_KEY is set.",
+      "SESSIONLY_PUBLIC_URL is plain HTTP on a host that is not this machine: sign-ins and tokens cross the network in clear. Put it behind HTTPS.",
+    );
+  }
+  const mail = ["RESEND_API_KEY", "SESSIONLY_EMAIL_FROM", "SMTP_URL"].filter((name) => env[name]);
+  if (mail.length) {
+    notes.push(
+      `${mail.join(" and ")} ${mail.length === 1 ? "is" : "are"} set, but no email is sent any more: people sign in with Google or GitHub.`,
     );
   }
   return notes;
-}
-
-/**
- * Work that an answer does not wait for (sending a message), kept track of
- * so that stopping the server can wait for it.
- */
-export function background() {
-  const running = new Set<Promise<void>>();
-  return {
-    defer(work: () => Promise<void>): void {
-      const done: Promise<void> = work()
-        .catch((err: unknown) => console.error(`work after an answer failed: ${reason(err)}`))
-        .finally(() => running.delete(done));
-      running.add(done);
-    },
-    /** Resolves once nothing is running, or after `ms` whatever still is. */
-    async idle(ms: number): Promise<void> {
-      const until = Date.now() + ms;
-      while (running.size && Date.now() < until) {
-        await Promise.race([Promise.all(running), new Promise((resolve) => setTimeout(resolve, until - Date.now()))]);
-      }
-    },
-  };
 }
 
 export async function runServer(options: RunOptions = {}): Promise<void> {
@@ -167,14 +205,15 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   // The dashboard, if it has been built (pnpm build).
   const webDist = fileURLToPath(new URL("../../web/dist", import.meta.url));
   const webRoot = existsSync(webDist) ? webDist : undefined;
-  const after = background();
-  const accounts = { ...accountsFrom(process.env), defer: after.defer };
-  // Old counters and links that ran out are cleared away now and then.
+  const accounts = accountsFrom(process.env);
+  const telemetry = telemetryFrom(process.env);
+  // Old counters and sign-ins nobody finished are cleared away now and then.
   const tidying = setInterval(() => void tidy(db).catch((err) => console.error("tidying failed:", err)), 15 * 60_000);
   tidying.unref();
   const app = createApp(db, {
     webRoot,
     accounts,
+    telemetry,
     extensions: options.extensions?.(),
     bootstrap: adminToken
       ? { token: adminToken, email: process.env.SESSIONLY_ADMIN_EMAIL ?? "admin@localhost" }
@@ -190,9 +229,15 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
     const edition = options.edition ? `, ${options.edition}` : "";
     console.log(`sessionly server on http://${hostname}:${info.port} (${where}${edition})`);
     if (!webRoot) console.log("The dashboard is not built; run `pnpm build` to serve it here.");
+    if (webRoot && telemetry && !hosted) {
+      console.log(
+        "The dashboard counts which of its pages are opened, with PostHog, and nothing of what they show. SESSIONLY_TELEMETRY=off turns that off.",
+      );
+    }
     const offered = offers(accounts);
-    if (offered.emailSignIn) {
-      console.log(`Signing in by email is on${offered.signup ? ", and anyone may sign up" : ""}${offered.inviteCode ? " with the invitation code" : ""}.`);
+    if (offered.providers.length) {
+      const ways = offered.providers.map((name) => LABELS[name]).join(" and ");
+      console.log(`Signing in with ${ways} is on${offered.signup ? ", and anyone may sign up" : ""}${offered.signup && offered.inviteCode ? " with the invitation code" : ""}.`);
     }
     if (!adminToken && !hosted) {
       console.log(
@@ -204,10 +249,6 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {
       server.close(async () => {
-        // A message that is on its way out is let go first: as long as one
-        // can take to be sent or given up on, so that none is left as a
-        // link nobody got that still holds back the next.
-        await after.idle(SEND_MS);
         await db.close();
         process.exit(0);
       });

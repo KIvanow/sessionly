@@ -103,6 +103,8 @@ export async function open<T>(path: string, body?: unknown): Promise<T> {
       method: body === undefined ? "GET" : "POST",
       headers: body === undefined ? {} : { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
+      // The cookie of a sign-in that is under way goes along, to this server only.
+      credentials: "same-origin",
     });
   } catch {
     throw new ApiError(0, "The server could not be reached.");

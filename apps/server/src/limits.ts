@@ -46,8 +46,9 @@ export async function giveBack(db: Queryable, taken: Taken): Promise<void> {
   ]);
 }
 
-/** Forget windows that have passed, and links that have run out. */
+/** Forget windows that have passed, and sign-ins that were not finished in time. */
 export async function tidy(db: Queryable): Promise<void> {
   await db.query(`DELETE FROM rate_counters WHERE window_start < now() - interval '2 hours'`);
-  await db.query(`DELETE FROM login_codes WHERE expires_at < now()`);
+  await db.query(`DELETE FROM sign_in_codes WHERE expires_at < now()`);
+  await db.query(`DELETE FROM sign_in_states WHERE expires_at < now()`);
 }
