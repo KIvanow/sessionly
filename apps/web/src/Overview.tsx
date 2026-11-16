@@ -4,6 +4,7 @@ import { query } from "./api.ts";
 import { scopeParams, type Pick, type Scope } from "./App.tsx";
 import { CostChart } from "./CostChart.tsx";
 import { activeTime, compact, count, dateTime, duration, groupCost, linesKept, modelName, percent, repoName, rewriteRate, share, toolName, usd, usdCompact } from "./format.ts";
+import { Loader } from "./Loader.tsx";
 import { useApi } from "./useApi.ts";
 
 interface Props {
@@ -26,7 +27,7 @@ export function Overview({ token, scope, showUsers, onPick, onSignOut }: Props) 
   const byTool = useApi<Summary>(token, path("tool"), onSignOut);
 
   if (byDay.error) return <p role="alert">{byDay.error}</p>;
-  if (!byDay.data) return <p className="muted">Loading…</p>;
+  if (!byDay.data) return <Loader />;
   if (byDay.data.total.sessions === 0) {
     return (
       <section className="card">
@@ -46,7 +47,7 @@ export function Overview({ token, scope, showUsers, onPick, onSignOut }: Props) 
   if (picked?.error) {
     headline = <p role="alert">{picked.error}</p>;
   } else if (picked && (picked.loading || !picked.data)) {
-    headline = <p className="muted">Loading…</p>;
+    headline = <Loader />;
   } else {
     const total = picked?.data ? picked.data.total : byDay.data.total;
     headline =
@@ -217,7 +218,7 @@ function RepoTools(props: RepoProps) {
     props.onSignOut,
   );
   if (summary.error) return <p role="alert">{summary.error}</p>;
-  if (!summary.data) return <p className="muted">Loading tools…</p>;
+  if (!summary.data) return <Loader label="Loading tools" />;
   return (
     <div className="files">
       <table>
@@ -271,7 +272,7 @@ function RepoFiles(props: RepoProps) {
     props.onSignOut,
   );
   if (list.error) return <p role="alert">{list.error}</p>;
-  if (!list.data) return <p className="muted">Loading files…</p>;
+  if (!list.data) return <Loader label="Loading files" />;
   if (list.data.total === 0) {
     return <p className="muted">No files were changed through an agent's file tools in these sessions.</p>;
   }
