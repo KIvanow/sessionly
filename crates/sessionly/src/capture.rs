@@ -34,9 +34,13 @@ pub fn detect_source(payload: &Value) -> &'static str {
         crate::paths::GROK
     } else if is_codex_rollout(transcript)
         // Codex's `transcript_path` can be null, as for a session with no
-        // rollout file; its payloads still name the turn (`turn_id`) where
-        // Claude Code's name the prompt (`prompt_id`).
-        || (transcript.is_empty() && has("turn_id") && !has("prompt_id"))
+        // rollout file. Its payloads still name the turn (`turn_id`) where
+        // Claude Code's name the prompt (`prompt_id`), and its SessionStart,
+        // which has no turn yet, has `permission_mode` but not the
+        // `scratchpad_dir` Claude Code adds.
+        || (transcript.is_empty()
+            && !has("prompt_id")
+            && (has("turn_id") || (has("permission_mode") && !has("scratchpad_dir"))))
     {
         crate::paths::CODEX
     } else {
@@ -132,6 +136,21 @@ pub fn capture(
         .unwrap_or(crate::paths::CLAUDE_CODE)
         .to_string();
     let source = source.as_str();
+    // A payload with no transcript path may be either agent's. A session
+    // whose events are already filed under one of them stays there, so that
+    // it is never in two places.
+    let no_path = record["payload"]["transcript_path"]
+        .as_str()
+        .is_none_or(str::is_empty);
+    let source = if no_path && source != crate::paths::CURSOR && source != crate::paths::GROK {
+        [crate::paths::CODEX, crate::paths::CLAUDE_CODE]
+            .into_iter()
+            .find(|other| raw_root.join(other).join(format!("{stem}.jsonl")).exists())
+            .unwrap_or(source)
+    } else {
+        source
+    };
+    record["source"] = json!(source);
     surroundings(&mut record);
     let path = raw_root.join(source).join(format!("{stem}.jsonl"));
     let mut line = serde_json::to_string(&record)?;
@@ -305,7 +324,7 @@ mod tests {
     #[test]
     fn files_each_agent_under_its_own_name() {
         let dir = tempfile::tempdir().unwrap();
-        let cases: [(&str, &str, &str); 7] = [
+        let cases: [(&str, &str, &str); 8] = [
             (
                 r#"{"session_id":"c1","hook_event_name":"Stop","transcript_path":"/home/u/.claude/projects/p/c1.jsonl"}"#,
                 "claude-code",
@@ -334,6 +353,12 @@ mod tests {
                 "claude-code",
                 "c3",
             ),
+            // its SessionStart has no turn yet
+            (
+                r#"{"session_id":"x3","hook_event_name":"SessionStart","permission_mode":"default","transcript_path":null}"#,
+                "codex",
+                "x3",
+            ),
             // A session with no rollout file has no path to tell it by.
             (
                 r#"{"session_id":"x2","turn_id":"t1","hook_event_name":"Stop","transcript_path":null}"#,
@@ -354,6 +379,25 @@ mod tests {
             assert_eq!(record["source"], source);
             assert_eq!(record["session_id"], id);
         }
+    }
+
+    #[test]
+    fn a_session_stays_where_its_first_events_were_filed() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = |source: &str| fs::read_dir(dir.path().join(source)).map_or(0, Iterator::count);
+        for payload in [
+            r#"{"session_id":"k9","hook_event_name":"SessionStart","transcript_path":"/home/u/.claude/projects/p/k9.jsonl"}"#,
+            // no path, and a field only Codex sends: it is still k9
+            r#"{"session_id":"k9","turn_id":"t1","hook_event_name":"Stop","transcript_path":null}"#,
+        ] {
+            capture(dir.path(), &mut payload.as_bytes(), "t", local).unwrap();
+        }
+        assert_eq!((files("claude-code"), files("codex")), (1, 0));
+        let lines = fs::read_to_string(dir.path().join("claude-code/k9.jsonl")).unwrap();
+        assert_eq!(lines.lines().count(), 2);
+        assert!(lines
+            .lines()
+            .all(|l| l.contains("\"source\":\"claude-code\"")));
     }
 
     #[test]

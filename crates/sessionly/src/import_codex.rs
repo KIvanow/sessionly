@@ -95,26 +95,42 @@ fn locate(path: &Path) -> Option<PathBuf> {
     latest_rollout(&files).cloned()
 }
 
-/// Where each rollout's session began (`root_of`), kept between runs: the
-/// first record of a file never changes, and reading it means reading the
-/// whole system prompt, for every file on every run.
+/// What was found out about rollouts, kept between runs. The first record of
+/// a rollout never changes, and reading it means reading the whole system
+/// prompt, for every file on every run; and the first record of a capture
+/// that names the rollout never changes either.
 pub struct Roots {
     file: PathBuf,
-    known: HashMap<String, String>,
+    /// Rollout path to the thread its session began as (`root_of`).
+    roots: HashMap<String, String>,
+    /// Capture or import file to the rollout it names.
+    rollouts: HashMap<String, String>,
     dirty: bool,
 }
 
+/// How many records of a capture are looked through for the rollout's path.
+const RECORDS_FOR_ROLLOUT: usize = 50;
+
 impl Roots {
-    /// The roots remembered in `dir`, which is where the imports are kept.
+    /// What is remembered in `dir`, which is where the imports are kept.
     pub fn load(dir: &Path) -> Roots {
         let file = dir.join("_roots.json");
-        let known = fs::read_to_string(&file)
+        let saved: Value = fs::read_to_string(&file)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
+            .unwrap_or(Value::Null);
+        let map = |key: &str| -> HashMap<String, String> {
+            saved[key]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect()
+        };
         Roots {
             file,
-            known,
+            roots: map("roots"),
+            rollouts: map("rollouts"),
             dirty: false,
         }
     }
@@ -123,13 +139,36 @@ impl Roots {
     /// is looked for among the thread's others.
     pub fn root_of(&mut self, rollout: &Path) -> Option<String> {
         let key = rollout.to_string_lossy().into_owned();
-        if let Some(root) = self.known.get(&key) {
+        if let Some(root) = self.roots.get(&key) {
             return Some(root.clone());
         }
         let root = root_of(&locate(rollout)?)?;
-        self.known.insert(key, root.clone());
+        self.roots.insert(key, root.clone());
         self.dirty = true;
         Some(root)
+    }
+
+    /// The rollout a hook capture or an import says it is of: the first record
+    /// that names one (a capture's payloads and an import's start both do).
+    pub fn rollout_of(&mut self, file: &Path) -> Option<PathBuf> {
+        let key = file.to_string_lossy().into_owned();
+        if let Some(rollout) = self.rollouts.get(&key) {
+            return Some(PathBuf::from(rollout));
+        }
+        let rollout = BufReader::new(fs::File::open(file).ok()?)
+            .split(b'\n')
+            .map_while(std::result::Result::ok)
+            .take(RECORDS_FOR_ROLLOUT)
+            .find_map(|line| {
+                let record: Value = serde_json::from_slice(&line).ok()?;
+                record["payload"]["transcript_path"]
+                    .as_str()
+                    .filter(|p| !p.is_empty())
+                    .map(String::from)
+            })?;
+        self.rollouts.insert(key, rollout.clone());
+        self.dirty = true;
+        Some(PathBuf::from(rollout))
     }
 
     /// Write down what was learned.
@@ -144,7 +183,8 @@ impl Roots {
             let tmp = self
                 .file
                 .with_extension(format!("json.{}.tmp", std::process::id()));
-            fs::write(&tmp, serde_json::to_vec(&self.known)?)?;
+            let saved = json!({ "roots": self.roots, "rollouts": self.rollouts });
+            fs::write(&tmp, serde_json::to_vec(&saved)?)?;
             fs::rename(&tmp, &self.file)?;
             Ok(())
         };
@@ -558,7 +598,8 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
     let mut model_of_turn: HashMap<String, String> = HashMap::new();
     let mut call_ix: HashMap<String, usize> = HashMap::new();
     // (turn, tokens) of each response Codex kept a record of.
-    let mut records: Vec<(Option<String>, Tokens)> = Vec::new();
+    // (turn, model in use when it was written, tokens)
+    let mut records: Vec<(Option<String>, Option<String>, Tokens)> = Vec::new();
     let mut responses_seen: HashSet<String> = HashSet::new();
     // Without those records: what the running total grew by, each time it grew.
     let mut total = Tokens::default();
@@ -612,7 +653,7 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
                     .is_none_or(|id| responses_seen.insert(id.to_string()));
                 if fresh && !other_thread(&p["thread_id"]) {
                     let turn = p["turn_id"].as_str().map(String::from);
-                    records.push((turn, Tokens::of(&p["usage"])));
+                    records.push((turn, model.clone(), Tokens::of(&p["usage"])));
                 }
             }
             "response_item" => {
@@ -710,7 +751,7 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
                     // told apart by it.
                     let mut item = p["item"].clone();
                     if item["id"].as_str().is_none_or(str::is_empty) {
-                        item["id"] = json!(format!("item-{}", t.parts.len()));
+                        item["id"] = json!(format!("{thread}-item-{}", t.parts.len()));
                     }
                     let item = &item;
                     let id = item["id"].as_str().unwrap_or_default().to_string();
@@ -825,9 +866,10 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
         let latest = model.clone();
         records
             .into_iter()
-            .map(|(turn, tokens)| {
+            .map(|(turn, then, tokens)| {
+                // the turn's own model, else the one in use at the time
                 let model = turn.and_then(|id| model_of_turn.get(&id).cloned());
-                (model.or(latest.clone()), tokens)
+                (model.or(then).or(latest.clone()), tokens)
             })
             .collect()
     };
@@ -909,11 +951,37 @@ fn patch_edits(patch: &str, cwd: Option<&str>) -> Vec<FileEdit> {
     edits
 }
 
+/// `bash -lc 'make'` as the command inside it, as an array of words is read.
+fn unwrapped(line: &str) -> String {
+    let mut words = line.trim().splitn(3, ' ');
+    if let (Some(shell), Some("-lc" | "-c"), Some(script)) =
+        (words.next(), words.next(), words.next())
+    {
+        if matches!(shell, "bash" | "sh" | "zsh")
+            || shell.ends_with("/bash")
+            || shell.ends_with("/sh")
+            || shell.ends_with("/zsh")
+        {
+            let script = script.trim();
+            for quote in ['\'', '"'] {
+                if let Some(inner) = script
+                    .strip_prefix(quote)
+                    .and_then(|rest| rest.strip_suffix(quote))
+                {
+                    return inner.to_string();
+                }
+            }
+            return script.to_string();
+        }
+    }
+    line.to_string()
+}
+
 /// A command given as arguments, as one line: the script of `bash -lc
-/// <script>`, otherwise the words.
+/// <script>`, otherwise the words. A line of text is read the same way.
 fn command_line(command: &Value) -> Option<String> {
     match command {
-        Value::String(line) => Some(line.clone()),
+        Value::String(line) => Some(unwrapped(line)),
         Value::Array(words) => {
             let words: Vec<&str> = words.iter().filter_map(Value::as_str).collect();
             match words.as_slice() {
@@ -1743,9 +1811,9 @@ pub(crate) mod tests {
         let mut fresh = Roots::load(&dir.path().join("elsewhere"));
         assert_eq!(fresh.root_of(&child).as_deref(), Some(MAIN));
         // a rollout that is nowhere has no root
-        let nowhere = dir.path().join(format!(
-            "sessions/2026/11/16/rollout-2026-11-16T12-00-09-019a8f00-0000-7000-8000-0000000000ff.jsonl"
-        ));
+        let nowhere = dir.path().join(
+            "sessions/2026/11/16/rollout-2026-11-16T12-00-09-019a8f00-0000-7000-8000-0000000000ff.jsonl",
+        );
         assert_eq!(fresh.root_of(&nowhere), None);
     }
 
@@ -1793,6 +1861,20 @@ pub(crate) mod tests {
                 function(4, "c2", "shell_command", json!({ "command": "make" })),
                 done(5, "i2", "make"),
                 function(6, "c3", "shell_command", json!({ "command": "ls" })),
+                // an item that has the command as one line, a call that has its words
+                function(
+                    6,
+                    "c4",
+                    "shell",
+                    json!({ "command": ["bash", "-lc", "rg TODO"] }),
+                ),
+                event(
+                    6,
+                    "item_completed",
+                    json!({ "thread_id": MAIN, "turn_id": "t1", "item": { "type": "CommandExecution",
+                            "id": "i9", "command": "bash -lc 'rg TODO'", "status": "completed",
+                            "aggregated_output": "", "exit_code": 0 } }),
+                ),
                 // an item that has no id of its own
                 event(
                     7,
@@ -1809,7 +1891,7 @@ pub(crate) mod tests {
             ],
         );
         let (events, _) = session(&path, &[], None).unwrap();
-        assert_eq!(tool_names(&events, "PreToolUse"), ["Bash"; 5]);
+        assert_eq!(tool_names(&events, "PreToolUse"), ["Bash"; 6]);
         let mut ids: Vec<&str> = events
             .iter()
             .filter(|e| e["hook"] == "PreToolUse")
@@ -1817,8 +1899,63 @@ pub(crate) mod tests {
             .collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 5, "{ids:?}");
+        assert_eq!(ids.len(), 6, "{ids:?}");
         assert!(ids.iter().all(|id| !id.is_empty()));
+    }
+
+    #[test]
+    fn a_command_reads_the_same_whether_it_is_words_or_a_line() {
+        let words = command_line(&json!(["/bin/bash", "-lc", "rg TODO"]));
+        assert_eq!(words.as_deref(), Some("rg TODO"));
+        for line in [
+            "bash -lc 'rg TODO'",
+            "/bin/bash -lc \"rg TODO\"",
+            "sh -c rg TODO",
+        ] {
+            assert_eq!(command_line(&json!(line)), words, "{line}");
+        }
+        assert_eq!(command_line(&json!("ls -la")).as_deref(), Some("ls -la"));
+    }
+
+    #[test]
+    fn tokens_with_no_turn_of_their_own_belong_to_the_model_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!(
+            "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{MAIN}.jsonl"
+        ));
+        let context = |second: u32, turn: &str, model: &str| {
+            row(
+                second,
+                "turn_context",
+                json!({ "turn_id": turn, "cwd": "/w", "model": model }),
+            )
+        };
+        let record = |second: u32, response: &str| {
+            row(
+                second,
+                "token_usage_record",
+                json!({ "thread_id": MAIN, "response_id": response,
+                        "usage": { "input_tokens": 100, "output_tokens": 10, "total_tokens": 110 } }),
+            )
+        };
+        write(
+            &path,
+            &[
+                meta(MAIN, json!({})),
+                event(1, "user_message", json!({ "message": "go" })),
+                context(1, "t1", "model-a"),
+                record(2, "r1"),
+                context(3, "t2", "model-b"),
+                record(4, "r2"),
+            ],
+        );
+        let (_, facts) = session(&path, &[], None).unwrap();
+        let usage = facts.unwrap().usage;
+        let requests = |model: &str| usage.iter().find(|u| u.model == model).map(|u| u.requests);
+        assert_eq!(
+            (requests("model-a"), requests("model-b")),
+            (Some(1), Some(1))
+        );
     }
 
     #[test]
