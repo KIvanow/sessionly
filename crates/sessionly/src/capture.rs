@@ -136,17 +136,22 @@ pub fn capture(
         .unwrap_or(crate::paths::CLAUDE_CODE)
         .to_string();
     let source = source.as_str();
-    // A payload with no transcript path may be either agent's. A session
-    // whose events are already filed under one of them stays there, so that
-    // it is never in two places.
+    // A payload with no transcript path may be either agent's. If the
+    // session already has events filed under exactly one of them, it stays
+    // there, so that it is not in two places. Sessions with no id of their
+    // own are not one session, and are left where they were detected.
     let no_path = record["payload"]["transcript_path"]
         .as_str()
         .is_none_or(str::is_empty);
-    let source = if no_path && source != crate::paths::CURSOR && source != crate::paths::GROK {
-        [crate::paths::CODEX, crate::paths::CLAUDE_CODE]
+    let source = if no_path && stem != "_unknown" {
+        let filed: Vec<&str> = [crate::paths::CODEX, crate::paths::CLAUDE_CODE]
             .into_iter()
-            .find(|other| raw_root.join(other).join(format!("{stem}.jsonl")).exists())
-            .unwrap_or(source)
+            .filter(|other| raw_root.join(other).join(format!("{stem}.jsonl")).exists())
+            .collect();
+        match filed.as_slice() {
+            [only] => only,
+            _ => source,
+        }
     } else {
         source
     };
@@ -398,6 +403,24 @@ mod tests {
         assert!(lines
             .lines()
             .all(|l| l.contains("\"source\":\"claude-code\"")));
+    }
+
+    #[test]
+    fn a_session_filed_in_both_places_is_left_where_it_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        for source in ["codex", "claude-code"] {
+            fs::create_dir_all(dir.path().join(source)).unwrap();
+            fs::write(dir.path().join(source).join("k8.jsonl"), "").unwrap();
+        }
+        // no path, no way to tell: Claude Code's by default
+        let payload = r#"{"session_id":"k8","hook_event_name":"Stop","transcript_path":null}"#;
+        let (path, _) = capture(dir.path(), &mut payload.as_bytes(), "t", local).unwrap();
+        assert_eq!(path, dir.path().join("claude-code/k8.jsonl"));
+        // sessions with no id are not one session
+        fs::create_dir_all(dir.path().join("codex")).unwrap();
+        fs::write(dir.path().join("codex/_unknown.jsonl"), "").unwrap();
+        let (path, _) = capture(dir.path(), &mut &b"{"[..], "t", local).unwrap();
+        assert_eq!(path, dir.path().join("claude-code/_unknown.jsonl"));
     }
 
     #[test]

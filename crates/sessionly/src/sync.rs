@@ -1,6 +1,6 @@
 //! `sessionly sync`: normalize captured sessions into the ledger.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -212,22 +212,33 @@ fn build(
 enum Outcome {
     /// Already in the ledger as it should be.
     Unchanged(String),
-    Synced(String),
+    /// The session's id, and the name of its files.
+    Synced(String, String),
     /// Nothing usable in its files.
     Empty,
     Failed(PathBuf, String),
 }
 
+/// The sessions that are in the ledger once a sync is done: their ids, and
+/// the names of their files.
+#[derive(Default)]
+struct Present {
+    ids: Vec<String>,
+    stems: HashSet<String>,
+}
+
 /// Count `outcome` in `report`, and note the sessions that are in the ledger.
-fn record(outcome: Outcome, report: &mut Report, present: &mut Vec<String>) {
+fn record(outcome: Outcome, report: &mut Report, present: &mut Present) {
     match outcome {
-        Outcome::Unchanged(id) => {
+        Outcome::Unchanged(stem) => {
             report.unchanged += 1;
-            present.push(id);
+            present.ids.push(stem.clone());
+            present.stems.insert(stem);
         }
-        Outcome::Synced(id) => {
+        Outcome::Synced(id, stem) => {
             report.synced += 1;
-            present.push(id);
+            present.ids.push(id);
+            present.stems.insert(stem);
         }
         Outcome::Empty => report.empty += 1,
         Outcome::Failed(source, reason) => report.failed.push((source, reason)),
@@ -288,7 +299,7 @@ impl Pass<'_> {
                         .map(|p| p.to_string_lossy().into_owned()),
                 };
                 ledger.upsert(&built.session, &fingerprint, &built.added_lines)?;
-                Outcome::Synced(built.session.session_id)
+                Outcome::Synced(built.session.session_id, stem.to_string())
             }
             Ok(None) => Outcome::Empty,
             Err(err) => Outcome::Failed(source, format!("{err:#}")),
@@ -306,7 +317,7 @@ pub fn run(
 ) -> Result<Report> {
     let mut report = Report::default();
     let built_with = built_with(machine_id);
-    let mut present: Vec<String> = Vec::new();
+    let mut present = Present::default();
 
     for dirs in sources {
         let raw = jsonl_files(&dirs.raw);
@@ -336,7 +347,7 @@ pub fn run(
         // has, which is all there is of the subagent's work: a parent that
         // came to nothing leaves it to stand alone.
         for (subagent, parent) in &subagents.folded {
-            let parent_is_in = present.iter().any(|id| id == parent);
+            let parent_is_in = present.stems.contains(parent);
             if parent_is_in {
                 if ledger.fingerprint(subagent)?.is_some() {
                     report.removed += u64::from(ledger.remove(subagent)?);
@@ -349,7 +360,7 @@ pub fn run(
     // A full rebuild makes the ledger match the captures and imports exactly.
     // A normal sync never removes anything.
     if force {
-        report.removed += ledger.retain(&present)?;
+        report.removed += ledger.retain(&present.ids)?;
     }
     Ok(report)
 }

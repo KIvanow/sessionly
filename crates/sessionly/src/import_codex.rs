@@ -105,11 +105,10 @@ pub struct Roots {
     roots: HashMap<String, String>,
     /// Capture or import file to the rollout it names.
     rollouts: HashMap<String, String>,
+    /// Files that named none, and how long they were then.
+    misses: HashMap<String, u64>,
     dirty: bool,
 }
-
-/// How many records of a capture are looked through for the rollout's path.
-const RECORDS_FOR_ROLLOUT: usize = 50;
 
 impl Roots {
     /// What is remembered in `dir`, which is where the imports are kept.
@@ -131,6 +130,12 @@ impl Roots {
             file,
             roots: map("roots"),
             rollouts: map("rollouts"),
+            misses: saved["misses"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_u64()?)))
+                .collect(),
             dirty: false,
         }
     }
@@ -155,19 +160,28 @@ impl Roots {
         if let Some(rollout) = self.rollouts.get(&key) {
             return Some(PathBuf::from(rollout));
         }
+        // one that named none is looked at again only once it has grown
+        let len = fs::metadata(file).ok()?.len();
+        if self.misses.get(&key) == Some(&len) {
+            return None;
+        }
         let rollout = BufReader::new(fs::File::open(file).ok()?)
             .split(b'\n')
             .map_while(std::result::Result::ok)
-            .take(RECORDS_FOR_ROLLOUT)
             .find_map(|line| {
                 let record: Value = serde_json::from_slice(&line).ok()?;
                 record["payload"]["transcript_path"]
                     .as_str()
                     .filter(|p| !p.is_empty())
                     .map(String::from)
-            })?;
-        self.rollouts.insert(key, rollout.clone());
+            });
         self.dirty = true;
+        let Some(rollout) = rollout else {
+            self.misses.insert(key, len);
+            return None;
+        };
+        self.misses.remove(&key);
+        self.rollouts.insert(key, rollout.clone());
         Some(PathBuf::from(rollout))
     }
 
@@ -183,7 +197,8 @@ impl Roots {
             let tmp = self
                 .file
                 .with_extension(format!("json.{}.tmp", std::process::id()));
-            let saved = json!({ "roots": self.roots, "rollouts": self.rollouts });
+            let saved =
+                json!({ "roots": self.roots, "rollouts": self.rollouts, "misses": self.misses });
             fs::write(&tmp, serde_json::to_vec(&saved)?)?;
             fs::rename(&tmp, &self.file)?;
             Ok(())
@@ -951,41 +966,50 @@ fn patch_edits(patch: &str, cwd: Option<&str>) -> Vec<FileEdit> {
     edits
 }
 
-/// `bash -lc 'make'` as the command inside it, as an array of words is read.
-fn unwrapped(line: &str) -> String {
-    let mut words = line.trim().splitn(3, ' ');
-    if let (Some(shell), Some("-lc" | "-c"), Some(script)) =
-        (words.next(), words.next(), words.next())
-    {
-        if matches!(shell, "bash" | "sh" | "zsh")
-            || shell.ends_with("/bash")
-            || shell.ends_with("/sh")
-            || shell.ends_with("/zsh")
-        {
-            let script = script.trim();
-            for quote in ['\'', '"'] {
-                if let Some(inner) = script
-                    .strip_prefix(quote)
-                    .and_then(|rest| rest.strip_suffix(quote))
-                {
-                    return inner.to_string();
-                }
-            }
-            return script.to_string();
-        }
-    }
-    line.to_string()
+fn is_shell(word: &str) -> bool {
+    matches!(
+        word.rsplit('/').next().unwrap_or(word),
+        "bash" | "sh" | "zsh"
+    )
 }
 
-/// A command given as arguments, as one line: the script of `bash -lc
-/// <script>`, otherwise the words. A line of text is read the same way.
+/// The script of `<shell> -lc <script>` or `-c`, with the quotes a line of
+/// text puts around it taken off.
+fn script_of<'a>(shell: &str, flag: &str, script: &'a str) -> Option<&'a str> {
+    if !is_shell(shell) || !matches!(flag, "-lc" | "-c") {
+        return None;
+    }
+    let script = script.trim();
+    for quote in ['\'', '"'] {
+        if let Some(inner) = script
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            // one quoted word only: `'a' && 'b'` is not
+            if !inner.contains(quote) {
+                return Some(inner);
+            }
+        }
+    }
+    Some(script)
+}
+
 fn command_line(command: &Value) -> Option<String> {
     match command {
-        Value::String(line) => Some(unwrapped(line)),
+        Value::String(line) => {
+            let mut words = line.trim().splitn(3, ' ');
+            let script = match (words.next(), words.next(), words.next()) {
+                (Some(shell), Some(flag), Some(script)) => script_of(shell, flag, script),
+                _ => None,
+            };
+            Some(script.map_or_else(|| line.clone(), String::from))
+        }
         Value::Array(words) => {
             let words: Vec<&str> = words.iter().filter_map(Value::as_str).collect();
             match words.as_slice() {
-                [_, "-lc" | "-c", script] => Some(script.to_string()),
+                [shell, flag, script] if script_of(shell, flag, script).is_some() => {
+                    Some(script.to_string())
+                }
                 [] => None,
                 words => Some(words.join(" ")),
             }
@@ -1810,6 +1834,13 @@ pub(crate) mod tests {
         // from the thread's file in its new place, with nothing remembered
         let mut fresh = Roots::load(&dir.path().join("elsewhere"));
         assert_eq!(fresh.root_of(&child).as_deref(), Some(MAIN));
+        // a capture that names no rollout is looked at again only once it grows
+        let capture = dir.path().join("capture.jsonl");
+        fs::write(&capture, "{\"payload\":{\"transcript_path\":null}}\n").unwrap();
+        let mut learning = Roots::load(&cache);
+        assert_eq!(learning.rollout_of(&capture), None);
+        fs::write(&capture, format!("{{\"payload\":{{\"transcript_path\":null}}}}\n{{\"payload\":{{\"transcript_path\":\"{}\"}}}}\n", child.display())).unwrap();
+        assert_eq!(learning.rollout_of(&capture), Some(child.clone()));
         // a rollout that is nowhere has no root
         let nowhere = dir.path().join(
             "sessions/2026/11/16/rollout-2026-11-16T12-00-09-019a8f00-0000-7000-8000-0000000000ff.jsonl",
@@ -1915,6 +1946,16 @@ pub(crate) mod tests {
             assert_eq!(command_line(&json!(line)), words, "{line}");
         }
         assert_eq!(command_line(&json!("ls -la")).as_deref(), Some("ls -la"));
+        // quotes that do not enclose the whole script are the script's own
+        assert_eq!(
+            command_line(&json!("bash -lc 'echo a' && 'echo b'")).as_deref(),
+            Some("'echo a' && 'echo b'")
+        );
+        // only a shell's script is unwrapped
+        assert_eq!(
+            command_line(&json!(["python", "-c", "print(1)"])).as_deref(),
+            Some("python -c print(1)")
+        );
     }
 
     #[test]
