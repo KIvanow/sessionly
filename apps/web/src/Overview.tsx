@@ -1,7 +1,7 @@
 import type { FileList, GroupBy, Summary, Totals } from "@sessionly/schema";
 import { Fragment, useState, type ReactNode } from "react";
 import { query } from "./api.ts";
-import { scopeParams, type Scope } from "./App.tsx";
+import { scopeParams, type Pick, type Scope } from "./App.tsx";
 import { CostChart } from "./CostChart.tsx";
 import { activeTime, compact, count, dateTime, duration, groupCost, linesKept, modelName, percent, repoName, rewriteRate, share, toolName, usd, usdCompact } from "./format.ts";
 import { useApi } from "./useApi.ts";
@@ -11,12 +11,15 @@ interface Props {
   scope: Scope;
   /** Whether to break totals down by person (admins). */
   showUsers: boolean;
+  /** Narrow everything but the cost chart to one of its columns, or back to the whole period. */
+  onPick: (pick: Pick | null) => void;
   onSignOut: () => void;
 }
 
-export function Overview({ token, scope, showUsers, onSignOut }: Props) {
+export function Overview({ token, scope, showUsers, onPick, onSignOut }: Props) {
   const path = (by: GroupBy) => `/summary${query({ by, ...scopeParams(scope) })}`;
-  const byDay = useApi<Summary>(token, path("day"), onSignOut);
+  // The chart shows the whole period, so another column can be picked.
+  const byDay = useApi<Summary>(token, `/summary${query({ by: "day", ...scopeParams(scope, true) })}`, onSignOut);
   const byUser = useApi<Summary>(token, showUsers ? path("user") : null, onSignOut);
   const byRepo = useApi<Summary>(token, path("repo"), onSignOut);
   const byModel = useApi<Summary>(token, path("model"), onSignOut);
@@ -24,8 +27,9 @@ export function Overview({ token, scope, showUsers, onSignOut }: Props) {
 
   if (byDay.error) return <p role="alert">{byDay.error}</p>;
   if (!byDay.data) return <p className="muted">Loading…</p>;
-  const total = byDay.data.total;
-  if (total.sessions === 0) {
+  // With a column picked, the headline is that column's: any summary of the narrowed scope has its total.
+  const total = (scope.pick ? byTool.data?.total : null) ?? byDay.data.total;
+  if (byDay.data.total.sessions === 0) {
     return (
       <section className="card">
         <h2>No sessions in this range</h2>
@@ -93,7 +97,7 @@ export function Overview({ token, scope, showUsers, onSignOut }: Props) {
           />
         </div>
       </section>
-      <CostChart days={byDay.data.groups} />
+      <CostChart days={byDay.data.groups} picked={scope.pick} onPick={onPick} />
       {/* Worth a table only once there is more than one agent to compare. */}
       {(byTool.data?.groups.length ?? 0) > 1 && (
         <Breakdown title="By tool" heading="Tool" summary={byTool.data} name={toolName} models />
@@ -175,10 +179,10 @@ function RepoDetail(props: RepoProps) {
 
 /** The agents that worked in one repository, compared. */
 function RepoTools(props: RepoProps) {
-  const { user, since, tool, model_is } = scopeParams(props.scope);
+  const { user, since, until, tool, model_is } = scopeParams(props.scope);
   const summary = useApi<Summary>(
     props.token,
-    `/summary${query({ by: "tool", repo_is: props.repo, user, since, tool, model_is })}`,
+    `/summary${query({ by: "tool", repo_is: props.repo, user, since, until, tool, model_is })}`,
     props.onSignOut,
   );
   if (summary.error) return <p role="alert">{summary.error}</p>;
@@ -228,11 +232,11 @@ function RepoTools(props: RepoProps) {
 /** The files agents changed in one repository, most lines added first. */
 function RepoFiles(props: RepoProps) {
   const [all, setAll] = useState(false);
-  const { user, since, tool, model_is } = scopeParams(props.scope);
+  const { user, since, until, tool, model_is } = scopeParams(props.scope);
   const several = props.tools.length > 1;
   const list = useApi<FileList>(
     props.token,
-    `/files${query({ repo_is: props.repo, user, since, tool, model_is, limit: all ? 2000 : FILES_SHOWN })}`,
+    `/files${query({ repo_is: props.repo, user, since, until, tool, model_is, limit: all ? 2000 : FILES_SHOWN })}`,
     props.onSignOut,
   );
   if (list.error) return <p role="alert">{list.error}</p>;
