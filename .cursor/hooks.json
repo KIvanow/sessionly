@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {
+        "command": ".sessionly/hook.sh cursor"
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": ".sessionly/hook.sh cursor"
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": ".sessionly/hook.sh cursor"
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "command": ".sessionly/hook.sh cursor"
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": ".sessionly/hook.sh cursor"
+      }
+    ],
+    "stop": [
+      {
+        "command": ".sessionly/hook.sh cursor"
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": ".sessionly/hook.sh cursor"
+      }
+    ]
+  }
+}
