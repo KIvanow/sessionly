@@ -14,6 +14,7 @@ import {
 } from "./api.ts";
 import { arrive, doors, landingOf } from "./arrival.ts";
 import { Arrived } from "./Arrived.tsx";
+import { Brand } from "./Brand.tsx";
 import { Connect } from "./Connect.tsx";
 import { Login } from "./Login.tsx";
 import { Overview } from "./Overview.tsx";
@@ -192,6 +193,7 @@ export function App() {
   if (arriving || leaving) {
     return (
       <main className="center">
+        <Brand />
         <p>{leaving ? "Signing out…" : "Signing in…"}</p>
       </main>
     );
@@ -240,6 +242,7 @@ export function App() {
   if (!me) {
     return (
       <main className="center">
+        <Brand />
         {problem ? (
           <p role="alert">
             {problem} <button onClick={signOut}>Sign in again</button>
@@ -264,6 +267,15 @@ export function App() {
     />
   );
 }
+
+/** What each page is, said at its top. A single session names itself. */
+const HEADINGS: Record<string, { title: string; about: string }> = {
+  "": { title: "Overview", about: "What the agents did, what it cost, and how much of what they wrote is still there." },
+  sessions: { title: "Sessions", about: "Every session that was uploaded, newest first." },
+  pulls: { title: "Pull requests", about: "How much of each pull request agents wrote, and how those lines fared in review." },
+  team: { title: "Team", about: "Who can sign in, and the tokens for what cannot." },
+  connect: { title: "Connect", about: "A token for each of your machines, and how to capture sessions elsewhere." },
+};
 
 function Shell({
   token,
@@ -316,6 +328,8 @@ function Shell({
   }, [page, rest.join("/"), token, scope, isAdmin, options.data, people, address, hosted, me]);
 
   const scoped = page === "" || page === "sessions";
+  const orgName = me.org !== "default" && me.org_name ? me.org_name : null;
+  const heading = HEADINGS[page === "team" || page === "pulls" ? (isAdmin ? page : "") : (page ?? "")];
   const link = (target: string, label: string) => (
     <a href={`#/${target}`} aria-current={page === target ? "page" : undefined}>
       {label}
@@ -325,35 +339,42 @@ function Shell({
   return (
     <>
       <header className="top">
-        <strong className="brand">Sessionly</strong>
-        <nav aria-label="Main">
-          {link("", "Overview")}
-          {link("sessions", "Sessions")}
-          {isAdmin && link("pulls", "Pull requests")}
-          {isAdmin && link("team", "Team")}
-          {link("connect", "Connect")}
-        </nav>
-        <span className="who">
-          {sessions.length > 1 ? (
-            <select aria-label="Organisation" value={token} onChange={(e) => onSwitch(e.target.value)}>
-              {sessions.map((s) => (
-                <option key={s.org} value={s.token}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          ) : (
-            me.org !== "default" && me.org_name
-          )}
-          <span>
-            {me.email} · {me.role}
+        <div>
+          <Brand />
+          <nav aria-label="Main">
+            {link("", "Overview")}
+            {link("sessions", "Sessions")}
+            {isAdmin && link("pulls", "Pull requests")}
+            {isAdmin && link("team", "Team")}
+            {link("connect", "Connect")}
+          </nav>
+          <span className="who">
+            {sessions.length > 1 ? (
+              <select aria-label="Organisation" value={token} onChange={(e) => onSwitch(e.target.value)}>
+                {sessions.map((s) => (
+                  <option key={s.org} value={s.token}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              orgName && <span className="org">{orgName}</span>
+            )}
+            <span>
+              {me.email} · {me.role}
+            </span>
+            <button onClick={onLeave}>Sign out</button>
           </span>
-          <button className="quiet" onClick={onLeave}>
-            Sign out
-          </button>
-        </span>
+        </div>
       </header>
       <main>
+        {heading && (
+          <div className="page-head">
+            <p className="eyebrow">{orgName ?? "Your team"}</p>
+            <h1>{heading.title}</h1>
+            <p>{heading.about}</p>
+          </div>
+        )}
         {scoped && (
           <form className="filters" aria-label="Filters" onSubmit={(e) => e.preventDefault()}>
             <label>

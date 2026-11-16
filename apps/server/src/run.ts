@@ -22,6 +22,8 @@
 //   SESSIONLY_RATE_PER_MINUTE  requests a token may make a minute (hosted default: 600)
 //   SESSIONLY_SIGNUPS_PER_HOUR organisations created an hour, in all (default 100)
 //   SESSIONLY_SIGNUPS_PER_NETWORK  organisations created an hour from one network (default 10)
+//   SESSIONLY_TELEMETRY    "off" for the dashboard not to count which of its pages are opened
+//                          (also off when DO_NOT_TRACK is set)
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
@@ -38,6 +40,7 @@ import {
   type ProviderName,
 } from "./oauth.ts";
 import { offers, type Accounts } from "./signup.ts";
+import { telemetryFrom } from "./telemetry.ts";
 
 export interface RunOptions {
   /**
@@ -203,12 +206,14 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   const webDist = fileURLToPath(new URL("../../web/dist", import.meta.url));
   const webRoot = existsSync(webDist) ? webDist : undefined;
   const accounts = accountsFrom(process.env);
+  const telemetry = telemetryFrom(process.env);
   // Old counters and sign-ins nobody finished are cleared away now and then.
   const tidying = setInterval(() => void tidy(db).catch((err) => console.error("tidying failed:", err)), 15 * 60_000);
   tidying.unref();
   const app = createApp(db, {
     webRoot,
     accounts,
+    telemetry,
     extensions: options.extensions?.(),
     bootstrap: adminToken
       ? { token: adminToken, email: process.env.SESSIONLY_ADMIN_EMAIL ?? "admin@localhost" }
@@ -224,6 +229,11 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
     const edition = options.edition ? `, ${options.edition}` : "";
     console.log(`sessionly server on http://${hostname}:${info.port} (${where}${edition})`);
     if (!webRoot) console.log("The dashboard is not built; run `pnpm build` to serve it here.");
+    if (webRoot && telemetry && !hosted) {
+      console.log(
+        "The dashboard counts which of its pages are opened, with PostHog, and nothing of what they show. SESSIONLY_TELEMETRY=off turns that off.",
+      );
+    }
     const offered = offers(accounts);
     if (offered.providers.length) {
       const ways = offered.providers.map((name) => LABELS[name]).join(" and ");

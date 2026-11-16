@@ -1,5 +1,6 @@
 import type { SessionDetail } from "@sessionly/schema";
 import { compact, cost, count, dateTime, duration, percent, repoName, share, toolName, usd } from "./format.ts";
+import { Tile } from "./Overview.tsx";
 import { useApi } from "./useApi.ts";
 
 /** One session, as it was uploaded. */
@@ -33,11 +34,48 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
 
   return (
     <>
-      <p>
-        <a href="#/sessions">← Sessions</a>
-      </p>
+      <div className="page-head">
+        <p className="eyebrow">
+          <a href="#/sessions">← Sessions</a>
+        </p>
+        <h1>{s.title || (hasText && s.prompts?.find((p) => p.text?.preview)?.text?.preview) || `Session ${s.session_id?.slice(0, 8)}`}</h1>
+        <p>
+          {found.data.owner_email}, with {toolName(s.source ?? "")}, {dateTime(s.started_at)}
+        </p>
+      </div>
+      <section className="tiles" aria-label="Totals">
+        <Tile
+          label="Cost"
+          value={s.cost ? cost(s.cost.total_usd ?? 0, s.cost.source ?? null) : "–"}
+          note={s.cost ? (s.cost.source ?? "").replaceAll("_", " ") : "unknown"}
+        />
+        <Tile
+          label="Active time"
+          value={(s.active_ms ?? 0) > 0 ? duration(s.active_ms ?? 0) : "–"}
+          note={`${duration(s.duration_ms ?? 0)} from first to last activity`}
+        />
+        <Tile
+          label="Tool calls"
+          value={count(counts.tool_calls ?? 0)}
+          note={`${count(counts.tool_failures ?? 0)} failed, in ${count(counts.prompts ?? 0)} prompts`}
+        />
+        {rewrite ? (
+          <Tile
+            label="Agent lines still there"
+            value={percent(share(rewrite.lines_surviving ?? 0, rewrite.lines_added ?? 0))}
+            part={share(rewrite.lines_surviving ?? 0, rewrite.lines_added ?? 0)}
+            note={`of ${count(rewrite.lines_added ?? 0)} tracked lines`}
+          />
+        ) : (
+          <Tile
+            label="Lines"
+            value={`+${compact(counts.lines_added ?? 0)}`}
+            note={`−${count(counts.lines_removed ?? 0)}, in ${count(counts.files_changed ?? 0)} ${counts.files_changed === 1 ? "file" : "files"}`}
+          />
+        )}
+      </section>
       <section className="card">
-        <h2>{s.title || (hasText && s.prompts?.find((p) => p.text?.preview)?.text?.preview) || `Session ${s.session_id?.slice(0, 8)}`}</h2>
+        <h2>The session</h2>
         <dl className="facts">
           <Fact label="Person" value={found.data.owner_email} />
           <Fact label="Tool" value={toolName(s.source ?? "")} />
