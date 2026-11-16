@@ -20,11 +20,12 @@ jobs:
   report:
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: read
+      # To read the pull request, and to post the figures on it as a comment.
+      pull-requests: write
       # Only the report of an earlier pull request compares commits.
       contents: read
     steps:
-      - uses: KIvanow/sessionly/action@819ec241efffbd3aa179529a78bad38da6ac4fc9 # main, 16 November 2026
+      - uses: KIvanow/sessionly/action@03db5a22106045df82c1f2cf2bc14b89729e959c # the figures as a comment, 16 November 2026
         with:
           url: https://app.sessionly.dev
           # A token with the ci role, which can report pull requests and nothing else.
