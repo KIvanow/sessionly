@@ -470,11 +470,11 @@ impl AgentHomes {
 
 /// Raised when an importer reads more, or differently, from the same files,
 /// so that sessions imported by an older binary are imported again.
-const IMPORT_VERSION: u64 = 5;
+const IMPORT_VERSION: u64 = 6;
 
-/// The source file, its size and the importer's version recorded in an
-/// import file's first record.
-fn imported_from(import_file: &Path) -> Option<(PathBuf, u64, u64)> {
+/// The source file, its size, the importer's version and the stamp of the
+/// session's name recorded in an import file's first record.
+fn imported_from(import_file: &Path) -> Option<(PathBuf, u64, u64, u64)> {
     use std::io::BufRead;
     let mut line = String::new();
     std::io::BufReader::new(fs::File::open(import_file).ok()?)
@@ -486,6 +486,7 @@ fn imported_from(import_file: &Path) -> Option<(PathBuf, u64, u64)> {
         PathBuf::from(payload["transcript_path"].as_str()?),
         payload["transcript_bytes"].as_u64()?,
         payload["import_version"].as_u64().unwrap_or(1),
+        payload["name_hash"].as_u64().unwrap_or(0),
     ))
 }
 
@@ -543,14 +544,21 @@ fn source_bytes(found: &Found, data_dir: &Path) -> u64 {
     let size = |path: &Path| fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     match found.source {
         GROK => crate::import_grok::session_bytes(&found.path),
-        CODEX => {
-            crate::import_codex::session_bytes(&found.path, &found.subagents, found.name.as_deref())
-        }
+        CODEX => crate::import_codex::session_bytes(&found.path, &found.subagents),
         CURSOR if found.hooks_only => size(&found.path),
         CURSOR => {
             crate::import_cursor::session_bytes(&found.path) + size(&capture_of(found, data_dir))
         }
         _ => transcript::tree_size(&found.path),
+    }
+}
+
+/// What a session is called, as a stamp: only Codex keeps that apart from the
+/// files, so a rename there has to redo the import.
+fn name_hash(found: &Found) -> u64 {
+    match found.source {
+        CODEX => crate::import_codex::name_hash(found.name.as_deref()),
+        _ => 0,
     }
 }
 
@@ -562,7 +570,8 @@ fn import_one(found: &Found, data_dir: &Path, report: &mut Report) {
         .join(found.source)
         .join(format!("{stem}.jsonl"));
     let bytes = source_bytes(found, data_dir);
-    if imported_from(&target) == Some((found.path.clone(), bytes, IMPORT_VERSION)) {
+    let named = name_hash(found);
+    if imported_from(&target) == Some((found.path.clone(), bytes, IMPORT_VERSION, named)) {
         report.up_to_date += 1;
         return;
     }
@@ -584,6 +593,7 @@ fn import_one(found: &Found, data_dir: &Path, report: &mut Report) {
         start["payload"]["transcript_path"] = json!(found.path);
         start["payload"]["transcript_bytes"] = json!(bytes);
         start["payload"]["import_version"] = json!(IMPORT_VERSION);
+        start["payload"]["name_hash"] = json!(named);
         if let Some(facts) = facts {
             let facts_path = data_dir
                 .join("transcript-facts")
@@ -688,27 +698,23 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
     }
     // Codex: <home>/sessions/<year>/<month>/<day>/rollout-<time>-<thread>.jsonl,
     // and archived ones side by side in <home>/archived_sessions.
-    let mut rollouts: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut files_of: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     if let Some(home) = &homes.codex_home {
-        let days = subdirs(&home.join("sessions"))
-            .into_iter()
-            .flat_map(|year| subdirs(&year))
-            .flat_map(|month| subdirs(&month));
-        for dir in days.chain([home.join("archived_sessions")]) {
-            let mut files: Vec<PathBuf> = fs::read_dir(&dir)
-                .into_iter()
-                .flatten()
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .collect();
-            files.sort();
-            for path in files {
-                // A thread that was reverted has a second file: the later one counts.
-                if let Some(thread) = crate::import_codex::thread_id(&path) {
-                    rollouts.insert(thread, path);
-                }
+        for path in crate::import_codex::files_in(home) {
+            if let Some(thread) = crate::import_codex::thread_id(&path) {
+                files_of.entry(thread).or_default().push(path);
             }
         }
     }
+    // A thread that was reverted has more than one file: the one nothing
+    // else carries on from counts.
+    let mut rollouts: BTreeMap<String, PathBuf> = files_of
+        .into_iter()
+        .filter_map(|(thread, files)| {
+            let latest = crate::import_codex::latest_rollout(&files)?.clone();
+            Some((thread, latest))
+        })
+        .collect();
     // A subagent's thread belongs to the session of the thread that began it.
     // One whose session's file is gone stands on its own.
     let threads: HashSet<String> = rollouts.keys().cloned().collect();

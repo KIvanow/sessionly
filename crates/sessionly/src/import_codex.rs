@@ -75,8 +75,20 @@ pub fn root_of(path: &Path) -> Option<String> {
         .read_to_end(&mut start)
         .ok()?;
     let text = String::from_utf8_lossy(&start);
-    let after = &text[text.find("\"session_id\":\"")? + "\"session_id\":\"".len()..];
-    let id = &after[..after.find('"')?];
+    if let Some(at) = text.find("\"session_id\":\"") {
+        let after = &text[at + "\"session_id\":\"".len()..];
+        if let Some(id) = after.find('"').map(|end| &after[..end]) {
+            return (!id.is_empty()).then(|| id.to_string());
+        }
+    }
+    // The key is not among the first bytes (another field came first, or the
+    // file was written differently): read the whole first record instead.
+    let mut line = String::new();
+    BufReader::new(fs::File::open(path).ok()?)
+        .read_line(&mut line)
+        .ok()?;
+    let row: Value = serde_json::from_str(&line).ok()?;
+    let id = row["payload"]["session_id"].as_str()?;
     (!id.is_empty()).then(|| id.to_string())
 }
 
@@ -111,7 +123,7 @@ fn entries(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Every file in the day folders and among the archived ones.
-fn files_in(home: &Path) -> Vec<PathBuf> {
+pub fn files_in(home: &Path) -> Vec<PathBuf> {
     let days = entries(&home.join("sessions"))
         .into_iter()
         .flat_map(|year| entries(&year))
@@ -134,6 +146,26 @@ fn history_base(path: &Path) -> Option<(String, u64)> {
         base["thread_id"].as_str()?.to_string(),
         base["end_byte_offset"].as_u64()?,
     ))
+}
+
+/// The file that holds a thread as it stands now, among all of its files: the
+/// one no other file carries on from. A revert starts a new file whose
+/// `history_base` names the one before, whichever folder either is in. Falls
+/// back to the last of `files` when the chain says nothing.
+pub fn latest_rollout(files: &[PathBuf]) -> Option<&PathBuf> {
+    if files.len() < 2 {
+        return files.first();
+    }
+    let based_on: HashSet<String> = files
+        .iter()
+        .filter_map(|p| history_base(p))
+        .map(|(base, _)| base)
+        .collect();
+    files
+        .iter()
+        .rev()
+        .find(|p| rollout_id(p).is_some_and(|id| !based_on.contains(&id)))
+        .or(files.last())
 }
 
 /// The files a thread's history is in, oldest first, each with how far into
@@ -1065,22 +1097,23 @@ pub fn thread_names(home: &Path) -> HashMap<String, String> {
     names
 }
 
-/// What an import is redone for: the combined size of the files a session is
-/// imported from, and its name, which changes without any of them changing.
-pub fn session_bytes(rollout: &Path, subagents: &[PathBuf], name: Option<&str>) -> u64 {
-    let files: u64 = std::iter::once(rollout)
+/// The combined size of the files a session is imported from.
+pub fn session_bytes(rollout: &Path, subagents: &[PathBuf]) -> u64 {
+    std::iter::once(rollout)
         .chain(subagents.iter().map(PathBuf::as_path))
         .filter_map(|p| fs::metadata(p).ok())
         .map(|m| m.len())
-        .sum();
-    // FNV-1a, kept to 32 bits so it cannot push the sum past what fits
-    let named = name
-        .unwrap_or_default()
-        .bytes()
-        .fold(0x811c_9dc5_u32, |hash, byte| {
-            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
-        });
-    files + u64::from(named) * u64::from(name.is_some())
+        .sum()
+}
+
+/// A stamp of what the thread is called, which changes without any of the
+/// files changing: FNV-1a. 0 for a thread with no name.
+pub fn name_hash(name: Option<&str>) -> u64 {
+    name.map_or(0, |name| {
+        name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    })
 }
 
 /// The session's events and what its rollout says about tokens. `rollout` is
@@ -1381,9 +1414,11 @@ pub(crate) mod tests {
 
         let names = thread_names(dir.path());
         let name = names.get(MAIN).map(String::as_str);
-        assert_ne!(
-            session_bytes(&main, &[], name),
-            session_bytes(&main, &[], Some("Another"))
+        assert_ne!(name_hash(name), name_hash(Some("Another")));
+        assert_ne!(name_hash(Some("")), name_hash(None));
+        assert_eq!(
+            session_bytes(&main, &[]),
+            fs::metadata(&main).unwrap().len()
         );
         let (events, facts) = session(&main, &[child], name).unwrap();
         let facts = facts.unwrap();
@@ -1524,6 +1559,37 @@ pub(crate) mod tests {
         let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
         let prompts: Vec<&str> = s.prompts.iter().map(|p| p.text.preview.as_str()).collect();
         assert_eq!(prompts, ["another way"]);
+    }
+
+    #[test]
+    fn the_newest_file_of_a_reverted_thread_is_the_one_nothing_continues() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join(format!(
+            "archived_sessions/rollout-2026-11-16T12-00-00-{MAIN}.jsonl"
+        ));
+        write(&first, &[meta(MAIN, json!({}))]);
+        let base = json!({ "history_base":
+            { "thread_id": MAIN, "end_ordinal_exclusive": 1, "end_byte_offset": 1 } });
+        let second = dir.path().join(format!(
+            "sessions/2026/11/17/rollout-2026-11-17T09-00-00-{MAIN}_0192-later.jsonl"
+        ));
+        write(&second, &[meta(MAIN, base)]);
+        // the second file is found first, the archived one last
+        let files = vec![second.clone(), first.clone()];
+        assert_eq!(latest_rollout(&files), Some(&second));
+        assert_eq!(latest_rollout(&files[1..]), Some(&first));
+    }
+
+    #[test]
+    fn finds_the_root_session_when_its_key_is_not_among_the_first_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(format!("rollout-2026-11-16T12-00-00-{CHILD}.jsonl"));
+        let mut payload = json!({ "base_instructions": { "text": "x".repeat(6000) } });
+        payload["session_id"] = json!(MAIN);
+        write(&path, &[row(0, "session_meta", payload)]);
+        assert_eq!(root_of(&path).as_deref(), Some(MAIN));
     }
 
     #[test]

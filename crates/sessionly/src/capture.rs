@@ -32,13 +32,16 @@ pub fn detect_source(payload: &Value) -> &'static str {
         crate::paths::CURSOR
     } else if has("workspaceRoot") || has("hookEventName") || transcript.contains("/.grok/") {
         crate::paths::GROK
-    } else if is_codex_rollout(transcript) {
+    } else if is_codex_rollout(transcript) || (transcript.is_empty() && has("turn_id")) {
         crate::paths::CODEX
     } else {
         crate::paths::CLAUDE_CODE
     }
 }
 
+/// Codex's `transcript_path` can be null, as for a session with no rollout
+/// file; its payloads then still say which turn they belong to (`turn_id`).
+///
 /// True for the path of a Codex session file: `…/rollout-<time>-<thread>.jsonl`,
 /// wherever `CODEX_HOME` puts it.
 fn is_codex_rollout(transcript: &str) -> bool {
@@ -298,7 +301,7 @@ mod tests {
     #[test]
     fn files_each_agent_under_its_own_name() {
         let dir = tempfile::tempdir().unwrap();
-        let cases: [(&str, &str, &str); 4] = [
+        let cases: [(&str, &str, &str); 5] = [
             (
                 r#"{"session_id":"c1","hook_event_name":"Stop","transcript_path":"/home/u/.claude/projects/p/c1.jsonl"}"#,
                 "claude-code",
@@ -314,6 +317,12 @@ mod tests {
                 r#"{"conversation_id":"k1","hook_event_name":"stop","cursor_version":"2.0"}"#,
                 "cursor",
                 "k1",
+            ),
+            // A session with no rollout file has no path to tell it by.
+            (
+                r#"{"session_id":"x2","turn_id":"t1","hook_event_name":"Stop","transcript_path":null}"#,
+                "codex",
+                "x2",
             ),
             (
                 r#"{"session_id":"x1","turn_id":"t1","hook_event_name":"Stop","transcript_path":"/data/codex/sessions/2026/11/16/rollout-2026-11-16T12-00-00-x1.jsonl"}"#,
