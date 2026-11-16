@@ -158,6 +158,13 @@ const ATTRIBUTION = {
 test("the figures as text", () => {
   const text = render(build(), ATTRIBUTION);
   assert.ok(text.startsWith(MARKER));
+  // Headed by the mark and the name, which leads to the server's page of pull requests when the server is known.
+  assert.match(text, /^### <img src="https:\/\/www\.sessionly\.dev\/favicon\.svg" width="20" height="20" align="top" alt=""> Sessionly$/m);
+  assert.match(render(build(), ATTRIBUTION, "https://sessionly.example.com/"), /> \[Sessionly\]\(https:\/\/sessionly\.example\.com\/#\/pulls\)$/m);
+  // The figures at a glance, then by tool and model.
+  assert.match(text, /\| Lines added \| By an agent \| Share \|\n\|---:\|---:\|---:\|\n\| 1,200 \| 450 \| 38% \|/);
+  // How it is counted is there for whoever asks, folded away.
+  assert.match(text, /<details>\n<summary>How this is counted<\/summary>\n\n[^\n]*shell command is not counted[^\n]*\n\n<\/details>$/);
   assert.match(text, /\*\*38% of the lines this pull request adds were written by a coding agent\*\* \(450 of 1,200\)/);
   assert.match(text, /\| Claude Code \| claude-opus-5-5 \| 300 \|/);
   assert.match(text, /\| Cursor \| not known \| 150 \|/);
@@ -171,8 +178,11 @@ test("the figures as text", () => {
   assert.doesNotMatch(render(build({ event: "opened" }), ATTRIBUTION), /still there/);
   const none = { first: { lines: 9, agent_lines: 0 }, now: { lines: 9, agent_lines: 0, by: [] }, by: [] };
   assert.match(render(build(), none), /No lines of this pull request were matched/);
+  assert.match(render(build(), none), /\| 9 \| 0 \| 0% \|/);
+  assert.doesNotMatch(render(build(), none), /\| Tool \|/);
   const empty = { first: { lines: 0, agent_lines: 0 }, now: { lines: 0, agent_lines: 0, by: [] }, by: [] };
   assert.match(render(build(), empty), /adds no lines to track/);
+  assert.doesNotMatch(render(build(), empty), /\| Lines added \|/);
   // a cloud agent's pull request whose session nobody captured says so
   const uncaptured = { ...none, cloud: { agents: ["cursor"], sessions: 0 } };
   assert.match(render(build(), uncaptured), /A cloud agent worked on this pull request \(Cursor\), and no session of it was captured/);

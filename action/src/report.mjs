@@ -108,10 +108,19 @@ function percent(part, whole) {
 /** Marks the comment this Action keeps up to date. */
 export const MARKER = "<!-- sessionly-pull-request-report -->";
 
-/** The figures as Markdown, for the run summary and the optional comment. */
-export function render(report, attribution) {
+/** Sessionly's mark, which GitHub shows in a comment through its own image proxy. */
+const MARK = "https://www.sessionly.dev/favicon.svg";
+
+/**
+ * The figures as Markdown, for the run summary and the comment on the pull
+ * request. `server` is the Sessionly server's address: the heading then leads
+ * to its page of pull requests.
+ */
+export function render(report, attribution, server) {
   const { first, now, by } = attribution;
-  const out = [MARKER, "### Sessionly", ""];
+  const home = server ? `${String(server).replace(/\/+$/, "")}/#/pulls` : null;
+  const name = home ? `[Sessionly](${home})` : "Sessionly";
+  const out = [MARKER, `### <img src="${MARK}" width="20" height="20" align="top" alt=""> ${name}`, ""];
   if (now.lines === 0) {
     out.push("This pull request adds no lines to track.");
   } else if (now.agent_lines === 0) {
@@ -120,6 +129,18 @@ export function render(report, attribution) {
     out.push(
       `**${percent(now.agent_lines, now.lines)} of the lines this pull request adds were written by a coding agent** ` +
         `(${count(now.agent_lines)} of ${count(now.lines)}).`,
+    );
+  }
+  if (now.lines > 0) {
+    out.push(
+      "",
+      "| Lines added | By an agent | Share |",
+      "|---:|---:|---:|",
+      `| ${count(now.lines)} | ${count(now.agent_lines)} | ${percent(now.agent_lines, now.lines)} |`,
+    );
+  }
+  if (now.agent_lines > 0) {
+    out.push(
       "",
       "| Tool | Model | Lines |",
       "|---|---|---:|",
@@ -152,9 +173,15 @@ export function render(report, attribution) {
   }
   out.push(
     "",
-    "<sub>Counts added lines that have a letter or digit. A line counts as an agent's when a session " +
+    "<details>",
+    "<summary>How this is counted</summary>",
+    "",
+    "Added lines that have a letter or digit are counted. A line counts as an agent's when a session " +
       "uploaded to Sessionly added it to the same file; everything else, including agents nobody " +
-      "captured, counts as not an agent's.</sub>",
+      "captured, counts as not an agent's. On a person's own machine, what an agent changed with a shell " +
+      "command is not counted, only what it changed with its file tools.",
+    "",
+    "</details>",
   );
   return out.join("\n");
 }

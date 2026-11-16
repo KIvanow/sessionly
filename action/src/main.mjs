@@ -83,7 +83,7 @@ export async function run(env, { api, deliver = send, log = console.log } = {}) 
     buildReport({ ...data, event: eventName(env.GITHUB_EVENT_NAME, payload.action), host, ignored }),
   );
   const attribution = await deliver(url, token, report);
-  const text = render(report, attribution);
+  const text = render(report, attribution, url);
 
   log(`Reported ${report.repo}#${number}: ${attribution.now.agent_lines} of ${attribution.now.lines} added lines matched to a coding agent.`);
   if (env.GITHUB_OUTPUT) {
