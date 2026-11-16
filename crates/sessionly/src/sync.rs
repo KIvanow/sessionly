@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::import_codex::Roots;
 use crate::ledger::{Fingerprint, Ledger};
 use crate::normalize;
 use crate::transcript;
@@ -89,7 +90,7 @@ fn jsonl_files(dir: &Path) -> BTreeMap<String, PathBuf> {
 /// The thread a Codex session file began as, when that is another thread:
 /// the file is of a subagent. The first record that names the rollout (a
 /// capture's payloads and an import's start both do) says where it is.
-fn codex_root(file: &Path, stem: &str) -> Option<String> {
+fn codex_root(file: &Path, stem: &str, roots: &mut Roots) -> Option<String> {
     use std::io::BufRead;
     let rollout = std::io::BufReader::new(fs::File::open(file).ok()?)
         .split(b'\n')
@@ -99,43 +100,53 @@ fn codex_root(file: &Path, stem: &str) -> Option<String> {
             let path = record["payload"]["transcript_path"].as_str()?;
             Some(PathBuf::from(path))
         })?;
-    crate::import_codex::root_of(&rollout)
+    roots
+        .root_of(&rollout)
         .filter(|root| crate::capture::file_stem(Some(root)) != stem)
+}
+
+/// What `take_subagents` found: the captures of each session's subagents, and
+/// each subagent's own stem with its session's.
+#[derive(Default)]
+struct Subagents {
+    captures: BTreeMap<String, Vec<PathBuf>>,
+    folded: Vec<(String, String)>,
 }
 
 /// Codex's hooks run in a subagent's thread too, so its capture is a file of
 /// its own, and a subagent whose session was missing once may have been
-/// imported alone. Neither is a session: take their stems out of `stems`,
-/// drop what the ledger has for them, and return the captures of each
-/// session's subagents. One whose parent session has no capture or import
-/// stands alone, as it does in the importer.
+/// imported alone. Neither is a session: take their stems out of `stems`.
+/// A subagent whose parent session has no capture or import stands alone, as
+/// it does in the importer.
 fn take_subagents(
     raw: &BTreeMap<String, PathBuf>,
     imported: &BTreeMap<String, PathBuf>,
     stems: &mut BTreeSet<&String>,
-    ledger: &mut Ledger,
-    report: &mut Report,
-) -> Result<BTreeMap<String, Vec<PathBuf>>> {
-    let mut found: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    roots: &mut Roots,
+) -> Subagents {
+    let mut found = Subagents::default();
     let all: Vec<String> = stems.iter().map(|s| (*s).clone()).collect();
-    for stem in &all {
-        let Some(file) = raw.get(stem).or(imported.get(stem)) else {
+    for stem in all {
+        let Some(file) = raw.get(&stem).or(imported.get(&stem)) else {
             continue;
         };
-        let Some(root) = codex_root(file, stem) else {
+        let Some(root) = codex_root(file, &stem, roots) else {
             continue;
         };
         let root = crate::capture::file_stem(Some(&root));
         if stems.contains(&root) {
-            stems.remove(stem);
-            if let Some(capture) = raw.get(stem) {
-                found.entry(root).or_default().push(capture.clone());
+            stems.remove(&stem);
+            if let Some(capture) = raw.get(&stem) {
+                found
+                    .captures
+                    .entry(root.clone())
+                    .or_default()
+                    .push(capture.clone());
             }
-            // synced as a session of its own before its parent was known
-            report.removed += u64::from(ledger.remove(stem)?);
+            found.folded.push((stem, root));
         }
     }
-    Ok(found)
+    found
 }
 
 fn size(path: Option<&PathBuf>) -> u64 {
@@ -221,11 +232,14 @@ pub fn run(
         let raw = jsonl_files(&dirs.raw);
         let imported = jsonl_files(&dirs.imported);
         let mut stems: BTreeSet<&String> = raw.keys().chain(imported.keys()).collect();
-        let subagent_raw = if dirs.source == crate::paths::CODEX {
-            take_subagents(&raw, &imported, &mut stems, ledger, &mut report)?
+        let mut roots = Roots::load(&dirs.imported);
+        let subagents = if dirs.source == crate::paths::CODEX {
+            take_subagents(&raw, &imported, &mut stems, &mut roots)
         } else {
-            BTreeMap::new()
+            Subagents::default()
         };
+        roots.save();
+        let subagent_raw = subagents.captures;
         for stem in stems {
             let (raw, imported) = (raw.get(stem), imported.get(stem));
             let subagent_raw = subagent_raw.get(stem).map_or(&[][..], Vec::as_slice);
@@ -280,11 +294,19 @@ pub fn run(
                 Err(err) => report.failed.push((source, format!("{err:#}"))),
             }
         }
+        // A thread synced as a session of its own before its session was
+        // known goes once that session is in the ledger: until then it keeps
+        // what it has, which is all there is of the subagent's work.
+        for (subagent, parent) in &subagents.folded {
+            if present.contains(parent) && ledger.fingerprint(subagent)?.is_some() {
+                report.removed += u64::from(ledger.remove(subagent)?);
+            }
+        }
     }
     // A full rebuild makes the ledger match the captures and imports exactly.
     // A normal sync never removes anything.
     if force {
-        report.removed = ledger.retain(&present)?;
+        report.removed += ledger.retain(&present)?;
     }
     Ok(report)
 }
@@ -401,6 +423,9 @@ mod tests {
         let report = run(&[dirs()], &mut env.ledger, "machine-1", false).unwrap();
         assert_eq!((report.synced, report.removed), (1, 1));
         assert!(env.ledger.get("sub").unwrap().is_none());
+        // a rebuild reports it once, not twice
+        let forced = run(&[dirs()], &mut env.ledger, "machine-1", true).unwrap();
+        assert_eq!(forced.removed, 0);
         let session = env.ledger.get("main").unwrap().unwrap();
         assert_eq!(session.counts.permission_requests, 1);
     }

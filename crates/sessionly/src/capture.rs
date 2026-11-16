@@ -34,8 +34,9 @@ pub fn detect_source(payload: &Value) -> &'static str {
         crate::paths::GROK
     } else if is_codex_rollout(transcript)
         // Codex's `transcript_path` can be null, as for a session with no
-        // rollout file; its payloads still say which turn they belong to.
-        || (transcript.is_empty() && has("turn_id"))
+        // rollout file; its payloads still name the turn (`turn_id`) where
+        // Claude Code's name the prompt (`prompt_id`).
+        || (transcript.is_empty() && has("turn_id") && !has("prompt_id"))
     {
         crate::paths::CODEX
     } else {
@@ -47,7 +48,9 @@ pub fn detect_source(payload: &Value) -> &'static str {
 /// wherever `CODEX_HOME` puts it.
 fn is_codex_rollout(transcript: &str) -> bool {
     let name = transcript.rsplit(['/', '\\']).next().unwrap_or_default();
-    name.starts_with("rollout-") || transcript.contains("/.codex/")
+    name.starts_with("rollout-")
+        || transcript.contains("/.codex/sessions/")
+        || transcript.contains("/.codex/archived_sessions/")
 }
 
 /// Wrap a raw hook payload in the envelope stored on disk. A payload that
@@ -302,7 +305,7 @@ mod tests {
     #[test]
     fn files_each_agent_under_its_own_name() {
         let dir = tempfile::tempdir().unwrap();
-        let cases: [(&str, &str, &str); 5] = [
+        let cases: [(&str, &str, &str); 7] = [
             (
                 r#"{"session_id":"c1","hook_event_name":"Stop","transcript_path":"/home/u/.claude/projects/p/c1.jsonl"}"#,
                 "claude-code",
@@ -318,6 +321,18 @@ mod tests {
                 r#"{"conversation_id":"k1","hook_event_name":"stop","cursor_version":"2.0"}"#,
                 "cursor",
                 "k1",
+            ),
+            // Claude Code names the prompt, not the turn
+            (
+                r#"{"session_id":"c2","prompt_id":"p1","turn_id":"t1","hook_event_name":"Stop","transcript_path":null}"#,
+                "claude-code",
+                "c2",
+            ),
+            // a project that happens to be called .codex
+            (
+                r#"{"session_id":"c3","hook_event_name":"Stop","transcript_path":"/home/u/.codex/projects/c3.jsonl"}"#,
+                "claude-code",
+                "c3",
             ),
             // A session with no rollout file has no path to tell it by.
             (

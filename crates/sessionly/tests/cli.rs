@@ -277,6 +277,30 @@ fn codex_hooks_are_installed_only_when_codex_home_exists() {
 }
 
 #[test]
+fn a_broken_codex_hooks_file_does_not_break_the_rest() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join(".codex")).unwrap();
+    fs::write(home.path().join(".codex/hooks.json"), "{ not json").unwrap();
+
+    for args in [["install"], ["status"], ["uninstall"]] {
+        let out = run(home.path(), &args);
+        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
+    }
+    // Claude's hooks went in and out as usual, and the broken file was left alone
+    let settings = fs::read_to_string(home.path().join(".claude/settings.json")).unwrap();
+    assert!(!settings.contains("sessionly"));
+    assert_eq!(
+        fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap(),
+        "{ not json"
+    );
+    let installed = run(home.path(), &["install"]);
+    assert!(stderr(&installed).contains("Codex hooks not installed"));
+    assert!(stdout(run(home.path(), &["status"]))
+        .lines()
+        .any(|line| line.starts_with("Codex:") && line.contains("unreadable")));
+}
+
+#[test]
 fn capture_then_show() {
     let home = tempfile::tempdir().unwrap();
     for payload in [

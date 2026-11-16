@@ -723,10 +723,11 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
         .collect();
     // A subagent's thread belongs to the session of the thread that began it.
     // One whose session's file is gone stands on its own.
+    let mut roots = crate::import_codex::Roots::load(&data_dir.join("imported").join(CODEX));
     let threads: HashSet<String> = rollouts.keys().cloned().collect();
     let mut subagents: HashMap<String, Vec<PathBuf>> = HashMap::new();
     rollouts.retain(|thread, path| {
-        let root = crate::import_codex::root_of(path);
+        let root = roots.root_of(path);
         match root.filter(|root| root != thread && threads.contains(root)) {
             Some(root) => {
                 subagents.entry(root).or_default().push(path.clone());
@@ -735,6 +736,7 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
             None => true,
         }
     });
+    roots.save();
     let mut names = match &homes.codex_home {
         Some(home) if !rollouts.is_empty() => crate::import_codex::thread_names(home),
         _ => HashMap::new(),

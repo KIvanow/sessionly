@@ -77,8 +77,83 @@ pub fn root_of(path: &Path) -> Option<String> {
     (!id.is_empty()).then(|| id.to_string())
 }
 
-/// The most a first record is read to: it is a few tens of kilobytes.
-const FIRST_RECORD_LIMIT: u64 = 4 << 20;
+/// The most a first record is read to: it is some tens of kilobytes.
+const FIRST_RECORD_LIMIT: u64 = 64 << 20;
+
+/// The file of a rollout that has since been moved (Codex archives old
+/// ones): `path` itself if it is still there, else the thread's latest file in
+/// the same Codex folder.
+fn locate(path: &Path) -> Option<PathBuf> {
+    if path.exists() {
+        return Some(path.to_path_buf());
+    }
+    let thread = thread_id(path)?;
+    let files: Vec<PathBuf> = files_in(home_of(path)?)
+        .into_iter()
+        .filter(|p| thread_id(p).as_deref() == Some(&*thread))
+        .collect();
+    latest_rollout(&files).cloned()
+}
+
+/// Where each rollout's session began (`root_of`), kept between runs: the
+/// first record of a file never changes, and reading it means reading the
+/// whole system prompt, for every file on every run.
+pub struct Roots {
+    file: PathBuf,
+    known: HashMap<String, String>,
+    dirty: bool,
+}
+
+impl Roots {
+    /// The roots remembered in `dir`, which is where the imports are kept.
+    pub fn load(dir: &Path) -> Roots {
+        let file = dir.join("_roots.json");
+        let known = fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        Roots {
+            file,
+            known,
+            dirty: false,
+        }
+    }
+
+    /// `root_of`, read from the file only the first time. A file that is gone
+    /// is looked for among the thread's others.
+    pub fn root_of(&mut self, rollout: &Path) -> Option<String> {
+        let key = rollout.to_string_lossy().into_owned();
+        if let Some(root) = self.known.get(&key) {
+            return Some(root.clone());
+        }
+        let root = root_of(&locate(rollout)?)?;
+        self.known.insert(key, root.clone());
+        self.dirty = true;
+        Some(root)
+    }
+
+    /// Write down what was learned.
+    pub fn save(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        let write = || -> Result<()> {
+            if let Some(dir) = self.file.parent() {
+                crate::paths::create_private_dir(dir)?;
+            }
+            let tmp = self
+                .file
+                .with_extension(format!("json.{}.tmp", std::process::id()));
+            fs::write(&tmp, serde_json::to_vec(&self.known)?)?;
+            fs::rename(&tmp, &self.file)?;
+            Ok(())
+        };
+        // only a cache: the next run learns it again
+        if write().is_ok() {
+            self.dirty = false;
+        }
+    }
+}
 
 /// Which of a thread's files this is, from its name: the part a revert adds
 /// after `_`, and for a thread's first file the thread itself.
@@ -631,7 +706,13 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
                     }
                 }
                 "item_completed" if !other_thread(&p["thread_id"]) => {
-                    let item = &p["item"];
+                    // An item with no id still needs one of its own: parts are
+                    // told apart by it.
+                    let mut item = p["item"].clone();
+                    if item["id"].as_str().is_none_or(str::is_empty) {
+                        item["id"] = json!(format!("item-{}", t.parts.len()));
+                    }
+                    let item = &item;
                     let id = item["id"].as_str().unwrap_or_default().to_string();
                     match item["type"].as_str().unwrap_or_default() {
                         "UserMessage" => {
@@ -750,7 +831,39 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
             })
             .collect()
     };
+    if paginated {
+        drop_shell_calls_kept_as_items(&mut t);
+    }
     Ok(t)
+}
+
+/// In the paginated layout what ran is kept as an item, so a shell call of
+/// the model's for the same command in the same turn is that command seen
+/// twice. Each item stands for one call.
+fn drop_shell_calls_kept_as_items(t: &mut Thread) {
+    let mut ran: HashMap<(Option<String>, String), usize> = HashMap::new();
+    for part in t.parts.iter().filter(|p| p.tool == "Bash") {
+        let command = part.input["command"].as_str().unwrap_or_default();
+        *ran.entry((part.turn.clone(), command.to_string()))
+            .or_default() += 1;
+    }
+    t.calls.retain(|call| {
+        if !matches!(
+            call.name.as_str(),
+            "shell" | "shell_command" | "local_shell" | "container.exec"
+        ) {
+            return true;
+        }
+        let (_, input) = canonical(call);
+        let command = input["command"].as_str().unwrap_or_default().to_string();
+        match ran.get_mut(&(call.turn.clone(), command)) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                false
+            }
+            _ => true,
+        }
+    });
 }
 
 /// A path in a patch or a tool's input, made absolute.
@@ -1162,7 +1275,11 @@ pub fn session(
         let Some(agent_id) = thread_id(file) else {
             continue;
         };
-        let thread = read(file, &agent_id)?;
+        // One that cannot be read (moved or half written) is left out: the
+        // session still stands without it, and its size changing imports again.
+        let Ok(thread) = read(file, &agent_id) else {
+            continue;
+        };
         let (Some(first), Some(last)) = (&thread.first_at, &thread.last_at) else {
             continue;
         };
@@ -1601,6 +1718,117 @@ pub(crate) mod tests {
         payload["session_id"] = json!(MAIN);
         write(&path, &[row(0, "session_meta", payload)]);
         assert_eq!(root_of(&path).as_deref(), Some(MAIN));
+    }
+
+    #[test]
+    fn roots_are_remembered_and_found_after_the_rollout_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = subagent(dir.path());
+        let cache = dir.path().join("imported");
+
+        let mut roots = Roots::load(&cache);
+        assert_eq!(roots.root_of(&child).as_deref(), Some(MAIN));
+        roots.save();
+
+        // archived: the old path is gone
+        let archived = dir
+            .path()
+            .join("archived_sessions")
+            .join(child.file_name().unwrap());
+        fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        fs::rename(&child, &archived).unwrap();
+        // from memory, with no file to read
+        assert_eq!(Roots::load(&cache).root_of(&child).as_deref(), Some(MAIN));
+        // from the thread's file in its new place, with nothing remembered
+        let mut fresh = Roots::load(&dir.path().join("elsewhere"));
+        assert_eq!(fresh.root_of(&child).as_deref(), Some(MAIN));
+        // a rollout that is nowhere has no root
+        let nowhere = dir.path().join(format!(
+            "sessions/2026/11/16/rollout-2026-11-16T12-00-09-019a8f00-0000-7000-8000-0000000000ff.jsonl"
+        ));
+        assert_eq!(fresh.root_of(&nowhere), None);
+    }
+
+    fn tool_names(events: &[Value], hook: &str) -> Vec<String> {
+        events
+            .iter()
+            .filter(|e| e["hook"] == hook)
+            .map(|e| {
+                e["payload"]["tool_name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .into()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_paginated_shell_call_and_its_item_are_one_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!(
+            "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{MAIN}.jsonl"
+        ));
+        let done = |second: u32, id: &str, command: &str| {
+            event(
+                second,
+                "item_completed",
+                json!({ "thread_id": MAIN, "turn_id": "t1", "item": { "type": "CommandExecution",
+                        "id": id, "command": ["/bin/bash", "-lc", command], "status": "completed",
+                        "aggregated_output": "", "exit_code": 0 } }),
+            )
+        };
+        write(
+            &path,
+            &[
+                meta(MAIN, json!({ "history_mode": "paginated" })),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                row(
+                    1,
+                    "turn_context",
+                    json!({ "turn_id": "t1", "cwd": "/work/repo", "model": "gpt-6-sol" }),
+                ),
+                // `make` is run twice and kept twice; `ls` once, and not as an item
+                function(2, "c1", "shell_command", json!({ "command": "make" })),
+                done(3, "i1", "make"),
+                function(4, "c2", "shell_command", json!({ "command": "make" })),
+                done(5, "i2", "make"),
+                function(6, "c3", "shell_command", json!({ "command": "ls" })),
+                // an item that has no id of its own
+                event(
+                    7,
+                    "item_completed",
+                    json!({ "thread_id": MAIN, "turn_id": "t1", "item": { "type": "CommandExecution",
+                            "command": ["echo"], "status": "completed", "exit_code": 0 } }),
+                ),
+                event(
+                    7,
+                    "item_completed",
+                    json!({ "thread_id": MAIN, "turn_id": "t1", "item": { "type": "CommandExecution",
+                            "id": "", "command": ["pwd"], "status": "completed", "exit_code": 0 } }),
+                ),
+            ],
+        );
+        let (events, _) = session(&path, &[], None).unwrap();
+        assert_eq!(tool_names(&events, "PreToolUse"), ["Bash"; 5]);
+        let mut ids: Vec<&str> = events
+            .iter()
+            .filter(|e| e["hook"] == "PreToolUse")
+            .filter_map(|e| e["payload"]["tool_use_id"].as_str())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 5, "{ids:?}");
+        assert!(ids.iter().all(|id| !id.is_empty()));
+    }
+
+    #[test]
+    fn a_subagent_that_cannot_be_read_leaves_the_session_standing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (main, child) = (sample(dir.path()), subagent(dir.path()));
+        fs::remove_file(&child).unwrap();
+        let (events, facts) = session(&main, &[child], None).unwrap();
+        assert!(facts.is_some());
+        assert!(events.iter().all(|e| e["hook"] != "SubagentStart"));
     }
 
     #[test]
