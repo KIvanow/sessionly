@@ -92,7 +92,20 @@ export async function run(env, { api, deliver = send, log = console.log } = {}) 
   if (on(env.SESSIONLY_SUMMARY ?? "true") && env.GITHUB_STEP_SUMMARY) {
     appendFileSync(env.GITHUB_STEP_SUMMARY, `${text}\n`);
   }
-  if (on(env.SESSIONLY_COMMENT)) await upsertComment(api, repo, number, MARKER, text);
+  // On unless switched off. The report has been sent by now: a comment that
+  // cannot be written (the job was not given pull-requests: write) is said,
+  // and takes nothing back.
+  if (on(env.SESSIONLY_COMMENT ?? "true")) {
+    try {
+      await upsertComment(api, repo, number, MARKER, text);
+    } catch (err) {
+      const why = String(err.message ?? err).replace(/\r?\n/g, " ");
+      log(
+        `::warning title=Sessionly::The figures could not be posted as a comment (${why}). ` +
+          "Give the job `pull-requests: write`, or set `comment: false`. They are on the run's summary page.",
+      );
+    }
+  }
   return { report, attribution, text };
 }
 
