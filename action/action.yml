@@ -17,8 +17,12 @@ inputs:
     description: Token used to read the pull request (and to comment, if that is switched on).
     default: ${{ github.token }}
   comment:
-    description: Post the figures as a comment on the pull request, kept up to date. Needs pull-requests write permission.
-    default: "false"
+    description: >-
+      Post the figures as one comment on the pull request, kept up to date as
+      the pull request changes. Needs pull-requests write permission; without
+      it the run warns and the figures are on its summary page only. Set to
+      "false" for no comment.
+    default: "true"
   summary:
     description: Write the figures to the workflow run's summary page.
     default: "true"
