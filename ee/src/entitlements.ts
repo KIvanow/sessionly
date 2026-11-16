@@ -1,4 +1,4 @@
-import { ApiError, type Db } from "@sessionly/server";
+import { ApiError, type OrgDb } from "@sessionly/server";
 import { LICENSE_PUBLIC_KEY } from "./license/keys.ts";
 import {
   allows,
@@ -10,35 +10,45 @@ import {
 } from "./license/license.ts";
 
 /**
- * The install's license, read from the database and verified offline on every load (a short
- * cache keeps it off the request path). Nothing here can stop capture, upload or the
- * dashboard: it only gates ee/.
+ * An organisation's license, read from the database and verified offline on every load (a
+ * short cache keeps it off the request path). Nothing here can stop capture, upload or the
+ * dashboard: it only gates ee/. Each method takes the request's database, which is where the
+ * organisation comes from.
+ *
+ * The cache is this process's own. Another copy of the server learns of a newly installed
+ * license when its own entry runs out, at most `ttlMs` later.
  */
+/** Organisations remembered at once. */
+const MAX_CACHED = 1000;
+
 export class Entitlements {
-  private cached: { until: number; license: License | null } | null = null;
-  private readonly db: Db;
+  private readonly cached = new Map<string, { until: number; license: License | null }>();
   private readonly now: () => Date;
   readonly publicKey: string;
   private readonly ttlMs: number;
 
-  constructor(db: Db, now: () => Date = () => new Date(), publicKey = LICENSE_PUBLIC_KEY, ttlMs = 30_000) {
-    this.db = db;
+  constructor(now: () => Date = () => new Date(), publicKey = LICENSE_PUBLIC_KEY, ttlMs = 30_000) {
     this.now = now;
     this.publicKey = publicKey;
     this.ttlMs = ttlMs;
   }
 
-  async state(): Promise<LicenseState> {
+  async state(db: OrgDb): Promise<LicenseState> {
     const at = this.now();
-    if (!this.cached || this.cached.until <= Date.now()) {
-      this.cached = { until: Date.now() + this.ttlMs, license: await this.load() };
+    let known = this.cached.get(db.orgId);
+    if (!known || known.until <= Date.now()) {
+      known = { until: Date.now() + this.ttlMs, license: await this.load(db) };
+      // Bounded: entries are cheap to read again.
+      if (this.cached.size >= MAX_CACHED) this.cached.clear();
+      this.cached.set(db.orgId, known);
     }
-    return licenseState(this.cached.license, at);
+    return licenseState(known.license, at);
   }
 
-  private async load(): Promise<License | null> {
-    const rows = await this.db.query<{ raw: string }>(
-      `SELECT raw FROM ee_licenses ORDER BY installed_at DESC`,
+  private async load(db: OrgDb): Promise<License | null> {
+    const rows = await db.query<{ raw: string }>(
+      `SELECT raw FROM ee_licenses WHERE org_id = $1 ORDER BY installed_at DESC`,
+      [db.orgId],
     );
     // The newest one that still verifies (a row edited in the database does not).
     for (const row of rows) {
@@ -51,17 +61,17 @@ export class Entitlements {
     return null;
   }
 
-  forget(): void {
-    this.cached = null;
+  forget(orgId: string): void {
+    this.cached.delete(orgId);
   }
 
-  async can(feature: Feature, mode: "read" | "write"): Promise<boolean> {
-    return allows(await this.state(), feature, mode);
+  async can(db: OrgDb, feature: Feature, mode: "read" | "write"): Promise<boolean> {
+    return allows(await this.state(db), feature, mode);
   }
 
   /** Throw the API error that explains why a feature is not available. */
-  async require(feature: Feature, mode: "read" | "write"): Promise<void> {
-    const state = await this.state();
+  async require(db: OrgDb, feature: Feature, mode: "read" | "write"): Promise<void> {
+    const state = await this.state(db);
     if (allows(state, feature, mode)) return;
     if (state.license?.features.includes(feature)) {
       throw new ApiError(

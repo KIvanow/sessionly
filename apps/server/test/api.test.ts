@@ -2,19 +2,19 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import type { Upload } from "@sessionly/schema";
 import { createApp } from "../src/app.ts";
-import { createToken } from "../src/auth.ts";
 import { openDb, type Db } from "../src/db.ts";
+import { testDb, tokenFor } from "./helpers.ts";
 
 let db: Db;
 let app: ReturnType<typeof createApp>;
 const tokens = { admin: "", ann: "", bob: "" };
 
 before(async () => {
-  db = await openDb("memory://");
+  db = await testDb();
   app = createApp(db, { bootstrap: { token: "bootstrap-secret", email: "root@example.com" } });
-  tokens.admin = (await createToken(db, { email: "boss@example.com", role: "admin" })).token;
-  tokens.ann = (await createToken(db, { email: "Ann@Example.com", name: "Ann", role: "member" })).token;
-  tokens.bob = (await createToken(db, { email: "bob@example.com", role: "member" })).token;
+  tokens.admin = await tokenFor(db, { email: "boss@example.com", role: "admin" });
+  tokens.ann = await tokenFor(db, { email: "Ann@Example.com", name: "Ann", role: "member" });
+  tokens.bob = await tokenFor(db, { email: "bob@example.com", role: "member" });
 });
 after(() => db.close());
 
@@ -79,7 +79,7 @@ test("every endpoint needs a known token", async () => {
   assert.equal((await get("nope", "/ping")).status, 401);
   assert.equal((await app.request("/api/v1/summary", { headers: { authorization: "Basic x" } })).status, 401);
   const ping = await get(tokens.ann, "/ping");
-  assert.deepEqual(ping, { status: 200, body: { ok: true, email: "ann@example.com", name: "Ann", role: "member" } });
+  assert.deepEqual(ping, { status: 200, body: { ok: true, org: "default", email: "ann@example.com", name: "Ann", role: "member" } });
   // the bootstrap token from the environment is an admin
   assert.equal((await get("bootstrap-secret", "/me")).body.role, "admin");
   assert.equal((await app.request("/api/v2/ping")).status, 404);
@@ -311,13 +311,15 @@ test("sessions from several agents are told apart", async () => {
   assert.equal((await get(tokens.admin, "/sessions/machine-1/cursor/cur-1")).status, 200);
 });
 
-test("the embedded database creates its folder", async () => {
-  const { mkdtempSync, existsSync } = await import("node:fs");
+test("the embedded database creates its folder", async (t) => {
+  const { mkdtempSync, existsSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const dir = join(mkdtempSync(join(tmpdir(), "sessionly-db-")), "not", "there", "yet");
+  const folder = mkdtempSync(join(tmpdir(), "sessionly-db-"));
+  t.after(() => rmSync(folder, { recursive: true, force: true }));
+  const dir = join(folder, "not", "there", "yet");
   const fresh = await openDb(`file:${dir}`);
-  await createToken(fresh, { email: "a@example.com", role: "member" });
+  await tokenFor(fresh, { email: "a@example.com", role: "member" });
   await fresh.close();
   assert.ok(existsSync(dir));
   // and the data is still there when it is opened again

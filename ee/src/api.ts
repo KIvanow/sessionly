@@ -1,11 +1,17 @@
-import { ApiError, type Api, type Extension } from "@sessionly/server";
+import { ApiError, type Api, type Extension, type OrgDb } from "@sessionly/server";
 import type { Entitlements } from "./entitlements.ts";
 import { LicenseError, verifyLicense } from "./license/license.ts";
 
 export interface EeDeps {
   entitlements: Entitlements;
-  /** This install's org id (SESSIONLY_ORG), or null if it is not set. */
+  /** The org id a license must name (SESSIONLY_ORG), or null if it is not set. */
   org: string | null;
+  /**
+   * A service many organisations share. Licenses are for a single install:
+   * the one org id a license is checked against is the whole server's, so
+   * there no organisation may install one.
+   */
+  hosted?: boolean;
   now?: () => Date;
 }
 
@@ -25,20 +31,25 @@ function requireAdmin(api: Api, path: string, methods: string[]): void {
 export function eeApi(deps: EeDeps): Extension {
   const { entitlements: ent, org } = deps;
   const now = deps.now ?? (() => new Date());
-  return (api, { db }) => {
+  // Every route reads the request's database: its organisation's rows only.
+  return (api) => {
     // --- License -----------------------------------------------------------
-    const view = async () => {
+    const view = async (db: OrgDb) => {
       const [people] = await db.query<{ n: unknown }>(
-        `SELECT count(DISTINCT email) AS n FROM tokens WHERE revoked_at IS NULL`,
+        `SELECT count(DISTINCT email) AS n FROM tokens WHERE org_id = $1 AND revoked_at IS NULL`,
+        [db.orgId],
       );
-      return { ...(await ent.state()), org, people: Number(people?.n ?? 0) };
+      return { ...(await ent.state(db)), org, people: Number(people?.n ?? 0) };
     };
 
     // License status: verified offline; no license means core features only.
-    api.get("/license", async (c) => c.json(await view()));
+    api.get("/license", async (c) => c.json(await view(c.get("db"))));
 
     requireAdmin(api, "/license", ["POST"]);
     api.post("/license", async (c) => {
+      if (deps.hosted) {
+        throw new ApiError(403, "no_licenses_here", "Licenses are for a self-hosted server. Here, features come with the plan.");
+      }
       const body = (await c.req.json().catch(() => ({}))) as { license?: unknown };
       if (typeof body.license !== "string" || !body.license || body.license.length > 16_384) {
         throw new ApiError(400, "license_malformed", "Send the license file's text as `license`.");
@@ -61,24 +72,31 @@ export function eeApi(deps: EeDeps): Extension {
       if (Date.parse(license.expiresAt) <= now().getTime()) {
         throw new ApiError(400, "license_expired", "This license has already expired.");
       }
+      const db = c.get("db");
       await db.query(
-        `INSERT INTO ee_licenses (id, org, raw, expires_at, installed_by, installed_at)
-         VALUES ($1, $2, $3, $4::timestamptz, $5, $6::timestamptz)
-         ON CONFLICT (id) DO UPDATE SET org = EXCLUDED.org, raw = EXCLUDED.raw,
+        `INSERT INTO ee_licenses (org_id, id, org, raw, expires_at, installed_by, installed_at)
+         VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7::timestamptz)
+         ON CONFLICT (org_id, id) DO UPDATE SET org = EXCLUDED.org, raw = EXCLUDED.raw,
            expires_at = EXCLUDED.expires_at, installed_by = EXCLUDED.installed_by,
            installed_at = EXCLUDED.installed_at`,
-        [license.id, license.org, body.license, license.expiresAt, c.get("principal").email, now().toISOString()],
+        [db.orgId, license.id, license.org, body.license, license.expiresAt, c.get("principal").email, now().toISOString()],
       );
-      ent.forget();
-      return c.json(await view(), 201);
+      ent.forget(db.orgId);
+      const installed = await view(db);
+      // What was just read is not committed yet. If the commit fails, the
+      // next request must not find it remembered.
+      ent.forget(db.orgId);
+      return c.json(installed, 201);
     });
 
     // --- Content policy (feature: content_policy) --------------------------
     // What the organisation asks its engineers' uploads to contain.
     api.get("/policy", async (c) => {
-      await ent.require("content_policy", "read");
+      const db = c.get("db");
+      await ent.require(db, "content_policy", "read");
       const [row] = await db.query<{ content: string; updated_by: string; updated_at: unknown }>(
-        `SELECT content, updated_by, updated_at FROM ee_content_policy WHERE id = 1`,
+        `SELECT content, updated_by, updated_at FROM ee_content_policy WHERE org_id = $1`,
+        [db.orgId],
       );
       return c.json({
         content: row?.content ?? "metadata",
@@ -93,7 +111,8 @@ export function eeApi(deps: EeDeps): Extension {
 
     requireAdmin(api, "/policy", ["PUT"]);
     api.put("/policy", async (c) => {
-      await ent.require("content_policy", "write");
+      const db = c.get("db");
+      await ent.require(db, "content_policy", "write");
       const body = (await c.req.json().catch(() => ({}))) as { content?: unknown };
       const content = CONTENT_LEVELS.find((level) => level === body.content);
       if (!content) {
@@ -101,11 +120,11 @@ export function eeApi(deps: EeDeps): Extension {
       }
       const at = now().toISOString();
       await db.query(
-        `INSERT INTO ee_content_policy (id, content, updated_by, updated_at)
-         VALUES (1, $1, $2, $3::timestamptz)
-         ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content,
+        `INSERT INTO ee_content_policy (org_id, content, updated_by, updated_at)
+         VALUES ($1, $2, $3, $4::timestamptz)
+         ON CONFLICT (org_id) DO UPDATE SET content = EXCLUDED.content,
            updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at`,
-        [content, c.get("principal").email, at],
+        [db.orgId, content, c.get("principal").email, at],
       );
       return c.json({ content, updated_by: c.get("principal").email, updated_at: at });
     });

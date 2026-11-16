@@ -1,7 +1,7 @@
 // Storing uploaded sessions and answering the dashboard's questions about them.
 import type { FileRow, GroupBy, Session, SessionRow, Totals, Upload } from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
-import type { Db } from "./db.ts";
+import type { OrgDb } from "./db.ts";
 
 const UNKNOWN = "(unknown)";
 
@@ -34,15 +34,15 @@ export function ownerOf(upload: Upload, uploader: Principal): string {
  * Store one session, replacing an earlier upload of the same session.
  * Returns false if what the server has was kept instead.
  */
-export async function storeUpload(db: Db, upload: Upload, uploader: Principal): Promise<boolean> {
+export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal): Promise<boolean> {
   const s: Session = upload.session ?? {};
   const owner = { email: ownerOf(upload, uploader) };
   const cloud = s.runtime?.kind === "cloud";
   const counts = s.counts ?? {};
-  const key = [s.machine_id, s.source, s.session_id];
+  const key = [db.orgId, s.machine_id, s.source, s.session_id];
   const [existing] = await db.query<{ owner_email: string; runtime: string | null; prompts: number }>(
     `SELECT owner_email, runtime, prompts FROM sessions
-     WHERE machine_id = $1 AND source = $2 AND session_id = $3`,
+     WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
     key,
   );
   if (existing && existing.owner_email !== owner.email) {
@@ -59,6 +59,7 @@ export async function storeUpload(db: Db, upload: Upload, uploader: Principal): 
   const usage = s.usage ?? [];
   const rewrite = upload.rewrite ?? null;
   const columns: Record<string, unknown> = {
+    org_id: db.orgId,
     machine_id: s.machine_id,
     source: s.source,
     session_id: s.session_id,
@@ -103,14 +104,21 @@ export async function storeUpload(db: Db, upload: Upload, uploader: Principal): 
   const casts: Record<string, string> = { models: "::jsonb", payload: "::jsonb" };
   const placeholders = names.map((name, i) => `$${i + 1}${casts[name] ?? ""}`);
   const updates = names
-    .filter((name) => !["machine_id", "source", "session_id"].includes(name))
+    .filter((name) => !["org_id", "machine_id", "source", "session_id"].includes(name))
     .map((name) => `${name} = EXCLUDED.${name}`);
-  await db.query(
+  // The check above read the row a moment ago. If someone else stored this
+  // very session in between, it is theirs: the update is skipped, not won by
+  // whoever came last.
+  const mayRefile = uploader.role === "env" ? uploader.email : null;
+  const stored = await db.query(
     `INSERT INTO sessions (${names.join(", ")}) VALUES (${placeholders.join(", ")})
-     ON CONFLICT (machine_id, source, session_id)
-     DO UPDATE SET ${updates.join(", ")}, updated_at = now()`,
-    Object.values(columns),
+     ON CONFLICT (org_id, machine_id, source, session_id)
+     DO UPDATE SET ${updates.join(", ")}, updated_at = now()
+     WHERE sessions.owner_email = EXCLUDED.owner_email OR sessions.owner_email = $${names.length + 1}
+     RETURNING 1`,
+    [...Object.values(columns), mayRefile],
   );
+  if (stored.length === 0) throw new Conflict("this session was uploaded by someone else");
   return true;
 }
 
@@ -137,12 +145,16 @@ export interface Filters {
   until?: string;
 }
 
-/** WHERE clause for what `viewer` may see, narrowed by `filters`. */
+/**
+ * WHERE clause for what `viewer` may see, narrowed by `filters`. It always
+ * starts with the viewer's organisation: an admin sees all of it, anyone
+ * else their own sessions in it.
+ */
 function where(viewer: Principal, filters: Filters): { sql: string; params: unknown[] } {
-  const conditions: string[] = [];
   const params: unknown[] = [];
   const bind = (value: unknown) => `$${params.push(value)}`;
   const like = (text: string) => bind(`%${text.replace(/[\\%_]/g, "\\$&")}%`);
+  const conditions: string[] = [`org_id = ${bind(viewer.orgId)}`];
   if (viewer.role !== "admin") conditions.push(`owner_email = ${bind(viewer.email)}`);
   if (filters.user) conditions.push(`owner_email ILIKE ${like(filters.user)}`);
   if (filters.repo) conditions.push(`repo ILIKE ${like(filters.repo)}`);
@@ -164,7 +176,7 @@ function where(viewer: Principal, filters: Filters): { sql: string; params: unkn
   }
   if (filters.since) conditions.push(`started_at >= ${bind(filters.since)}::timestamptz`);
   if (filters.until) conditions.push(`started_at < ${bind(filters.until)}::timestamptz`);
-  return { sql: conditions.length ? `WHERE ${conditions.join(" AND ")}` : "", params };
+  return { sql: `WHERE ${conditions.join(" AND ")}`, params };
 }
 
 const GROUP_KEY: Record<GroupBy, string> = {
@@ -219,7 +231,7 @@ function totals(row: Record<string, unknown>): Totals {
 
 /** Totals per group (largest cost first; days oldest first) and overall. */
 export async function summarize(
-  db: Db,
+  db: OrgDb,
   viewer: Principal,
   by: GroupBy,
   filters: Filters,
@@ -239,7 +251,7 @@ const iso = (value: unknown): string | null =>
 
 /** Sessions the viewer may see, newest first. */
 export async function listSessions(
-  db: Db,
+  db: OrgDb,
   viewer: Principal,
   filters: Filters,
   page: { limit: number; offset: number },
@@ -303,14 +315,14 @@ export async function listSessions(
 
 /** One session as uploaded, or null if it doesn't exist or isn't the viewer's to see. */
 export async function getSession(
-  db: Db,
+  db: OrgDb,
   viewer: Principal,
   key: { machine_id: string; source: string; session_id: string },
 ): Promise<{ owner_email: string; updated_at: string; upload: Upload } | null> {
   const rows = await db.query<{ owner_email: string; updated_at: unknown; payload: unknown }>(
     `SELECT owner_email, updated_at, payload FROM sessions
-     WHERE machine_id = $1 AND source = $2 AND session_id = $3`,
-    [key.machine_id, key.source, key.session_id],
+     WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
+    [db.orgId, key.machine_id, key.source, key.session_id],
   );
   const row = rows[0];
   if (!row || (viewer.role !== "admin" && row.owner_email !== viewer.email)) return null;
@@ -323,13 +335,13 @@ export async function getSession(
  * added and removed, and how much of what was added is still there.
  */
 export async function listFiles(
-  db: Db,
+  db: OrgDb,
   viewer: Principal,
   filters: Filters,
   limit: number,
 ): Promise<{ files: FileRow[]; total: number }> {
   const { sql, params } = where(viewer, filters);
-  const and = sql ? `${sql} AND` : "WHERE";
+  const and = `${sql} AND`;
   const changed = `sessions CROSS JOIN LATERAL
     jsonb_array_elements(coalesce(payload->'session'->'files', '[]'::jsonb)) AS f
     ${and} coalesce((f->>'writes')::double precision, 0) > 0`;
@@ -386,7 +398,7 @@ export async function listFiles(
 
 /** Values to offer in the dashboard's filters. */
 export async function filterOptions(
-  db: Db,
+  db: OrgDb,
   viewer: Principal,
 ): Promise<{ users: string[]; repos: string[]; models: string[]; tools: string[]; runtimes: string[] }> {
   const { sql, params } = where(viewer, {});

@@ -8,3 +8,5 @@ node_modules/
 dist/
 # local server data (embedded database)
 /apps/server/data/
+# settings for a server run from this checkout, secrets among them
+.env

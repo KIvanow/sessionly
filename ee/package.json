@@ -5,10 +5,10 @@
   "license": "SEE LICENSE IN ../LICENSE-EE",
   "type": "module",
   "scripts": {
-    "start": "node src/main.ts",
+    "start": "node --env-file-if-exists=../.env src/main.ts",
     "sign-license": "node scripts/sign-license.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"test/*.test.ts\""
+    "test": "node --test --test-global-setup=test/global.ts \"test/*.test.ts\""
   },
   "dependencies": {
     "@sessionly/server": "workspace:*",

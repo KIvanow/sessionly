@@ -62,7 +62,7 @@
         <div class="wrap">
           <h1>Data Processing Agreement</h1>
           <p class="meta">
-            Effective as of 14 November 2026
+            Effective as of 16 November 2026
             <span class="pdf-link">&middot; <a href="/dpa.pdf">Download PDF</a></span>
           </p>
           <p class="print-note">
@@ -768,10 +768,23 @@
               telemetry to me or to anyone else. License files are verified offline.
             </li>
             <li>
-              The website is static, loads no scripts, and is served with a Content Security
-              Policy of <code>default-src 'none'</code> with only its own stylesheet, fonts and
-              images allowed, plus <code>X-Content-Type-Options</code>, <code>X-Frame-Options</code> and
-              <code>Referrer-Policy</code> headers.
+              The dashboard counts which of its pages are opened, in PostHog's EU cloud. A count
+              is the page's name, whether the server is the Hosted Service or a self-hosted one,
+              and an id made up for that one load of the page. It contains no Customer Data: no
+              org, person, session, token or anything a page shows. It is sent by the dashboard's
+              own code, with no analytics library, as a request to which the browser adds no
+              cookie and no header naming the site it comes from; nothing is stored in the
+              browser for it; and a browser that sends Do Not Track or Global Privacy Control is
+              not counted.
+            </li>
+            <li>
+              The website is static and loads one script, Vercel Web Analytics, from the site
+              itself. It counts visits without cookies and without keeping IP addresses. The
+              website is served with a Content Security Policy of
+              <code>default-src 'none'</code> with only its own script, stylesheet, fonts and
+              images and connections back to itself allowed, plus
+              <code>X-Content-Type-Options</code>, <code>X-Frame-Options</code> and
+              <code>Referrer-Policy</code> headers. No Customer Data is on the website.
             </li>
           </ul>
           <h3>Incident handling and transparency</h3>
@@ -810,19 +823,37 @@
               <tbody>
                 <tr>
                   <td>Vercel</td>
-                  <td>Hosting this website</td>
-                  <td>Web request logs for sessionly.dev. No Customer Data</td>
+                  <td>Hosting this website, and counting its visits</td>
+                  <td>
+                    Web request logs for sessionly.dev, and the pages visited. No Customer Data
+                  </td>
                   <td>
                     United States company; serves the website from its edge network worldwide.
                     Transfer relies on Vercel's Standard Contractual Clauses or Data Privacy
                     Framework certification.
                   </td>
                 </tr>
+                <tr>
+                  <td>PostHog (EU cloud)</td>
+                  <td>Counting which pages of the dashboard are opened</td>
+                  <td>
+                    Page names, whether the server is hosted or self-hosted, and the connection
+                    each count arrives on (its IP address and the browser's standard headers); no
+                    IP address is kept. No Customer Data
+                  </td>
+                  <td>
+                    United States company; counts are received and stored in its EU cloud, on
+                    servers in Frankfurt, Germany. Where its staff or providers outside the EEA
+                    have access, the transfer relies on the Standard Contractual Clauses in
+                    PostHog's data processing agreement.
+                  </td>
+                </tr>
               </tbody>
             </table>
           </div>
           <p>
-            Vercel is listed so that the list here and the one in the Privacy Policy are the same.
+            Vercel and PostHog are listed so that the list here and the one in the Privacy Policy
+            are the same; neither processes Customer Data.
             Changes to this list are notified under Section 5.2 of the DPA.
           </p>
         </div>

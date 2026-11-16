@@ -6,3 +6,8 @@ target
 docs
 sessions
 apps/server/data
+# settings and secrets of whoever builds: never part of an image
+.env
+**/.env
+.env.*
+**/.env.*

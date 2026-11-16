@@ -13,7 +13,7 @@ import type {
   PullSummary,
   PullsByModel,
 } from "@sessionly/schema";
-import type { Db } from "./db.ts";
+import type { OrgDb } from "./db.ts";
 
 export class BadReport extends Error {}
 
@@ -149,7 +149,8 @@ export function attribute(
   };
 }
 
-function checked(body: unknown): PullReport {
+/** A report as the Action sends it, checked; throws `BadReport` saying what is wrong with it. */
+export function checkReport(body: unknown): PullReport {
   const r = body as Record<string, unknown>;
   const fail = (what: string): never => {
     throw new BadReport(what);
@@ -237,7 +238,7 @@ const CLOUD_BRANCHES: [RegExp, string][] = [
  * commits and what its branch is called, and how many cloud sessions were
  * uploaded for that branch. Null if nothing points to one.
  */
-async function cloudOf(db: Db, report: PullReport): Promise<PullCloud | null> {
+async function cloudOf(db: OrgDb, report: PullReport): Promise<PullCloud | null> {
   const agents = new Set<string>();
   for (const email of report.commit_emails ?? []) {
     const agent = CLOUD_COMMITTERS[email];
@@ -249,11 +250,11 @@ async function cloudOf(db: Db, report: PullReport): Promise<PullCloud | null> {
   }
   let sessions = 0;
   if (branch) {
-    const params: unknown[] = [branch];
+    const params: unknown[] = [db.orgId, branch];
     const names = repoNames(report).map((name) => `$${params.push(name)}`).join(", ");
     const rows = await db.query<{ source: string; n: unknown }>(
       `SELECT source, count(*) AS n FROM sessions
-       WHERE runtime = 'cloud' AND branch = $1 AND repo IN (${names}) GROUP BY source`,
+       WHERE org_id = $1 AND runtime = 'cloud' AND branch = $2 AND repo IN (${names}) GROUP BY source`,
       params,
     );
     for (const row of rows) {
@@ -265,10 +266,12 @@ async function cloudOf(db: Db, report: PullReport): Promise<PullCloud | null> {
 }
 
 /** What agents added in the repository around the time of a pull request. */
-async function claimsFor(db: Db, report: PullReport): Promise<Claim[]> {
+async function claimsFor(db: OrgDb, report: PullReport): Promise<Claim[]> {
   const since = new Date(Date.parse(report.created_at) - LOOK_BACK_DAYS * 86_400_000).toISOString();
   const names = repoNames(report);
-  const params: unknown[] = [since];
+  // Only this organisation's sessions: another's, in the same repository and
+  // by the same committer, are not this pull request's.
+  const params: unknown[] = [since, db.orgId];
   const list = (values: string[]) => values.map((value) => `$${params.push(value)}`).join(", ");
   // The same line turns up in more than one person's work. Only sessions of
   // the people who committed to the pull request are taken to have written
@@ -282,7 +285,7 @@ async function claimsFor(db: Db, report: PullReport): Promise<Claim[]> {
   const rows = await db.query(
     `SELECT source, primary_model, started_at, payload->'lines' AS lines
      FROM sessions
-     WHERE repo IN (${list(names)}) AND payload->'lines' IS NOT NULL
+     WHERE org_id = $2 AND repo IN (${list(names)}) AND payload->'lines' IS NOT NULL
        AND (started_at IS NULL OR started_at >= $1::timestamptz) ${by}`,
     params,
   );
@@ -302,11 +305,10 @@ async function claimsFor(db: Db, report: PullReport): Promise<Claim[]> {
  * which of its lines agents wrote. The lines of the first report are kept
  * for good: they are what review started from.
  */
-export async function storePull(db: Db, body: unknown): Promise<PullAttribution> {
-  const report = checked(body);
+export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttribution> {
   const [existing] = await db.query<{ first_files: unknown; first_event: string }>(
-    `SELECT first_files, first_event FROM pull_requests WHERE repo = $1 AND number = $2`,
-    [report.repo, report.number],
+    `SELECT first_files, first_event FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
+    [db.orgId, report.repo, report.number],
   );
   const first = existing ? json<FileHashes[]>(existing.first_files) : report.files;
   const attribution: PullAttribution = {
@@ -315,6 +317,7 @@ export async function storePull(db: Db, body: unknown): Promise<PullAttribution>
     cloud: await cloudOf(db, report),
   };
   const columns: Record<string, unknown> = {
+    org_id: db.orgId,
     repo: report.repo,
     number: report.number,
     head_repo: report.head_repo,
@@ -344,11 +347,11 @@ export async function storePull(db: Db, body: unknown): Promise<PullAttribution>
   };
   const names = Object.keys(columns);
   const casts: Record<string, string> = { last_files: "::jsonb", first_files: "::jsonb", attribution: "::jsonb" };
-  const kept = ["repo", "number", "first_event", "first_files"];
+  const kept = ["org_id", "repo", "number", "first_event", "first_files"];
   await db.query(
     `INSERT INTO pull_requests (${names.join(", ")})
      VALUES (${names.map((name, i) => `$${i + 1}${casts[name] ?? ""}`).join(", ")})
-     ON CONFLICT (repo, number) DO UPDATE SET
+     ON CONFLICT (org_id, repo, number) DO UPDATE SET
        ${names.filter((name) => !kept.includes(name)).map((name) => `${name} = EXCLUDED.${name}`).join(", ")},
        updated_at = now()`,
     Object.values(columns),
@@ -364,14 +367,14 @@ export interface PullFilters {
   since?: string;
 }
 
-function where(filters: PullFilters): { sql: string; params: unknown[] } {
-  const conditions: string[] = [];
+function where(orgId: string, filters: PullFilters): { sql: string; params: unknown[] } {
   const params: unknown[] = [];
   const bind = (value: unknown) => `$${params.push(value)}`;
+  const conditions: string[] = [`org_id = ${bind(orgId)}`];
   if (filters.repo) conditions.push(`repo ILIKE ${bind(`%${filters.repo.replace(/[\\%_]/g, "\\$&")}%`)}`);
   if (filters.state) conditions.push(`state = ${bind(filters.state)}`);
   if (filters.since) conditions.push(`coalesce(merged_at, closed_at, created_at) >= ${bind(filters.since)}::timestamptz`);
-  return { sql: conditions.length ? `WHERE ${conditions.join(" AND ")}` : "", params };
+  return { sql: `WHERE ${conditions.join(" AND ")}`, params };
 }
 
 const ROW_COLUMNS = `repo, number, title, url, author, state, created_at, merged_at, first_event, commits,
@@ -403,11 +406,11 @@ function pullRow(r: Record<string, unknown>): PullRow {
 
 /** Pull requests, most recently created first. */
 export async function listPulls(
-  db: Db,
+  db: OrgDb,
   filters: PullFilters,
   page: { limit: number; offset: number },
 ): Promise<PullList> {
-  const { sql, params } = where(filters);
+  const { sql, params } = where(db.orgId, filters);
   const rows = await db.query(
     `SELECT ${ROW_COLUMNS} FROM pull_requests ${sql}
      ORDER BY created_at DESC NULLS LAST, repo, number DESC
@@ -419,8 +422,8 @@ export async function listPulls(
 }
 
 /** How each agent and model's lines fared in review, over the matching pull requests. */
-export async function summarizePulls(db: Db, filters: PullFilters): Promise<PullSummary> {
-  const { sql, params } = where(filters);
+export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<PullSummary> {
+  const { sql, params } = where(db.orgId, filters);
   const rows = (await db.query(`SELECT ${ROW_COLUMNS} FROM pull_requests ${sql}`, params)).map(pullRow);
   const byModel = new Map<string, PullsByModel>();
   const total = {

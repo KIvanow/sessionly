@@ -56,4 +56,6 @@ pnpm --filter @sessionly/ee sign-license --key /secure/license-ed25519.pem \
 | `content_policy`       | The organisation sets what uploads from its engineers should contain: `GET /api/v1/policy` (anyone signed in) and `PUT /api/v1/policy {"content": "metadata" \| "previews"}` (admins). The server stores and serves the policy. The `sessionly` binary does not read it yet: each engineer's own `sessionly settings --content` still decides what is sent. |
 
 How it plugs in: `eeApi()` is an entry in the core's `extensions`, which adds routes to the
-authenticated API, and `migrateEe` runs through `prepare` (see `apps/server/src/run.ts`).
+authenticated API, and the tables are the server's `migrations` option (see
+`apps/server/src/run.ts`). Neither is handed the database itself: a route gets the one
+organisation's view of its request.

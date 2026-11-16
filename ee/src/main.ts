@@ -5,12 +5,14 @@ import { runServer } from "@sessionly/server";
 import { eeApi } from "./api.ts";
 import { loadEeEnv } from "./config.ts";
 import { Entitlements } from "./entitlements.ts";
-import { migrateEe } from "./migrate.ts";
+import { EE_MIGRATIONS } from "./migrate.ts";
 
 const env = loadEeEnv();
 
 await runServer({
   edition: "Business and Enterprise features",
-  prepare: migrateEe,
-  extensions: (db) => [eeApi({ entitlements: new Entitlements(db), org: env.org })],
+  migrations: [EE_MIGRATIONS],
+  extensions: () => [
+    eeApi({ entitlements: new Entitlements(), org: env.org, hosted: process.env.SESSIONLY_HOSTED === "true" }),
+  ],
 });

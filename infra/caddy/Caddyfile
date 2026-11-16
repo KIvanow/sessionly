@@ -1,0 +1,36 @@
+# In front of the hosted service: TLS, and the copies of the server behind it.
+{$SESSIONLY_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	reverse_proxy {
+		# The copies of the server, by name: the file "copies" beside this
+		# one, which update.sh writes whenever it has changed which copies
+		# there are. Named one by one, and not found under the name they
+		# share, because only then does Caddy ask each how it is (below).
+		import copies
+		lb_policy round_robin
+		# Asked every few seconds whether it can reach its database, not
+		# only whether it is running: a copy that cannot gets nothing sent
+		# to it until it can again.
+		health_uri /readyz
+		health_interval 5s
+		health_timeout 3s
+		# A copy that stops between two of those questions: connecting to
+		# it fails at once, or gives up after a second (the copies are on
+		# this machine's own network, where connecting takes no time). The
+		# request goes to another copy, and that one is left alone for a
+		# while.
+		lb_try_duration 8s
+		lb_try_interval 100ms
+		fail_duration 10s
+		max_fails 1
+		transport http {
+			dial_timeout 1s
+		}
+	}
+}

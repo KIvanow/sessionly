@@ -4,12 +4,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs all of this first, and publishes nothing if it fails.
+  workflow_call:
 
+# Actions are named by the commit they were at when this was written, not by a
+# tag that can be moved, as in the release workflow.
 jobs:
   licensing:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: Every commit is signed off (DCO)
@@ -25,6 +29,8 @@ jobs:
           fi
       - name: Nothing outside ee/ imports from ee/
         run: node scripts/check-ee-imports.mjs
+      - name: Only the allowed files see the database unscoped
+        run: node scripts/check-unscoped.mjs
 
   rust:
     strategy:
@@ -33,35 +39,121 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: What the hooks noted, if two of them each downloaded the binary
+        if: always()
+        run: |
+          for log in target/tmp/two-downloads-*.log; do
+            [ -e "$log" ] || continue
+            echo "::warning::Two parallel hooks each downloaded the binary; the steps they noted are in this job's log."
+            cat "$log"
+            rm -f "$log"
+            rm -f "$log"
+          done
 
   # The oldest Rust the crate claims to build with (rust-version in Cargo.toml).
   msrv:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: "1.89"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo test --locked
+      - name: What the hooks noted, if two of them each downloaded the binary
+        if: always()
+        run: |
+          for log in target/tmp/two-downloads-*.log; do
+            [ -e "$log" ] || continue
+            echo "::warning::Two parallel hooks each downloaded the binary; the steps they noted are in this job's log."
+            cat "$log"
+            rm -f "$log"
+            rm -f "$log"
+          done
 
   # The TypeScript side: server and shared types.
   node:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 2s --health-retries 30
+      # The oldest Postgres the server runs on.
+      postgres16:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 2s --health-retries 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      # The same tests on a real Postgres, where row-level security and the
+      # switch of role have to hold too. Twice, for the two kinds of user a
+      # server meets, neither a superuser:
+      - name: The tests on Postgres, as a user who may create roles
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -qc "CREATE ROLE managed LOGIN PASSWORD 'managed' CREATEDB CREATEROLE"
+          export TEST_DATABASE_URL=postgres://managed:managed@localhost:5432/postgres
+          pnpm --filter @sessionly/server test
+          pnpm --filter @sessionly/ee test
+      # ...and as the kind a managed database's panel creates, who may not:
+      # an admin makes each database and runs what the server tells such a
+      # database's admin to run, which is the one-time step it needs.
+      - name: The tests on Postgres, as a user who may not
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -qc "CREATE ROLE plain LOGIN PASSWORD 'plain'"
+          export TEST_DATABASE_URL=postgres://plain:plain@localhost:5432/postgres
+          export TEST_DATABASE_ADMIN_URL=postgres://postgres:postgres@localhost:5432/postgres
+          pnpm --filter @sessionly/server test
+          pnpm --filter @sessionly/ee test
+      - name: The tests on Postgres 16, the oldest it runs on, both ways
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -p 5433 -U postgres -qc "CREATE ROLE managed LOGIN PASSWORD 'managed' CREATEDB CREATEROLE" -c "CREATE ROLE plain LOGIN PASSWORD 'plain'"
+          export TEST_DATABASE_URL=postgres://managed:managed@localhost:5433/postgres
+          pnpm --filter @sessionly/server test
+          pnpm --filter @sessionly/ee test
+          export TEST_DATABASE_URL=postgres://plain:plain@localhost:5433/postgres
+          export TEST_DATABASE_ADMIN_URL=postgres://postgres:postgres@localhost:5433/postgres
+          pnpm --filter @sessionly/server test
+          pnpm --filter @sessionly/ee test
+      - name: The tests left no database or role behind
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for port in 5432 5433; do
+            left=$(psql -h localhost -p $port -U postgres -Atc "SELECT datname FROM pg_database WHERE datname NOT IN ('postgres', 'template0', 'template1') UNION ALL SELECT rolname FROM pg_roles WHERE rolname LIKE 'sessionly_app_%'")
+            if [ -n "$left" ]; then echo "left on port $port:"; echo "$left"; exit 1; fi
+          done
       - run: pnpm build
