@@ -23,6 +23,7 @@ import {
   getSession,
   listFiles,
   listSessions,
+  removeUpload,
   storeUpload,
   summarize,
   type Filters,
@@ -421,6 +422,18 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     }
     // Not stored: the server already has more of this cloud session.
     return c.json({ stored });
+  });
+
+  // The uploader takes a session back: its machine no longer has it as one
+  // (a subagent's thread, since folded into the session that started it).
+  api.delete("/sessions/:machine/:source/:session", async (c) => {
+    const { machine, source, session } = c.req.param();
+    const removed = await removeUpload(c.get("db"), c.get("principal"), {
+      machine_id: machine,
+      source,
+      session_id: session,
+    });
+    return removed ? c.json({ removed }) : c.json({ error: "no such session of yours" }, 404);
   });
 
   api.get("/summary", async (c) => {

@@ -488,6 +488,34 @@ impl Client {
         )
         .map(|_| ())
     }
+
+    /// Take back a session this machine uploaded and no longer has as one.
+    /// A server that has none (or is too old to know how) answers 404,
+    /// which is as good: there is nothing left to take back.
+    pub fn delete_session(
+        &self,
+        machine_id: &str,
+        source: &str,
+        session_id: &str,
+    ) -> Result<(), SendError> {
+        let url = format!(
+            "{}/api/v1/sessions/{}/{}/{}",
+            self.base,
+            url_segment(machine_id),
+            url_segment(source),
+            url_segment(session_id)
+        );
+        let result = Self::check(
+            self.agent
+                .delete(url)
+                .header("Authorization", format!("Bearer {}", self.token))
+                .call(),
+        );
+        match result {
+            Err(SendError::Rejected(m)) if m.starts_with("HTTP 404") => Ok(()),
+            other => other.map(|_| ()),
+        }
+    }
 }
 
 /// A 403 about the license or the caller's role is about this request, not
@@ -533,6 +561,8 @@ pub struct Report {
     pub failed: Vec<(String, String)>,
     /// Set when the run stopped early; nothing after that point was tried.
     pub stopped: Option<String>,
+    /// Sessions taken back from the server: they are part of another now.
+    pub withdrawn: u64,
 }
 
 impl Report {
@@ -543,6 +573,9 @@ impl Report {
             self.unchanged,
             self.failed.len()
         );
+        if self.withdrawn > 0 {
+            text.push_str(&format!("; took back {}", self.withdrawn));
+        }
         if let Some(reason) = &self.stopped {
             text.push_str(&format!("; stopped: {reason}"));
         }
@@ -596,6 +629,24 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
                     report.stopped = Some(err.to_string());
                     break;
                 }
+            }
+        }
+    }
+    // Last, so the server never has less than it should: what a session held
+    // that is one no more has by now been sent with the session it is part of.
+    if report.stopped.is_none() && !dry_run {
+        for (id, source) in ledger.withdrawals(&server.url)? {
+            match client.delete_session(&config.machine_id, &source, &id) {
+                Ok(()) => {
+                    ledger.withdrawn(&id, &server.url)?;
+                    report.withdrawn += 1;
+                }
+                Err(err @ SendError::Auth(_)) => {
+                    report.stopped = Some(err.to_string());
+                    break;
+                }
+                // It stays noted, and is tried again next time.
+                Err(err) => report.failed.push((id, err.to_string())),
             }
         }
     }

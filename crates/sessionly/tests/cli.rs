@@ -784,6 +784,82 @@ fn shell_edits_are_counted_on_this_machine_when_switched_on() {
     assert!(!kept.exists());
 }
 
+/// A Codex subagent's thread can be uploaded as a session before the session
+/// that spawned it is known. Once it is part of that one, the server is told
+/// to drop its own copy, so its work is not there twice.
+#[test]
+fn a_subagent_uploaded_alone_is_taken_back_once_it_is_part_of_its_session() {
+    use serde_json::json;
+    const MAIN: &str = "019a8f00-0000-7000-8000-00000000000a";
+    const SUB: &str = "019a8f00-0000-7000-8000-00000000000b";
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    let day = home.path().join(".codex/sessions/2026/11/16");
+    fs::create_dir_all(&day).unwrap();
+    // A thread's rollout with one finished turn, and a hook event that names it.
+    let thread = |id: &str, source: serde_json::Value| {
+        let at = "2026-11-16T10:00:00.000Z";
+        let rows = [
+            json!({ "timestamp": at, "type": "session_meta", "payload": {
+                "session_id": MAIN, "id": id, "cwd": "/work", "source": source } }),
+            json!({ "timestamp": at, "type": "event_msg",
+                    "payload": { "type": "task_started", "turn_id": "t1" } }),
+            json!({ "timestamp": at, "type": "event_msg",
+                    "payload": { "type": "user_message", "message": "look around" } }),
+            json!({ "timestamp": at, "type": "event_msg",
+                    "payload": { "type": "task_complete", "turn_id": "t1" } }),
+        ];
+        let rollout = day.join(format!("rollout-2026-11-16T10-00-00-{id}.jsonl"));
+        let text: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        fs::write(&rollout, text).unwrap();
+        let mut cmd = sessionly(home.path());
+        cmd.arg("capture");
+        let payload = json!({ "session_id": id, "turn_id": "t1", "hook_event_name": "Stop",
+                              "transcript_path": rollout });
+        assert_silent_success(
+            &run_with_stdin(cmd, payload.to_string().as_bytes()),
+            "capture",
+        );
+    };
+    let deletes = || {
+        let all = server.requests().into_iter();
+        all.filter(|r| r.method == "DELETE").collect::<Vec<_>>()
+    };
+
+    thread(
+        SUB,
+        json!({ "subagent": { "thread_spawn": { "parent_thread_id": MAIN, "depth": 1 } } }),
+    );
+    stdout(run(
+        home.path(),
+        &["connect", &server.url, "--token", "secret-token"],
+    ));
+    let alone = stdout(run(home.path(), &["upload"]));
+    assert!(alone.contains("Uploaded 1 sessions"), "{alone}");
+    assert!(server.puts()[0].path.ends_with(&format!("/codex/{SUB}")));
+    assert!(deletes().is_empty());
+
+    // The session that spawned it turns up: the subagent is part of that.
+    thread(MAIN, json!("cli"));
+    let folded = stdout(run(home.path(), &["upload"]));
+    assert!(
+        folded.contains("Uploaded 1 sessions") && folded.contains("Took back 1"),
+        "{folded}"
+    );
+    let puts = server.puts();
+    assert_eq!(puts.len(), 2);
+    assert!(puts[1].path.ends_with(&format!("/codex/{MAIN}")));
+    let taken = deletes();
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0].path, puts[0].path);
+    assert_eq!(taken[0].auth.as_deref(), Some("Bearer secret-token"));
+
+    // Once is enough.
+    let again = stdout(run(home.path(), &["upload"]));
+    assert!(!again.contains("Took back"), "{again}");
+    assert_eq!(deletes().len(), 1);
+}
+
 #[test]
 fn upload_sends_each_session_once_and_again_when_it_changes() {
     let home = tempfile::tempdir().unwrap();

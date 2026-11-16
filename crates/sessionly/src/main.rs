@@ -633,6 +633,12 @@ fn run(command: Command) -> Result<()> {
                     report.sent, report.unchanged
                 );
             }
+            if report.withdrawn > 0 {
+                println!(
+                    "Took back {} that are part of another session now",
+                    report.withdrawn
+                );
+            }
             for (id, reason) in &report.failed {
                 eprintln!("warning: {id} was not uploaded: {reason}");
             }

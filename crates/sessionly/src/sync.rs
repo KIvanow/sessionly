@@ -472,6 +472,9 @@ mod tests {
         let alone = run(&[dirs()], &mut env.ledger, "machine-1", false).unwrap();
         assert_eq!(alone.synced, 1);
         assert!(env.ledger.get("sub").unwrap().is_some());
+        // and may be uploaded as one
+        let server = "https://sessionly.example.com";
+        env.ledger.mark_uploaded("sub", server, "hash").unwrap();
 
         // the parent's own import is what makes it a session with subagents
         capture("main", &main, "UserPromptSubmit");
@@ -481,9 +484,16 @@ mod tests {
         let report = run(&[dirs()], &mut env.ledger, "machine-1", false).unwrap();
         assert_eq!((report.synced, report.removed), (1, 1));
         assert!(env.ledger.get("sub").unwrap().is_none());
+        // the server still has it: that is noted, for the next upload
+        let noted = vec![("sub".to_string(), "codex".to_string())];
+        assert_eq!(env.ledger.withdrawals(server).unwrap(), noted);
         // a rebuild reports it once, not twice
         let forced = run(&[dirs()], &mut env.ledger, "machine-1", true).unwrap();
         assert_eq!(forced.removed, 0);
+        assert_eq!(env.ledger.withdrawals(server).unwrap(), noted);
+        // should it be uploaded as a session again, the server keeps it
+        env.ledger.mark_uploaded("sub", server, "hash").unwrap();
+        assert!(env.ledger.withdrawals(server).unwrap().is_empty());
         let session = env.ledger.get("main").unwrap().unwrap();
         assert_eq!(session.counts.permission_requests, 1);
     }

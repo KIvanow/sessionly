@@ -65,17 +65,28 @@ pub fn thread_id(path: &Path) -> Option<String> {
 }
 
 /// The thread that started the session a rollout is part of: for a subagent
-/// that is another thread. Read from the first record's `payload.session_id`,
-/// which holds the whole system prompt as well, so it is read for this only.
+/// that is another thread, the first record's `payload.session_id`. Any
+/// other thread is its own session, whatever `session_id` it carries: a fork
+/// can have its parent's, and is not a subagent. The first record holds the
+/// whole system prompt as well, so it is read for this only.
 pub fn root_of(path: &Path) -> Option<String> {
     let mut line = String::new();
     BufReader::new(fs::File::open(path).ok()?.take(FIRST_RECORD_LIMIT))
         .read_line(&mut line)
         .ok()?;
     let row: Value = serde_json::from_str(&line).ok()?;
-    let id = row["payload"]["session_id"].as_str()?;
+    let meta = &row["payload"];
+    // `source` is a word (`cli`, `exec`) or, for a subagent, says what kind.
+    let subagent = meta["source"].get("subagent").is_some() || meta["thread_source"] == "subagent";
+    let id = match meta["session_id"].as_str() {
+        Some(session) if subagent => session,
+        _ => meta["id"].as_str().or(meta["session_id"].as_str())?,
+    };
     (!id.is_empty()).then(|| id.to_string())
 }
+
+/// The rule `root_of` goes by. What `Roots` remembers from another is not used.
+const ROOT_RULE: u64 = 2;
 
 /// The most a first record is read to: it is some tens of kilobytes.
 const FIRST_RECORD_LIMIT: u64 = 64 << 20;
@@ -128,7 +139,11 @@ impl Roots {
         };
         Roots {
             file,
-            roots: map("roots"),
+            roots: if saved["root_rule"] == ROOT_RULE {
+                map("roots")
+            } else {
+                HashMap::new()
+            },
             rollouts: map("rollouts"),
             misses: saved["misses"]
                 .as_object()
@@ -197,8 +212,8 @@ impl Roots {
             let tmp = self
                 .file
                 .with_extension(format!("json.{}.tmp", std::process::id()));
-            let saved =
-                json!({ "roots": self.roots, "rollouts": self.rollouts, "misses": self.misses });
+            let saved = json!({ "root_rule": ROOT_RULE, "roots": self.roots,
+                "rollouts": self.rollouts, "misses": self.misses });
             fs::write(&tmp, serde_json::to_vec(&saved)?)?;
             fs::rename(&tmp, &self.file)?;
             Ok(())
@@ -1766,6 +1781,8 @@ pub(crate) mod tests {
             "sessions/2026/11/17/rollout-2026-11-17T10-00-00-{FORK}.jsonl"
         ));
         write(&fork, &forked);
+        // it carries its parent's session id, and is still no subagent of it
+        assert_eq!(root_of(&fork).as_deref(), Some(FORK));
         let (events, facts) = session(&fork, &[], None).unwrap();
         let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
         let prompts: Vec<&str> = s.prompts.iter().map(|p| p.text.preview.as_str()).collect();

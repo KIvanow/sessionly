@@ -476,7 +476,11 @@ is read from its output and a patch's files from the patch text.
   is recorded either way. In the older layout only patches are recorded besides the script, so
   such a session has its edits but not its commands.
 - **A subagent** is a thread with a rollout file of its own. It is folded into the session
-  that started it, with its tool calls and tokens, as Claude Code's subagents are.
+  that started it, with its tool calls and tokens, as Claude Code's subagents are. A thread
+  is a subagent when Codex itself says so in the file's first record, not because it carries
+  another thread's session id, which a fork can too. A subagent whose session was not known
+  yet may have been uploaded as a session of its own; once it is part of its session, the
+  next upload asks the server to drop that copy.
 - **Going back to an earlier turn** (a revert) makes Codex start a new file for the thread
   that points at the part of the old one that still stands. The session is that part and
   what came after: the turns taken back are not in it. A fork is a thread of its own, so a
@@ -548,12 +552,17 @@ ignores fields it doesn't know.
 
 ### Uploading
 
-The binary uploads to a Sessionly server (see [Server](#server)). It uses two endpoints, both
+The binary uploads to a Sessionly server (see [Server](#server)). It uses three endpoints, all
 with `Authorization: Bearer <token>`:
 
 - `GET /api/v1/ping` answers 2xx if the token is accepted.
 - `PUT /api/v1/sessions/{machine_id}/{source}/{session_id}` stores or replaces one session. The
   body is the payload described under [What an upload contains](#what-an-upload-contains).
+- `DELETE /api/v1/sessions/{machine_id}/{source}/{session_id}` takes one back. The binary
+  sends it only for a session that has become part of another (a Codex subagent's thread
+  uploaded before its session was known), and only the person a session is filed under can.
+  A server from before this answers 404, which the binary takes as nothing left to do: such
+  a server keeps the extra copy.
 
 ```sh
 sessionly connect https://sessionly.example.com   # asks for the token, checks it, saves both

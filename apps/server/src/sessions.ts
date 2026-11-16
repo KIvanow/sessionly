@@ -122,6 +122,25 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   return true;
 }
 
+/**
+ * Take back one session its uploader no longer has: what it held is now part
+ * of another session, which a second copy here would count twice. Only the
+ * person it is filed under can. Returns whether there was one to remove.
+ */
+export async function removeUpload(
+  db: OrgDb,
+  uploader: Principal,
+  key: { machine_id: string; source: string; session_id: string },
+): Promise<boolean> {
+  const removed = await db.query(
+    `DELETE FROM sessions
+     WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4 AND owner_email = $5
+     RETURNING 1`,
+    [db.orgId, key.machine_id, key.source, key.session_id, uploader.email],
+  );
+  return removed.length > 0;
+}
+
 export type { GroupBy };
 
 export interface Filters {
