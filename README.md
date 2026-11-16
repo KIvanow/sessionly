@@ -778,9 +778,10 @@ How to read it:
 - The model is known per line for Claude Code, and for Cursor turns the hooks saw; otherwise
   the session's main model stands in, or it is shown as not known.
 
-The Action writes the figures to the run's summary page. It comments on the pull request only
-if you set `comment: true` (and give it `pull-requests: write`); a badge on every pull request
-changes how people feel about being measured, so that is yours to switch on. Other inputs:
+The Action writes the figures to the run's summary page and posts them as one comment on the
+pull request, which it keeps up to date and never repeats. The comment needs `pull-requests:
+write`. A figure on every pull request changes how people feel about being measured, so it is
+yours to switch off: `comment: false`. Other inputs:
 `ignore` (files to leave out; lock files by default), `other-names` (names the repository's
 clones may still have as their origin after a rename or transfer), `backfill` (for a pull
 request from before the Action was added, first report it as it was when opened, worked out
