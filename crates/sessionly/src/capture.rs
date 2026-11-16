@@ -120,7 +120,8 @@ pub fn file_stem(session_id: Option<&str>) -> String {
 /// hook event's name.
 ///
 /// `surroundings` may add to the record what only the place it runs in
-/// knows (see [`in_a_sandbox`]). On a person's own machine it adds nothing.
+/// knows (see [`where_it_runs`]). On a person's own machine it adds nothing
+/// unless that person asked for shell commands' changes to be counted.
 pub fn capture(
     raw_root: &Path,
     input: &mut impl Read,
@@ -167,16 +168,27 @@ pub fn capture(
 
 /// What a cloud agent's sandbox adds to a record: under `runtime`, what the
 /// platform says about the session (see `runtime`), and for a shell command
-/// what it changed in the working tree (see `changes`).
-fn in_a_sandbox(record: &mut Value) {
+/// what it changed in the working tree (see `changes`). On a person's own
+/// machine only the second, and only with the `shell_edits` setting on.
+fn where_it_runs(record: &mut Value) {
     let text = |key: &str| record[key].as_str().unwrap_or_default().to_string();
-    let Some(said) = crate::runtime::describe(&text("source"), &text("hook")) else {
-        return;
-    };
-    record["runtime"] = said;
     let Ok(data_dir) = crate::paths::data_dir() else {
         return;
     };
+    match crate::runtime::describe(&text("source"), &text("hook")) {
+        Some(said) => record["runtime"] = said,
+        None => {
+            // Only tool events are looked at: the setting is not read for the rest.
+            let asked = record["payload"]["tool_name"].is_string()
+                && crate::paths::config_path().is_ok_and(|path| crate::config::shell_edits(&path));
+            if text("hook") == "SessionEnd" {
+                crate::changes::forget(&data_dir, record);
+            }
+            if !asked {
+                return;
+            }
+        }
+    }
     if let Some(Value::Object(seen)) = crate::changes::observe(&data_dir, record) {
         for (key, value) in seen {
             record[key] = value;
@@ -197,7 +209,7 @@ pub fn run() -> i32 {
         &raw_dir,
         &mut std::io::stdin().lock(),
         &received_at,
-        in_a_sandbox,
+        where_it_runs,
     ) {
         Ok((_, hook)) => {
             if let Ok(data_dir) = crate::paths::data_dir() {

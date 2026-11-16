@@ -151,6 +151,11 @@ enum Command {
         /// which lines of a pull request an agent wrote
         #[arg(long, value_name = "on|off", value_parser = parse_on_off)]
         line_hashes: Option<bool>,
+        /// Count what an agent's shell commands change in a repository, by
+        /// comparing its files before and after each one. Anything else that
+        /// changes a file meanwhile is counted as the agent's too
+        #[arg(long, value_name = "on|off", value_parser = parse_on_off)]
+        shell_edits: Option<bool>,
     },
     /// One background sync and upload (started by the capture hook)
     #[command(hide = true)]
@@ -667,13 +672,16 @@ fn run(command: Command) -> Result<()> {
             auto_sync,
             content,
             line_hashes,
+            shell_edits,
         } => {
             let path = paths::config_path()?;
             let mut config = config::Config::load(&path)?;
-            if auto_sync.is_some() || content.is_some() || line_hashes.is_some() {
+            let asked = [auto_sync, line_hashes, shell_edits];
+            if content.is_some() || asked.iter().any(Option::is_some) {
                 config.auto_sync = auto_sync.unwrap_or(config.auto_sync);
                 config.upload_content = content.unwrap_or(config.upload_content);
                 config.upload_line_hashes = line_hashes.unwrap_or(config.upload_line_hashes);
+                config.shell_edits = shell_edits.unwrap_or(config.shell_edits);
                 config.save(&path)?;
             }
             print_settings(&config);
@@ -759,6 +767,14 @@ fn print_settings(config: &config::Config) {
             "on (runs in the background when a session ends)"
         } else {
             "off"
+        }
+    );
+    println!(
+        "Shell:      {}",
+        if config.shell_edits {
+            "on (what changes in a repository while an agent's command runs is counted as the agent's)"
+        } else {
+            "off (only what agents change with their file tools is counted)"
         }
     );
 }

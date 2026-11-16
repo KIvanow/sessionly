@@ -156,7 +156,8 @@ What it does and doesn't mean:
 - It measures survival, not quality or cause: code can be rewritten for reasons that have
   nothing to do with how it was written.
 - Only changes made through the agent's file tools are tracked, not edits made by shell
-  commands. A [session in the cloud](#cloud-sessions) is the exception.
+  commands. A [session in the cloud](#cloud-sessions) is the exception, and so is a machine
+  where [shell edits](#shell-edits) are switched on.
 - If the session's directory no longer exists, the last measurement is kept.
 
 ```
@@ -230,8 +231,45 @@ Limits to know about:
   covers the whole session.
 - File changes made by shell commands (`sed`, `git apply`, generators) are not attributed to
   files; only the agent's file tools are. A [session in the cloud](#cloud-sessions) is the
-  exception: there what each shell command changed is counted too.
+  exception: there what each shell command changed is counted too. On your own machine you
+  can switch that on (see [Shell edits](#shell-edits)).
 - User name and email come from git config at sync time. They are a label, not verified identity.
+
+### Shell edits
+
+Some agents, and some ways of working, edit with the shell instead of the file tools: a
+script that rewrites a file, `sed -i`, a heredoc, a formatter. Hooks are told that a command
+ran, not what it changed, so those sessions show few changed files or none, and their lines
+are missing from pull request figures. To count them on this machine:
+
+```sh
+sessionly settings --shell-edits on
+```
+
+From then on the files of the repository are compared just before and just after each shell
+command of Claude Code or Cursor, the same way as in a [cloud session](#cloud-sessions), and
+what differs is counted as that command's: the files and the lines, toward the session's
+totals, the rewrite rate and pull requests.
+
+It is off by default because of what it cannot tell apart. **Anything that changes a file in
+the repository while an agent's command runs is counted as the agent's**: a file you save in
+your editor during a long test run, or what a second agent session does in the same
+checkout at that moment. Between commands nothing is attributed, so the window is only as
+long as the commands are. If that matters, leave it off, or give each agent a checkout of
+its own (a git worktree).
+
+What else to know:
+
+- It applies to sessions captured by hooks after it is switched on. Sessions already
+  recorded are not changed, and imported ones have nothing to compare.
+- Each shell command costs two looks at the working tree with git: about 15 ms each in
+  this repository, more in a large one. One that takes more than five seconds is abandoned and not tried again
+  in that session.
+- The comparison is kept in `~/.sessionly/snapshots/<session>` (an index and the objects
+  of changed files; your repository's own index, objects and HEAD are not written) and
+  removed when the session ends.
+- The limits are those of a cloud session: a command that moves to commits it did not make
+  is not counted, files git ignores are not looked at, new files over 1 MB are left out.
 
 ### Cloud sessions
 

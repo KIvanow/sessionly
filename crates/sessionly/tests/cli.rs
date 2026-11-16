@@ -720,6 +720,70 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// On a person's own machine a shell command's changes are counted only
+/// once that person has asked for it.
+#[test]
+fn shell_edits_are_counted_on_this_machine_when_switched_on() {
+    use serde_json::json;
+    let home = tempfile::tempdir().unwrap();
+    let repo = home.path().join("work/app");
+    fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
+    };
+    git(&["init", "--quiet", "--initial-branch", "main"]);
+    fs::write(repo.join("a.txt"), "one\n").unwrap();
+
+    // One command that appends a line to a.txt, as the hooks see it.
+    let command = |session: &str, id: &str, line: &str| {
+        for hook in ["PreToolUse", "PostToolUse"] {
+            if hook == "PostToolUse" {
+                let mut text = fs::read_to_string(repo.join("a.txt")).unwrap();
+                text.push_str(line);
+                fs::write(repo.join("a.txt"), text).unwrap();
+            }
+            let mut cmd = sessionly(home.path());
+            cmd.arg("capture");
+            let payload = json!({ "session_id": session, "hook_event_name": hook, "cwd": repo,
+                "tool_use_id": id, "tool_name": "Bash",
+                "tool_input": { "command": "echo >> a.txt" }, "tool_response": {} });
+            let out = run_with_stdin(cmd, payload.to_string().as_bytes());
+            assert_silent_success(&out, "capture");
+        }
+    };
+    let files = |session: &str| {
+        let shown = stdout(run(home.path(), &["show", session, "--json"]));
+        let shown: serde_json::Value = serde_json::from_str(&shown).unwrap();
+        shown["files"].clone()
+    };
+
+    command("off-1", "t1", "two\n");
+    assert_eq!(files("off-1"), json!([]));
+    assert!(!home.path().join("data/snapshots").exists());
+
+    let said = stdout(run(home.path(), &["settings", "--shell-edits", "on"]));
+    assert!(said.contains("Shell:      on"), "{said}");
+    command("on-1", "t2", "three\nfour\n");
+    let changed = files("on-1");
+    assert!(changed[0]["path"].as_str().unwrap().ends_with("a.txt"));
+    assert_eq!(changed[0]["lines_added"], 2);
+
+    // What was kept to compare against goes when the session ends.
+    let kept = home.path().join("data/snapshots/on-1");
+    assert!(kept.exists());
+    let mut cmd = sessionly(home.path());
+    cmd.arg("capture");
+    let end = json!({ "session_id": "on-1", "hook_event_name": "SessionEnd", "reason": "other" });
+    run_with_stdin(cmd, end.to_string().as_bytes());
+    assert!(!kept.exists());
+}
+
 #[test]
 fn upload_sends_each_session_once_and_again_when_it_changes() {
     let home = tempfile::tempdir().unwrap();
