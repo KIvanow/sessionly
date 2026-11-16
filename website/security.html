@@ -21,6 +21,7 @@
       type="font/woff2"
       crossorigin
     />
+    <script defer src="/_vercel/insights/script.js"></script>
   </head>
   <body>
     <header class="top">
@@ -367,10 +368,12 @@
 
           <h2>This website</h2>
           <p>
-            The website is static HTML, one stylesheet and two typefaces, all served from the site
-            itself. It runs no scripts, sets no cookies and has no analytics. It is served with a
-            Content Security Policy of <code>default-src 'none'</code> that allows only its own
-            stylesheet, fonts and images, and sends <code>X-Content-Type-Options</code>, <code>X-Frame-Options</code> and
+            The website is static HTML, one stylesheet, two typefaces and one script, all served
+            from the site itself. The script is Vercel Web Analytics, which counts page visits
+            without cookies and without keeping IP addresses. The website sets no cookies. It is
+            served with a Content Security Policy of <code>default-src 'none'</code> that allows
+            only its own script, stylesheet, fonts and images, and connections back to itself, and
+            sends <code>X-Content-Type-Options</code>, <code>X-Frame-Options</code> and
             <code>Referrer-Policy</code> headers. It is hosted by Vercel, which keeps request logs.
           </p>
 
