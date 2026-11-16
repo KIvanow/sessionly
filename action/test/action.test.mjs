@@ -158,6 +158,13 @@ const ATTRIBUTION = {
 test("the figures as text", () => {
   const text = render(build(), ATTRIBUTION);
   assert.ok(text.startsWith(MARKER));
+  // Headed by the mark and the name, which leads to the server's page of pull requests when the server is known.
+  assert.match(text, /^### <img src="https:\/\/www\.sessionly\.dev\/favicon\.svg" width="20" height="20" align="top" alt=""> Sessionly$/m);
+  assert.match(render(build(), ATTRIBUTION, "https://sessionly.example.com/"), /> \[Sessionly\]\(https:\/\/sessionly\.example\.com\/#\/pulls\)$/m);
+  // The figures at a glance, then by tool and model.
+  assert.match(text, /\| Lines added \| By an agent \| Share \|\n\|---:\|---:\|---:\|\n\| 1,200 \| 450 \| 38% \|/);
+  // How it is counted is there for whoever asks, folded away.
+  assert.match(text, /<details>\n<summary>How this is counted<\/summary>\n\n[^\n]*shell command is not counted[^\n]*\n\n<\/details>$/);
   assert.match(text, /\*\*38% of the lines this pull request adds were written by a coding agent\*\* \(450 of 1,200\)/);
   assert.match(text, /\| Claude Code \| claude-opus-5-5 \| 300 \|/);
   assert.match(text, /\| Cursor \| not known \| 150 \|/);
@@ -171,8 +178,11 @@ test("the figures as text", () => {
   assert.doesNotMatch(render(build({ event: "opened" }), ATTRIBUTION), /still there/);
   const none = { first: { lines: 9, agent_lines: 0 }, now: { lines: 9, agent_lines: 0, by: [] }, by: [] };
   assert.match(render(build(), none), /No lines of this pull request were matched/);
+  assert.match(render(build(), none), /\| 9 \| 0 \| 0% \|/);
+  assert.doesNotMatch(render(build(), none), /\| Tool \|/);
   const empty = { first: { lines: 0, agent_lines: 0 }, now: { lines: 0, agent_lines: 0, by: [] }, by: [] };
   assert.match(render(build(), empty), /adds no lines to track/);
+  assert.doesNotMatch(render(build(), empty), /\| Lines added \|/);
   // a cloud agent's pull request whose session nobody captured says so
   const uncaptured = { ...none, cloud: { agents: ["cursor"], sessions: 0 } };
   assert.match(render(build(), uncaptured), /A cloud agent worked on this pull request \(Cursor\), and no session of it was captured/);
@@ -237,26 +247,68 @@ test("a run reads the pull request, reports it, and writes the summary and outpu
   assert.equal(sent[0][2].aliases, undefined);
   assert.equal(readFileSync(env.GITHUB_OUTPUT, "utf8"), "lines=1200\nagent-lines=450\n");
   assert.match(readFileSync(env.GITHUB_STEP_SUMMARY, "utf8"), /38% of the lines/);
-  // nothing is written to the pull request unless asked, and the token is not logged
-  assert.ok(api.calls.every(([method]) => method === "GET"));
+  // the one thing written to the pull request is the comment, and the token is not logged
+  assert.deepEqual(
+    api.calls.filter(([method]) => method !== "GET").map(([method, path]) => `${method} ${path}`),
+    ["POST /repos/acme/web/issues/7/comments"],
+  );
   assert.ok(!logged.join("\n").includes("sly_secret"));
 });
 
-test("the comment is opt-in and is kept up to date rather than repeated", async () => {
+test("the figures are posted as one comment, kept up to date rather than repeated, unless switched off", async () => {
   const deliver = async () => ATTRIBUTION;
   const writes = (api) => api.calls.filter(([method]) => method !== "GET").map(([method, path]) => `${method} ${path}`);
 
+  // On by default, and when said so.
   const fresh = fakeGithub();
-  const { text } = await run(environment({ SESSIONLY_COMMENT: "true", SESSIONLY_SUMMARY: "false" }), { api: fresh, deliver, log() {} });
+  const { text } = await run(environment({ SESSIONLY_SUMMARY: "false" }), { api: fresh, deliver, log() {} });
   assert.deepEqual(writes(fresh), ["POST /repos/acme/web/issues/7/comments"]);
+  assert.equal(fresh.calls.find(([method]) => method === "POST")[2].body, text);
+  assert.ok(text.startsWith(MARKER));
+  const asked = fakeGithub();
+  await run(environment({ SESSIONLY_COMMENT: "true" }), { api: asked, deliver, log() {} });
+  assert.deepEqual(writes(asked), ["POST /repos/acme/web/issues/7/comments"]);
 
+  // The comment that is there is changed, among whatever else was said on the pull request.
   const stale = fakeGithub([{ id: 41, body: "unrelated" }, { id: 42, body: `${MARKER}\nold figures` }]);
-  await run(environment({ SESSIONLY_COMMENT: "true" }), { api: stale, deliver, log() {} });
+  await run(environment(), { api: stale, deliver, log() {} });
   assert.deepEqual(writes(stale), ["PATCH /repos/acme/web/issues/comments/42"]);
 
+  // One that already says the same is left alone: no notification for nothing.
   const current = fakeGithub([{ id: 42, body: text }]);
-  await run(environment({ SESSIONLY_COMMENT: "true" }), { api: current, deliver, log() {} });
+  await run(environment(), { api: current, deliver, log() {} });
   assert.deepEqual(writes(current), []);
+
+  // Switched off: nothing is written to the pull request, and its comments are not even read.
+  for (const off of ["false", "FALSE", "0", "no", "off", ""]) {
+    const quiet = fakeGithub();
+    await run(environment({ SESSIONLY_COMMENT: off }), { api: quiet, deliver, log() {} });
+    assert.ok(quiet.calls.every(([method, path]) => method === "GET" && !path.includes("/issues/")), `"${off}"`);
+  }
+});
+
+test("a job that may not comment still reports, and says what to change", async () => {
+  // The workflow's token with pull-requests: read, as most were set up.
+  const api = fakeGithub();
+  const request = api.request;
+  api.request = async (method, path, body) => {
+    if (method !== "GET") throw new Error(`GitHub answered 403 to ${method} ${path}: {"message":"Resource not accessible by integration"}`);
+    return request(method, path, body);
+  };
+  const sent = [];
+  const logged = [];
+  const env = environment();
+  const out = await run(env, { api, deliver: async (...args) => (sent.push(args), ATTRIBUTION), log: (line) => logged.push(line) });
+  // The report went, the outputs and the summary are written, and the run does not fail.
+  assert.equal(sent.length, 1);
+  assert.equal(out.attribution, ATTRIBUTION);
+  assert.equal(readFileSync(env.GITHUB_OUTPUT, "utf8"), "lines=1200\nagent-lines=450\n");
+  assert.match(readFileSync(env.GITHUB_STEP_SUMMARY, "utf8"), /38% of the lines/);
+  const warnings = logged.filter((line) => line.startsWith("::warning"));
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /could not be posted as a comment \(GitHub answered 403 .*Resource not accessible by integration.*\)/);
+  assert.match(warnings[0], /`pull-requests: write`, or set `comment: false`/);
+  assert.ok(!warnings[0].includes("\n"));
 });
 
 test("backfill first reports a pull request as it was when opened", async () => {

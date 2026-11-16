@@ -23,7 +23,7 @@ jobs:
   report:
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: read
+      pull-requests: write   # to comment; "read" is enough with comment: false
     steps:
       - uses: KIvanow/sessionly/action@main
         with:
@@ -52,7 +52,7 @@ shows a warning that the token is missing.
 | `token` | (required) | A Sessionly token with the `ci` role. |
 | `github-token` | the workflow's token | Used to read the pull request, and to comment if that is on. |
 | `summary` | `true` | Write the figures to the run's summary page. |
-| `comment` | `false` | Post the figures as one comment on the pull request and keep it up to date. Needs `pull-requests: write`. |
+| `comment` | `true` | Post the figures as one comment on the pull request and keep it up to date, as other bots do. Needs `pull-requests: write`; without it the run warns and nothing else changes. `false` for no comment. |
 | `ignore` | lock files, `*.min.js`, `*.snap`, `*.map` | Files to leave out, separated by commas or new lines: a file name, a path, or a pattern with `*`. Add generated files here. |
 | `other-names` | | Names clones of the repository may still have as their origin, as `owner/name`: for example from before it was renamed or moved to another owner. |
 | `backfill` | `false` | For a pull request from before the Action was added: first report it as it was when opened, worked out from its commits, so what review changed can still be measured. Not possible after a rebase or squash of the branch. |
