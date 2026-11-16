@@ -114,9 +114,10 @@
             has no SOC 2 or ISO 27001 audit.
           </p>
           <p>
-            Sessionly is self-hosted today: hosting, TLS and backups of a server are yours to
-            arrange. A hosted service is planned and not open yet; how it is hosted and backed up
-            will be described here before it opens.
+            Sessionly can be self-hosted, where hosting, TLS and backups of a server are yours to
+            arrange, or used as the hosted service at app.sessionly.dev, which is open and free
+            during early access. How that is hosted and backed up is under
+            <a href="#hosted">The hosted service</a> below.
           </p>
 
           <h2>On the developer's machine</h2>
@@ -330,6 +331,60 @@
             stops the dashboard counting its pages, and its policy then allows no address but its
             own.
           </p>
+
+          <h2 id="hosted">The hosted service</h2>
+          <p>
+            The hosted service runs the published code, built from the public repository, and
+            everything above about the server holds for it. What is particular to it:
+          </p>
+          <ul>
+            <li>
+              <strong>Where it runs.</strong> One virtual machine at DigitalOcean in Frankfurt,
+              Germany, with its data in a DigitalOcean managed PostgreSQL database in the same
+              region. Nothing of it is stored anywhere else.
+            </li>
+            <li>
+              <strong>Orgs are kept apart twice.</strong> Every query names the org of the token
+              that asked. Underneath, each request runs in the database as a role that cannot log
+              in and that row-level security confines to that one org: a query that forgot to
+              name its org would get nothing of anyone else's, and a write into another org is
+              refused by the database itself.
+            </li>
+            <li>
+              <strong>Signing in.</strong> People sign in with Google or GitHub; there are no
+              passwords. Only which account it is and its verified email addresses are asked of
+              the provider. The account that first signs in to an org under an address is from
+              then on the only one that gets in as that person there, whoever else comes to hold
+              the address. Nobody is taken into an org they were added to without being shown
+              which one it is and who added them.
+            </li>
+            <li>
+              <strong>In transit.</strong> HTTPS only, with a certificate from Let's Encrypt;
+              plain HTTP is redirected, and <code>Strict-Transport-Security</code> is sent. The
+              server connects to its database over the provider's private network, with TLS, and
+              checks the database's certificate against the provider's certificate authority.
+            </li>
+            <li>
+              <strong>What is reachable.</strong> From the internet, the machine answers on ports
+              80 and 443 only. The database accepts connections from that machine alone. The
+              machine is administered over SSH with a key, from named addresses; passwords are
+              not accepted.
+            </li>
+            <li>
+              <strong>At rest and backups.</strong> The database is encrypted at rest by
+              DigitalOcean, which backs it up daily and keeps what is needed to restore it to
+              any moment of the last seven days. There are no other copies.
+            </li>
+            <li>
+              <strong>Limits.</strong> Requests, sign-ins, new orgs and wrong invitation codes
+              are counted and limited, by network address, by token and by account.
+            </li>
+            <li>
+              <strong>What it is not.</strong> It is one machine and one database node in one
+              region: if either is down, the service is down until it is back. One person runs
+              it. There is no SOC 2 or ISO 27001 audit.
+            </li>
+          </ul>
 
           <h2>Pull requests</h2>
           <p>

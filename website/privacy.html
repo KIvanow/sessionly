@@ -78,9 +78,9 @@
                 unless whoever runs it turns that off.
               </li>
               <li>
-                The hosted service is not open yet. This policy already says what it will store,
-                because it runs the same published code; where it runs and which providers it uses
-                will be added here before it opens.
+                The hosted service, at app.sessionly.dev, is open and free during early access. It
+                runs the same published code, at DigitalOcean in Frankfurt, Germany. What it stores
+                and which providers it uses are set out below.
               </li>
               <li>
                 This website sets no cookies. It counts visits with Vercel Web Analytics, which
@@ -128,7 +128,7 @@
           <ul>
             <li>
               <strong>Communications data</strong> from our exchanges, such as when you email me
-              for support, to ask about a license or to be told when the Hosted Service opens:
+              for support, to ask about a license or about the Hosted Service:
               your email address, your name if you give it, and what you write.
             </li>
             <li>
@@ -143,6 +143,17 @@
               email address it is issued to (stored lower-case), an optional name, its role
               (admin, member or ci), and when it was created, last used and revoked. Only a hash
               of the token is stored. There are no passwords.
+            </li>
+            <li>
+              <strong>Sign-in data on the Hosted Service</strong>: people sign in with a Google or
+              a GitHub account. From Google or GitHub I receive two things and nothing else of
+              the account: its number there (a number that stays the account's own), and the
+              email addresses the provider has verified for it. For each person of an org I keep
+              their email address, their role, when they were added and, if the person who added
+              them had signed in, that person's address; and once they have signed in, which
+              provider they used and that account number, so that only the same account gets in
+              as them afterwards. No password reaches me, and I keep no access to the Google or
+              GitHub account. Google or GitHub learns that you signed in to Sessionly.
             </li>
           </ul>
 
@@ -249,10 +260,12 @@
               the counting off.
             </li>
             <li>
-              <strong>Server logs.</strong> The Sessionly server does not write a log of requests.
-              The infrastructure in front of the Hosted Service will keep ordinary connection logs
-              (IP address, time, address requested, status); how long they are kept will be stated
-              here before the Hosted Service opens.
+              <strong>Server logs and limits.</strong> The Sessionly server does not write a log
+              of requests, and neither does the proxy in front of the Hosted Service. Errors are
+              logged, without what a request contained. To stop abuse, the Hosted Service counts
+              requests for a short time: by the network address they come from, by token and, for
+              signing up, by email address and sign-in account. These counts are deleted within
+              about two hours.
             </li>
             <li>
               <strong>Email.</strong> I do not embed tracking pixels, and I do not use open or
@@ -313,6 +326,17 @@
                   </thead>
                   <tbody>
                     <tr>
+                      <td>DigitalOcean</td>
+                      <td>
+                        Hosting the Hosted Service: the machine it runs on and its database, in
+                        Frankfurt, Germany
+                      </td>
+                      <td>
+                        Everything stored on the Hosted Service (accounts, sign-in data, session
+                        records and pull request reports), and the connections to it
+                      </td>
+                    </tr>
+                    <tr>
                       <td>Vercel</td>
                       <td>Hosting this website, and counting its visits</td>
                       <td>Web request logs for sessionly.dev, and the pages visited</td>
@@ -329,10 +353,11 @@
                   </tbody>
                 </table>
               </div>
-              The Hosted Service is not open yet, so no provider hosts session data for me today.
-              The provider that will host it, and any payment or email provider it uses, will be
-              added to this table before it opens. Email you send me is handled by my mailbox
-              provider.
+              Google and GitHub are not my service providers. When you sign in with one of them
+              you use your own account there, under your agreement with it. The Hosted Service
+              sends no email and, being free during early access, uses no payment provider; if
+              that changes, the provider will be added to this table first. Email you send me is
+              handled by my mailbox provider.
             </li>
             <li>
               <strong>Your org.</strong> An admin of an org can see every session and pull request
@@ -398,8 +423,11 @@
           <p>
             I am based in Bulgaria. Vercel is a United States company and serves this website from
             its network worldwide, so the request logs for your visit may be processed in the
-            United States and elsewhere. Where the Hosted Service runs will be stated here before
-            it opens.
+            United States and elsewhere. The Hosted Service runs at DigitalOcean in Frankfurt,
+            Germany, and what it stores is stored there. DigitalOcean is a United States company;
+            where its staff outside the European Economic Area have access, that is covered by
+            its certification under the EU-U.S. Data Privacy Framework, with Standard Contractual
+            Clauses as the fallback.
           </p>
           <p>
             If you are located in the European Economic Area, the United Kingdom or Switzerland, I
@@ -440,7 +468,7 @@
             </li>
             <li>
               <strong>Consent</strong>: where you have given it for a specific purpose, such as
-              asking to be told when the Hosted Service opens. You may withdraw consent at any time
+              asking me to write to you about the Hosted Service. You may withdraw consent at any time
               by contacting me.
             </li>
           </ul>

@@ -84,9 +84,8 @@
                 countersigned copy, email me and I will return one.
               </li>
               <li>
-                The Hosted Service is not open yet. It will run the published code, so what it
-                stores is already known and described here; where it runs will be added to Annex
-                III before the first org is created.
+                The Hosted Service is open at app.sessionly.dev and free during early access. It
+                runs the published code, at DigitalOcean in Frankfurt, Germany (Annex III).
               </li>
               <li>
                 Full prompts, file contents, command output and source code are never uploaded.
@@ -311,8 +310,8 @@
 
           <h2 id="s6">6. International transfers</h2>
           <p>
-            I am based in Bulgaria. The Hosted Service is not open yet; the country and region it
-            runs in will be stated in Annex III before the first org is created.
+            I am based in Bulgaria. The Hosted Service runs in Frankfurt, Germany, at DigitalOcean
+            (Annex III), and Customer Data is stored there.
           </p>
           <p>
             I will not transfer Customer Data outside the European Economic Area, the United Kingdom
@@ -413,7 +412,8 @@
             including sessions, pull request reports and tokens, and I will confirm the deletion by
             email on request. Two exceptions: data I must keep under EU or Member State law is kept
             only as long as that law requires and remains protected by this DPA; and copies in
-            database backups persist until the backups rotate, during which they are used only to
+            database backups persist until the backups rotate, seven days later, during which
+            they are used only to
             recover the service. Export what you need before closing your account, because after
             deletion I cannot return it. The data on your engineers' machines is not affected.
           </p>
@@ -675,8 +675,8 @@
               earlier.
             </li>
             <li>
-              <strong>Location:</strong> to be stated in Annex III before the first org is created
-              on the Hosted Service.
+              <strong>Location:</strong> Frankfurt, Germany (DigitalOcean's FRA1 region), as
+              stated in Annex III.
             </li>
           </ul>
 
@@ -685,10 +685,9 @@
             These are the measures in place as of the effective date, written from the code, which
             is public at
             <a href="https://github.com/KIvanow/sessionly">github.com/KIvanow/sessionly</a>. The
-            <a href="/security">security page</a> describes them in more detail. Measures that
-            depend on where the Hosted Service runs (transport encryption in front of it, network
-            isolation, backups) will be added here before it opens. Sessionly has no SOC 2 or ISO
-            27001 certification.
+            <a href="/security">security page</a> describes them in more detail. The measures that
+            depend on where the Hosted Service runs are under &ldquo;Hosting&rdquo; below.
+            Sessionly has no SOC 2 or ISO 27001 certification.
           </p>
           <h3>Data minimisation, before anything is uploaded</h3>
           <ul>
@@ -715,6 +714,42 @@
               to the Hosted Service by the program or by the GitHub Action.
             </li>
           </ul>
+          <h3>Hosting</h3>
+          <ul>
+            <li>
+              The Hosted Service runs on one virtual machine at DigitalOcean in Frankfurt,
+              Germany, with Customer Data in a DigitalOcean managed PostgreSQL database in the
+              same region. Customer Data is stored nowhere else.
+            </li>
+            <li>
+              It is reached over HTTPS only, with a certificate from Let's Encrypt; plain HTTP is
+              redirected and <code>Strict-Transport-Security</code> is sent. From the internet the
+              machine answers on ports 80 and 443 only.
+            </li>
+            <li>
+              The database accepts connections from that machine alone. The server connects to it
+              over the provider's private network, with TLS, and verifies the database's
+              certificate against the provider's certificate authority.
+            </li>
+            <li>
+              The database is encrypted at rest by DigitalOcean. It is backed up daily, with what
+              is needed to restore it to any moment of the previous seven days; backups older than
+              that are gone. There are no other copies of Customer Data.
+            </li>
+            <li>
+              The machine is administered over SSH with a key, from named addresses; passwords are
+              not accepted, and security updates of its system are applied automatically.
+            </li>
+          </ul>
+          <h3>Separation of Customers</h3>
+          <ul>
+            <li>
+              Every row of Customer Data belongs to one org, and every query names the org of the
+              token that asked. Underneath, each request runs in the database as a role that
+              cannot log in and that row-level security confines to that org: it can neither read
+              nor write another org's rows.
+            </li>
+          </ul>
           <h3>Encryption in transit</h3>
           <ul>
             <li>
@@ -729,6 +764,13 @@
               Access is by bearer token. Tokens are generated from 24 random bytes, shown once when
               created, and stored only as SHA-256 hashes. They can be revoked at any time; when
               each was last used is recorded. There are no passwords.
+            </li>
+            <li>
+              People sign in to the dashboard with a Google or a GitHub account. Only which
+              account it is and its verified email addresses are asked of the provider. The
+              account that first signs in to an org under an address is from then on the only one
+              accepted as that person there; an admin of the org, or the Processor, can let the
+              person in with another. A sign-in lasts seven days.
             </li>
             <li>
               Each token has one role. A member reads only the sessions filed under their own
@@ -804,11 +846,10 @@
 
           <h2 id="annex3">Annex III: Sub-processors</h2>
           <p>
-            The Hosted Service is not open yet, so no Sub-processor processes Customer Data as of
-            the effective date. Before the first org is created, this Annex will name the provider
-            that hosts the Hosted Service and its database, with its location and transfer basis,
-            and any other provider that will handle Customer Data. The makers of the Customer's
-            coding agents and GitHub are not Sub-processors (Section 2.2 of the DPA).
+            DigitalOcean hosts the Hosted Service and its database, and is the only Sub-processor
+            that processes Customer Data. The makers of the Customer's coding agents and GitHub
+            are not Sub-processors (Section 2.2 of the DPA); nor are Google and GitHub when the
+            Customer's people sign in with them, which they do with their own accounts there.
           </p>
           <div class="table-wrap">
             <table>
@@ -821,6 +862,17 @@
                 </tr>
               </thead>
               <tbody>
+                <tr>
+                  <td>DigitalOcean</td>
+                  <td>Hosting the Hosted Service: the machine it runs on and its database</td>
+                  <td>All Customer Data, and the connections to the Hosted Service</td>
+                  <td>
+                    DigitalOcean, LLC, a United States company. Stored and processed in its FRA1
+                    region, in Frankfurt, Germany. Where its staff outside the EEA have access,
+                    the transfer relies on its certification under the EU-U.S. Data Privacy
+                    Framework, with Standard Contractual Clauses as the fallback.
+                  </td>
+                </tr>
                 <tr>
                   <td>Vercel</td>
                   <td>Hosting this website, and counting its visits</td>

@@ -372,7 +372,14 @@ Signing in was checked against stand-ins for Google and GitHub that answer as th
 documentation says they do, and in a browser against a stand-in: a link to the page someone
 comes back to, opened in another browser, signed in or not, does nothing there. It was then
 tried through Google and GitHub themselves on one machine, at `http://localhost:8080`
-against a local Postgres. Not checked: either of them sending people back to a public
-address over HTTPS, where the cookies have their `__Host-` names.
+against a local Postgres.
 
-Not checked: a real managed database, and Caddy getting a public certificate.
+It runs this way at app.sessionly.dev: a DigitalOcean droplet and a managed Postgres 17, both
+in Frankfurt. There, on the first start, `update.sh` (under dash, the system's `sh`) stopped
+with the statement for the database's admin and removed what it had started; once `doadmin`
+had run it, the next run came up, and Caddy got its certificate from Let's Encrypt. Checked
+on that database: every table with an org column has row-level security on; a request with
+no organisation set sees no rows; one organisation can neither read nor write another's; and
+requests cannot read the sign-in codes or the counters. Checked from outside: only ports 80
+and 443 answer, and the sign-in cookies are set with their `__Host-` names. Not checked there:
+a failover of the database, and an update under load.
