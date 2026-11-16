@@ -1,0 +1,33 @@
+# Reports each pull request of this repository to the hosted Sessionly, which
+# works out how much of it coding agents wrote and how those lines fare in
+# review. Hashes of the added lines are sent, never the lines. See action/README.md.
+name: Sessionly
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, closed]
+  pull_request_review:
+    types: [submitted]
+  # A pull request from before this workflow was added, one at a time.
+  workflow_dispatch:
+    inputs:
+      number:
+        description: The pull request to report
+        required: true
+
+permissions: {}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      # Only the report of an earlier pull request compares commits.
+      contents: read
+    steps:
+      - uses: KIvanow/sessionly/action@819ec241efffbd3aa179529a78bad38da6ac4fc9 # main, 16 November 2026
+        with:
+          url: https://app.sessionly.dev
+          # A token with the ci role, which can report pull requests and nothing else.
+          token: ${{ secrets.SESSIONLY_TOKEN }}
+          pr-number: ${{ inputs.number }}
+          backfill: ${{ github.event_name == 'workflow_dispatch' }}
