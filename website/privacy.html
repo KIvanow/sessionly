@@ -60,7 +60,7 @@
       <section class="legal">
         <div class="wrap">
           <h1>Privacy Policy</h1>
-          <p class="meta">Effective as of 15 November 2026</p>
+          <p class="meta">Effective as of 16 November 2026</p>
 
           <div class="summary">
             <h2>In short</h2>
@@ -73,8 +73,8 @@
               </li>
               <li>
                 A self-hosted Sessionly server sends nothing to me either. Its dashboard counts
-                which of its pages are opened, and nothing of what they show, unless whoever runs
-                it turns that off.
+                which of its pages are opened, and nothing of what they show or of where it runs,
+                unless whoever runs it turns that off.
               </li>
               <li>
                 The hosted service is not open yet. This policy already says what it will store,
@@ -224,14 +224,24 @@
             </li>
             <li>
               <strong>The dashboard</strong> keeps your access token in your browser's local
-              storage so you stay signed in. It sets no cookies. It counts which of its pages are
-              opened with PostHog, in PostHog's EU cloud: each count is the page's name (such as
-              &ldquo;sessions&rdquo; or &ldquo;team&rdquo;), the kind of browser and system, the
-              screen's size, and whether the server is hosted or self-hosted. It never includes
-              the address the dashboard runs at, an org, a person, a session or anything a page
-              shows. Nothing is stored in your browser for it, PostHog is told not to keep IP
-              addresses, and a browser that sends Do Not Track is not counted. Whoever runs a
-              self-hosted server can turn the counting off.
+              storage so you stay signed in. Its only cookies are two short-lived ones that are
+              part of signing in with Google or GitHub, described under &ldquo;Cookies and
+              tracking&rdquo; below. It counts which of its pages are
+              opened with PostHog, in PostHog's EU cloud. Each count is three things: the page's
+              name (such as &ldquo;sessions&rdquo; or &ldquo;team&rdquo;), whether the server is
+              hosted or self-hosted, and an id made up for that one load of the dashboard, which
+              is gone when the page is closed or reloaded. Nothing is read from your browser to
+              put in it, and it never includes the address the dashboard runs at, an org, a
+              person, a session or anything a page shows. The dashboard sends it with a few lines
+              of its own code, as a request to which the browser adds no cookie and neither of
+              the two headers (<code>Origin</code> and <code>Referer</code>) that would say which
+              site it comes from. Like any server, PostHog's sees the connection a count arrives
+              on: its IP address, and what a browser says of itself with every request (its
+              kind, its system and its languages). Each count asks PostHog not to look the
+              address up for a location, and the PostHog project is set to discard IP addresses.
+              Nothing is stored in your browser for it, and a browser that sends Do Not Track or
+              Global Privacy Control is not counted. Whoever runs a self-hosted server can turn
+              the counting off.
             </li>
             <li>
               <strong>Server logs.</strong> The Sessionly server does not write a log of requests.
@@ -306,8 +316,9 @@
                       <td>PostHog (EU cloud)</td>
                       <td>Counting which pages of the dashboard are opened</td>
                       <td>
-                        Page names, browser, system and screen size, and the connection the count
-                        arrives on; no IP address is kept
+                        Page names, whether the server is hosted or self-hosted, and the connection
+                        each count arrives on (its IP address and the browser's standard headers);
+                        no IP address is kept
                       </td>
                     </tr>
                   </tbody>
@@ -458,11 +469,21 @@
             with an unsubscribe link in every message.
           </p>
           <p>
-            <strong>Cookies and tracking.</strong> Neither this website nor the dashboard sets
-            cookies. The dashboard uses your browser's local storage only to keep you signed in;
-            signing out or clearing it removes the token. The dashboard counts which of its pages
-            are opened, as described above, without storing anything in your browser. There is no
-            advertising and there are no cross-site trackers, so there is no cookie banner.
+            <strong>Cookies and tracking.</strong> This website sets no cookies. The dashboard
+            sets cookies for one thing only: signing in with Google or GitHub. When you leave for
+            Google or GitHub, one cookie lets the dashboard recognise the same browser when it
+            comes back; a second one carries the sign-in from that moment until you have chosen
+            which org to sign in to. Each holds a random value that means nothing outside that
+            one sign-in, lasts ten minutes at most, is removed when the sign-in is finished or
+            cancelled, is sent only to the dashboard itself, and cannot be read by scripts. If
+            you sign in with a token, no cookie is set at all. These cookies are not used to
+            track you, to measure anything or to advertise, and nothing about you is sold or
+            shared for advertising. The dashboard uses your browser's local storage only to keep
+            you signed in; signing out or clearing it removes the token. The dashboard counts
+            which of its pages are opened, as described above, without storing anything in your
+            browser. There is no advertising and there are no cross-site trackers. Because the
+            only cookies are ones that signing in cannot work without, there is no cookie
+            banner.
           </p>
           <p>
             <strong>Declining to provide information.</strong> I need certain information, such as
