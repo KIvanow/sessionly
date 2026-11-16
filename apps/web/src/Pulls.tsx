@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { query } from "./api.ts";
 import { scopeParams, type Scope } from "./App.tsx";
 import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
+import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
 import { useApi } from "./useApi.ts";
 
@@ -60,6 +61,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
         </label>
       </form>
       {summary.error && <p role="alert">{summary.error}</p>}
+      {!summary.data && !everything.data && !summary.error && <Loader label="Loading pull requests" />}
       {everything.data?.total === 0 && <Setup />}
       {total && total.pulls === 0 && everything.data && everything.data.total > 0 && (
         <section className="card">

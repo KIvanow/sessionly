@@ -1,5 +1,6 @@
 import type { SessionDetail } from "@sessionly/schema";
 import { compact, cost, count, dateTime, duration, percent, repoName, share, toolName, usd } from "./format.ts";
+import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
 import { useApi } from "./useApi.ts";
 
@@ -7,7 +8,7 @@ import { useApi } from "./useApi.ts";
 export function SessionView({ token, address, onSignOut }: { token: string; address: string; onSignOut: () => void }) {
   const found = useApi<SessionDetail>(token, `/sessions/${address}`, onSignOut);
   if (found.error) return <p role="alert">{found.error}</p>;
-  if (!found.data) return <p className="muted">Loading…</p>;
+  if (!found.data) return <Loader />;
   const s = found.data.upload.session ?? {};
   const rewrite = found.data.upload.rewrite ?? null;
   const counts = s.counts ?? {};

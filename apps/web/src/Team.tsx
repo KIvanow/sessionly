@@ -1,7 +1,9 @@
 import type { CreatedToken, Role, TokenInfo, UserInfo } from "@sessionly/schema";
 import { useState } from "react";
 import { api } from "./api.ts";
+import { CopyButton } from "./CopyButton.tsx";
 import { dateTime } from "./format.ts";
+import { Loader } from "./Loader.tsx";
 import { PROVIDERS } from "./Login.tsx";
 import { useApi } from "./useApi.ts";
 
@@ -41,7 +43,15 @@ function License({ token, onSignOut }: { token: string; onSignOut: () => void })
     );
   }
   const view = installed ?? found.data;
-  if (!view) return found.error ? <p role="alert">{found.error}</p> : null;
+  if (!view) {
+    if (found.error) return <p role="alert">{found.error}</p>;
+    return (
+      <section className="card">
+        <h2>License</h2>
+        <Loader label="Loading license" />
+      </section>
+    );
+  }
   const l = view.license;
   const status =
     view.status === "active"
@@ -193,6 +203,7 @@ function People({
         </p>
       )}
       {list.error && <p role="alert">{list.error}</p>}
+      {!list.data && !list.error && <Loader label="Loading people" />}
       {people.length > 0 && (
         <div className="scroll">
           <table>
@@ -329,7 +340,7 @@ export function Team({
                 session in anyone's name, so keep it there and nowhere else.
               </p>
             )}
-            <button onClick={() => navigator.clipboard?.writeText(created.token)}>Copy</button>
+            <CopyButton text={created.token} copiedLabel="Token copied">Copy</CopyButton>
             <button className="quiet" onClick={() => setCreated(null)}>Done</button>
           </div>
         )}
@@ -337,6 +348,7 @@ export function Team({
       <section className="card">
         <h2>Tokens</h2>
         {list.error && <p role="alert">{list.error}</p>}
+        {!list.data && !list.error && <Loader label="Loading tokens" />}
         {list.data && list.data.tokens.length === 0 && (
           <p className="muted">
             No tokens yet.{!people && " You are signed in with the server's built-in admin token."}
