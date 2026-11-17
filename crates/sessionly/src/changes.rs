@@ -28,6 +28,7 @@
 //!   call returned.
 //! - Files git ignores are not looked at. New files over 1 MB are left out.
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -39,6 +40,9 @@ use serde_json::{json, Value};
 
 /// The shell tool as Claude Code and as Cursor name it.
 const SHELL_TOOLS: &[&str] = &["Bash", "Shell"];
+
+/// Codex's file tool, as its hooks name it.
+const PATCH_TOOL: &str = "apply_patch";
 
 /// How long looking at the working tree may take for one event. A hook must
 /// not stall the session: past this, the look is abandoned and no more are
@@ -131,6 +135,20 @@ pub fn observe(data_dir: &Path, record: &Value) -> Option<Value> {
         .into_iter()
         .find_map(text);
     let tool = p["tool_name"].as_str().unwrap_or_default();
+    // Codex's file tool names its files in the patch it applies, and there
+    // may be several: each is noted as a file tool's work.
+    if tool == PATCH_TOOL {
+        let dir = data_dir
+            .join("snapshots")
+            .join(crate::capture::file_stem(record["session_id"].as_str()));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        for path in patched(p["tool_input"]["command"].as_str()?, cwd) {
+            step(&dir, Event::Edit { path, ended }, now);
+        }
+        return None;
+    }
     let root;
     let event = if SHELL_TOOLS.contains(&tool) {
         root = crate::git::repo_root(cwd?)?;
@@ -160,6 +178,26 @@ pub fn observe(data_dir: &Path, record: &Value) -> Option<Value> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
     step(&data_dir.join("snapshots").join(stem), event, now)
+}
+
+/// The files a Codex patch names: those it adds, updates, deletes or moves to.
+fn patched(patch: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
+    const NAMES: [&str; 4] = [
+        "*** Add File: ",
+        "*** Update File: ",
+        "*** Delete File: ",
+        "*** Move to: ",
+    ];
+    patch
+        .lines()
+        .filter_map(|line| NAMES.iter().find_map(|name| line.strip_prefix(name)))
+        .map(|named| Path::new(named.trim()))
+        .filter_map(|named| match (named.is_absolute(), cwd) {
+            (true, _) => Some(named.to_path_buf()),
+            (false, Some(cwd)) => Some(cwd.join(named)),
+            (false, None) => None,
+        })
+        .collect()
 }
 
 /// The session of `record` is over: drop what was kept to compare against.
@@ -567,6 +605,57 @@ fn patch_lines(patch: &str) -> Vec<Vec<String>> {
     files
 }
 
+/// What the captures at `paths` say shell commands changed, by the id of the
+/// command's call: `changes`, or `changes_skipped`. For an agent whose
+/// sessions are built from its own files, which know the commands and not
+/// what they changed. A capture that cannot be read says nothing.
+pub fn seen_in<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> HashMap<String, Value> {
+    let mut seen = HashMap::new();
+    for path in paths {
+        let _ = crate::jsonl::for_each(path, |record| {
+            let said: serde_json::Map<String, Value> = ["changes", "changes_skipped"]
+                .into_iter()
+                .filter(|key| !record[*key].is_null())
+                .map(|key| (key.to_string(), record[key].clone()))
+                .collect();
+            if let (Some(id), false) = (record["payload"]["tool_use_id"].as_str(), said.is_empty())
+            {
+                seen.insert(id.to_string(), Value::Object(said));
+            }
+        });
+    }
+    seen
+}
+
+/// Put what captures saw shell commands change (`seen`, from `seen_in`) with
+/// the same commands in `events` built from elsewhere. Only with a shell
+/// command that ended, and that says nothing of its own.
+pub fn add_seen(events: &mut [Value], seen: &HashMap<String, Value>) {
+    if seen.is_empty() {
+        return;
+    }
+    for event in events {
+        let ended = matches!(
+            event["hook"].as_str(),
+            Some("PostToolUse" | "PostToolUseFailure")
+        );
+        let p = &event["payload"];
+        let shell = p["tool_name"]
+            .as_str()
+            .is_some_and(|tool| SHELL_TOOLS.contains(&tool));
+        if !ended || !shell || !event["changes"].is_null() {
+            continue;
+        }
+        let Some(Value::Object(said)) = p["tool_use_id"].as_str().and_then(|id| seen.get(id))
+        else {
+            continue;
+        };
+        for (key, value) in said {
+            event[key] = value.clone();
+        }
+    }
+}
+
 /// The files a shell command's event says it changed: path, whether the file
 /// is new, and its patch lines.
 pub fn of(record: &Value) -> impl Iterator<Item = (&str, bool, impl Iterator<Item = &str>)> {
@@ -887,5 +976,82 @@ mod tests {
         repo.write("old.txt", "one\n");
         let said = observe(data, &cursor("postToolUseFailure"));
         assert_eq!(repo.changes(said), [file("old.txt", "M", &["-two"])]);
+    }
+
+    #[test]
+    fn a_codex_patch_while_a_command_runs_is_not_the_commands() {
+        let repo = Repo::new();
+        let data = repo.dir.parent().unwrap().parent().unwrap();
+        let event = |hook: &str, tool: &str, input: Value| {
+            json!({ "hook": hook, "session_id": "s1",
+                    "payload": { "tool_name": tool, "cwd": repo.root, "tool_input": input } })
+        };
+        let shell = |hook: &str| event(hook, "Bash", json!({ "command": "make" }));
+        // The patch names its files itself, by where the session is or in full.
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: hello.py\n@@\n-old\n+new\n\
+             *** Add File: {}\n+made\n*** End Patch\n",
+            repo.root.join("made.txt").display()
+        );
+        let patching = |hook: &str| event(hook, "apply_patch", json!({ "command": patch }));
+
+        assert_eq!(observe(data, &shell("PreToolUse")), None);
+        assert_eq!(observe(data, &patching("PreToolUse")), None);
+        repo.write("hello.py", "def greet(name):\n    return name\n");
+        repo.write("made.txt", "made\n");
+        assert_eq!(observe(data, &patching("PostToolUse")), None);
+        repo.write("old.txt", "one\n");
+        let said = observe(data, &shell("PostToolUse"));
+        // The patch's two files are the patch's: Codex's own files say so.
+        assert_eq!(repo.changes(said), [file("old.txt", "M", &["-two"])]);
+
+        assert_eq!(
+            patched(
+                "*** Update File: a.txt\n*** Move to: b/c.txt\n*** Delete File: /x/d.txt\n",
+                None
+            ),
+            [PathBuf::from("/x/d.txt")]
+        );
+    }
+
+    #[test]
+    fn what_a_capture_saw_is_put_with_the_same_command_from_elsewhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("capture.jsonl");
+        let changes = json!([{ "path": "/repo/a.txt", "status": "M", "lines": ["+one"] }]);
+        let lines = [
+            json!({ "hook": "PreToolUse", "payload": { "tool_use_id": "c1", "tool_name": "Bash" } }),
+            json!({ "hook": "PostToolUse", "payload": { "tool_use_id": "c1", "tool_name": "Bash" },
+                    "changes": changes }),
+            json!({ "hook": "PostToolUse", "payload": { "tool_use_id": "c2", "tool_name": "Bash" },
+                    "changes_skipped": "too large" }),
+            json!({ "hook": "PostToolUse", "payload": { "tool_use_id": "c3", "tool_name": "Bash" } }),
+            json!({ "hook": "PostToolUse", "payload": { "tool_use_id": "c4", "tool_name": "Bash" },
+                    "changes": changes }),
+        ];
+        let text: Vec<String> = lines.iter().map(Value::to_string).collect();
+        fs::write(&capture, text.join("\n") + "\nnot json\n").unwrap();
+        let missing = dir.path().join("none.jsonl");
+        let seen = seen_in([&capture, &missing].into_iter());
+        assert_eq!(seen.len(), 3);
+
+        let ended = |id: &str, tool: &str| json!({ "hook": "PostToolUse", "payload": { "tool_use_id": id, "tool_name": tool } });
+        let mut events = vec![
+            json!({ "hook": "PreToolUse", "payload": { "tool_use_id": "c1", "tool_name": "Bash" } }),
+            ended("c1", "Bash"),
+            ended("c2", "Bash"),
+            ended("c3", "Bash"),
+            // A patch run through the shell is written down as an edit, with
+            // its lines from the patch: the capture's are not added to them.
+            ended("c4", "Edit"),
+            ended("c9", "Bash"),
+        ];
+        add_seen(&mut events, &seen);
+        assert_eq!(events[0].get("changes"), None);
+        assert_eq!(events[1]["changes"], changes);
+        assert_eq!(events[2]["changes_skipped"], "too large");
+        for untouched in &events[3..] {
+            assert_eq!(untouched.as_object().unwrap().len(), 2, "{untouched}");
+        }
     }
 }
