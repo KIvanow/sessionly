@@ -398,8 +398,18 @@ pub fn repository_name(text: &str) -> Result<String> {
         if let Some(remote) = crate::git::origin_remote(&root) {
             remote
         } else {
-            let home = crate::paths::home_dir().map(|dir| dir.to_string_lossy().into_owned());
-            relative_path(&root.to_string_lossy(), None, home.as_deref())
+            // The directory the command runs in is named as the file system
+            // knows it, which need not be how the home directory is named
+            // (on macOS `/var` is a link to `/private/var`): both are tried.
+            let home = crate::paths::home_dir();
+            let real = home.as_deref().and_then(|dir| dir.canonicalize().ok());
+            let root = root.to_string_lossy();
+            [home, real]
+                .into_iter()
+                .flatten()
+                .map(|home| relative_path(&root, None, Some(&home.to_string_lossy())))
+                .find(|short| short.starts_with('~'))
+                .unwrap_or_else(|| root.into_owned())
         }
     } else {
         text.to_string()
