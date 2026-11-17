@@ -1,36 +1,48 @@
 #!/bin/sh
 # Sessionly capture for cloud agent sessions. https://sessionly.dev
 #
-# Written by `sessionly install --repo` (sessionly 0.3.1). To update it,
+# Written by `sessionly install --repo` (sessionly 0.4.0). To update it,
 # run that again with a newer sessionly rather than editing it.
 #
 # The hooks in .claude/settings.json and .cursor/hooks.json run this on every
-# hook event, with the event on standard input.
+# hook event, with the event on standard input. Codex's cloud runs no hooks:
+# there the agent runs it, as AGENTS.md asks, before and after a turn's work.
 #
 # - On a person's own machine it does nothing. Sessions there are captured by
 #   that person's own `sessionly install`, if they have one.
-# - In a Claude Code cloud session or a Cursor cloud agent it fetches the
-#   sessionly binary once per sandbox, checks it against the checksum below,
+# - In a Claude Code cloud session, a Cursor cloud agent or a Codex cloud
+#   task it fetches the sessionly binary once per sandbox, checks it against the checksum below,
 #   and hands it the event. Where sessions are sent is up to the sandbox's
 #   environment (SESSIONLY_URL and SESSIONLY_TOKEN); without those nothing
 #   leaves the sandbox.
 #
 # It prints nothing and always exits 0, so it cannot block or change a session.
 
-VERSION=0.3.1
+VERSION=0.4.0
 BASE=https://github.com/KIvanow/sessionly/releases/download
-SHA256_X86_64=8edc55a6c740de735f32e192432d4a3c94129f958f9059f628c07b90eb61fca4
-SHA256_AARCH64=60cd5eedbcf63186ce9c99758b4cf22374d486e55a572fdf162f579a05543eef
+SHA256_X86_64=dbf0db71b65d51d28215cd54f88efce0590625136cdfa78ccddcd1acf4c85bea
+SHA256_AARCH64=c5b5f4950c69d483d6bd74aaba90cf531c0795d458e732a22959633ce3e0f558
 
 case "${1:-}" in
   # Cursor's cloud also runs the hooks in .claude/settings.json. There the
   # entry in .cursor/hooks.json is the one that captures.
   claude) [ "${CLAUDE_CODE_REMOTE:-}" = true ] && [ -z "${CURSOR_VERSION:-}" ] || exit 0 ;;
   cursor) [ -S "${CURSOR_AGENT_SOCKET:-/run/cursor/api.sock}" ] || exit 0 ;;
+  # Codex names its thread to every command, on a person's machine too. The
+  # cloud environment it names only in its cloud.
+  codex) [ -n "${CODEX_THREAD_ID:-}" ] && [ -n "${CODEX_ENVIRONMENT_ID:-}" ] || exit 0 ;;
   *) exit 0 ;;
 esac
 
 home="${SESSIONLY_HOME:-$HOME/.sessionly}"
+# Codex runs its commands in a sandbox of its own, which may not let them
+# write to the home directory.
+if [ "$1" = codex ] && [ -z "${SESSIONLY_HOME:-}" ] &&
+  ! { mkdir -p "$home" && [ -w "$home" ]; } 2> /dev/null; then
+  home="${TMPDIR:-/tmp}/sessionly-$(id -u)"
+  SESSIONLY_HOME="$home"
+  export SESSIONLY_HOME
+fi
 bin="$home/bin/sessionly-$VERSION"
 
 note() {
@@ -73,7 +85,7 @@ download() {
   elif tar -xzf "$tmp/sessionly.tar.gz" -C "$tmp" sessionly && chmod 755 "$tmp/sessionly" &&
     mv "$tmp/sessionly" "$bin"; then
     rm -rf "$tmp" "$failed"
-    note "installed sessionly $VERSION"
+    note "installed sessionly $VERSION ($$)"
     return 0
   else
     note "could not unpack the download"
@@ -84,25 +96,54 @@ download() {
 }
 
 # Hooks run in parallel: one downloads while the others wait for it.
+#
+# The lock is a file that this shell creates only if it is not there yet
+# (set -C): one system call, made by the shell itself. It used to be a folder
+# made with mkdir. Where several hooks asked at the same moment, each was
+# told it had made the folder, and two of them downloaded: seen on Ubuntu
+# 26.04, whose mkdir is not GNU's, and never where it is.
+#
+# Each step is noted with the process it was, in bootstrap.log, so that a
+# sandbox where two hooks still download shows how. It is a few lines, once
+# per sandbox.
 fetch() {
   mkdir -p "$home/bin" && chmod 700 "$home" || return 1
-  lock="$home/bin/fetching"
+  lock="$home/bin/fetching.lock"
   waited=0
-  until mkdir "$lock" 2> /dev/null; do
-    [ -x "$bin" ] && return 0
+  until (set -C && : > "$lock") 2> /dev/null; do
+    if [ -x "$bin" ]; then
+      note "$$ stopped waiting for the lock after $waited waits: the binary is there"
+      return 0
+    fi
     waited=$((waited + 1))
     if [ "$waited" -gt 300 ]; then
       # Half a minute: whoever is downloading was killed, or is too slow to
       # wait for. This event is not captured; the next hook may try.
-      rmdir "$lock" 2> /dev/null
+      rm -f "$lock"
+      note "$$ waited half a minute for the lock, removed it and gave up"
       return 1
     fi
     sleep 0.1
   done
-  [ -x "$bin" ] || download
-  rmdir "$lock" 2> /dev/null
+  if [ -x "$bin" ]; then
+    note "$$ took the lock after $waited waits: the binary is there"
+  else
+    note "$$ took the lock after $waited waits: no binary yet, downloading"
+    download
+    note "$$ finished downloading ($?)"
+  fi
+  if rm "$lock" 2> /dev/null; then
+    note "$$ released the lock"
+  else
+    note "$$ found the lock gone when releasing it"
+  fi
 }
 
 [ -x "$bin" ] || fetch > /dev/null 2>&1
-[ -x "$bin" ] && "$bin" capture > /dev/null 2>&1
+[ -x "$bin" ] || exit 0
+if [ "$1" = codex ]; then
+  "$bin" turn "${2:-}" < /dev/null > /dev/null 2>&1
+else
+  "$bin" capture > /dev/null 2>&1
+fi
 exit 0
