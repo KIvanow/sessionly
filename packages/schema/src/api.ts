@@ -332,6 +332,39 @@ export interface PullReport {
   files: FileHashes[];
   /** Changed files GitHub gave no diff for (too large, or binary). */
   files_without_diff?: number;
+  /**
+   * Its reviews and comments, oldest first: who, when, where, and a link to
+   * each on GitHub. Left out by a version of the Action from before these
+   * were sent; what the server has is then kept.
+   */
+  feedback?: PullFeedback[];
+  /**
+   * How many reviews and comments it has. More than are in `feedback` on a
+   * pull request with more than the server takes: the latest are then sent.
+   */
+  feedback_total?: number;
+}
+
+/**
+ * A review of a pull request, or a comment on it: who made it, when, on
+ * which line, and where it is on GitHub. Never what it says.
+ */
+export interface PullFeedback {
+  /** A review, a comment on a line of the diff, or one in the conversation. */
+  kind: "review" | "inline" | "conversation";
+  /** Its page on GitHub. */
+  url: string | null;
+  /** GitHub login of who made it. */
+  author: string;
+  bot: boolean;
+  at: string;
+  /** A review's outcome: `approved`, `changes_requested`, `commented` or `dismissed`. */
+  state?: string | null;
+  /** The file and line a comment on the diff is about. */
+  path?: string | null;
+  line?: number | null;
+  /** A comment on the diff that answers another. */
+  reply?: boolean;
 }
 
 /** Lines an agent wrote, by which agent and model. */
@@ -400,6 +433,48 @@ export interface PullRow {
   files_without_diff: number;
   attribution: PullAttribution;
   updated_at: string;
+}
+
+/** A file of a pull request: the tracked lines it adds, and how many an agent wrote. */
+export interface PullFile {
+  path: string;
+  lines: number;
+  agent_lines: number;
+}
+
+/**
+ * A session that wrote lines of a pull request. What is known of the session
+ * is null once it has been deleted.
+ */
+export interface PullSession {
+  machine_id: string;
+  source: string;
+  session_id: string;
+  /** Lines of the pull request, as last reported, put down to this session. */
+  lines: number;
+  session: Pick<
+    SessionRow,
+    "owner_email" | "runtime" | "title" | "started_at" | "active_ms" | "cost_usd" | "cost_source" | "primary_model" | "prompts"
+  > | null;
+}
+
+/**
+ * One pull request, with what the list leaves out. `files`, `sessions` and
+ * `feedback` are null on a pull request last reported before they were kept.
+ */
+export interface PullDetail extends PullRow {
+  draft: boolean;
+  head_ref: string | null;
+  base_ref: string | null;
+  closed_at: string | null;
+  /** Files with tracked lines, most lines first. */
+  files: PullFile[] | null;
+  /** Most lines first. */
+  sessions: PullSession[] | null;
+  /** Oldest first. */
+  feedback: PullFeedback[] | null;
+  /** How many there are on GitHub: more than `feedback` has when only the latest were kept. */
+  feedback_total: number | null;
 }
 
 export interface PullList {

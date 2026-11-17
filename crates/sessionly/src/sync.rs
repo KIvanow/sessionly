@@ -360,7 +360,7 @@ pub fn run(
             let parent_is_in = present.stems.contains(parent);
             if parent_is_in {
                 if ledger.fingerprint(subagent)?.is_some() {
-                    report.removed += u64::from(ledger.remove(subagent)?);
+                    report.removed += u64::from(ledger.remove(subagent, parent)?);
                 }
             } else {
                 record(pass.stem(ledger, subagent, &[])?, &mut report, &mut present);
@@ -482,6 +482,9 @@ mod tests {
         let alone = run(&[dirs()], &mut env.ledger, "machine-1", false).unwrap();
         assert_eq!(alone.synced, 1);
         assert!(env.ledger.get("sub").unwrap().is_some());
+        // and may be uploaded as one
+        let server = "https://sessionly.example.com";
+        env.ledger.mark_uploaded("sub", server, "hash").unwrap();
 
         // the parent's own import is what makes it a session with subagents
         capture("main", &main, "UserPromptSubmit");
@@ -491,9 +494,21 @@ mod tests {
         let report = run(&[dirs()], &mut env.ledger, "machine-1", false).unwrap();
         assert_eq!((report.synced, report.removed), (1, 1));
         assert!(env.ledger.get("sub").unwrap().is_none());
+        // the server still has it: that is noted, for the next upload
+        // once it has the session the subagent is part of
+        let noted = vec![crate::ledger::Withdrawal {
+            session_id: "sub".into(),
+            source: "codex".into(),
+            part_of: "main".into(),
+        }];
+        assert_eq!(env.ledger.withdrawals(server).unwrap(), noted);
         // a rebuild reports it once, not twice
         let forced = run(&[dirs()], &mut env.ledger, "machine-1", true).unwrap();
         assert_eq!(forced.removed, 0);
+        assert_eq!(env.ledger.withdrawals(server).unwrap(), noted);
+        // should it be uploaded as a session again, the server keeps it
+        env.ledger.mark_uploaded("sub", server, "hash").unwrap();
+        assert!(env.ledger.withdrawals(server).unwrap().is_empty());
         let session = env.ledger.get("main").unwrap().unwrap();
         assert_eq!(session.counts.permission_requests, 1);
     }

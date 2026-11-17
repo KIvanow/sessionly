@@ -211,7 +211,11 @@
             reviewed and closed: the repository's name, the pull request's number, title and
             address, its author's GitHub user name, its state, branch names and dates, counts of
             commits, reviews, review comments and review rounds, and, per changed file, hashes of
-            the lines the pull request adds. The email addresses on the pull request's commits are
+            the lines the pull request adds. For each review and comment on the pull request it
+            sends who made it (their GitHub user name, and whether that is a bot), when, the file
+            and line it is on, a review's outcome, and its address on GitHub, so that the
+            dashboard can link to it. The text of reviews and comments is not sent and not
+            stored. The email addresses on the pull request's commits are
             sent with each report so that lines are matched only to sessions by the people who
             committed; they are used for that comparison and are not stored.
           </p>

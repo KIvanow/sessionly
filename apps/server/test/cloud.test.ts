@@ -117,6 +117,23 @@ test("an environment's token uploads sessions and does nothing else", async () =
   assert.equal((await put(made.body.token, session("c-made"))).status, 200);
 });
 
+test("an environment's token takes back only what is filed under its own address", async () => {
+  const remove = (token: string, id: string) => call(token, "DELETE", `/sessions/cloud/claude-code/${id}`);
+  // Filed under the person who started it: theirs, not the environment's.
+  assert.deepEqual(await remove(tokens.env, "c-dee"), { status: 200, body: { removed: false } });
+  assert.equal(await ownerOf("c-dee"), "dee@example.com");
+  // Nor another environment's.
+  const other = await tokenFor(db, { email: "other-cloud@example.com", role: "env" });
+  await put(tokens.env, session("c-nobody", { person: null }));
+  assert.deepEqual(await remove(other, "c-nobody"), { status: 200, body: { removed: false } });
+  assert.equal(await ownerOf("c-nobody"), "cloud@example.com");
+
+  assert.deepEqual(await remove(tokens.env, "c-nobody"), { status: 200, body: { removed: true } });
+  assert.equal((await call(tokens.admin, "GET", "/sessions/cloud/claude-code/c-nobody")).status, 404);
+  // A ci token takes nothing back.
+  assert.equal((await remove(tokens.ci, "c-dee")).status, 403);
+});
+
 test("a sandbox that saw less of a session does not replace what is there", async () => {
   await put(tokens.env, session("c-long", { prompts: 5 }));
   // The session moved to a new sandbox, which captured its last two turns.
