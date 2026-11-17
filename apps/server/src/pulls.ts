@@ -265,6 +265,7 @@ export function checkReport(body: unknown): PullReport {
       file.hashes.every((h) => typeof h === "string" && HASH.test(h));
     if (!ok) fail("each file needs a path and hashes of 16 hex digits");
   }
+  const feedback = checkFeedback(r.feedback, fail);
   return {
     repo: text("repo").replace(/\/+$/, ""),
     head_repo: optional("head_repo"),
@@ -290,7 +291,9 @@ export function checkReport(body: unknown): PullReport {
     review_rounds: whole("review_rounds"),
     files: (files as FileHashes[]).map((f) => ({ path: f.path, hashes: f.hashes })),
     files_without_diff: whole("files_without_diff"),
-    feedback: checkFeedback(r.feedback, fail),
+    feedback,
+    // Never fewer than were sent, whatever the report says.
+    feedback_total: feedback && Math.max(feedback.length, r.feedback_total == null ? 0 : whole("feedback_total")),
   };
 }
 
@@ -431,6 +434,7 @@ export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttr
     detail: JSON.stringify(breakdown(report.files, claims)),
     // An Action from before these were sent says nothing of them: what is here stays.
     feedback: report.feedback ? JSON.stringify(report.feedback) : null,
+    feedback_total: report.feedback ? (report.feedback_total ?? report.feedback.length) : null,
     // only used when the row is new
     first_event: report.event,
     first_files: JSON.stringify(first),
@@ -444,13 +448,18 @@ export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttr
     feedback: "::jsonb",
   };
   const kept = ["org_id", "repo", "number", "first_event", "first_files"];
+  // Reviews and comments, and how many there are, stay as they are when a report has none.
+  const set = (name: string) =>
+    name === "feedback" || name === "feedback_total"
+      ? `CASE WHEN EXCLUDED.feedback IS NULL THEN pull_requests.${name} ELSE EXCLUDED.${name} END`
+      : `EXCLUDED.${name}`;
   await db.query(
     `INSERT INTO pull_requests (${names.join(", ")})
      VALUES (${names.map((name, i) => `$${i + 1}${casts[name] ?? ""}`).join(", ")})
      ON CONFLICT (org_id, repo, number) DO UPDATE SET
        ${names
          .filter((name) => !kept.includes(name))
-         .map((name) => `${name} = ${name === "feedback" ? "coalesce(EXCLUDED.feedback, pull_requests.feedback)" : `EXCLUDED.${name}`}`)
+         .map((name) => `${name} = ${set(name)}`)
          .join(", ")},
        updated_at = now()`,
     Object.values(columns),
@@ -510,7 +519,7 @@ function pullRow(r: Record<string, unknown>): PullRow {
  */
 export async function getPull(db: OrgDb, repo: string, number: number): Promise<PullDetail | null> {
   const [r] = await db.query(
-    `SELECT ${ROW_COLUMNS}, draft, head_ref, base_ref, closed_at, detail, feedback
+    `SELECT ${ROW_COLUMNS}, draft, head_ref, base_ref, closed_at, detail, feedback, feedback_total
      FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
     [db.orgId, repo, number],
   );
@@ -525,6 +534,7 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
     files: detail?.files ?? null,
     sessions: detail ? await withSessions(db, detail.sessions ?? []) : null,
     feedback: r.feedback == null ? null : json<PullFeedback[]>(r.feedback),
+    feedback_total: r.feedback == null || r.feedback_total == null ? null : num(r.feedback_total),
   };
 }
 

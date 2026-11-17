@@ -338,6 +338,11 @@ export interface PullReport {
    * were sent; what the server has is then kept.
    */
   feedback?: PullFeedback[];
+  /**
+   * How many reviews and comments it has. More than are in `feedback` on a
+   * pull request with more than the server takes: the latest are then sent.
+   */
+  feedback_total?: number;
 }
 
 /**
@@ -468,6 +473,8 @@ export interface PullDetail extends PullRow {
   sessions: PullSession[] | null;
   /** Oldest first. */
   feedback: PullFeedback[] | null;
+  /** How many there are on GitHub: more than `feedback` has when only the latest were kept. */
+  feedback_total: number | null;
 }
 
 export interface PullList {

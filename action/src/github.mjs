@@ -51,11 +51,13 @@ export async function readPull(api, repo, number) {
 
 /**
  * Create the Action's comment on a pull request, or bring it up to date.
- * `comments` are the pull request's, if they were read already.
+ * `comments` are the pull request's, if they were read already. They may be
+ * from before another run wrote the comment, so one that is not among them is
+ * looked for again before a second is written.
  */
 export async function upsertComment(api, repo, number, marker, body, comments) {
-  comments ??= await all(api, `/repos/${repo}/issues/${number}/comments`);
-  const mine = comments.find((c) => c.body?.includes(marker));
+  const find = (list) => list?.find((c) => c.body?.includes(marker));
+  const mine = find(comments) ?? find(await all(api, `/repos/${repo}/issues/${number}/comments`));
   if (mine) {
     if (mine.body !== body) await api.request("PATCH", `/repos/${repo}/issues/comments/${mine.id}`, { body });
   } else {

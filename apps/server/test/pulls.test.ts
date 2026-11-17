@@ -364,10 +364,19 @@ test("a pull request's page: its files, the sessions that wrote it, and links to
 
   // An Action from before reviews and comments were sent says nothing of them: what is known stays.
   await call(tokens.ci, "PUT", "/prs", report({ number: 30, event: "synchronize", files }));
-  assert.equal((await at(30)).body.feedback.length, 3);
+  assert.deepEqual([(await at(30)).body.feedback.length, (await at(30)).body.feedback_total], [3, 3]);
+  // On a pull request with more than are sent, how many there are is kept too,
+  // and through a report from an older Action like the rest.
+  await call(tokens.ci, "PUT", "/prs", report({ number: 30, event: "synchronize", files, feedback, feedback_total: 2500 }));
+  await call(tokens.ci, "PUT", "/prs", report({ number: 30, event: "synchronize", files }));
+  assert.deepEqual([(await at(30)).body.feedback.length, (await at(30)).body.feedback_total], [3, 2500]);
+  // Never fewer than were sent.
+  await call(tokens.ci, "PUT", "/prs", report({ number: 30, event: "synchronize", files, feedback, feedback_total: 1 }));
+  assert.equal((await at(30)).body.feedback_total, 3);
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({ number: 30, feedback, feedback_total: "many" }))).status, 422);
   // One that sends none says there are none.
   await call(tokens.ci, "PUT", "/prs", report({ number: 30, event: "synchronize", files, feedback: [] }));
-  assert.deepEqual((await at(30)).body.feedback, []);
+  assert.deepEqual([(await at(30)).body.feedback, (await at(30)).body.feedback_total], [[], 0]);
 
   // A session that was deleted since is still counted, and leads nowhere.
   await db.query(`DELETE FROM sessions WHERE session_id = 'p-two'`);

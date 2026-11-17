@@ -71,9 +71,7 @@ export function feedbackOf(reviews, comments, conversation) {
     if (!comment.created_at || comment.body?.includes(MARKER)) continue;
     all.push({ kind: "conversation", ...who(comment), at: comment.created_at });
   }
-  all.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
-  // On a pull request with more than the server takes, the latest are sent.
-  return all.slice(-MAX_FEEDBACK);
+  return all.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
 }
 
 /**
@@ -107,6 +105,7 @@ export function buildReport({ pull, files, reviews, comments, conversation = [],
   }
   const repo = pull.base?.repo?.full_name;
   const headRepo = pull.head?.repo?.full_name;
+  const feedback = feedbackOf(reviews, comments, conversation);
   return {
     repo: `${host}/${repo}`,
     head_repo: headRepo && headRepo !== repo ? `${host}/${headRepo}` : null,
@@ -131,7 +130,10 @@ export function buildReport({ pull, files, reviews, comments, conversation = [],
     review_rounds: reviewRounds(author, reviews, comments, commits),
     files: reported,
     files_without_diff: withoutDiff,
-    feedback: feedbackOf(reviews, comments, conversation),
+    // On a pull request with more than the server takes, the latest are sent,
+    // with how many there are: what is counted from them is then not all of it.
+    feedback: feedback.slice(-MAX_FEEDBACK),
+    feedback_total: feedback.length,
   };
 }
 

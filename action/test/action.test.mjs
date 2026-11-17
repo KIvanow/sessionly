@@ -138,6 +138,7 @@ test("a report says where the pull request stands and what it adds", () => {
       { kind: "review", url: null, author: "ann", bot: false, at: at(7), state: "commented" },
       { kind: "inline", url: null, author: "ann", bot: false, at: at(7), path: null, line: null, reply: false },
     ],
+    feedback_total: 7,
   });
   const merged = build({ pull: { ...PULL, state: "closed", merged: true, merged_at: at(40), closed_at: at(40) } });
   assert.deepEqual([merged.state, merged.merged_at], ["merged", at(40)]);
@@ -194,11 +195,12 @@ test("reviews and comments are reported as who, when, where and a link, never as
   assert.doesNotMatch(JSON.stringify(report), /SECRET_TEXT|leaks/);
   // The comments under a pull request change none of the counts.
   assert.deepEqual([report.reviews, report.review_comments, report.bot_review_comments], [1, 0, 1]);
-  // More than the server takes: the latest are sent.
+  assert.equal(report.feedback_total, 4);
+  // More than the server takes: the latest are sent, with how many there are.
   const many = Array.from({ length: 2100 }, (_, i) => ({ user: { login: "bob" }, created_at: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString() }));
-  const latest = feedbackOf([], [], many);
-  assert.equal(latest.length, 2000);
-  assert.equal(latest.at(-1).at, "2026-01-01T00:34:59.000Z");
+  const latest = buildReport({ ...GITHUB, reviews: [], comments: [], conversation: many, event: "review", host: "github.com", ignored: ignoring("") });
+  assert.deepEqual([latest.feedback.length, latest.feedback_total], [2000, 2100]);
+  assert.equal(latest.feedback.at(-1).at, "2026-01-01T00:34:59.000Z");
 });
 
 test("the figures as text", () => {
@@ -332,7 +334,21 @@ test("the figures are posted as one comment, kept up to date rather than repeate
     assert.ok(quiet.calls.every(([method]) => method === "GET"), `"${off}"`);
   }
   // The comments under the pull request are read once, for the report and for finding the Action's own.
-  assert.equal(fresh.calls.filter(([method, path]) => method === "GET" && path.includes("/issues/")).length, 1);
+  const reads = (api) => api.calls.filter(([method, path]) => method === "GET" && path.includes("/issues/")).length;
+  assert.equal(reads(stale), 1);
+  // When the Action's own is not among them they are read again before one is
+  // written: another run may have written it since.
+  assert.equal(reads(fresh), 2);
+  const raced = fakeGithub();
+  const answer = raced.request;
+  let read = 0;
+  raced.request = async (method, path, body) => {
+    const answered = await answer(method, path, body);
+    if (method !== "GET" || !path.includes("/issues/")) return answered;
+    return read++ === 0 ? [] : [{ id: 43, body: `${MARKER}\nthe other run's figures` }];
+  };
+  await run(environment(), { api: raced, deliver, log() {} });
+  assert.deepEqual(writes(raced), ["PATCH /repos/acme/web/issues/comments/43"]);
 });
 
 test("a job that may not comment still reports, and says what to change", async () => {

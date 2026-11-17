@@ -630,6 +630,8 @@ const MIGRATIONS: string[] = [
   // reported before these were kept.
   `ALTER TABLE pull_requests ADD COLUMN detail jsonb`,
   `ALTER TABLE pull_requests ADD COLUMN feedback jsonb`,
+  // How many reviews and comments there are, when that is more than are kept.
+  `ALTER TABLE pull_requests ADD COLUMN feedback_total integer`,
 ];
 
 /**

@@ -187,6 +187,13 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
           <p className="muted">Nobody has reviewed it or commented on it.</p>
         ) : (
           <>
+          {(p.feedback_total ?? 0) > p.feedback.length && (
+            <p className="muted hint">
+              This pull request has {count(p.feedback_total!)} reviews and comments. Only the latest{" "}
+              {count(p.feedback.length)} are kept, so the counts here leave out the {count(p.feedback_total! - p.feedback.length)}{" "}
+              before them.
+            </p>
+          )}
           <div className="scroll">
             <table>
               <thead>
