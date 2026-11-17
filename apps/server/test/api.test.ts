@@ -109,6 +109,27 @@ test("an upload is stored under the token's owner and can be replaced", async ()
   assert.equal((await put(tokens.bob, upload("s-ann-1"))).status, 409);
 });
 
+test("an uploader can take a session back, and nobody else can", async () => {
+  const address = "/api/v1/sessions/machine-1/claude-code/s-ann-gone";
+  const remove = (token: string) => app.request(address, { method: "DELETE", headers: auth(token) });
+  assert.equal((await put(tokens.ann, upload("s-ann-gone"))).status, 200);
+  const before = (await get(tokens.ann, "/sessions")).body.total;
+
+  const answer = async (token: string) => {
+    const response = await remove(token);
+    return [response.status, await response.json()];
+  };
+  // not Bob's: he has none to take back, and is told so
+  assert.deepEqual(await answer(tokens.bob), [200, { removed: false }]);
+  assert.equal((await get(tokens.ann, "/sessions")).body.total, before);
+
+  assert.deepEqual(await answer(tokens.ann), [200, { removed: true }]);
+  assert.equal((await get(tokens.ann, "/sessions")).body.total, before - 1);
+  assert.equal((await get(tokens.ann, "/sessions/machine-1/claude-code/s-ann-gone")).status, 404);
+  // again: there is none
+  assert.deepEqual(await answer(tokens.ann), [200, { removed: false }]);
+});
+
 test("bad uploads are refused with a reason", async () => {
   const refuse = async (response: Response, status: number, text: RegExp) => {
     assert.equal(response.status, status);

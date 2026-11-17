@@ -633,14 +633,29 @@ fn run(command: Command) -> Result<()> {
                     report.sent, report.unchanged
                 );
             }
+            if report.withdrawn > 0 {
+                println!(
+                    "Took back {} that are part of another session now",
+                    report.withdrawn
+                );
+            }
             for (id, reason) in &report.failed {
                 eprintln!("warning: {id} was not uploaded: {reason}");
+            }
+            for (id, reason) in &report.not_withdrawn {
+                eprintln!("warning: {id} was not taken back: {reason}");
             }
             if let Some(reason) = report.stopped {
                 bail!("upload stopped early: {reason}");
             }
             if !report.failed.is_empty() {
                 bail!("{} sessions were not uploaded", report.failed.len());
+            }
+            if !report.not_withdrawn.is_empty() {
+                bail!(
+                    "{} sessions were not taken back",
+                    report.not_withdrawn.len()
+                );
             }
         }
         Command::License { action } => {

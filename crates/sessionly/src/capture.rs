@@ -140,12 +140,14 @@ pub fn capture(
     // A payload with no transcript path may be either agent's. If the
     // session already has events filed under exactly one of them, it stays
     // there, so that it is not in two places. Sessions with no id of their
-    // own are not one session, and are left where they were detected.
+    // own are not one session, and are left where they were detected. So is
+    // an event known to be Cursor's or Grok's: only those two are in doubt.
     let no_path = record["payload"]["transcript_path"]
         .as_str()
         .is_none_or(str::is_empty);
-    let source = if no_path && stem != "_unknown" {
-        let filed: Vec<&str> = [crate::paths::CODEX, crate::paths::CLAUDE_CODE]
+    let either = [crate::paths::CODEX, crate::paths::CLAUDE_CODE];
+    let source = if no_path && either.contains(&source) && stem != "_unknown" {
+        let filed: Vec<&str> = either
             .into_iter()
             .filter(|other| raw_root.join(other).join(format!("{stem}.jsonl")).exists())
             .collect();
@@ -427,6 +429,17 @@ mod tests {
         assert!(lines
             .lines()
             .all(|l| l.contains("\"source\":\"claude-code\"")));
+    }
+
+    #[test]
+    fn an_event_known_to_be_another_agents_is_not_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("claude-code")).unwrap();
+        fs::write(dir.path().join("claude-code/k7.jsonl"), "").unwrap();
+        // Cursor's, with no transcript yet, and a file of that name elsewhere
+        let payload = r#"{"conversation_id":"k7","hook_event_name":"stop","transcript_path":null}"#;
+        let (path, _) = capture(dir.path(), &mut payload.as_bytes(), "t", local).unwrap();
+        assert_eq!(path, dir.path().join("cursor/k7.jsonl"));
     }
 
     #[test]
