@@ -98,16 +98,28 @@ CREATE TABLE uploads (
 ";
 
 /// Sessions that were uploaded and are sessions no more (`Ledger::remove`):
-/// each server that has one is still to be told. Made apart from the tables
-/// above, which a ledger of an earlier version has without it.
+/// each server that has one is still to be told, once it has the session
+/// that one is part of now (`part_of`). Made apart from the tables above,
+/// which a ledger of an earlier version has without it.
 const WITHDRAWALS: &str = "
 CREATE TABLE IF NOT EXISTS withdrawals (
     session_id TEXT NOT NULL,
     server     TEXT NOT NULL,
     source     TEXT NOT NULL,
+    part_of    TEXT NOT NULL,
     PRIMARY KEY (session_id, server)
 );
 ";
+
+/// A session a server has that is a session no more.
+#[derive(Debug, PartialEq)]
+pub struct Withdrawal {
+    pub session_id: String,
+    /// The agent it was of.
+    pub source: String,
+    /// The session that holds its work now.
+    pub part_of: String,
+}
 
 /// Per-session rewrite totals, joined into listings.
 const REWRITE_TOTALS: &str = "
@@ -379,6 +391,16 @@ impl Ledger {
             tx.pragma_update(None, "user_version", DB_VERSION)?;
         }
         tx.execute_batch(WITHDRAWALS)?;
+        // A build from before `part_of` made the table without it. What it
+        // noted is kept, as part of a session nobody can name any more.
+        let knows_part_of = tx
+            .prepare("SELECT 1 FROM pragma_table_info('withdrawals') WHERE name = 'part_of'")?
+            .exists([])?;
+        if !knows_part_of {
+            tx.execute_batch(
+                "ALTER TABLE withdrawals ADD COLUMN part_of TEXT NOT NULL DEFAULT ''",
+            )?;
+        }
         tx.commit()?;
         Ok(Ledger { conn })
     }
@@ -563,14 +585,20 @@ impl Ledger {
         Ok(())
     }
 
-    /// The sessions `server` has that are sessions no more, each with the
-    /// agent it was of.
-    pub fn withdrawals(&self, server: &str) -> Result<Vec<(String, String)>> {
+    /// The sessions `server` has that are sessions no more.
+    pub fn withdrawals(&self, server: &str) -> Result<Vec<Withdrawal>> {
         let mut query = self.conn.prepare(
-            "SELECT session_id, source FROM withdrawals WHERE server = ?1 ORDER BY session_id",
+            "SELECT session_id, source, part_of FROM withdrawals
+             WHERE server = ?1 ORDER BY session_id",
         )?;
         let rows = query
-            .query_map([server], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map([server], |r| {
+                Ok(Withdrawal {
+                    session_id: r.get(0)?,
+                    source: r.get(1)?,
+                    part_of: r.get(2)?,
+                })
+            })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows)
     }
@@ -605,16 +633,17 @@ impl Ledger {
     }
 
     /// Remove one session that is a session no more, with its files and
-    /// measurements. Returns whether it was there. A server it was uploaded
-    /// to still has it: that is noted, for the next upload to take it back
-    /// (`withdrawals`).
-    pub fn remove(&mut self, session_id: &str) -> Result<bool> {
+    /// measurements: its work is in the session `part_of` now. Returns
+    /// whether it was there. A server it was uploaded to still has it: that
+    /// is noted, for an upload to take it back once that server has
+    /// `part_of` (`withdrawals`).
+    pub fn remove(&mut self, session_id: &str, part_of: &str) -> Result<bool> {
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT OR REPLACE INTO withdrawals
-             SELECT u.session_id, u.server, s.source FROM uploads u
+             SELECT u.session_id, u.server, s.source, ?2 FROM uploads u
              JOIN sessions s ON s.session_id = u.session_id WHERE u.session_id = ?1",
-            [session_id],
+            [session_id, part_of],
         )?;
         tx.execute("DELETE FROM rewrite WHERE session_id = ?1", [session_id])?;
         tx.execute("DELETE FROM uploads WHERE session_id = ?1", [session_id])?;
@@ -894,6 +923,37 @@ mod tests {
             .query_row("SELECT count(*) FROM session_files", [], |r| r.get(0))
             .unwrap();
         assert_eq!(files, 1);
+    }
+
+    #[test]
+    fn what_an_earlier_build_noted_to_take_back_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("l.db");
+        drop(Ledger::open(&path).unwrap());
+        // The table as it was made before it said what a session became part of.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE withdrawals;
+             CREATE TABLE withdrawals (session_id TEXT NOT NULL, server TEXT NOT NULL,
+                 source TEXT NOT NULL, PRIMARY KEY (session_id, server));
+             INSERT INTO withdrawals VALUES ('sub-1', 'https://s.example.com', 'codex');",
+        )
+        .unwrap();
+        drop(conn);
+        let mut ledger = Ledger::open(&path).unwrap();
+        assert_eq!(
+            ledger.withdrawals("https://s.example.com").unwrap(),
+            [Withdrawal {
+                session_id: "sub-1".into(),
+                source: "codex".into(),
+                part_of: String::new(),
+            }]
+        );
+        // And one can be noted in it as before.
+        ledger
+            .upsert(&session("sub-2"), &fingerprint(1), &[])
+            .unwrap();
+        assert!(ledger.remove("sub-2", "main-1").unwrap());
     }
 
     #[test]

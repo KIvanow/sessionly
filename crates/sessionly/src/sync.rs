@@ -350,7 +350,7 @@ pub fn run(
             let parent_is_in = present.stems.contains(parent);
             if parent_is_in {
                 if ledger.fingerprint(subagent)?.is_some() {
-                    report.removed += u64::from(ledger.remove(subagent)?);
+                    report.removed += u64::from(ledger.remove(subagent, parent)?);
                 }
             } else {
                 record(pass.stem(ledger, subagent, &[])?, &mut report, &mut present);
@@ -485,7 +485,12 @@ mod tests {
         assert_eq!((report.synced, report.removed), (1, 1));
         assert!(env.ledger.get("sub").unwrap().is_none());
         // the server still has it: that is noted, for the next upload
-        let noted = vec![("sub".to_string(), "codex".to_string())];
+        // once it has the session the subagent is part of
+        let noted = vec![crate::ledger::Withdrawal {
+            session_id: "sub".into(),
+            source: "codex".into(),
+            part_of: "main".into(),
+        }];
         assert_eq!(env.ledger.withdrawals(server).unwrap(), noted);
         // a rebuild reports it once, not twice
         let forced = run(&[dirs()], &mut env.ledger, "machine-1", true).unwrap();

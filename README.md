@@ -560,9 +560,11 @@ with `Authorization: Bearer <token>`:
   body is the payload described under [What an upload contains](#what-an-upload-contains).
 - `DELETE /api/v1/sessions/{machine_id}/{source}/{session_id}` takes one back. The binary
   sends it only for a session that has become part of another (a Codex subagent's thread
-  uploaded before its session was known), and only the person a session is filed under can.
-  A server from before this answers 404, which the binary takes as nothing left to do: such
-  a server keeps the extra copy.
+  uploaded before its session was known), and only once the server has the session it is
+  part of. Only the person a session is filed under can take it back; the answer is
+  `{"removed": true}`, or `false` if there was none of theirs. A server from before this
+  answers 404, and a token that may not gets 403: the binary keeps the session noted and asks
+  again at a later upload, and until then such a server keeps the extra copy.
 
 ```sh
 sessionly connect https://sessionly.example.com   # asks for the token, checks it, saves both
@@ -741,7 +743,7 @@ sees their own sessions; an admin sees everyone's. A `ci` token is for the GitHu
 report pull requests and nothing else. An `env` token is for a cloud agent's environment (see
 [Cloud sessions](#cloud-sessions)): it can upload sessions and nothing else, and a cloud session
 it uploads is filed under the person the platform says started it, since several people start
-sessions in one environment. Whoever holds it can therefore upload a session in anyone's name,
+sessions in one environment. It can take back only a session filed under its own address. Whoever holds it can therefore upload a session in anyone's name,
 so give it only to those environments. An admin creates and revokes tokens through
 `POST /api/v1/tokens`, `GET /api/v1/tokens` and `DELETE /api/v1/tokens/{id}`, or from the command
 line with `pnpm token create --email ann@example.com` (with the embedded database, stop the

@@ -246,9 +246,12 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
         return c.json({ error: "this token only reports pull requests" }, 403);
       }
     }
-    // An env token uploads the sessions of a cloud environment and does nothing else.
+    // An env token uploads the sessions of a cloud environment and does nothing
+    // else, but for taking one back: as for anyone, only one filed under the
+    // token's own address, never one filed under a person the platform named.
     if (principal.role === "env") {
-      const uploading = c.req.method === "PUT" && /\/sessions\/[^/]+\/[^/]+\/[^/]+$/.test(c.req.path);
+      const uploading =
+        (c.req.method === "PUT" || c.req.method === "DELETE") && /\/sessions\/[^/]+\/[^/]+\/[^/]+$/.test(c.req.path);
       if (!uploading && !c.req.path.endsWith("/ping")) {
         return c.json({ error: "this token only uploads sessions" }, 403);
       }
@@ -426,6 +429,8 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
 
   // The uploader takes a session back: its machine no longer has it as one
   // (a subagent's thread, since folded into the session that started it).
+  // Having none of theirs to remove is an answer too, not a failure: a 404
+  // here is left to mean a server that has no such address yet.
   api.delete("/sessions/:machine/:source/:session", async (c) => {
     const { machine, source, session } = c.req.param();
     const removed = await removeUpload(c.get("db"), c.get("principal"), {
@@ -433,7 +438,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       source,
       session_id: session,
     });
-    return removed ? c.json({ removed }) : c.json({ error: "no such session of yours" }, 404);
+    return c.json({ removed });
   });
 
   api.get("/summary", async (c) => {

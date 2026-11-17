@@ -145,9 +145,9 @@ pub fn capture(
     let no_path = record["payload"]["transcript_path"]
         .as_str()
         .is_none_or(str::is_empty);
-    let in_doubt = [crate::paths::CODEX, crate::paths::CLAUDE_CODE].contains(&source);
-    let source = if no_path && in_doubt && stem != "_unknown" {
-        let filed: Vec<&str> = [crate::paths::CODEX, crate::paths::CLAUDE_CODE]
+    let either = [crate::paths::CODEX, crate::paths::CLAUDE_CODE];
+    let source = if no_path && either.contains(&source) && stem != "_unknown" {
+        let filed: Vec<&str> = either
             .into_iter()
             .filter(|other| raw_root.join(other).join(format!("{stem}.jsonl")).exists())
             .collect();

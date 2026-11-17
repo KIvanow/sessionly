@@ -125,7 +125,9 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
 /**
  * Take back one session its uploader no longer has: what it held is now part
  * of another session, which a second copy here would count twice. Only the
- * person it is filed under can. Returns whether there was one to remove.
+ * person it is filed under can: for an `env` token that is its own address,
+ * so a cloud session filed under whoever started it stays. Returns whether
+ * there was one to remove.
  */
 export async function removeUpload(
   db: OrgDb,

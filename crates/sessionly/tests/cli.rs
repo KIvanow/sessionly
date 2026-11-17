@@ -633,10 +633,13 @@ struct Received {
 }
 
 /// A minimal HTTP server that records requests and answers with `status`.
+/// A DELETE has an answer of its own (`deleting`): at first that the
+/// session was there and is removed.
 struct StubServer {
     url: String,
     received: Arc<Mutex<Vec<Received>>>,
     status: Arc<AtomicU16>,
+    deleting: Arc<Mutex<(u16, &'static str)>>,
 }
 
 impl StubServer {
@@ -645,7 +648,8 @@ impl StubServer {
         let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let received = Arc::new(Mutex::new(Vec::new()));
         let status = Arc::new(AtomicU16::new(200));
-        let (log, code) = (received.clone(), status.clone());
+        let deleting = Arc::new(Mutex::new((200, r#"{"removed":true}"#)));
+        let (log, code, taking_back) = (received.clone(), status.clone(), deleting.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let mut reader = BufReader::new(stream);
@@ -672,14 +676,16 @@ impl StubServer {
                 }
                 let mut body = vec![0u8; length];
                 let _ = reader.read_exact(&mut body);
+                let (status, answer) = match method.as_str() {
+                    "DELETE" => *taking_back.lock().unwrap(),
+                    _ => (code.load(Ordering::SeqCst), r#"{"error":"stub says no"}"#),
+                };
                 log.lock().unwrap().push(Received {
                     method,
                     path,
                     auth,
                     body: String::from_utf8_lossy(&body).into_owned(),
                 });
-                let status = code.load(Ordering::SeqCst);
-                let answer = r#"{"error":"stub says no"}"#;
                 let _ = reader.get_mut().write_all(
                     format!(
                         "HTTP/1.1 {status} Stub\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
@@ -693,7 +699,19 @@ impl StubServer {
             url,
             received,
             status,
+            deleting,
         }
+    }
+
+    fn deletes(&self) -> Vec<Received> {
+        self.requests()
+            .into_iter()
+            .filter(|r| r.method == "DELETE")
+            .collect()
+    }
+
+    fn answer_deletes_with(&self, status: u16, body: &'static str) {
+        *self.deleting.lock().unwrap() = (status, body);
     }
 
     fn requests(&self) -> Vec<Received> {
@@ -784,63 +802,74 @@ fn shell_edits_are_counted_on_this_machine_when_switched_on() {
     assert!(!kept.exists());
 }
 
+const CODEX_MAIN: &str = "019a8f00-0000-7000-8000-00000000000a";
+const CODEX_SUB: &str = "019a8f00-0000-7000-8000-00000000000b";
+
+/// A Codex thread of the session `CODEX_MAIN`: its rollout with one finished
+/// turn, and a hook event that names it. `spawned` makes it a subagent's.
+fn codex_thread(home: &Path, id: &str, spawned: bool) {
+    use serde_json::json;
+    let day = home.join(".codex/sessions/2026/11/16");
+    fs::create_dir_all(&day).unwrap();
+    let source = match spawned {
+        true => json!({ "subagent": { "thread_spawn":
+                        { "parent_thread_id": CODEX_MAIN, "depth": 1 } } }),
+        false => json!("cli"),
+    };
+    let at = "2026-11-16T10:00:00.000Z";
+    let rows = [
+        json!({ "timestamp": at, "type": "session_meta", "payload": {
+            "session_id": CODEX_MAIN, "id": id, "cwd": "/work", "source": source } }),
+        json!({ "timestamp": at, "type": "event_msg",
+                "payload": { "type": "task_started", "turn_id": "t1" } }),
+        json!({ "timestamp": at, "type": "event_msg",
+                "payload": { "type": "user_message", "message": "look around" } }),
+        json!({ "timestamp": at, "type": "event_msg",
+                "payload": { "type": "task_complete", "turn_id": "t1" } }),
+    ];
+    let rollout = day.join(format!("rollout-2026-11-16T10-00-00-{id}.jsonl"));
+    let text: String = rows.iter().map(|row| format!("{row}\n")).collect();
+    fs::write(&rollout, text).unwrap();
+    let mut cmd = sessionly(home);
+    cmd.arg("capture");
+    let payload = json!({ "session_id": id, "turn_id": "t1", "hook_event_name": "Stop",
+                          "transcript_path": rollout });
+    assert_silent_success(
+        &run_with_stdin(cmd, payload.to_string().as_bytes()),
+        "capture",
+    );
+}
+
+/// A machine whose Codex subagents were each uploaded to `server` as a
+/// session of their own: the session that spawned them is not known yet.
+fn upload_subagents_alone(home: &Path, server: &StubServer, subagents: &[&str]) {
+    for id in subagents {
+        codex_thread(home, id, true);
+    }
+    stdout(run(
+        home,
+        &["connect", &server.url, "--token", "secret-token"],
+    ));
+    let alone = stdout(run(home, &["upload"]));
+    let sent = format!("Uploaded {} sessions", subagents.len());
+    assert!(alone.contains(&sent), "{alone}");
+    assert!(server.deletes().is_empty());
+}
+
 /// A Codex subagent's thread can be uploaded as a session before the session
 /// that spawned it is known. Once it is part of that one, the server is told
 /// to drop its own copy, so its work is not there twice.
 #[test]
 fn a_subagent_uploaded_alone_is_taken_back_once_it_is_part_of_its_session() {
-    use serde_json::json;
-    const MAIN: &str = "019a8f00-0000-7000-8000-00000000000a";
-    const SUB: &str = "019a8f00-0000-7000-8000-00000000000b";
     let home = tempfile::tempdir().unwrap();
     let server = StubServer::start();
-    let day = home.path().join(".codex/sessions/2026/11/16");
-    fs::create_dir_all(&day).unwrap();
-    // A thread's rollout with one finished turn, and a hook event that names it.
-    let thread = |id: &str, source: serde_json::Value| {
-        let at = "2026-11-16T10:00:00.000Z";
-        let rows = [
-            json!({ "timestamp": at, "type": "session_meta", "payload": {
-                "session_id": MAIN, "id": id, "cwd": "/work", "source": source } }),
-            json!({ "timestamp": at, "type": "event_msg",
-                    "payload": { "type": "task_started", "turn_id": "t1" } }),
-            json!({ "timestamp": at, "type": "event_msg",
-                    "payload": { "type": "user_message", "message": "look around" } }),
-            json!({ "timestamp": at, "type": "event_msg",
-                    "payload": { "type": "task_complete", "turn_id": "t1" } }),
-        ];
-        let rollout = day.join(format!("rollout-2026-11-16T10-00-00-{id}.jsonl"));
-        let text: String = rows.iter().map(|row| format!("{row}\n")).collect();
-        fs::write(&rollout, text).unwrap();
-        let mut cmd = sessionly(home.path());
-        cmd.arg("capture");
-        let payload = json!({ "session_id": id, "turn_id": "t1", "hook_event_name": "Stop",
-                              "transcript_path": rollout });
-        assert_silent_success(
-            &run_with_stdin(cmd, payload.to_string().as_bytes()),
-            "capture",
-        );
-    };
-    let deletes = || {
-        let all = server.requests().into_iter();
-        all.filter(|r| r.method == "DELETE").collect::<Vec<_>>()
-    };
-
-    thread(
-        SUB,
-        json!({ "subagent": { "thread_spawn": { "parent_thread_id": MAIN, "depth": 1 } } }),
-    );
-    stdout(run(
-        home.path(),
-        &["connect", &server.url, "--token", "secret-token"],
-    ));
-    let alone = stdout(run(home.path(), &["upload"]));
-    assert!(alone.contains("Uploaded 1 sessions"), "{alone}");
-    assert!(server.puts()[0].path.ends_with(&format!("/codex/{SUB}")));
-    assert!(deletes().is_empty());
+    upload_subagents_alone(home.path(), &server, &[CODEX_SUB]);
+    assert!(server.puts()[0]
+        .path
+        .ends_with(&format!("/codex/{CODEX_SUB}")));
 
     // The session that spawned it turns up: the subagent is part of that.
-    thread(MAIN, json!("cli"));
+    codex_thread(home.path(), CODEX_MAIN, false);
     let folded = stdout(run(home.path(), &["upload"]));
     assert!(
         folded.contains("Uploaded 1 sessions") && folded.contains("Took back 1"),
@@ -848,8 +877,8 @@ fn a_subagent_uploaded_alone_is_taken_back_once_it_is_part_of_its_session() {
     );
     let puts = server.puts();
     assert_eq!(puts.len(), 2);
-    assert!(puts[1].path.ends_with(&format!("/codex/{MAIN}")));
-    let taken = deletes();
+    assert!(puts[1].path.ends_with(&format!("/codex/{CODEX_MAIN}")));
+    let taken = server.deletes();
     assert_eq!(taken.len(), 1);
     assert_eq!(taken[0].path, puts[0].path);
     assert_eq!(taken[0].auth.as_deref(), Some("Bearer secret-token"));
@@ -857,7 +886,117 @@ fn a_subagent_uploaded_alone_is_taken_back_once_it_is_part_of_its_session() {
     // Once is enough.
     let again = stdout(run(home.path(), &["upload"]));
     assert!(!again.contains("Took back"), "{again}");
-    assert_eq!(deletes().len(), 1);
+    assert_eq!(server.deletes().len(), 1);
+}
+
+/// The server's copy of a subagent is all it has of that work until the
+/// session it is part of has arrived there.
+#[test]
+fn a_subagent_is_not_taken_back_before_the_server_has_its_session() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    upload_subagents_alone(home.path(), &server, &[CODEX_SUB]);
+
+    // The session that spawned it is refused: too large, say.
+    codex_thread(home.path(), CODEX_MAIN, false);
+    server.answer_with(413);
+    let refused = run(home.path(), &["upload"]);
+    assert!(!refused.status.success());
+    let text = stderr(&refused);
+    assert!(
+        text.contains(&format!("{CODEX_MAIN} was not uploaded")),
+        "{text}"
+    );
+    assert!(server.deletes().is_empty());
+
+    // Once it is there, the copy goes.
+    server.answer_with(200);
+    let sent = stdout(run(home.path(), &["upload"]));
+    assert!(
+        sent.contains("Uploaded 1 sessions") && sent.contains("Took back 1"),
+        "{sent}"
+    );
+    assert_eq!(server.deletes().len(), 1);
+}
+
+/// A server that cannot take a session back, or will not for this token, has
+/// still stored every upload: that is no failure, and it is asked again later.
+#[test]
+fn a_take_back_the_server_cannot_do_waits_and_fails_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    upload_subagents_alone(home.path(), &server, &[CODEX_SUB]);
+    codex_thread(home.path(), CODEX_MAIN, false);
+
+    // A token that only uploads, on a server that lets it do nothing else.
+    server.answer_deletes_with(403, r#"{"error":"this token only uploads sessions"}"#);
+    let out = run(home.path(), &["upload"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).is_empty(), "{}", stderr(&out));
+    let text = stdout(out);
+    assert!(
+        text.contains("Uploaded 1 sessions") && !text.contains("Took back"),
+        "{text}"
+    );
+    assert_eq!(server.deletes().len(), 1);
+
+    // A server from before sessions could be taken back.
+    server.answer_deletes_with(404, r#"{"error":"not found"}"#);
+    let text = stdout(run(home.path(), &["upload"]));
+    assert!(!text.contains("Took back"), "{text}");
+    assert_eq!(server.deletes().len(), 2);
+
+    // A server that fails: said for what it is, not as a failed upload.
+    server.answer_deletes_with(503, r#"{"error":"try later"}"#);
+    let out = run(home.path(), &["upload"]);
+    assert!(!out.status.success());
+    let text = stderr(&out);
+    assert!(
+        text.contains(&format!("{CODEX_SUB} was not taken back")) && text.contains("try later"),
+        "{text}"
+    );
+    assert!(!text.contains("not uploaded"), "{text}");
+    assert_eq!(server.deletes().len(), 3);
+
+    // The server has none of this person's: nothing was taken back, and
+    // there is nothing more to ask.
+    server.answer_deletes_with(200, r#"{"removed":false}"#);
+    let text = stdout(run(home.path(), &["upload"]));
+    assert!(!text.contains("Took back"), "{text}");
+    assert_eq!(server.deletes().len(), 4);
+    stdout(run(home.path(), &["upload"]));
+    assert_eq!(server.deletes().len(), 4);
+}
+
+/// A server that is down is not asked once for every session to take back.
+#[test]
+fn take_backs_stop_when_the_server_cannot_be_reached() {
+    const SUBS: [&str; 5] = [
+        "019a8f00-0000-7000-8000-0000000000b1",
+        "019a8f00-0000-7000-8000-0000000000b2",
+        "019a8f00-0000-7000-8000-0000000000b3",
+        "019a8f00-0000-7000-8000-0000000000b4",
+        "019a8f00-0000-7000-8000-0000000000b5",
+    ];
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    upload_subagents_alone(home.path(), &server, &SUBS);
+    codex_thread(home.path(), CODEX_MAIN, false);
+
+    server.answer_deletes_with(503, r#"{"error":"try later"}"#);
+    let out = run(home.path(), &["upload"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("upload stopped early"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(server.deletes().len(), 3);
+
+    // All of them, once it is back.
+    server.answer_deletes_with(200, r#"{"removed":true}"#);
+    let text = stdout(run(home.path(), &["upload"]));
+    assert!(text.contains("Took back 5"), "{text}");
 }
 
 #[test]

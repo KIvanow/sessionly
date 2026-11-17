@@ -115,15 +115,19 @@ test("an uploader can take a session back, and nobody else can", async () => {
   assert.equal((await put(tokens.ann, upload("s-ann-gone"))).status, 200);
   const before = (await get(tokens.ann, "/sessions")).body.total;
 
-  assert.equal((await remove(tokens.bob)).status, 404);
+  const answer = async (token: string) => {
+    const response = await remove(token);
+    return [response.status, await response.json()];
+  };
+  // not Bob's: he has none to take back, and is told so
+  assert.deepEqual(await answer(tokens.bob), [200, { removed: false }]);
   assert.equal((await get(tokens.ann, "/sessions")).body.total, before);
 
-  const removed = await remove(tokens.ann);
-  assert.deepEqual([removed.status, await removed.json()], [200, { removed: true }]);
+  assert.deepEqual(await answer(tokens.ann), [200, { removed: true }]);
   assert.equal((await get(tokens.ann, "/sessions")).body.total, before - 1);
   assert.equal((await get(tokens.ann, "/sessions/machine-1/claude-code/s-ann-gone")).status, 404);
   // again: there is none
-  assert.equal((await remove(tokens.ann)).status, 404);
+  assert.deepEqual(await answer(tokens.ann), [200, { removed: false }]);
 });
 
 test("bad uploads are refused with a reason", async () => {

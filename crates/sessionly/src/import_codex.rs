@@ -64,32 +64,84 @@ pub fn thread_id(path: &Path) -> Option<String> {
     (!id.is_empty()).then(|| id.to_string())
 }
 
-/// The thread that started the session a rollout is part of: for a subagent
-/// that is another thread, the first record's `payload.session_id`. Any
-/// other thread is its own session, whatever `session_id` it carries: a fork
-/// can have its parent's, and is not a subagent. The first record holds the
-/// whole system prompt as well, so it is read for this only.
-pub fn root_of(path: &Path) -> Option<String> {
+/// What a rollout's first record says of where its thread came from.
+struct Origin {
+    /// The thread itself.
+    id: Option<String>,
+    /// `session_id`: for a subagent, the thread that started it all.
+    session: Option<String>,
+    subagent: bool,
+    /// The thread that spawned a subagent, where the record names it.
+    parent: Option<String>,
+}
+
+/// The first record holds the whole system prompt as well, so it is read
+/// for this only.
+fn origin(path: &Path) -> Option<Origin> {
     let mut line = String::new();
     BufReader::new(fs::File::open(path).ok()?.take(FIRST_RECORD_LIMIT))
         .read_line(&mut line)
         .ok()?;
     let row: Value = serde_json::from_str(&line).ok()?;
     let meta = &row["payload"];
+    let text = |value: &Value| value.as_str().filter(|s| !s.is_empty()).map(String::from);
     // `source` is a word (`cli`, `exec`) or, for a subagent, says what kind.
-    let subagent = meta["source"].get("subagent").is_some() || meta["thread_source"] == "subagent";
-    let id = match meta["session_id"].as_str() {
-        Some(session) if subagent => session,
-        _ => meta["id"].as_str().or(meta["session_id"].as_str())?,
-    };
-    (!id.is_empty()).then(|| id.to_string())
+    let spawned = &meta["source"]["subagent"]["thread_spawn"];
+    Some(Origin {
+        id: text(&meta["id"]),
+        session: text(&meta["session_id"]),
+        subagent: meta["source"].get("subagent").is_some() || meta["thread_source"] == "subagent",
+        parent: text(&spawned["parent_thread_id"]).or(text(&meta["parent_thread_id"])),
+    })
 }
 
-/// The rule `root_of` goes by. What `Roots` remembers from another is not used.
-const ROOT_RULE: u64 = 2;
+/// The thread that started the session a rollout is part of. Any thread
+/// that is not a subagent is its own session, whatever `session_id` it
+/// carries: a fork can have its parent's, and is not a subagent. A subagent
+/// is part of the session of the thread that spawned it, and that one's if
+/// it is a subagent too. That is the thread its `session_id` names, except
+/// under a fork, whose subagents carry the session id the fork does: so the
+/// way up is followed through the files of the same Codex folder. Where it
+/// cannot be (no parent named, or its file is gone), `session_id` stands.
+pub fn root_of(path: &Path) -> Option<String> {
+    let first = origin(path)?;
+    if !first.subagent {
+        return first.id.or(first.session);
+    }
+    let said = first.session.clone();
+    let mut seen = HashSet::new();
+    let mut at = first;
+    while let Some(parent) = at.parent.take() {
+        // The usual case, with no other file to read.
+        if said.as_deref() == Some(&*parent) {
+            return said;
+        }
+        let file = home_of(path).and_then(|home| rollout_in(home, &parent));
+        match file.and_then(|file| origin(&file)) {
+            Some(above) if !above.subagent => return Some(parent),
+            // spawned by a subagent: on up, unless this is going in circles
+            Some(above) if seen.insert(parent.clone()) => at = above,
+            _ => return said.or(Some(parent)),
+        }
+    }
+    said.or(at.id)
+}
+
+/// The rule `root_of` goes by. What `Roots` remembers from another stands
+/// only for a rollout that can no longer be read.
+const ROOT_RULE: u64 = 3;
 
 /// The most a first record is read to: it is some tens of kilobytes.
 const FIRST_RECORD_LIMIT: u64 = 64 << 20;
+
+/// The file that holds `thread` as it stands now, in a Codex folder.
+fn rollout_in(home: &Path, thread: &str) -> Option<PathBuf> {
+    let files: Vec<PathBuf> = files_in(home)
+        .into_iter()
+        .filter(|p| thread_id(p).as_deref() == Some(thread))
+        .collect();
+    latest_rollout(&files).cloned()
+}
 
 /// The file of a rollout that has since been moved (Codex archives old
 /// ones): `path` itself if it is still there, else the thread's latest file in
@@ -98,12 +150,7 @@ fn locate(path: &Path) -> Option<PathBuf> {
     if path.exists() {
         return Some(path.to_path_buf());
     }
-    let thread = thread_id(path)?;
-    let files: Vec<PathBuf> = files_in(home_of(path)?)
-        .into_iter()
-        .filter(|p| thread_id(p).as_deref() == Some(&*thread))
-        .collect();
-    latest_rollout(&files).cloned()
+    rollout_in(home_of(path)?, &thread_id(path)?)
 }
 
 /// What was found out about rollouts, kept between runs. The first record of
@@ -114,6 +161,10 @@ pub struct Roots {
     file: PathBuf,
     /// Rollout path to the thread its session began as (`root_of`).
     roots: HashMap<String, String>,
+    /// The same as an earlier rule had it. A rollout is read again by the
+    /// rule of now; one that has been deleted since cannot be, and what was
+    /// found out about it then is all there is.
+    before: HashMap<String, String>,
     /// Capture or import file to the rollout it names.
     rollouts: HashMap<String, String>,
     /// Files that named none, and how long they were then.
@@ -137,13 +188,15 @@ impl Roots {
                 .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
                 .collect()
         };
+        let mut roots = map("roots");
+        let mut before = map("roots_before");
+        if saved["root_rule"] != ROOT_RULE {
+            before.extend(roots.drain());
+        }
         Roots {
             file,
-            roots: if saved["root_rule"] == ROOT_RULE {
-                map("roots")
-            } else {
-                HashMap::new()
-            },
+            roots,
+            before,
             rollouts: map("rollouts"),
             misses: saved["misses"]
                 .as_object()
@@ -156,13 +209,16 @@ impl Roots {
     }
 
     /// `root_of`, read from the file only the first time. A file that is gone
-    /// is looked for among the thread's others.
+    /// is looked for among the thread's others, and if the thread has none
+    /// left, what an earlier rule made of it stands.
     pub fn root_of(&mut self, rollout: &Path) -> Option<String> {
         let key = rollout.to_string_lossy().into_owned();
         if let Some(root) = self.roots.get(&key) {
             return Some(root.clone());
         }
-        let root = root_of(&locate(rollout)?)?;
+        let read = locate(rollout).and_then(|file| root_of(&file));
+        let root = read.or_else(|| self.before.get(&key).cloned())?;
+        self.before.remove(&key);
         self.roots.insert(key, root.clone());
         self.dirty = true;
         Some(root)
@@ -213,6 +269,7 @@ impl Roots {
                 .file
                 .with_extension(format!("json.{}.tmp", std::process::id()));
             let saved = json!({ "root_rule": ROOT_RULE, "roots": self.roots,
+                "roots_before": self.before,
                 "rollouts": self.rollouts, "misses": self.misses });
             fs::write(&tmp, serde_json::to_vec(&saved)?)?;
             fs::rename(&tmp, &self.file)?;
@@ -1863,6 +1920,73 @@ pub(crate) mod tests {
             "sessions/2026/11/16/rollout-2026-11-16T12-00-09-019a8f00-0000-7000-8000-0000000000ff.jsonl",
         );
         assert_eq!(fresh.root_of(&nowhere), None);
+    }
+
+    #[test]
+    fn a_subagent_belongs_to_the_thread_that_spawned_it_fork_or_not() {
+        const FORK: &str = "019a8f00-0000-7000-8000-0000000000f0";
+        const DEEPER: &str = "019a8f00-0000-7000-8000-0000000000f1";
+        let dir = tempfile::tempdir().unwrap();
+        let file = |thread: &str| {
+            dir.path().join(format!(
+                "sessions/2026/11/17/rollout-2026-11-17T10-00-00-{thread}.jsonl"
+            ))
+        };
+        let spawned_by = |parent: &str| json!({ "source": { "subagent": { "thread_spawn": { "parent_thread_id": parent } } } });
+        // a fork carries its parent's session id, and so does what it spawns
+        write(&file(FORK), &[meta(FORK, json!({}))]);
+        write(&file(CHILD), &[meta(CHILD, spawned_by(FORK))]);
+        assert_eq!(root_of(&file(CHILD)).as_deref(), Some(FORK));
+        // a subagent's own subagent is part of the same session
+        write(&file(DEEPER), &[meta(DEEPER, spawned_by(CHILD))]);
+        assert_eq!(root_of(&file(DEEPER)).as_deref(), Some(FORK));
+
+        // with the fork's file gone, the session id is all there is to go by
+        fs::remove_file(file(FORK)).unwrap();
+        assert_eq!(root_of(&file(CHILD)).as_deref(), Some(MAIN));
+        // and with no session id, the thread that is named
+        let mut bare = spawned_by(FORK);
+        bare["id"] = json!(CHILD);
+        write(&file(CHILD), &[row(0, "session_meta", bare)]);
+        assert_eq!(root_of(&file(CHILD)).as_deref(), Some(FORK));
+    }
+
+    #[test]
+    fn what_an_earlier_rule_remembered_stands_only_for_a_rollout_that_is_gone() {
+        const FORK: &str = "019a8f00-0000-7000-8000-0000000000f0";
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("imported");
+        let fork = dir.path().join(format!(
+            "sessions/2026/11/17/rollout-2026-11-17T10-00-00-{FORK}.jsonl"
+        ));
+        write(&fork, &[meta(FORK, json!({}))]);
+        // a subagent whose rollout was deleted after its root was found out
+        let gone = dir.path().join(format!(
+            "sessions/2026/11/16/rollout-2026-11-16T12-00-08-{CHILD}.jsonl"
+        ));
+        fs::create_dir_all(&cache).unwrap();
+        // as it was written before there was a rule to name
+        let (fork_key, gone_key) = (fork.to_string_lossy(), gone.to_string_lossy());
+        let remembered = json!({ "roots": { &*fork_key: MAIN, &*gone_key: MAIN } });
+        fs::write(cache.join("_roots.json"), remembered.to_string()).unwrap();
+
+        // someone who asks about neither leaves both as they are
+        let mut roots = Roots::load(&cache);
+        assert_eq!(roots.root_of(&sample(dir.path())).as_deref(), Some(MAIN));
+        roots.save();
+
+        let mut roots = Roots::load(&cache);
+        // read again: a fork is its own session by the rule of now
+        assert_eq!(roots.root_of(&fork).as_deref(), Some(FORK));
+        // nothing to read: what was remembered is kept
+        assert_eq!(roots.root_of(&gone).as_deref(), Some(MAIN));
+        roots.save();
+        // and is not looked for again
+        let saved: Value =
+            serde_json::from_str(&fs::read_to_string(cache.join("_roots.json")).unwrap()).unwrap();
+        assert_eq!(saved["roots"][&*gone_key], MAIN);
+        assert_eq!(saved["roots_before"], json!({}));
+        assert_eq!(Roots::load(&cache).root_of(&gone).as_deref(), Some(MAIN));
     }
 
     fn tool_names(events: &[Value], hook: &str) -> Vec<String> {
