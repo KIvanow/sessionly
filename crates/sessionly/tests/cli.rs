@@ -2365,6 +2365,9 @@ fn update_replaces_the_binary_with_a_release_that_checks_out() {
     release_of(&releases, "99.0.0", "sessionly 99.0.0", true);
     release_of(&releases, "99.0.1", "sessionly 99.0.1", false);
     release_of(&releases, "99.0.2", "sessionly 1.2.3", true);
+    // Says the right thing and then fails: the quote ends the script's
+    // `echo`, and the lines after it are the script's own.
+    release_of(&releases, "99.0.3", "sessionly 99.0.3'\nexit 1\n: '", true);
     let latest = home.path().join("latest.json");
     let newest = |version: &str| {
         fs::write(&latest, format!(r#"{{"tag_name":"v{version}"}}"#)).unwrap();
@@ -2425,6 +2428,10 @@ fn update_replaces_the_binary_with_a_release_that_checks_out() {
         "{}",
         stderr(&out)
     );
+    // Nor does one that names its version and fails.
+    let out = update(&["--version", "99.0.3"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("does not run"), "{}", stderr(&out));
     let out = update(&["--version", "99.9.9"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("checksums"), "{}", stderr(&out));

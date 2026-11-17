@@ -172,7 +172,15 @@ pub fn run(exe: &Path, this: &str, wanted: Option<&str>, check: bool) -> Result<
     let dir = exe.parent().context("the binary has no directory")?;
     let work = dir.join(format!(".sessionly-update-{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
-    fs::create_dir(&work).with_context(|| {
+    // For this user alone from the moment it exists: what is unpacked in it
+    // is run and then becomes the binary, so nobody else may put a file there.
+    let mut private = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        private.mode(0o700);
+    }
+    private.create(&work).with_context(|| {
         format!(
             "cannot write to {}; run this as whoever installed sessionly there",
             dir.display()
@@ -215,6 +223,12 @@ fn replace(exe: &Path, work: &Path, packed: &[u8], version: &str) -> Result<()> 
         .arg("--version")
         .output()
         .context("running the downloaded binary")?;
+    if !says.status.success() {
+        bail!(
+            "the downloaded binary does not run ({}); nothing was changed",
+            says.status
+        );
+    }
     let says = String::from_utf8_lossy(&says.stdout).trim().to_string();
     if says != format!("sessionly {version}") {
         bail!("the downloaded binary says it is {says:?}, not sessionly {version}; nothing was changed");
