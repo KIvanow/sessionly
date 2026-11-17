@@ -55,6 +55,29 @@ sessionly status
 it on one project first. The hook command contains the absolute path of the binary, so don't
 commit a settings file that has it.
 
+To move to a newer release later:
+
+```sh
+sessionly update            # --check only says whether there is one; --version 0.4.0 names one
+```
+
+It downloads the release's archive for this machine, checks it against the release's
+`SHA256SUMS`, runs the new binary once to see that it is the version asked for, and then puts
+it where the old one was, in one step. If any of that fails, nothing is changed. The hooks name
+the binary by its path, which stays the same, so they need nothing, and Codex does not ask to
+approve them again. What it does not do:
+
+- A repository set up with [`install --repo`](#cloud-sessions) keeps fetching the version its
+  script names, until `install --repo` is run there again with the new binary and committed.
+- A binary built from source is replaced by the released one like any other. To stay on your
+  own build, rebuild instead.
+- It needs to be able to write where the binary is, and there are released binaries only for
+  Linux and macOS.
+
+`SESSIONLY_RELEASE_BASE` names another place to download from, as for `install --repo`, and
+`SESSIONLY_RELEASE_LATEST` another to ask for the newest version: an address that answers
+with JSON whose `tag_name` is the release's tag.
+
 What install does to the settings file:
 
 - It adds or removes only hook entries whose command is exactly `<path>/sessionly capture`.

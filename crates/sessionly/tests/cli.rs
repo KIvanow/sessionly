@@ -2318,3 +2318,133 @@ fn a_codex_cloud_task_records_what_each_turn_changed() {
         .unwrap();
     assert_eq!(stdout(status), " M hello.py\n?? notes.txt\n?? unseen.txt\n");
 }
+
+/// A folder of releases as `SESSIONLY_RELEASE_BASE` names one, with a
+/// release `version` in it whose "binary" is a script that says what
+/// `says`. `honest` is whether its checksum is the archive's own.
+#[cfg(target_os = "linux")]
+fn release_of(dir: &Path, version: &str, says: &str, honest: bool) {
+    let archive = format!(
+        "sessionly-{}-unknown-linux-musl.tar.gz",
+        std::env::consts::ARCH
+    );
+    let release = dir.join(format!("v{version}"));
+    fs::create_dir_all(&release).unwrap();
+    fs::write(
+        release.join("sessionly"),
+        format!("#!/bin/sh\necho '{says}'\n"),
+    )
+    .unwrap();
+    let packed = Command::new("tar")
+        .args(["-czf", &archive, "sessionly"])
+        .current_dir(&release)
+        .status()
+        .unwrap();
+    assert!(packed.success());
+    let sum = stdout(
+        Command::new("sha256sum")
+            .arg(release.join(&archive))
+            .output()
+            .unwrap(),
+    );
+    let sum = sum.split_whitespace().next().unwrap().to_string();
+    let written = if honest { sum } else { "0".repeat(64) };
+    fs::write(
+        release.join("SHA256SUMS"),
+        format!("{written}  {archive}\n"),
+    )
+    .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn update_replaces_the_binary_with_a_release_that_checks_out() {
+    let home = tempfile::tempdir().unwrap();
+    let this = env!("CARGO_PKG_VERSION");
+    let releases = home.path().join("releases");
+    release_of(&releases, "99.0.0", "sessionly 99.0.0", true);
+    release_of(&releases, "99.0.1", "sessionly 99.0.1", false);
+    release_of(&releases, "99.0.2", "sessionly 1.2.3", true);
+    let latest = home.path().join("latest.json");
+    let newest = |version: &str| {
+        fs::write(&latest, format!(r#"{{"tag_name":"v{version}"}}"#)).unwrap();
+    };
+
+    // A copy to update, reached through a link as an installed one often is.
+    let bin = home.path().join("opt/sessionly");
+    fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_sessionly"), &bin).unwrap();
+    let link = home.path().join("sessionly");
+    std::os::unix::fs::symlink(&bin, &link).unwrap();
+    let before = fs::read(&bin).unwrap();
+    let update = |args: &[&str]| {
+        let mut cmd = Command::new(&link);
+        cmd.arg("update")
+            .args(args)
+            .env("HOME", home.path())
+            .env(
+                "SESSIONLY_RELEASE_BASE",
+                format!("file://{}", releases.display()),
+            )
+            .env(
+                "SESSIONLY_RELEASE_LATEST",
+                format!("file://{}", latest.display()),
+            );
+        cmd.output().unwrap()
+    };
+    let unchanged = || fs::read(&bin).unwrap() == before;
+
+    // Nothing newer: nothing to do.
+    newest(this);
+    let said = stdout(update(&[]));
+    assert!(said.contains("is the newest release"), "{said}");
+    newest("0.0.1");
+    let said = stdout(update(&[]));
+    assert!(said.contains("is the newest release"), "{said}");
+    assert!(unchanged());
+
+    // Asked only whether there is one.
+    newest("99.0.0");
+    let said = stdout(update(&["--check"]));
+    assert!(said.contains("sessionly 99.0.0 is out"), "{said}");
+    assert!(unchanged());
+
+    // A download that is not what its checksum says, and one that is not
+    // the version it was published as, change nothing.
+    let out = update(&["--version", "99.0.1"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("does not match its checksum"),
+        "{}",
+        stderr(&out)
+    );
+    let out = update(&["--version", "99.0.2"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("not sessionly 99.0.2"),
+        "{}",
+        stderr(&out)
+    );
+    let out = update(&["--version", "99.9.9"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("checksums"), "{}", stderr(&out));
+    assert!(unchanged());
+    let left: Vec<_> = fs::read_dir(bin.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["sessionly"], "something was left beside the binary");
+
+    // The newest one: the file is replaced where it is, and the link stays.
+    let said = stdout(update(&[]));
+    assert!(
+        said.contains(&format!("Updated sessionly {this} to 99.0.0")),
+        "{said}"
+    );
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let now = stdout(Command::new(&link).arg("--version").output().unwrap());
+    assert_eq!(now.trim(), "sessionly 99.0.0");
+}

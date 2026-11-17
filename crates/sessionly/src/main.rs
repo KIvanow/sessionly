@@ -29,6 +29,7 @@ mod session;
 mod sync;
 mod transcript;
 mod turn;
+mod update;
 mod upload;
 mod watch;
 
@@ -169,6 +170,15 @@ enum Command {
         /// before and after each command
         #[arg(long, value_enum)]
         shell_edits: Option<config::ShellEdits>,
+    },
+    /// Replace this binary with the newest release
+    Update {
+        /// Only say whether there is a newer release
+        #[arg(long)]
+        check: bool,
+        /// This release instead of the newest one, such as 0.4.0
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
     },
     /// One background sync and upload (started by the capture hook)
     #[command(hide = true)]
@@ -701,6 +711,27 @@ fn run(command: Command) -> Result<()> {
                     server.url
                 ),
                 Err(err) => bail!("{err}"),
+            }
+        }
+        Command::Update { check, version } => {
+            let this = env!("CARGO_PKG_VERSION");
+            // The file itself, not a link to it: the link stays where it is.
+            let exe = std::env::current_exe()
+                .and_then(std::fs::canonicalize)
+                .context("locating the sessionly binary")?;
+            match update::run(&exe, this, version.as_deref(), check)? {
+                update::Outcome::Current => println!("sessionly {this} is the newest release."),
+                update::Outcome::Available(found) => {
+                    println!("sessionly {found} is out (this is {this}). Run: sessionly update")
+                }
+                update::Outcome::Updated(now, path) => {
+                    println!("Updated sessionly {this} to {now} at {}", path.display());
+                    println!("The hooks run it from the same place and need nothing.");
+                    println!(
+                        "A repository set up with `sessionly install --repo` keeps fetching the \
+                         version it names until that is run there again."
+                    );
+                }
             }
         }
         Command::Settings {
