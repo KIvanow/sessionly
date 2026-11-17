@@ -253,17 +253,29 @@ footer :focus-visible {
 .top .menu nav a {
   padding: 11px 0;
 }
-@media (max-width: 419px) {
+@media (max-width: 639px) {
   .top .cta .ghost {
     display: none;
   }
-  /* 320px wide: brand, Menu and Get started on one line. */
   .top .wrap {
     gap: 8px;
   }
   .top .cta .btn {
     padding: 0 12px;
     font-size: 14px;
+  }
+}
+@media (max-width: 479px) {
+  /* Narrow phones: brand, Sign in and Menu on one line. Get started is in the menu. */
+  .top .cta .primary {
+    display: none;
+  }
+}
+@media (max-width: 359px) {
+  .top .cta .btn,
+  .top .menu .toggle {
+    padding-left: 8px;
+    padding-right: 8px;
   }
 }
 @media (min-width: 1020px) {
@@ -277,11 +289,17 @@ footer :focus-visible {
     display: none;
   }
 }
-/* The section links need a little less room each until the window is wider. */
+/* The section links need a little less room each until the window is wider. The buttons
+   give some of theirs back too, until Sign in clears the right edge. */
 @media (min-width: 1020px) and (max-width: 1179px) {
   .top nav a {
     padding: 8px 7px;
     font-size: 14px;
+  }
+}
+@media (min-width: 1020px) and (max-width: 1099px) {
+  .top .cta .btn {
+    padding: 0 10px;
   }
 }
 
@@ -340,6 +358,21 @@ footer :focus-visible {
 }
 .top .btn.primary:hover {
   text-decoration: none;
+}
+/* The way into the hosted app. Blue, and last, so it is the button that asks to be clicked. */
+.top .btn.signin {
+  background: var(--band-blue);
+  border-color: var(--band-blue);
+  color: #0b1a30;
+}
+.top .btn.signin:hover {
+  background: var(--band-text);
+  border-color: var(--band-text);
+  color: #0b1a30;
+  text-decoration: none;
+}
+.top .btn.signin:focus-visible {
+  outline-color: var(--band-text);
 }
 .band .btn.primary {
   background: var(--pop);
