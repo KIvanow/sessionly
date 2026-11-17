@@ -11,14 +11,18 @@
 //!   (`CLAUDE_CODE_REMOTE=true`, the cloud session id, how the session was
 //!   started, the person's email).
 //! - Cursor's cloud agents serve it from a Unix socket (`$CURSOR_AGENT_SOCKET`).
+//! - Codex's cloud is the exception: git there is set up as the person, and
+//!   the environment names the thread (`CODEX_THREAD_ID`) and, only there,
+//!   the cloud environment (`CODEX_ENVIRONMENT_ID`).
 //!
-//! Checked against one real session on each platform, 2026-11-14.
+//! Checked against one real session on each platform, 2026-11-14, and on
+//! Codex's cloud 2026-11-17.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::paths::{CLAUDE_CODE, CURSOR};
+use crate::paths::{CLAUDE_CODE, CODEX, CURSOR};
 
 /// The machine id every sandbox uses. A sandbox is new each time, so an id of
 /// its own would file one session under several machines when it moves.
@@ -49,8 +53,16 @@ impl Surroundings<'_> {
         is_socket(&path).then_some(path)
     }
 
+    /// The thread of a Codex cloud task, if a command runs in one. Codex
+    /// names the thread to every command it runs, on a person's machine
+    /// too; the cloud environment it names only in its cloud.
+    pub fn codex_cloud(&self) -> Option<String> {
+        self.var("CODEX_ENVIRONMENT_ID")?;
+        self.var("CODEX_THREAD_ID")
+    }
+
     pub fn in_cloud(&self) -> bool {
-        self.claude_cloud() || self.cursor_socket().is_some()
+        self.claude_cloud() || self.cursor_socket().is_some() || self.codex_cloud().is_some()
     }
 
     /// What to store with a hook event of `source`: null outside a cloud
@@ -79,6 +91,20 @@ impl Surroundings<'_> {
                     "user_email": ask("owner/user-email").or_else(|| ask("turn/user-email")),
                 }))
             }
+            // Git in Codex's sandbox is set up as the person who started the
+            // task, so it is asked: without this the session would be nobody's.
+            CODEX => {
+                let thread = self.codex_cloud()?;
+                let email = std::env::current_dir()
+                    .ok()
+                    .and_then(|dir| crate::git::user(&dir).1);
+                Some(json!({
+                    "kind": "cloud",
+                    "id": thread,
+                    "started_from": null,
+                    "user_email": email,
+                }))
+            }
             _ => None,
         }
     }
@@ -91,6 +117,11 @@ fn process_env(name: &str) -> Option<String> {
 /// Whether this process runs in a cloud session's sandbox.
 pub fn in_cloud() -> bool {
     Surroundings { env: &process_env }.in_cloud()
+}
+
+/// See [`Surroundings::codex_cloud`].
+pub fn codex_cloud() -> Option<String> {
+    Surroundings { env: &process_env }.codex_cloud()
 }
 
 /// See [`Surroundings::describe`].
@@ -301,6 +332,31 @@ mod tests {
             early,
             Some(json!({ "kind": "cloud", "id": null, "started_from": null, "user_email": null }))
         );
+    }
+
+    #[test]
+    fn codex_names_its_cloud_only_there() {
+        let nowhere = ("CURSOR_AGENT_SOCKET", "/nonexistent/api.sock".to_string());
+        // On a person's machine Codex names the thread and nothing more.
+        let vars = HashMap::from([nowhere.clone(), ("CODEX_THREAD_ID", "t-1".to_string())]);
+        let env = with(&vars);
+        let here = Surroundings { env: &env };
+        assert!(!here.in_cloud());
+        assert_eq!(here.describe(CODEX, "Stop"), None);
+
+        let vars = HashMap::from([
+            nowhere,
+            ("CODEX_THREAD_ID", "t-1".to_string()),
+            ("CODEX_ENVIRONMENT_ID", "ccarenv_1".to_string()),
+        ]);
+        let env = with(&vars);
+        let there = Surroundings { env: &env };
+        assert!(there.in_cloud());
+        let said = there.describe(CODEX, "Stop").unwrap();
+        assert_eq!(said["kind"], "cloud");
+        assert_eq!(said["id"], "t-1");
+        // Another agent's events are not Codex's.
+        assert_eq!(there.describe(CLAUDE_CODE, "Stop"), None);
     }
 
     /// Serves Cursor's metadata on a socket in `dir`: `answers` by path.

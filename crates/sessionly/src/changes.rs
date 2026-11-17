@@ -58,6 +58,10 @@ const SHELL_TOOLS: &[&str] = &["Bash", "Shell"];
 /// Codex's file tool, as its hooks name it.
 const PATCH_TOOL: &str = "apply_patch";
 
+/// Not a tool: a whole turn of an agent that runs no hooks (see `turn`). Its
+/// start and end are looked at as a shell command's are.
+pub const TURN_TOOL: &str = "Turn";
+
 /// How long looking at the working tree may take for one event. A hook must
 /// not stall the session: past this, the look is abandoned and no more are
 /// tried in that session.
@@ -192,7 +196,7 @@ pub fn observe(data_dir: &Path, record: &Value, at: Where) -> Option<Value> {
         return None;
     }
     let root;
-    let event = if SHELL_TOOLS.contains(&tool) {
+    let event = if SHELL_TOOLS.contains(&tool) || tool == TURN_TOOL {
         let command = p["tool_input"]["command"].as_str().unwrap_or_default();
         let own = crate::git::repo_root(cwd?);
         root = goes_to(command, cwd?)

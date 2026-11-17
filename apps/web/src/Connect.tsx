@@ -114,20 +114,21 @@ export function Connect({ token, me, onSignOut }: { token: string; me: Me; onSig
           <section className="card">
             <h2>Cloud agents</h2>
             <p className="muted">
-              Claude Code on the web and Cursor's cloud agents run in a sandbox, so capture is set up in the
-              repository and the server is named in the cloud environment.
+              Claude Code on the web, Cursor's cloud agents and Codex's cloud tasks run in a sandbox, so capture
+              is set up in the repository and the server is named in the cloud environment. Of a Codex cloud
+              task only the files and lines each turn changed are recorded.
             </p>
             <ol className="steps">
               <li>
-                In the repository: <code>sessionly install --repo</code>, then commit the three files it writes.
+                In the repository: <code>sessionly install --repo</code>, then commit the four files it writes.
               </li>
               <li>
                 On the <a href="#/team">Team page</a>, create a token with the role "Cloud environment".
               </li>
               <li>
                 In the cloud environment's secrets, set <code>SESSIONLY_URL={origin}</code> and{" "}
-                <code>SESSIONLY_TOKEN</code> to that token. For Claude Code, also add this server's host to the
-                environment's allowed domains.
+                <code>SESSIONLY_TOKEN</code> to that token (for Codex, as environment variables). For Claude Code
+                and Codex, also add this server's host to the environment's allowed domains.
               </li>
             </ol>
             <p>

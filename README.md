@@ -11,8 +11,8 @@ files those agents keep (see [Cursor and Grok](#cursor-and-grok)), and so are Co
 [Codex](#codex)). It can upload to a server,
 which shows the same figures for a whole team in a web dashboard. Sessions that run in the
 cloud (Claude Code's cloud sessions, Cursor's cloud agents) are captured through hooks a
-repository carries (see [Cloud sessions](#cloud-sessions)). Not done yet: sign-in other than
-tokens.
+repository carries, and Codex's cloud tasks in a reduced form, without hooks (see
+[Cloud sessions](#cloud-sessions)). Not done yet: sign-in other than tokens.
 
 ## How it fits together
 
@@ -301,11 +301,11 @@ carries, so that is where capture for them goes:
 
 ```sh
 sessionly install --repo          # in the repository's root; --repo DIR for another one
-git add .sessionly .claude/settings.json .cursor/hooks.json
+git add .sessionly .claude/settings.json .cursor/hooks.json AGENTS.md
 git commit -m "Capture cloud agent sessions"
 ```
 
-That writes three files, and only adds to the two that may already exist:
+That writes four files, and only adds to the three that may already exist:
 
 - **`.sessionly/hook.sh`**, a script. On a person's own machine it does nothing: sessions there
   are captured by that person's own `sessionly install`, if they have one. In a sandbox it
@@ -314,9 +314,11 @@ That writes three files, and only adds to the two that may already exist:
   nothing and always exits 0.
 - **Entries in `.claude/settings.json`** (for Claude Code) **and `.cursor/hooks.json`** (for
   Cursor) that run the script.
+- **A section in `AGENTS.md`**, between `<!-- sessionly:begin -->` and `<!-- sessionly:end -->`,
+  for Codex's cloud, which runs no hooks (see [Codex cloud tasks](#codex-cloud-tasks)).
 
 Where a sandbox sends its sessions is not in the repository. It is given to the cloud
-environment, as secrets:
+environment, as secrets (in Codex's cloud, as environment variables):
 
 | Variable | Meaning |
 |---|---|
@@ -324,8 +326,8 @@ environment, as secrets:
 | `SESSIONLY_LINE_HASHES=on` | Optional. Send line hashes, which [pull request](#pull-requests) figures need. |
 | `SESSIONLY_CONTENT=previews` | Optional. Send previews instead of metadata only. |
 
-Claude Code's cloud sessions reach only the hosts on the environment's allowed list, so add
-the server's host there. Cursor's cloud agents can reach it as they are.
+Claude Code's cloud sessions and Codex's cloud tasks reach only the hosts on the environment's
+allowed list, so add the server's host there. Cursor's cloud agents can reach it as they are.
 
 What is different about a session from the cloud:
 
@@ -382,6 +384,57 @@ What to know:
 The platforms' side of this was checked with one real session on each (2026-11-14): which
 hooks fire and from which files, what they carry, where the person and the session id are
 to be found, and what a sandbox can reach.
+
+#### Codex cloud tasks
+
+Codex's cloud is different, and what Sessionly records of a task there is much less. Tried on
+2026-11-17, with Codex 0.167:
+
+- **It runs no hooks.** Not the ones in a repository's `.codex/hooks.json`, present from the
+  task's first moment, and none can be put in the home directory: nothing an environment's
+  install script leaves behind was there when the task ran.
+- **The agent is not in the sandbox.** Only what runs its commands is, so there is no session
+  file to read there either, and the `codex cloud` command on a person's machine does not list
+  these tasks.
+- **It does read `AGENTS.md`** and does what it says.
+
+So `sessionly install --repo` adds a section to `AGENTS.md` that asks the agent, in a Codex
+cloud task only, to run the script twice in every turn in which it changes files:
+`sh .sessionly/hook.sh codex start` before its first change and `sh .sessionly/hook.sh codex
+end` after its last. The working tree is compared between the two, as it is around a shell
+command in the other clouds, and the session is uploaded before the second command returns.
+
+What such a session has:
+
+- its turns, with when each began and ended;
+- the files each turn changed and the lines it added and removed, which count toward the
+  rewrite rate and [pull requests](#pull-requests) like any other edit;
+- the repository and branch, that it ran in the cloud, and the person. Git in Codex's sandbox
+  is set up as the person who started the task, so that is who the session belongs to.
+
+What it does not have: the text of prompts, tool calls (each turn shows one, named `Turn`,
+which stands for all of its work), the model, tokens and cost.
+
+What to know:
+
+- **It depends on the agent.** A turn is recorded only if the agent ran the commands. A turn
+  it did not end is ended by the next one's start, with what changed until then. A turn it did
+  not start is recorded with nothing known to be its. A turn in which it ran neither is not
+  there at all, and its lines count as not an agent's.
+- **Other agents read `AGENTS.md` too**, and so does Codex on a person's machine. The section
+  says it is for Codex's cloud only, and the script does nothing anywhere else: it looks for
+  `CODEX_ENVIRONMENT_ID`, which Codex sets only in its cloud. Your own text in `AGENTS.md` is
+  left as it is, and `sessionly uninstall --repo` takes the section out again.
+- **In the cloud environment**, set `SESSIONLY_URL` and `SESSIONLY_TOKEN` as environment
+  variables and add the server's host to the allowed domains. The script also has to download
+  the sessionly binary from GitHub's releases. With "package manager domains" enabled
+  `github.com` could be reached; whether the download itself gets through that setting alone
+  has not been tried, so if `bootstrap.log` says it could not download, add `github.com` and
+  `release-assets.githubusercontent.com`.
+- Where the sandbox does not let commands write to the home directory, Sessionly keeps its
+  files in `/tmp/sessionly-<uid>` instead of `~/.sessionly`.
+- This was built from what one environment showed on one day, and the whole path (download,
+  capture, upload) has been run in tests but not yet in Codex's cloud itself.
 
 ### Past sessions
 
@@ -537,7 +590,8 @@ keep. A session the hooks did not see has neither.
 **Codex does not run a new or changed hook until you have approved it.** After `sessionly
 install`, start `codex` and accept the hooks in the review it shows (or run `/hooks`). Moving
 the `sessionly` binary changes the command, so Codex will ask again. `sessionly install
---project` and `--repo` do not write Codex hooks: sessions in Codex's cloud are not captured.
+--project` and `--repo` do not write Codex hooks. Codex's cloud runs none: what is recorded of
+a task there is under [Codex cloud tasks](#codex-cloud-tasks).
 
 ### What an upload contains
 
@@ -1026,7 +1080,8 @@ under the SIL Open Font License) are served from `website/fonts/`. `python3 -m h
 6. ✅ Aggregation on one machine (`summary`), upload, server and team dashboard
 7. ✅ Cursor, Grok and Codex sessions beside Claude Code's
 8. ✅ Pull requests: how much agents wrote, with which models, and how it fared in review
-9. ✅ Sessions in the cloud: Claude Code's cloud sessions and Cursor's cloud agents
+9. ✅ Sessions in the cloud: Claude Code's cloud sessions and Cursor's cloud agents, and what
+   each turn of a Codex cloud task changed
 10. ✅ Organisations, signing in with Google or GitHub, and a hosted mode anyone can sign up to
 11. Plans and billing for the hosted service; deleting and exporting an organisation's data
 12. Polish, docs, example data
