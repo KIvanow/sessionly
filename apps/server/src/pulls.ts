@@ -7,9 +7,13 @@ import type {
   LinesBy,
   PullAttribution,
   PullCloud,
+  PullDetail,
+  PullFeedback,
+  PullFile,
   PullList,
   PullReport,
   PullRow,
+  PullSession,
   PullSummary,
   PullsByModel,
 } from "@sessionly/schema";
@@ -20,6 +24,7 @@ export class BadReport extends Error {}
 /** Sessions that started longer than this before a pull request was opened are not looked at. */
 const LOOK_BACK_DAYS = 90;
 const MAX_FILES = 5000;
+const MAX_FEEDBACK = 2000;
 const HASH = /^[0-9a-f]{16}$/;
 
 const num = (value: unknown): number => (value == null ? 0 : Number(value));
@@ -36,7 +41,11 @@ export interface Claim {
   hashes: string[];
   /** When the session started, for telling the latest writer of a line. */
   started: number;
+  /** The session, to lead back to it from the pull request. */
+  session?: SessionKey;
 }
+
+type SessionKey = Pick<PullSession, "machine_id" | "source" | "session_id">;
 
 /** A worktree kept in a `worktrees` or `.worktrees` folder, as agents do: what follows is the path in it. */
 const IN_WORKTREE = /^(?:.*\/)?\.?worktrees\/[^/]+\/(.+)$/;
@@ -54,10 +63,10 @@ function samePath(claimed: string, path: string): boolean {
   return outside && claimed.endsWith(`/${path}`);
 }
 
-type Writer = { tool: string; model: string | null };
+export type Writer = { tool: string; model: string | null; session?: SessionKey };
 
 /** For each added line of each file, the agent that wrote it, or null. */
-function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[][] {
+export function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[][] {
   // Looking only at claims on a file of the same name keeps this quick.
   const byName = new Map<string, Claim[]>();
   for (const claim of claims) {
@@ -76,7 +85,7 @@ function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[][] {
     for (const claim of matching) {
       for (const hash of claim.hashes) {
         const list = pool.get(hash);
-        const writer = { tool: claim.tool, model: claim.model };
+        const writer = { tool: claim.tool, model: claim.model, session: claim.session };
         if (list) list.push(writer);
         else pool.set(hash, [writer]);
       }
@@ -101,21 +110,23 @@ const sorted = <T extends LinesBy>(rows: Map<string, T>): T[] =>
 /**
  * Which lines of a pull request agents wrote: as it was first reported
  * (`first`), as it is now (`now`), and how many of the agents' first lines
- * are still in it.
+ * are still in it. `lines` are the writers of `now`, where they were worked
+ * out already.
  */
 export function attribute(
   first: FileHashes[],
   now: FileHashes[],
   claims: Claim[],
+  lines: (Writer | null)[][] = writers(now, claims),
 ): Omit<PullAttribution, "from_open" | "cloud"> {
   const count = (files: FileHashes[]) => files.reduce((sum, f) => sum + f.hashes.length, 0);
 
   const nowBy = new Map<string, LinesBy>();
   let agentNow = 0;
-  for (const line of writers(now, claims).flat()) {
+  for (const line of lines.flat()) {
     if (!line) continue;
     agentNow += 1;
-    tally(nowBy, line, () => ({ ...line, lines: 0 })).lines += 1;
+    tally(nowBy, line, () => ({ tool: line.tool, model: line.model, lines: 0 })).lines += 1;
   }
 
   // What is left of each file's lines now, to tick the first lines off against.
@@ -136,7 +147,7 @@ export function attribute(
       const line = firstWriters[i]![j];
       if (!line) return;
       agentFirst += 1;
-      const row = tally(firstBy, line, () => ({ ...line, lines: 0, surviving: 0 }));
+      const row = tally(firstBy, line, () => ({ tool: line.tool, model: line.model, lines: 0, surviving: 0 }));
       row.lines += 1;
       if (there) row.surviving += 1;
     });
@@ -147,6 +158,77 @@ export function attribute(
     now: { lines: count(now), agent_lines: agentNow, by: sorted(nowBy) },
     by: sorted(firstBy),
   };
+}
+
+/**
+ * A pull request's lines as they are now, file by file and session by
+ * session: where its agent lines are, and which sessions they came from.
+ * `lines` are its writers, the same ones `attribute` counts.
+ */
+export function breakdown(now: FileHashes[], lines: (Writer | null)[][]): { files: PullFile[]; sessions: Omit<PullSession, "session">[] } {
+  const sessions = new Map<string, Omit<PullSession, "session">>();
+  const files = now.map((file, i) => {
+    let agent = 0;
+    for (const line of lines[i]!) {
+      if (!line) continue;
+      agent += 1;
+      const from = line.session;
+      if (!from) continue;
+      const key = `${from.machine_id}\n${from.source}\n${from.session_id}`;
+      const row = sessions.get(key);
+      if (row) row.lines += 1;
+      else sessions.set(key, { ...from, lines: 1 });
+    }
+    return { path: file.path, lines: file.hashes.length, agent_lines: agent };
+  });
+  return {
+    files: files.sort((a, b) => b.lines - a.lines || a.path.localeCompare(b.path)),
+    sessions: [...sessions.values()].sort((a, b) => b.lines - a.lines || a.session_id.localeCompare(b.session_id)),
+  };
+}
+
+const FEEDBACK_KINDS = ["review", "inline", "conversation"];
+const REVIEW_STATES = ["approved", "changes_requested", "commented", "dismissed"];
+
+/** A link that can be followed from the dashboard: a web address, and nothing that runs. */
+function webAddress(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 500) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A report's reviews and comments, checked. Only what is named here is kept:
+ * anything else sent with one, its text above all, is dropped.
+ */
+function checkFeedback(value: unknown, fail: (what: string) => never): PullFeedback[] | undefined {
+  if (value == null) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_FEEDBACK) fail(`feedback must be a list of at most ${MAX_FEEDBACK} reviews and comments`);
+  return (value as Record<string, unknown>[]).map((f) => {
+    const bad = () => fail("each review or comment needs a kind, an author and a time");
+    if (!f || typeof f !== "object" || !FEEDBACK_KINDS.includes(f.kind as string)) bad();
+    if (typeof f.author !== "string" || f.author === "" || f.author.length > 100) bad();
+    if (typeof f.at !== "string" || Number.isNaN(Date.parse(f.at))) bad();
+    const kind = f.kind as PullFeedback["kind"];
+    const one: PullFeedback = {
+      kind,
+      url: webAddress(f.url),
+      author: f.author as string,
+      bot: f.bot === true,
+      at: new Date(f.at as string).toISOString(),
+    };
+    if (kind === "review") one.state = REVIEW_STATES.includes(f.state as string) ? (f.state as string) : null;
+    if (kind === "inline") {
+      one.path = typeof f.path === "string" && f.path !== "" && f.path.length <= 1000 ? f.path : null;
+      one.line = Number.isInteger(f.line) && (f.line as number) > 0 ? (f.line as number) : null;
+      one.reply = f.reply === true;
+    }
+    return one;
+  });
 }
 
 /** A report as the Action sends it, checked; throws `BadReport` saying what is wrong with it. */
@@ -185,6 +267,7 @@ export function checkReport(body: unknown): PullReport {
       file.hashes.every((h) => typeof h === "string" && HASH.test(h));
     if (!ok) fail("each file needs a path and hashes of 16 hex digits");
   }
+  const feedback = checkFeedback(r.feedback, fail);
   return {
     repo: text("repo").replace(/\/+$/, ""),
     head_repo: optional("head_repo"),
@@ -210,6 +293,9 @@ export function checkReport(body: unknown): PullReport {
     review_rounds: whole("review_rounds"),
     files: (files as FileHashes[]).map((f) => ({ path: f.path, hashes: f.hashes })),
     files_without_diff: whole("files_without_diff"),
+    feedback,
+    // Never fewer than were sent, whatever the report says.
+    feedback_total: feedback && Math.max(feedback.length, r.feedback_total == null ? 0 : whole("feedback_total")),
   };
 }
 
@@ -278,12 +364,16 @@ async function claimsFor(db: OrgDb, report: PullReport): Promise<Claim[]> {
   // it. A cloud agent commits as itself, so its session is known by where it
   // worked instead: the pull request's own branch.
   const emails = report.commit_emails ?? [];
-  // A session without a git email is its uploader's.
-  const people = `lower(coalesce(user_email, owner_email)) IN (${list(emails)})`;
-  const onBranch = report.head_ref ? ` OR (runtime = 'cloud' AND branch = $${params.push(report.head_ref)})` : "";
-  const by = emails.length ? `AND (${people}${onBranch})` : "";
+  // A session without a git email is its uploader's. (Nothing is bound for a
+  // condition that is left out: a parameter no statement uses is refused.)
+  let by = "";
+  if (emails.length) {
+    const people = `lower(coalesce(user_email, owner_email)) IN (${list(emails)})`;
+    const onBranch = report.head_ref ? ` OR (runtime = 'cloud' AND branch = $${params.push(report.head_ref)})` : "";
+    by = `AND (${people}${onBranch})`;
+  }
   const rows = await db.query(
-    `SELECT source, primary_model, started_at, payload->'lines' AS lines
+    `SELECT machine_id, source, session_id, primary_model, started_at, payload->'lines' AS lines
      FROM sessions
      WHERE org_id = $2 AND repo IN (${list(names)}) AND payload->'lines' IS NOT NULL
        AND (started_at IS NULL OR started_at >= $1::timestamptz) ${by}`,
@@ -296,6 +386,7 @@ async function claimsFor(db: OrgDb, report: PullReport): Promise<Claim[]> {
       path: lines.path ?? "",
       hashes: lines.hashes ?? [],
       started: row.started_at == null ? 0 : new Date(row.started_at as string).getTime(),
+      session: { machine_id: String(row.machine_id), source: String(row.source), session_id: String(row.session_id) },
     })),
   );
 }
@@ -311,8 +402,11 @@ export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttr
     [db.orgId, report.repo, report.number],
   );
   const first = existing ? json<FileHashes[]>(existing.first_files) : report.files;
+  const claims = await claimsFor(db, report);
+  // Worked out once, for the figures and for the page: the two then agree.
+  const lines = writers(report.files, claims);
   const attribution: PullAttribution = {
-    ...attribute(first, report.files, await claimsFor(db, report)),
+    ...attribute(first, report.files, claims, lines),
     from_open: (existing?.first_event ?? report.event) === "opened",
     cloud: await cloudOf(db, report),
   };
@@ -341,18 +435,36 @@ export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttr
     files_without_diff: report.files_without_diff,
     last_files: JSON.stringify(report.files),
     attribution: JSON.stringify(attribution),
+    detail: JSON.stringify(breakdown(report.files, lines)),
+    // An Action from before these were sent says nothing of them: what is here stays.
+    feedback: report.feedback ? JSON.stringify(report.feedback) : null,
+    feedback_total: report.feedback ? (report.feedback_total ?? report.feedback.length) : null,
     // only used when the row is new
     first_event: report.event,
     first_files: JSON.stringify(first),
   };
   const names = Object.keys(columns);
-  const casts: Record<string, string> = { last_files: "::jsonb", first_files: "::jsonb", attribution: "::jsonb" };
+  const casts: Record<string, string> = {
+    last_files: "::jsonb",
+    first_files: "::jsonb",
+    attribution: "::jsonb",
+    detail: "::jsonb",
+    feedback: "::jsonb",
+  };
   const kept = ["org_id", "repo", "number", "first_event", "first_files"];
+  // Reviews and comments, and how many there are, stay as they are when a report has none.
+  const set = (name: string) =>
+    name === "feedback" || name === "feedback_total"
+      ? `CASE WHEN EXCLUDED.feedback IS NULL THEN pull_requests.${name} ELSE EXCLUDED.${name} END`
+      : `EXCLUDED.${name}`;
   await db.query(
     `INSERT INTO pull_requests (${names.join(", ")})
      VALUES (${names.map((name, i) => `$${i + 1}${casts[name] ?? ""}`).join(", ")})
      ON CONFLICT (org_id, repo, number) DO UPDATE SET
-       ${names.filter((name) => !kept.includes(name)).map((name) => `${name} = EXCLUDED.${name}`).join(", ")},
+       ${names
+         .filter((name) => !kept.includes(name))
+         .map((name) => `${name} = ${set(name)}`)
+         .join(", ")},
        updated_at = now()`,
     Object.values(columns),
   );
@@ -402,6 +514,68 @@ function pullRow(r: Record<string, unknown>): PullRow {
     attribution: json<PullAttribution>(r.attribution),
     updated_at: iso(r.updated_at) ?? "",
   };
+}
+
+/**
+ * One pull request: its figures, its files, the sessions that wrote its
+ * lines, and its reviews and comments. Null if none was reported under that
+ * number.
+ */
+export async function getPull(db: OrgDb, repo: string, number: number): Promise<PullDetail | null> {
+  const [r] = await db.query(
+    `SELECT ${ROW_COLUMNS}, draft, head_ref, base_ref, closed_at, detail, feedback, feedback_total
+     FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
+    [db.orgId, repo, number],
+  );
+  if (!r) return null;
+  const detail = r.detail == null ? null : json<{ files: PullFile[]; sessions: Omit<PullSession, "session">[] }>(r.detail);
+  return {
+    ...pullRow(r),
+    draft: r.draft === true,
+    head_ref: (r.head_ref as string) ?? null,
+    base_ref: (r.base_ref as string) ?? null,
+    closed_at: iso(r.closed_at),
+    files: detail?.files ?? null,
+    sessions: detail ? await withSessions(db, detail.sessions ?? []) : null,
+    feedback: r.feedback == null ? null : json<PullFeedback[]>(r.feedback),
+    feedback_total: r.feedback == null || r.feedback_total == null ? null : num(r.feedback_total),
+  };
+}
+
+/** What is known now of the sessions a pull request's lines came from. */
+async function withSessions(db: OrgDb, wrote: Omit<PullSession, "session">[]): Promise<PullSession[]> {
+  if (wrote.length === 0) return [];
+  const params: unknown[] = [db.orgId];
+  const keys = wrote
+    .map((s) => `($${params.push(s.machine_id)}::text, $${params.push(s.source)}::text, $${params.push(s.session_id)}::text)`)
+    .join(", ");
+  const rows = await db.query(
+    `SELECT machine_id, source, session_id, owner_email, runtime, title, started_at, active_ms, cost_usd,
+            cost_source, primary_model, prompts
+     FROM sessions WHERE org_id = $1 AND (machine_id, source, session_id) IN (${keys})`,
+    params,
+  );
+  const key = (s: { machine_id: unknown; source: unknown; session_id: unknown }) => `${s.machine_id}\n${s.source}\n${s.session_id}`;
+  const found = new Map(rows.map((row) => [key(row as never), row]));
+  return wrote.map((s) => {
+    const row = found.get(key(s));
+    return {
+      ...s,
+      session: row
+        ? {
+            owner_email: String(row.owner_email),
+            runtime: (row.runtime as string) ?? null,
+            title: (row.title as string) ?? null,
+            started_at: iso(row.started_at),
+            active_ms: num(row.active_ms),
+            cost_usd: row.cost_usd == null ? null : Number(row.cost_usd),
+            cost_source: (row.cost_source as string) ?? null,
+            primary_model: (row.primary_model as string) ?? null,
+            prompts: num(row.prompts),
+          }
+        : null,
+    };
+  });
 }
 
 /** Pull requests, most recently created first. */

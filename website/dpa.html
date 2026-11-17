@@ -603,8 +603,9 @@
               issues tokens to.
             </li>
             <li>
-              <strong>Pull request authors:</strong> people who open pull requests in repositories
-              where the Customer runs the GitHub Action, whether or not they use Sessionly.
+              <strong>Pull request authors, reviewers and commenters:</strong> people who open,
+              review or comment on pull requests in repositories where the Customer runs the
+              GitHub Action, whether or not they use Sessionly.
             </li>
             <li>
               <strong>Anyone mentioned in a preview</strong>, if the Customer uploads previews: a
@@ -645,7 +646,10 @@
               <strong>Pull request reports:</strong> repository name, pull request number, title
               and address; the author's GitHub user name; state, branch names and dates; counts of
               commits, reviews, requests for changes, review comments by people and by bots, and
-              review rounds; per changed file, hashes of the added lines. The email addresses on
+              review rounds; per changed file, hashes of the added lines; for each review and
+              comment, its author's GitHub user name and whether that is a bot, when it was made,
+              the file and line it is on, a review's outcome and its address on GitHub, and never
+              its text. The email addresses on
               the pull request's commits are received with each report, used to select the
               sessions to compare with, and not stored.
             </li>

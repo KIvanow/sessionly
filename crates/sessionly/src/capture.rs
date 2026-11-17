@@ -169,27 +169,39 @@ pub fn capture(
 /// What a cloud agent's sandbox adds to a record: under `runtime`, what the
 /// platform says about the session (see `runtime`), and for a shell command
 /// what it changed in the working tree (see `changes`). On a person's own
-/// machine only the second, and only with the `shell_edits` setting on.
+/// machine only the second, and as much of it as the `shell_edits` setting
+/// says: there the agent is not the only one at work.
 fn where_it_runs(record: &mut Value) {
+    use crate::changes::Where;
+    use crate::config::ShellEdits;
     let text = |key: &str| record[key].as_str().unwrap_or_default().to_string();
     let Ok(data_dir) = crate::paths::data_dir() else {
         return;
     };
-    match crate::runtime::describe(&text("source"), &text("hook")) {
-        Some(said) => record["runtime"] = said,
+    let at = match crate::runtime::describe(&text("source"), &text("hook")) {
+        Some(said) => {
+            record["runtime"] = said;
+            Where::Sandbox
+        }
         None => {
-            // Only tool events are looked at: the setting is not read for the rest.
-            let asked = record["payload"]["tool_name"].is_string()
-                && crate::paths::config_path().is_ok_and(|path| crate::config::shell_edits(&path));
             if text("hook") == "SessionEnd" {
                 crate::changes::forget(&data_dir, record);
             }
-            if !asked {
+            // Only tool events are looked at: the setting is not read for the rest.
+            if !record["payload"]["tool_name"].is_string() {
                 return;
             }
+            let counted = crate::paths::config_path()
+                .map_or(ShellEdits::Off, |path| crate::config::shell_edits(&path));
+            if counted == ShellEdits::Off {
+                return;
+            }
+            Where::Machine {
+                sure: counted == ShellEdits::Sure,
+            }
         }
-    }
-    if let Some(Value::Object(seen)) = crate::changes::observe(&data_dir, record) {
+    };
+    if let Some(Value::Object(seen)) = crate::changes::observe(&data_dir, record, at) {
         for (key, value) in seen {
             record[key] = value;
         }

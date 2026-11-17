@@ -624,6 +624,14 @@ const MIGRATIONS: string[] = [
   // trial databases has such people: no release kept sign-ins without it.)
   `UPDATE users SET confirmed_at = NULL WHERE confirmed_at IS NOT NULL AND sign_in_account IS NULL`,
   `ALTER TABLE users ADD CONSTRAINT users_confirmed_with_account CHECK (confirmed_at IS NULL OR sign_in_account IS NOT NULL)`,
+  // A pull request's page: per file, the lines an agent wrote, and which
+  // sessions wrote them; and its reviews and comments, as who, when, where
+  // and a link to GitHub, never their text. Null on a pull request last
+  // reported before these were kept.
+  `ALTER TABLE pull_requests ADD COLUMN detail jsonb`,
+  `ALTER TABLE pull_requests ADD COLUMN feedback jsonb`,
+  // How many reviews and comments there are, when that is more than are kept.
+  `ALTER TABLE pull_requests ADD COLUMN feedback_total integer`,
 ];
 
 /**

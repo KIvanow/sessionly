@@ -720,10 +720,11 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// On a person's own machine a shell command's changes are counted only
-/// once that person has asked for it.
+/// On a person's own machine a shell command's changes are counted as far
+/// as they are sure to be the command's, unless that person asks for all of
+/// them or for none.
 #[test]
-fn shell_edits_are_counted_on_this_machine_when_switched_on() {
+fn shell_edits_are_counted_on_this_machine_as_far_as_they_are_sure() {
     use serde_json::json;
     let home = tempfile::tempdir().unwrap();
     let repo = home.path().join("work/app");
@@ -740,19 +741,23 @@ fn shell_edits_are_counted_on_this_machine_when_switched_on() {
     git(&["init", "--quiet", "--initial-branch", "main"]);
     fs::write(repo.join("a.txt"), "one\n").unwrap();
 
-    // One command that appends a line to a.txt, as the hooks see it.
-    let command = |session: &str, id: &str, line: &str| {
+    // One command that appends a line to a.txt, as the hooks see it: one
+    // that is over at once, or one that takes a while.
+    let command = |session: &str, id: &str, text: &str, line: &str, long: bool| {
         for hook in ["PreToolUse", "PostToolUse"] {
             if hook == "PostToolUse" {
                 let mut text = fs::read_to_string(repo.join("a.txt")).unwrap();
                 text.push_str(line);
                 fs::write(repo.join("a.txt"), text).unwrap();
+                if long {
+                    std::thread::sleep(std::time::Duration::from_millis(2200));
+                }
             }
             let mut cmd = sessionly(home.path());
             cmd.arg("capture");
             let payload = json!({ "session_id": session, "hook_event_name": hook, "cwd": repo,
                 "tool_use_id": id, "tool_name": "Bash",
-                "tool_input": { "command": "echo >> a.txt" }, "tool_response": {} });
+                "tool_input": { "command": text }, "tool_response": {} });
             let out = run_with_stdin(cmd, payload.to_string().as_bytes());
             assert_silent_success(&out, "capture");
         }
@@ -763,16 +768,43 @@ fn shell_edits_are_counted_on_this_machine_when_switched_on() {
         shown["files"].clone()
     };
 
-    command("off-1", "t1", "two\n");
-    assert_eq!(files("off-1"), json!([]));
-    assert!(!home.path().join("data/snapshots").exists());
+    let added = |session: &str| {
+        let changed = files(session);
+        assert!(changed[0]["path"].as_str().unwrap().ends_with("a.txt"));
+        changed[0]["lines_added"].clone()
+    };
 
-    let said = stdout(run(home.path(), &["settings", "--shell-edits", "on"]));
-    assert!(said.contains("Shell:      on"), "{said}");
-    command("on-1", "t2", "three\nfour\n");
-    let changed = files("on-1");
-    assert!(changed[0]["path"].as_str().unwrap().ends_with("a.txt"));
-    assert_eq!(changed[0]["lines_added"], 2);
+    // As installed: a command that is over at once changed what changed.
+    let said = stdout(run(home.path(), &["settings"]));
+    assert!(said.contains("Shell:      sure"), "{said}");
+    command("sure-1", "t1", "make", "two\n", false);
+    assert_eq!(added("sure-1"), 1);
+    // One that took a while changed what its text spells out, and no more.
+    command("sure-2", "t2", "make", "three\n", true);
+    assert_eq!(files("sure-2"), json!([]));
+    command(
+        "sure-3",
+        "t3",
+        "echo 'four, as the command itself says it' >> a.txt; make",
+        "four, as the command itself says it\nfive, which only a person typed\n",
+        true,
+    );
+    assert_eq!(added("sure-3"), 1);
+
+    // All of it, by the name the setting had before as well.
+    for all in ["all", "on"] {
+        let said = stdout(run(home.path(), &["settings", "--shell-edits", all]));
+        assert!(said.contains("Shell:      all"), "{said}");
+    }
+    command("on-1", "t4", "make", "six\nseven\n", true);
+    assert_eq!(added("on-1"), 2);
+
+    // None of it: the files are not even looked at.
+    let said = stdout(run(home.path(), &["settings", "--shell-edits", "off"]));
+    assert!(said.contains("Shell:      off"), "{said}");
+    command("off-1", "t5", "echo eight >> a.txt", "eight\n", false);
+    assert_eq!(files("off-1"), json!([]));
+    assert!(!home.path().join("data/snapshots/off-1").exists());
 
     // What was kept to compare against goes when the session ends.
     let kept = home.path().join("data/snapshots/on-1");
@@ -1222,8 +1254,10 @@ fn a_cloud_session_is_uploaded_at_each_turns_end_for_whoever_started_it() {
     );
     assert!(shown.contains("2 changed (+4 -0)"), "{shown}");
 
-    // On a person's own machine the working tree is not looked at: what
-    // changes while a command runs may be the person's own typing.
+    // On a person's own machine the working tree is not looked at once that
+    // person has said so: what changes while a command runs may be their
+    // own typing. The sandbox's setting is not theirs to change.
+    run(home.path(), &["settings", "--shell-edits", "off"]);
     let mut local = shell("PreToolUse");
     local["session_id"] = json!("local-1");
     capture(home.path(), local.clone());
