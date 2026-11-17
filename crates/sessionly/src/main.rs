@@ -134,6 +134,18 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Stop submitting sessions from a repository, and delete the ones already submitted
+    Exclude {
+        /// The repository: a directory, or the name the dashboard shows
+        /// (`github.com/owner/name`, `~/Documents`). Omit to list them.
+        repo: Option<String>,
+    },
+    /// Submit sessions from a repository again. What was deleted stays deleted
+    /// until a machine that still has the sessions uploads them.
+    Include {
+        /// The repository, as named to `sessionly exclude`
+        repo: String,
+    },
     /// The server's Business or Enterprise license
     License {
         #[command(subcommand)]
@@ -622,17 +634,7 @@ fn run(command: Command) -> Result<()> {
             sync_ledger(&mut ledger, false)?;
             let report = upload::run(&mut ledger, &config, dry_run)?;
             let server = config.server.as_ref().map_or("", |s| s.url.as_str());
-            if dry_run {
-                println!(
-                    "Would upload {} sessions to {server} ({} already up to date)",
-                    report.sent, report.unchanged
-                );
-            } else {
-                println!(
-                    "Uploaded {} sessions to {server} ({} already up to date)",
-                    report.sent, report.unchanged
-                );
-            }
+            println!("{}", upload_line(dry_run, &report, server));
             for (id, reason) in &report.failed {
                 eprintln!("warning: {id} was not uploaded: {reason}");
             }
@@ -643,6 +645,8 @@ fn run(command: Command) -> Result<()> {
                 bail!("{} sessions were not uploaded", report.failed.len());
             }
         }
+        Command::Exclude { repo } => exclude_repository(repo.as_deref())?,
+        Command::Include { repo } => include_repository(&repo)?,
         Command::License { action } => {
             let config = config::Config::load(&paths::config_path()?)?;
             let Some(server) = &config.server else {
@@ -738,6 +742,172 @@ fn content_name(content: session::Content) -> &'static str {
     }
 }
 
+fn upload_line(dry_run: bool, report: &upload::Report, server: &str) -> String {
+    let verb = if dry_run { "Would upload" } else { "Uploaded" };
+    let mut text = format!(
+        "{verb} {} sessions to {server} ({} already up to date",
+        report.sent, report.unchanged
+    );
+    if report.excluded > 0 {
+        text.push_str(&format!(
+            ", {} from repositories you stopped submitting",
+            report.excluded
+        ));
+    }
+    text.push(')');
+    text
+}
+
+/// What `sessionly exclude` and `sessionly include` say when the server has
+/// no such route.
+const EXCLUSIONS_UNSUPPORTED: &str =
+    "this server cannot stop a repository yet; it needs a newer version of sessionly";
+
+/// The config on disk, and a client for the server it names. A server given
+/// through the environment is used for the request and not written back.
+fn connected_client() -> Result<(config::Config, PathBuf, upload::Client)> {
+    let path = paths::config_path()?;
+    let config = config::Config::load(&path)?;
+    let live = config.clone().with_environment();
+    let Some(server) = live.server.as_ref() else {
+        bail!("no server is configured; run: sessionly connect <url>");
+    };
+    Ok((config, path, upload::Client::new(server)))
+}
+
+fn sorted_repos(mut names: Vec<String>) -> Vec<String> {
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn remember_repo(list: &mut Vec<String>, name: &str) {
+    if !list.iter().any(|have| have == name) {
+        list.push(name.to_string());
+    }
+    list.sort();
+    list.dedup();
+}
+
+/// A 404 that is not "this repository is not stopped": an older server.
+fn exclusions_unsupported(err: &upload::SendError) -> bool {
+    matches!(
+        err,
+        upload::SendError::Rejected(message)
+            if message.starts_with("HTTP 404") && !message.contains("no such repository")
+    )
+}
+
+fn print_excluded(names: &[String]) {
+    if names.is_empty() {
+        println!("Nothing is stopped.");
+        return;
+    }
+    println!("Stopped:");
+    for name in names {
+        println!("  {name}");
+    }
+}
+
+fn list_excluded(config: &mut config::Config, path: &Path, client: &upload::Client) -> Result<()> {
+    match client.get("/api/v1/repos/excluded") {
+        Ok(value) => match upload::repo_names(&value) {
+            Some(names) => {
+                config.excluded_repos = sorted_repos(names);
+                config.save(path)?;
+                print_excluded(&config.excluded_repos);
+                Ok(())
+            }
+            None => bail!(EXCLUSIONS_UNSUPPORTED),
+        },
+        Err(err) if exclusions_unsupported(&err) => bail!(EXCLUSIONS_UNSUPPORTED),
+        Err(err) => bail!("{err}"),
+    }
+}
+
+fn exclude_repository(repo: Option<&str>) -> Result<()> {
+    let (mut config, path, client) = connected_client()?;
+    let Some(text) = repo else {
+        return list_excluded(&mut config, &path, &client);
+    };
+    let asked = upload::repository_name(text)?;
+    let answer = match client.exclude_repo(&asked) {
+        Ok(answer) => answer,
+        Err(err) if exclusions_unsupported(&err) => bail!(EXCLUSIONS_UNSUPPORTED),
+        Err(err) => bail!("{err}"),
+    };
+    let name = answer
+        .get("repo")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&asked)
+        .to_string();
+    let removed = answer
+        .get("sessions_removed")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let covers = answer
+        .get("covers_folders")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    match client.get("/api/v1/repos/excluded") {
+        Ok(value) => match upload::repo_names(&value) {
+            Some(names) => config.excluded_repos = sorted_repos(names),
+            None => remember_repo(&mut config.excluded_repos, &name),
+        },
+        Err(_) => remember_repo(&mut config.excluded_repos, &name),
+    }
+    config.save(&path)?;
+    let removed = match removed {
+        0 => "No sessions of yours were on the server.".to_string(),
+        1 => "1 session already submitted from it was removed.".to_string(),
+        n => format!("{n} sessions already submitted from it were removed."),
+    };
+    println!("Stopped submitting {name}. {removed}");
+    if covers {
+        println!("Directories inside it are stopped too.");
+    }
+    println!("The copy on this machine is kept, and is not sent again until you allow it.");
+    println!("To submit it again: sessionly include {name}");
+    Ok(())
+}
+
+fn include_repository(repo: &str) -> Result<()> {
+    let (mut config, path, client) = connected_client()?;
+    let asked = upload::repository_name(repo)?;
+    let answer = match client.include_repo(&asked) {
+        Ok(answer) => answer,
+        Err(err) if exclusions_unsupported(&err) => bail!(EXCLUSIONS_UNSUPPORTED),
+        Err(upload::SendError::Rejected(message)) if message.contains("no such repository") => {
+            if config.excluded_repos.iter().any(|have| have == &asked) {
+                config.excluded_repos.retain(|have| have != &asked);
+                config.save(&path)?;
+            }
+            bail!("{asked} is not stopped");
+        }
+        Err(err) => bail!("{err}"),
+    };
+    let name = answer
+        .get("repo")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&asked)
+        .to_string();
+    match client.get("/api/v1/repos/excluded") {
+        Ok(value) => match upload::repo_names(&value) {
+            Some(names) => config.excluded_repos = sorted_repos(names),
+            None => config
+                .excluded_repos
+                .retain(|have| have != &name && have != &asked),
+        },
+        Err(_) => config
+            .excluded_repos
+            .retain(|have| have != &name && have != &asked),
+    }
+    config.save(&path)?;
+    println!("{name} will be submitted again.");
+    println!("The next upload from a machine that still has the sessions sends them.");
+    Ok(())
+}
+
 fn print_settings(config: &config::Config) {
     println!("Machine id: {}", config.machine_id);
     match &config.server {
@@ -777,6 +947,9 @@ fn print_settings(config: &config::Config) {
             "off (only what agents change with their file tools is counted)"
         }
     );
+    if !config.excluded_repos.is_empty() {
+        println!("Excluded:   {}", config.excluded_repos.join(", "));
+    }
 }
 
 /// Install the hooks in Codex's own file.

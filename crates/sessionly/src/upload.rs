@@ -318,6 +318,107 @@ mod tests {
     }
 }
 
+/// The repository a server files a session under: its remote, or its root,
+/// or the working directory. Empty remote is kept, matching the server,
+/// which uses `remote ?? root ?? cwd` and does not skip an empty string.
+pub fn submitted_repo(session: &Session) -> Option<String> {
+    if let Some(repo) = &session.repo {
+        if let Some(remote) = &repo.remote {
+            return Some(remote.clone());
+        }
+        return Some(repo.root.clone());
+    }
+    session.cwd.clone()
+}
+
+/// Whether `repo` is stopped by one of `rules`. A path (`~`, `~/…` or `/…`)
+/// also covers directories inside it. A remote is only itself. Kept in step
+/// with `repoCovered` in `packages/schema/src/repo.ts`.
+pub fn repo_excluded(repo: &str, rules: &[String]) -> bool {
+    let left = slashes(repo);
+    rules.iter().any(|rule| {
+        let right = rule_text(rule);
+        if right.is_empty() || right == "/" {
+            return false;
+        }
+        if left == right {
+            return true;
+        }
+        let path = right == "~" || right.starts_with("~/") || right.starts_with('/');
+        path && left.starts_with(&format!("{right}/"))
+    })
+}
+
+fn slashes(text: &str) -> String {
+    text.replace('\\', "/")
+}
+
+/// `rule` without a trailing slash. `~/` is `~`; `/` stays `/`.
+fn rule_text(rule: &str) -> String {
+    let slashed = slashes(rule.trim());
+    let trimmed = slashed.trim_end_matches('/');
+    if trimmed.is_empty() {
+        slashed
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The repository `text` names, as a server files sessions.
+///
+/// A directory that exists is the repository it is in: the origin remote,
+/// if it has one, otherwise the path shortened to `~/…`. Anything else is
+/// already a name, such as `github.com/owner/name` or `~/Documents`.
+pub fn repository_name(text: &str) -> Result<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("name the repository");
+    }
+    let path = expand_home(trimmed);
+    let resolved = if path.is_dir() {
+        let root = crate::git::repo_root(&path).unwrap_or(path);
+        if let Some(remote) = crate::git::origin_remote(&root) {
+            remote
+        } else {
+            let home = crate::paths::home_dir().map(|dir| dir.to_string_lossy().into_owned());
+            relative_path(&root.to_string_lossy(), None, home.as_deref())
+        }
+    } else {
+        slashes(trimmed)
+    };
+    // The same shape the server accepts. `/` exists as a directory, and is
+    // still not a repository name.
+    let mut repo = resolved;
+    while repo.len() > 1 && repo.ends_with('/') {
+        repo.pop();
+    }
+    if repo.is_empty() || repo == "/" {
+        anyhow::bail!("name the repository");
+    }
+    if repo.chars().count() > 1024 {
+        anyhow::bail!("that repository name is too long");
+    }
+    if repo.chars().any(|c| c.is_control()) {
+        anyhow::bail!("that repository name is not valid");
+    }
+    Ok(repo)
+}
+
+/// `~/…` and `~` from the home directory. Anything else is used as given,
+/// so a name like `github.com/owner/name` is not looked up as a path
+/// unless that path exists.
+fn expand_home(text: &str) -> std::path::PathBuf {
+    let Some(home) = crate::paths::home_dir() else {
+        return std::path::PathBuf::from(text);
+    };
+    if text == "~" {
+        return home;
+    }
+    text.strip_prefix("~/")
+        .map(|rest| home.join(rest))
+        .unwrap_or_else(|| std::path::PathBuf::from(text))
+}
+
 // ---------------------------------------------------------------------------
 // Sending
 // ---------------------------------------------------------------------------
@@ -356,6 +457,11 @@ pub struct Client {
     agent: ureq::Agent,
     base: String,
     token: String,
+}
+
+/// What one session upload did. `excluded` means the repository is stopped.
+pub struct PutResult {
+    pub excluded: bool,
 }
 
 /// Whose certificates to accept: those in the file `SSL_CERT_FILE` names,
@@ -470,8 +576,46 @@ impl Client {
         )
     }
 
+    pub fn put(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, SendError> {
+        Self::check(
+            self.agent
+                .put(format!("{}{path}", self.base))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .send_json(body),
+        )
+    }
+
+    pub fn delete(&self, path: &str) -> Result<serde_json::Value, SendError> {
+        Self::check(
+            self.agent
+                .delete(format!("{}{path}", self.base))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .call(),
+        )
+    }
+
+    /// Stop submitting `repo` and delete the sessions already submitted from it.
+    pub fn exclude_repo(&self, repo: &str) -> Result<serde_json::Value, SendError> {
+        self.put(
+            "/api/v1/repos/excluded",
+            &serde_json::json!({ "repo": repo }),
+        )
+    }
+
+    /// Submit `repo` again. Sessions already deleted are not restored by this.
+    pub fn include_repo(&self, repo: &str) -> Result<serde_json::Value, SendError> {
+        self.delete(&format!(
+            "/api/v1/repos/excluded?repo={}",
+            url_segment(repo)
+        ))
+    }
+
     /// Store or replace one session on the server.
-    pub fn put_session(&self, upload: &Upload) -> Result<(), SendError> {
+    pub fn put_session(&self, upload: &Upload) -> Result<PutResult, SendError> {
         let s = &upload.session;
         let url = format!(
             "{}/api/v1/sessions/{}/{}/{}",
@@ -486,7 +630,9 @@ impl Client {
                 .header("Authorization", format!("Bearer {}", self.token))
                 .send_json(upload),
         )
-        .map(|_| ())
+        .map(|body| PutResult {
+            excluded: body.get("excluded").and_then(|v| v.as_bool()) == Some(true),
+        })
     }
 }
 
@@ -529,6 +675,8 @@ pub struct Report {
     pub sent: u64,
     /// Sessions the server already has in their current form.
     pub unchanged: u64,
+    /// Sessions from a repository this person stopped submitting.
+    pub excluded: u64,
     /// Sessions that could not be sent, with the reason.
     pub failed: Vec<(String, String)>,
     /// Set when the run stopped early; nothing after that point was tried.
@@ -538,9 +686,10 @@ pub struct Report {
 impl Report {
     pub fn summary(&self) -> String {
         let mut text = format!(
-            "uploaded {} ({} unchanged, {} failed)",
+            "uploaded {} ({} unchanged, {} excluded, {} failed)",
             self.sent,
             self.unchanged,
+            self.excluded,
             self.failed.len()
         );
         if let Some(reason) = &self.stopped {
@@ -559,6 +708,19 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
     let client = Client::new(server);
     let mut report = Report::default();
     let mut unreachable = 0;
+    // The server's list is what decides. A copy kept here covers a run that
+    // cannot ask (an older server, or one that did not answer).
+    let mut rules = match client.get("/api/v1/repos/excluded") {
+        Ok(value) => match repo_names(&value) {
+            Some(names) => names,
+            None => config.excluded_repos.clone(),
+        },
+        Err(err @ SendError::Auth(_)) => {
+            report.stopped = Some(err.to_string());
+            return Ok(report);
+        }
+        Err(_) => config.excluded_repos.clone(),
+    };
     for id in ledger.session_ids()? {
         let Some(session) = ledger.get(&id)? else {
             continue;
@@ -569,6 +731,19 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
             config.upload_content,
             config.upload_line_hashes,
         )?;
+        let repo = submitted_repo(&payload.session);
+        if repo
+            .as_deref()
+            .is_some_and(|name| repo_excluded(name, &rules))
+        {
+            // The server no longer has it. Forget that it was sent, so that
+            // allowing the repository again sends it on the next upload.
+            if !dry_run {
+                ledger.forget_upload(&id, &server.url)?;
+            }
+            report.excluded += 1;
+            continue;
+        }
         let hash = payload_hash(&payload);
         if ledger.uploaded_hash(&id, &server.url)?.as_deref() == Some(hash.as_str()) {
             report.unchanged += 1;
@@ -579,7 +754,17 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
             continue;
         }
         match client.put_session(&payload) {
-            Ok(()) => {
+            Ok(result) if result.excluded => {
+                if let Some(name) = repo {
+                    if !rules.iter().any(|rule| rule == &name) {
+                        rules.push(name);
+                    }
+                }
+                ledger.forget_upload(&id, &server.url)?;
+                report.excluded += 1;
+                unreachable = 0;
+            }
+            Ok(_) => {
                 ledger.mark_uploaded(&id, &server.url, &hash)?;
                 report.sent += 1;
                 unreachable = 0;
@@ -600,6 +785,18 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
         }
     }
     Ok(report)
+}
+
+/// `{"repos":[...]}` from `GET /repos/excluded`, or none when the body is not that.
+pub(crate) fn repo_names(value: &serde_json::Value) -> Option<Vec<String>> {
+    value
+        .get("repos")
+        .and_then(|repos| repos.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
 }
 
 #[cfg(test)]
@@ -735,5 +932,92 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
         assert_eq!(url_segment("abc-123_x.y"), "abc-123_x.y");
         assert_eq!(url_segment("a/b ?#"), "a%2Fb%20%3F%23");
         assert_eq!(url_segment("é"), "%C3%A9");
+    }
+}
+
+#[cfg(test)]
+mod repo_rules {
+    use super::*;
+
+    #[test]
+    fn a_path_covers_what_is_inside_it_and_a_remote_does_not() {
+        let rules = |rule: &str| vec![rule.to_string()];
+        assert!(repo_excluded("~/Downloads", &rules("~/Downloads")));
+        assert!(repo_excluded("~/Downloads/notes", &rules("~/Downloads")));
+        assert!(repo_excluded("~/Downloads\\notes", &rules("~/Downloads")));
+        assert!(repo_excluded("~/Downloads/a", &rules("~/Downloads/")));
+        assert!(!repo_excluded("~/Downloads-backup", &rules("~/Downloads")));
+        assert!(!repo_excluded("~/downloads", &rules("~/Downloads")));
+        assert!(repo_excluded(
+            "github.com/acme/web",
+            &rules("github.com/acme/web")
+        ));
+        assert!(!repo_excluded(
+            "github.com/acme/web-ui",
+            &rules("github.com/acme/web")
+        ));
+        assert!(!repo_excluded(
+            "github.com/acme/web/extra",
+            &rules("github.com/acme/web")
+        ));
+        assert!(repo_excluded("~/Documents", &rules("~")));
+        assert!(repo_excluded("~/Documents", &rules("~/")));
+        assert!(!repo_excluded("/tmp/x", &rules("~")));
+        assert!(!repo_excluded("github.com/acme/web", &rules("~")));
+        assert!(repo_excluded("~/100%_done/child", &rules("~/100%_done")));
+        assert!(!repo_excluded("~/100XYdone/child", &rules("~/100%_done")));
+        assert!(!repo_excluded("", &rules("~/Documents")));
+        assert!(!repo_excluded("~/Documents", &rules("")));
+        assert!(!repo_excluded("~/Documents", &rules("/")));
+    }
+
+    #[test]
+    fn a_directory_is_named_as_its_remote_or_its_shortened_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        };
+        git(&["init", "--quiet", "--initial-branch", "main"]);
+        let path = dir.path().to_string_lossy().into_owned();
+        let home = crate::paths::home_dir().map(|home| home.to_string_lossy().into_owned());
+        assert_eq!(
+            repository_name(&path).unwrap(),
+            relative_path(&path, None, home.as_deref())
+        );
+
+        git(&["remote", "add", "origin", "git@github.com:acme/hidden.git"]);
+        assert_eq!(repository_name(&path).unwrap(), "github.com/acme/hidden");
+        let nested = dir.path().join("docs");
+        std::fs::create_dir(&nested).unwrap();
+        assert_eq!(
+            repository_name(&nested.to_string_lossy()).unwrap(),
+            "github.com/acme/hidden"
+        );
+
+        assert_eq!(
+            repository_name("github.com/acme/web").unwrap(),
+            "github.com/acme/web"
+        );
+        assert_eq!(
+            repository_name(" ~/sessionly-test-no-such-repo-9f3a/ ").unwrap(),
+            "~/sessionly-test-no-such-repo-9f3a"
+        );
+        assert_eq!(
+            repository_name("~\\sessionly-test-no-such-repo-9f3a\\notes").unwrap(),
+            "~/sessionly-test-no-such-repo-9f3a/notes"
+        );
+        assert_eq!(repository_name("~").unwrap(), "~");
+        assert_eq!(repository_name("~/").unwrap(), "~");
+        assert!(repository_name("").is_err());
+        assert!(repository_name("   ").is_err());
+        assert!(repository_name("/").is_err());
+        assert!(repository_name(&"a".repeat(1025)).is_err());
+        assert!(repository_name("has\nbreak").is_err());
     }
 }

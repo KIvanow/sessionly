@@ -548,6 +548,17 @@ impl Ledger {
         Ok(())
     }
 
+    /// Forget that `server` was sent a session. Called when its repository is
+    /// stopped: the server no longer has it, so the next upload after it is
+    /// allowed again must send it.
+    pub fn forget_upload(&mut self, session_id: &str, server: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM uploads WHERE session_id = ?1 AND server = ?2",
+            [session_id, server],
+        )?;
+        Ok(())
+    }
+
     /// Remove every session whose id is not in `keep`, with its files and
     /// measurements. Returns how many were removed.
     pub fn retain(&mut self, keep: &[String]) -> Result<u64> {

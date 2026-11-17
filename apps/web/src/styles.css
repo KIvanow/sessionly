@@ -276,6 +276,20 @@ main > p { margin: 0; }
 .filters label, .inline label, .login label { display: grid; gap: 5px; }
 .filters select { width: 100%; min-width: 0; }
 
+/* Stopping a repository sits under the filters that choose it. */
+.submission { display: grid; gap: 8px; }
+.submission p { margin: 0; }
+.submission .row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; }
+.submission ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.submission li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 14px;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
 /* Sheets: the ledger's paper, with a hard shadow. A sheet's heading is ruled
    off beneath with the ledger's double line. */
 .card {

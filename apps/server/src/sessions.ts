@@ -1,5 +1,5 @@
 // Storing uploaded sessions and answering the dashboard's questions about them.
-import type { FileRow, GroupBy, Session, SessionRow, Totals, Upload } from "@sessionly/schema";
+import { parseRepo, repoCovered, type FileRow, type GroupBy, type Session, type SessionRow, type Totals, type Upload } from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
 import type { OrgDb } from "./db.ts";
 
@@ -30,16 +30,26 @@ export function ownerOf(upload: Upload, uploader: Principal): string {
   return uploader.role === "env" && cloud && /^\S+@\S+$/.test(named) ? named : uploader.email;
 }
 
+/** What storing an upload did. `excluded` means the repository is stopped, so nothing was stored. */
+export type StoreResult = { stored: boolean; excluded?: true };
+
 /**
  * Store one session, replacing an earlier upload of the same session.
- * Returns false if what the server has was kept instead.
+ * `stored` is false when what the server has was kept instead, or when the
+ * person has stopped the repository: then a copy of theirs is removed.
  */
-export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal): Promise<boolean> {
+export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal): Promise<StoreResult> {
   const s: Session = upload.session ?? {};
   const owner = { email: ownerOf(upload, uploader) };
   const cloud = s.runtime?.kind === "cloud";
   const counts = s.counts ?? {};
   const key = [db.orgId, s.machine_id, s.source, s.session_id];
+  const repoName = s.repo?.remote ?? s.repo?.root ?? s.cwd ?? null;
+  // Before the row is read: stopping the repository removes what is there.
+  if (await submissionStopped(db, owner.email, repoName)) {
+    await dropOwn(db, key, owner.email);
+    return { stored: false, excluded: true };
+  }
   const [existing] = await db.query<{ owner_email: string; runtime: string | null; prompts: number }>(
     `SELECT owner_email, runtime, prompts FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
@@ -54,7 +64,7 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   // A cloud session can outlive its sandbox. The next sandbox has seen only
   // what happened since it started: what it sends must not replace more.
   if (existing?.runtime === "cloud" && cloud && (counts.prompts ?? 0) < Number(existing.prompts)) {
-    return false;
+    return { stored: false };
   }
   const usage = s.usage ?? [];
   const rewrite = upload.rewrite ?? null;
@@ -68,7 +78,7 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     runtime_id: s.runtime?.id ?? null,
     user_email: s.user?.email ?? null,
     user_name: s.user?.name ?? null,
-    repo: s.repo?.remote ?? s.repo?.root ?? s.cwd ?? null,
+    repo: repoName,
     branch: s.repo?.branch ?? null,
     title: s.title ?? null,
     started_at: s.started_at ?? null,
@@ -119,7 +129,90 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     [...Object.values(columns), mayRefile],
   );
   if (stored.length === 0) throw new Conflict("this session was uploaded by someone else");
-  return true;
+  // Stopped while this was being stored: the row must not stay.
+  if (await submissionStopped(db, owner.email, repoName)) {
+    await dropOwn(db, key, owner.email);
+    return { stored: false, excluded: true };
+  }
+  return { stored: true };
+}
+
+/** Delete this person's copy of one session, if it is theirs. */
+async function dropOwn(db: OrgDb, key: unknown[], email: string): Promise<void> {
+  await db.query(
+    `DELETE FROM sessions
+     WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4 AND owner_email = $5`,
+    [...key, email],
+  );
+}
+
+/** Whether this person stopped the repository a session is filed under. */
+async function submissionStopped(db: OrgDb, email: string, repo: string | null): Promise<boolean> {
+  if (!repo) return false;
+  const rules = await db.query<{ repo: string }>(
+    `SELECT repo FROM repo_exclusions WHERE org_id = $1 AND owner_email = $2`,
+    [db.orgId, email],
+  );
+  return rules.some((rule) => repoCovered(repo, rule.repo));
+}
+
+/** The repositories this person stopped, in name order. */
+export async function listExcluded(db: OrgDb, email: string): Promise<string[]> {
+  const rows = await db.query<{ repo: string }>(
+    `SELECT repo FROM repo_exclusions WHERE org_id = $1 AND owner_email = $2 ORDER BY repo`,
+    [db.orgId, email],
+  );
+  return rows.map((row) => row.repo);
+}
+
+/**
+ * Stop `raw` for this person and delete the sessions of theirs it covers.
+ * Doing it again deletes any that arrived since.
+ */
+export async function excludeRepo(
+  db: OrgDb,
+  email: string,
+  raw: unknown,
+): Promise<{ repo: string; sessions_removed: number; covers_folders: boolean }> {
+  const parsed = parseRepo(raw);
+  if (!parsed.ok) throw new RepoNameError(parsed.error);
+  const { repo, coversFolders } = parsed.name;
+  await db.query(
+    `INSERT INTO repo_exclusions (org_id, owner_email, repo) VALUES ($1, $2, $3)
+     ON CONFLICT (org_id, owner_email, repo) DO NOTHING`,
+    [db.orgId, email, repo],
+  );
+  // A path covers directories inside it. `%` and `_` in the name are literal,
+  // and a backslash in a stored path is a slash for the comparison.
+  const pattern = coversFolders ? `${escapeLike(repo)}/%` : null;
+  const removed = await db.query(
+    `DELETE FROM sessions
+     WHERE org_id = $1 AND owner_email = $2 AND repo IS NOT NULL
+       AND (replace(repo, E'\\\\', '/') = $3
+            OR ($4::text IS NOT NULL AND replace(repo, E'\\\\', '/') LIKE $4 ESCAPE E'\\\\'))
+     RETURNING 1`,
+    [db.orgId, email, repo, pattern],
+  );
+  return { repo, sessions_removed: removed.length, covers_folders: coversFolders };
+}
+
+/** Allow a repository again. Returns its name, or null if it was not stopped. Nothing deleted is restored. */
+export async function includeRepo(db: OrgDb, email: string, raw: unknown): Promise<string | null> {
+  const parsed = parseRepo(raw);
+  if (!parsed.ok) throw new RepoNameError(parsed.error);
+  const rows = await db.query<{ repo: string }>(
+    `DELETE FROM repo_exclusions WHERE org_id = $1 AND owner_email = $2 AND repo = $3 RETURNING repo`,
+    [db.orgId, email, parsed.name.repo],
+  );
+  return rows[0]?.repo ?? null;
+}
+
+/** `parseRepo` refused the name. The route says so as a 400. */
+export class RepoNameError extends Error {}
+
+/** LIKE pattern metacharacters, so a repository named `100%_done` is only itself. */
+function escapeLike(text: string): string {
+  return text.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
 }
 
 export type { GroupBy };

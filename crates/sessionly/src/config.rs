@@ -50,6 +50,10 @@ pub struct Config {
     /// this machine too (see `changes`). Off unless switched on: whatever
     /// else changes a file while a command runs is put down to the agent.
     pub shell_edits: bool,
+    /// Repositories this machine does not upload. The server's list decides;
+    /// this is the copy last set here, used when the server cannot be asked.
+    #[serde(default)]
+    pub excluded_repos: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,6 +71,7 @@ impl Default for Config {
             auto_sync: true,
             upload_line_hashes: false,
             shell_edits: false,
+            excluded_repos: Vec::new(),
         }
     }
 }

@@ -624,6 +624,19 @@ const MIGRATIONS: string[] = [
   // trial databases has such people: no release kept sign-ins without it.)
   `UPDATE users SET confirmed_at = NULL WHERE confirmed_at IS NOT NULL AND sign_in_account IS NULL`,
   `ALTER TABLE users ADD CONSTRAINT users_confirmed_with_account CHECK (confirmed_at IS NULL OR sign_in_account IS NOT NULL)`,
+  // A person can stop a repository. Sessions of theirs already submitted from
+  // it are deleted, and a later upload of it is not stored. The name is the
+  // one a session is filed under (its remote, or its path). A path also
+  // covers directories inside it; a remote is only itself.
+  `CREATE TABLE repo_exclusions (
+     org_id      text NOT NULL REFERENCES orgs ON DELETE CASCADE,
+     owner_email text NOT NULL,
+     repo        text NOT NULL,
+     created_at  timestamptz NOT NULL DEFAULT now(),
+     PRIMARY KEY (org_id, owner_email, repo)
+   )`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON repo_exclusions`),
+  ...rowLevelSecurity("repo_exclusions"),
 ];
 
 /**

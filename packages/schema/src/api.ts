@@ -255,6 +255,23 @@ export interface FilterOptions {
   runtimes: string[];
 }
 
+/** Repositories this person stopped submitting (`GET /repos/excluded`). */
+export interface ExcludedRepos {
+  repos: string[];
+}
+
+/**
+ * Stopping one repository (`PUT /repos/excluded`): sessions of theirs already
+ * submitted from it are deleted, and later uploads are not stored.
+ */
+export interface ExcludedRepo {
+  repo: string;
+  /** How many of their sessions were deleted. */
+  sessions_removed: number;
+  /** A path: directories inside it are stopped too. A remote is only itself. */
+  covers_folders: boolean;
+}
+
 export interface TokenInfo {
   id: string;
   email: string;
