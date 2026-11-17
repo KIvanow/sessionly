@@ -197,6 +197,7 @@ footer :focus-visible {
   font-size: 15px;
   font-weight: 500;
   text-decoration: none;
+  white-space: nowrap;
 }
 .top nav a:hover {
   text-decoration: underline;
@@ -276,7 +277,7 @@ footer :focus-visible {
     display: none;
   }
 }
-/* Six links need a little less room each until the window is wider. */
+/* The section links need a little less room each until the window is wider. */
 @media (min-width: 1020px) and (max-width: 1179px) {
   .top nav a {
     padding: 8px 7px;
