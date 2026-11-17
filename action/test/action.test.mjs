@@ -212,7 +212,7 @@ test("the figures as text", () => {
   // The figures at a glance, then by tool and model.
   assert.match(text, /\| Lines added \| By an agent \| Share \|\n\|---:\|---:\|---:\|\n\| 1,200 \| 450 \| 38% \|/);
   // How it is counted is there for whoever asks, folded away.
-  assert.match(text, /<details>\n<summary>How this is counted<\/summary>\n\n[^\n]*shell command is not counted[^\n]*\n\n<\/details>$/);
+  assert.match(text, /<details>\n<summary>How this is counted<\/summary>\n\n[^\n]*shell command is counted only where it is sure[^\n]*\n\n<\/details>$/);
   assert.match(text, /\*\*38% of the lines this pull request adds were written by a coding agent\*\* \(450 of 1,200\)/);
   assert.match(text, /\| Claude Code \| claude-opus-5-5 \| 300 \|/);
   assert.match(text, /\| Cursor \| not known \| 150 \|/);

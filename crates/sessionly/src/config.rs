@@ -46,10 +46,39 @@ pub struct Config {
     /// Upload hashes of the lines agents added, so the server can tell which
     /// lines of a pull request an agent wrote. Off unless switched on.
     pub upload_line_hashes: bool,
-    /// Count what an agent's shell commands change in the working tree, on
-    /// this machine too (see `changes`). Off unless switched on: whatever
-    /// else changes a file while a command runs is put down to the agent.
-    pub shell_edits: bool,
+    /// How much of what changes in the working tree while an agent's shell
+    /// command runs is counted as the agent's, on this machine (see `changes`).
+    pub shell_edits: ShellEdits,
+}
+
+/// How much of what changes in a repository while an agent's shell command
+/// runs is counted as the agent's, on a person's own machine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellEdits {
+    /// What is sure to be the command's: lines its own text spells out, and
+    /// everything when it ran briefly with no other session at work there
+    #[default]
+    Sure,
+    /// Everything that changed while it ran, which may include a file you
+    /// saved or another session changed meanwhile
+    #[value(alias = "on")]
+    All,
+    /// Nothing: only what agents change with their file tools is counted
+    Off,
+}
+
+impl<'de> Deserialize<'de> for ShellEdits {
+    /// By name. A version from before there were three wrote `true` for
+    /// everything and `false` for what was then the default.
+    fn deserialize<D: serde::Deserializer<'de>>(from: D) -> Result<Self, D::Error> {
+        Ok(match serde_json::Value::deserialize(from)? {
+            serde_json::Value::Bool(true) => ShellEdits::All,
+            serde_json::Value::String(name) if name == "all" => ShellEdits::All,
+            serde_json::Value::String(name) if name == "off" => ShellEdits::Off,
+            _ => ShellEdits::Sure,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,19 +95,20 @@ impl Default for Config {
             upload_content: Content::Metadata,
             auto_sync: true,
             upload_line_hashes: false,
-            shell_edits: false,
+            shell_edits: ShellEdits::default(),
         }
     }
 }
 
-/// Whether `shell_edits` is switched on in the config at `path`. For the
-/// capture hook, which runs for every event: it reads the one setting and
-/// never creates the file.
-pub fn shell_edits(path: &Path) -> bool {
+/// The `shell_edits` setting in the config at `path`. For the capture hook,
+/// which runs for every event: it reads the one setting and never creates
+/// the file.
+pub fn shell_edits(path: &Path) -> ShellEdits {
     fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .is_some_and(|config| config["shell_edits"] == true)
+        .and_then(|config| ShellEdits::deserialize(&config["shell_edits"]).ok())
+        .unwrap_or_default()
 }
 
 impl Config {
@@ -320,6 +350,48 @@ mod tests {
         );
         fs::write(&path, "{ broken").unwrap();
         assert!(Config::load(&path).is_err());
+    }
+
+    #[test]
+    fn shell_edits_count_what_is_sure_unless_said_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // No config yet, and one from before the setting.
+        assert_eq!(shell_edits(&path), ShellEdits::Sure);
+        for (saved, means) in [
+            (r#"{"machine_id":"m-1"}"#, ShellEdits::Sure),
+            (
+                r#"{"machine_id":"m-1","shell_edits":"sure"}"#,
+                ShellEdits::Sure,
+            ),
+            (
+                r#"{"machine_id":"m-1","shell_edits":"all"}"#,
+                ShellEdits::All,
+            ),
+            (
+                r#"{"machine_id":"m-1","shell_edits":"off"}"#,
+                ShellEdits::Off,
+            ),
+            // As a version from before there were three wrote it.
+            (
+                r#"{"machine_id":"m-1","shell_edits":true}"#,
+                ShellEdits::All,
+            ),
+            (
+                r#"{"machine_id":"m-1","shell_edits":false}"#,
+                ShellEdits::Sure,
+            ),
+        ] {
+            fs::write(&path, saved).unwrap();
+            assert_eq!(shell_edits(&path), means, "{saved}");
+            assert_eq!(Config::load(&path).unwrap().shell_edits, means, "{saved}");
+        }
+        let mut config = Config::load(&path).unwrap();
+        config.shell_edits = ShellEdits::Off;
+        config.save(&path).unwrap();
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains(r#""shell_edits": "off""#));
     }
 
     #[test]
