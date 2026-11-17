@@ -579,6 +579,50 @@ pub fn fetch_text(url: &str) -> Result<String> {
     Ok(response.body_mut().read_to_string()?)
 }
 
+/// What is at `url`, for a 2xx answer and no more than `limit` bytes of it.
+/// No token is sent. A `file://` address is read from disk: a release can be
+/// kept in a folder (see `SESSIONLY_RELEASE_BASE`).
+pub fn fetch_bytes(url: &str, limit: u64) -> Result<Vec<u8>> {
+    if let Some(path) = url.strip_prefix("file://") {
+        let size = std::fs::metadata(path)?.len();
+        if size > limit {
+            anyhow::bail!("{size} bytes, which is more than the {limit} expected");
+        }
+        return Ok(std::fs::read(path)?);
+    }
+    let mut response = agent().get(url).call()?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        anyhow::bail!("HTTP {status}");
+    }
+    Ok(response
+        .body_mut()
+        .with_config()
+        .limit(limit)
+        .read_to_vec()?)
+}
+
+/// Where the page at `url` sends on to, if it does: its `Location`, with the
+/// redirect not followed.
+pub fn redirect_of(url: &str) -> Result<Option<String>> {
+    let response = agent()
+        .get(url)
+        .config()
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .build()
+        .call()?;
+    let status = response.status().as_u16();
+    if !(300..400).contains(&status) {
+        anyhow::bail!("HTTP {status}");
+    }
+    Ok(response
+        .headers()
+        .get("location")
+        .and_then(|to| to.to_str().ok())
+        .map(String::from))
+}
+
 impl Client {
     pub fn new(server: &Server) -> Client {
         let agent = agent();
