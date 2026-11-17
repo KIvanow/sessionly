@@ -240,8 +240,9 @@ Limits to know about:
 Some agents, and some ways of working, edit with the shell instead of the file tools: a
 script that rewrites a file, `sed -i`, a heredoc, a formatter. Hooks are told that a command
 ran, not what it changed. So the files of the repository are compared just before and just
-after each shell command of Claude Code or Cursor, and what differs is looked at: the files
-and the lines, toward the session's totals, the rewrite rate and pull requests.
+after each shell command of Claude Code, Cursor or Codex (see [Codex](#codex) for how sure
+that is there), and what differs is looked at: the files and the lines, toward the session's
+totals, the rewrite rate and pull requests.
 
 In a [cloud session](#cloud-sessions) all of what differs is the command's: the agent is
 alone there. On your own machine it is not. You may save a file in your editor during a long
@@ -521,8 +522,17 @@ SubagentStart, SubagentStop, PreCompact and PostCompact), marked `async` (all bu
 which Codex runs in step regardless) so Codex neither waits for it nor shows it running. `sessionly uninstall` removes them and `sessionly status` counts
 them. A session the hooks have seen is brought in from its rollout at the next sync without
 running `import`; as with Cursor and Grok, the agent's own file is the record and the hooks say
-that the session happened. One thing is taken from the hooks: how often Codex asked for
-permission, which the rollout does not keep. A session the hooks did not see has 0.
+that the session happened. Two things are taken from the hooks, which the rollout does not
+keep. A session the hooks did not see has neither.
+
+- **How often Codex asked for permission.**
+- **What its shell commands changed**, where [shell edits](#shell-edits) are counted. The
+  rollout has each command and the lines of each patch (`apply_patch`), but nothing of what
+  a `sed -i` or a heredoc did to a file. The hooks compare the files before and after the
+  command, and what they find is put with the same command in the rollout. Because the hooks
+  are `async`, Codex does not wait for the look before a command: a command that changes a
+  file before that look is done has that change missed, never counted twice. A file a patch
+  changes while a command runs is the patch's, not the command's.
 
 **Codex does not run a new or changed hook until you have approved it.** After `sessionly
 install`, start `codex` and accept the hooks in the review it shows (or run `/hooks`). Moving

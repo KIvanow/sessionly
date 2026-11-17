@@ -35,8 +35,20 @@ pub struct Built {
 /// `facts_dir` after each successful read and loaded from there when the
 /// transcript itself is gone. For other agents the importer saved them.
 pub fn build_from_raw(raw_path: &Path, facts_dir: &Path, source: &str) -> Result<Option<Built>> {
+    build_with(raw_path, facts_dir, source, &HashMap::new())
+}
+
+/// As `build_from_raw`, with what hook captures saw shell commands change
+/// (`seen`, from `changes::seen_in`) put with the same commands in the file.
+pub fn build_with(
+    raw_path: &Path,
+    facts_dir: &Path,
+    source: &str,
+    seen: &HashMap<String, Value>,
+) -> Result<Option<Built>> {
     let mut events: Vec<Value> = Vec::new();
     crate::jsonl::for_each(raw_path, |record| events.push(record))?;
+    crate::changes::add_seen(&mut events, seen);
     let transcript_path = events
         .iter()
         .find_map(|e| e["payload"]["transcript_path"].as_str())

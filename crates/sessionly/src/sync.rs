@@ -165,9 +165,10 @@ fn permission_requests<'a>(captures: impl Iterator<Item = &'a PathBuf>) -> u64 {
 /// partway covers less than the transcript does, so an import wins over it.
 /// For other agents the hooks only say that a session happened: their own
 /// session files hold more, so an import always wins. Codex's files leave out
-/// one thing its hooks do say: that it asked for permission. A subagent's
-/// thread has a capture of its own, which counts toward the session that
-/// spawned it (`subagent_raw`).
+/// two things its hooks do say: that it asked for permission, and what a
+/// shell command changed, where the capture looked (see `changes`). A
+/// subagent's thread has a capture of its own, which counts toward the
+/// session that spawned it (`subagent_raw`).
 fn build(
     dirs: &SourceDirs,
     raw: Option<&PathBuf>,
@@ -179,7 +180,16 @@ fn build(
         None => Ok(None),
     };
     if dirs.source != crate::paths::CLAUDE_CODE {
-        let mut built = match from(imported)? {
+        let codex = dirs.source == crate::paths::CODEX;
+        let from_import = match imported {
+            // The import knows each shell command, and the captures what it changed.
+            Some(path) if codex => {
+                let seen = crate::changes::seen_in(raw.into_iter().chain(subagent_raw));
+                normalize::build_with(path, &dirs.facts, &dirs.source, &seen)?
+            }
+            _ => from(imported)?,
+        };
+        let mut built = match from_import {
             Some(built) => Some(built),
             None => from(raw)?,
         };
@@ -783,6 +793,68 @@ mod tests {
         .unwrap();
         run(&[dirs], &mut ledger, "m", false).unwrap();
         assert_eq!(asked(&ledger), (Transcript, 2));
+    }
+
+    #[test]
+    fn a_codex_import_takes_what_its_shell_commands_changed_from_the_hooks() {
+        use serde_json::Value;
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = SourceDirs::in_data_dir(dir.path(), "codex");
+        fs::create_dir_all(&dirs.raw).unwrap();
+        fs::create_dir_all(&dirs.imported).unwrap();
+        let record = |hook: &str, origin: &str, at: u32, more: Value| {
+            let mut payload = json!({ "session_id": "x1", "prompt_id": "t1", "cwd": "/repo" });
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(more.as_object().unwrap().clone());
+            json!({ "hook": hook, "origin": origin, "payload": payload,
+                    "received_at": format!("2026-11-16T10:00:{at:02}Z") })
+        };
+        let shell = |id: &str| json!({ "tool_use_id": id, "tool_name": "Bash", "tool_input": { "command": "sed -i s/a/b/ a.txt" } });
+        let write = |path: PathBuf, records: &[Value]| {
+            let lines: Vec<String> = records.iter().map(Value::to_string).collect();
+            fs::write(path, lines.join("\n") + "\n").unwrap();
+        };
+        // Codex's own file: the command, and nothing of what it changed.
+        write(
+            dirs.imported.join("x1.jsonl"),
+            &[
+                record(
+                    "UserPromptSubmit",
+                    "transcript",
+                    0,
+                    json!({ "prompt": "x" }),
+                ),
+                record("PreToolUse", "transcript", 1, shell("c1")),
+                record("PostToolUse", "transcript", 2, shell("c1")),
+                record("PreToolUse", "transcript", 3, shell("c2")),
+                record("PostToolUse", "transcript", 4, shell("c2")),
+            ],
+        );
+        let mut ledger = Ledger::open(&dir.path().join("l.db")).unwrap();
+        run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
+        assert_eq!(ledger.get("x1").unwrap().unwrap().files, []);
+
+        // The capture looked at the files around the first command.
+        let mut ended = record("PostToolUse", "hook", 2, shell("c1"));
+        ended["changes"] =
+            json!([{ "path": "/repo/a.txt", "status": "M", "lines": ["-a", "+b", "+c"] }]);
+        write(
+            dirs.raw.join("x1.jsonl"),
+            &[record("PreToolUse", "hook", 1, shell("c1")), ended],
+        );
+        run(&[dirs], &mut ledger, "m", false).unwrap();
+        let session = ledger.get("x1").unwrap().unwrap();
+        assert_eq!(session.captured_by, crate::session::CapturedBy::Transcript);
+        let files: Vec<_> = session
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.lines_added, f.lines_removed))
+            .collect();
+        assert_eq!(files, [("/repo/a.txt", 2, 1)]);
+        let lines: Vec<_> = session.tool_calls.iter().map(|c| c.lines_added).collect();
+        assert_eq!(lines, [2, 0]);
     }
 
     #[test]
