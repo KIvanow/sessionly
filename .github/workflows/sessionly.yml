@@ -25,7 +25,7 @@ jobs:
       # Only the report of an earlier pull request compares commits.
       contents: read
     steps:
-      - uses: KIvanow/sessionly/action@327c975005b5307ad93ca677a0e529fec89e8c08 # the figures as a comment, 16 November 2026
+      - uses: KIvanow/sessionly/action@e56f9a3325ac1233ac35785da72a69c803d45200 # who reviewed and commented, and where, 17 November 2026
         with:
           url: https://app.sessionly.dev
           # A token with the ci role, which can report pull requests and nothing else.
