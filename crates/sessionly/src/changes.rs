@@ -11,12 +11,26 @@
 //! kept under the data directory. The repository's own index, objects and
 //! HEAD are never written.
 //!
-//! This is done in a sandbox (see `runtime`), where the agent is the only
-//! one working. On a person's machine whatever the person saved while a
-//! command ran would be put down to the agent, and so would what another
-//! session changed meanwhile. There it is done only when the person has
-//! switched it on (`sessionly settings --shell-edits on`), and what is kept
-//! for a session is removed when the session ends.
+//! In a sandbox (see `runtime`) the agent is the only one working, and all
+//! that differs is the command's. On a person's machine whatever the person
+//! saved while a command ran would be put down to the agent, and so would
+//! what another session changed meanwhile. There only what is sure to be the
+//! command's is counted, unless the person asks for all of it or for none
+//! (`sessionly settings --shell-edits`):
+//!
+//! - everything, when the command was over within `QUICK_MS` and no other
+//!   session was seen at work in the repository meanwhile: nobody saves a
+//!   file in that time;
+//! - otherwise the added lines that the command's own text spells out (a
+//!   heredoc, a script given inline), and nothing of a file where it spells
+//!   out none.
+//!
+//! What is kept for a session is removed when the session ends. A home
+//! directory that is itself a repository is not looked at there.
+//!
+//! A command that begins `cd <somewhere> &&` is looked at where it goes, if
+//! that is another worktree of the session's repository: an agent given a
+//! worktree of its own often works that way. Other repositories are left alone.
 //!
 //! Deliberate limits:
 //! - A command that moves HEAD to commits it did not make itself (`git pull`,
@@ -60,6 +74,23 @@ const READ_ONLY: &[&str] = &["Read", "Grep", "Glob", "LS"];
 /// A file tool seen to start and never to end is taken to be at work this long.
 const EDIT_LASTS_MS: u64 = 60_000;
 
+/// On a person's machine, a command over within this long is taken to be the
+/// only thing that changed a file meanwhile.
+const QUICK_MS: u64 = 2_000;
+
+/// A line of at least this many characters tells whose it is by being in a
+/// command's text as one of its lines; one of twice as many, by being
+/// anywhere in it. Shorter ones are in too many files to tell.
+const TELLING: usize = 16;
+
+/// Another session's shell command seen to start and never to end is taken
+/// to be running this long.
+const COMMAND_LASTS_MS: u64 = 60 * 60_000;
+
+/// What was kept for a session not heard of for this long is removed: it
+/// ended without saying so.
+const KEPT_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 /// What is remembered between the events of one session.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -76,8 +107,8 @@ struct State {
     at: u64,
     /// Shell commands that have begun and not ended.
     open: u32,
-    /// Looking took too long once: it is not tried again.
-    gave_up: bool,
+    /// Repositories where looking took too long once: there it is not tried again.
+    too_slow: Vec<String>,
     /// Files the agent's file tools are changing or changed lately.
     edited: Vec<Edited>,
 }
@@ -95,8 +126,15 @@ struct Edited {
 
 /// One event, as far as it matters here.
 enum Event<'a> {
-    /// A shell command began, or ended, in the repository at `root`.
-    Shell { root: &'a Path, ended: bool },
+    /// A shell command began, or ended, in the repository at `root`. With
+    /// `sure`, only what is sure to be the command's is counted, going by
+    /// its text in `command`.
+    Shell {
+        root: &'a Path,
+        ended: bool,
+        command: &'a str,
+        sure: bool,
+    },
     /// A file tool began, or ended, its work on a file.
     Edit { path: PathBuf, ended: bool },
 }
@@ -108,16 +146,23 @@ enum Stop {
     TooLarge,
 }
 
-/// Called with each captured event in a sandbox. For a shell command's start
-/// it notes the working tree; for its end it answers what to store with the
+/// Called with each captured tool event. For a shell command's start it
+/// notes the working tree; for its end it answers what to store with the
 /// event: `{"changes": [{"path", "status", "lines"}]}`, or
 /// `{"changes_skipped": "<why>"}` when a change was seen and not counted.
-/// `lines` are patch lines, `+added` and `-removed`.
+/// `lines` are patch lines, `+added` and `-removed`. With `sure`, as on a
+/// person's own machine, only what is sure to be the command's is answered.
 ///
 /// Agents run tools side by side, so a file tool may change a file while a
 /// shell command runs. That tool reports the change itself: its events are
 /// noted here so the file is not counted a second time as the command's.
-pub fn observe(data_dir: &Path, record: &Value) -> Option<Value> {
+pub fn observe(data_dir: &Path, record: &Value, at: Where) -> Option<Value> {
+    // The clock is read first: waiting for the lock and looking at the tree
+    // take time in which a file can change too.
+    let began = Instant::now();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
     let p = &record["payload"];
     let ended = match record["hook"].as_str()?.to_lowercase().as_str() {
         "pretooluse" => false,
@@ -133,8 +178,28 @@ pub fn observe(data_dir: &Path, record: &Value) -> Option<Value> {
     let tool = p["tool_name"].as_str().unwrap_or_default();
     let root;
     let event = if SHELL_TOOLS.contains(&tool) {
-        root = crate::git::repo_root(cwd?)?;
-        Event::Shell { root: &root, ended }
+        let command = p["tool_input"]["command"].as_str().unwrap_or_default();
+        let own = crate::git::repo_root(cwd?);
+        root = goes_to(command, cwd?)
+            .and_then(|there| root_there(&there, own.as_deref()))
+            .or(own)?;
+        let sure = match at {
+            Where::Sandbox => false,
+            Where::Machine { sure } => {
+                // Some keep their home directory in git. That is not a
+                // repository an agent is at work in: it is everything.
+                if crate::paths::home_dir().is_some_and(|home| real(&home) == real(&root)) {
+                    return None;
+                }
+                sure
+            }
+        };
+        Event::Shell {
+            root: &root,
+            ended,
+            command,
+            sure,
+        }
     } else if READ_ONLY.contains(&tool) {
         return None;
     } else {
@@ -156,17 +221,167 @@ pub fn observe(data_dir: &Path, record: &Value) -> Option<Value> {
         Event::Edit { path, ended }
     };
     let stem = crate::capture::file_stem(record["session_id"].as_str());
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-    step(&data_dir.join("snapshots").join(stem), event, now)
+    step(&data_dir.join("snapshots").join(stem), event, now, began)
+}
+
+/// Where an event was captured, for what of a shell command's changes may be
+/// counted there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Where {
+    /// A cloud agent's sandbox: the agent is alone, and all of it is counted.
+    Sandbox,
+    /// A person's own machine: with `sure`, only what is sure to be the command's.
+    Machine { sure: bool },
+}
+
+/// A directory as the file system knows it: links followed, `..` taken out.
+/// As it is given when it cannot be found.
+fn real(dir: &Path) -> PathBuf {
+    fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// The directory git keeps a repository's objects in, shared by all of its
+/// worktrees: `.git` itself, or for a worktree what its `.git` file leads to.
+fn common_dir(root: &Path) -> Option<PathBuf> {
+    let git = root.join(".git");
+    if git.is_dir() {
+        return Some(real(&git));
+    }
+    let text = fs::read_to_string(&git).ok()?;
+    let own = root.join(text.trim().strip_prefix("gitdir:")?.trim());
+    // A worktree's own directory is `<common>/worktrees/<name>`.
+    let named = own.parent()?;
+    let common = named.parent()?;
+    (named.file_name()? == "worktrees").then(|| real(common))
+}
+
+/// The repository a command went to, given where it said it goes (`there`)
+/// and the repository the session is in (`own`). Only the session's own
+/// repository is looked at: a directory inside it, under the name the session
+/// knows it by, or another worktree of it. A command that goes anywhere else
+/// is none of this session's work on its repository.
+fn root_there(there: &Path, own: Option<&Path>) -> Option<PathBuf> {
+    let own = own?;
+    let root = crate::git::repo_root(&fs::canonicalize(there).ok()?)?;
+    if root == real(own) {
+        return Some(own.to_path_buf());
+    }
+    (common_dir(&root)? == common_dir(own)?).then_some(root)
 }
 
 /// The session of `record` is over: drop what was kept to compare against.
-/// One that starts again begins with a fresh look.
+/// One that starts again begins with a fresh look. What sessions that ended
+/// without saying so left behind goes too.
 pub fn forget(data_dir: &Path, record: &Value) {
+    let kept = data_dir.join("snapshots");
     let stem = crate::capture::file_stem(record["session_id"].as_str());
-    let _ = fs::remove_dir_all(data_dir.join("snapshots").join(stem));
+    let _ = fs::remove_dir_all(kept.join(stem));
+    for other in fs::read_dir(&kept).into_iter().flatten().flatten() {
+        let heard =
+            fs::metadata(other.path().join("state.json")).and_then(|state| state.modified());
+        if heard.is_ok_and(|at| at.elapsed().is_ok_and(|ago| ago > KEPT_FOR)) {
+            let _ = fs::remove_dir_all(other.path());
+        }
+    }
+}
+
+/// Where a command says it goes before anything else: the `<somewhere>` of
+/// `cd <somewhere> && …`, from `cwd`. None when it does not begin that way,
+/// or names the place in a way only a shell can work out.
+fn goes_to(command: &str, cwd: &Path) -> Option<PathBuf> {
+    let rest = command.trim_start().strip_prefix("cd ")?.trim_start();
+    let (place, then) = match rest.chars().next()? {
+        quote @ ('"' | '\'') => {
+            let end = rest[1..].find(quote)? + 1;
+            (&rest[1..end], &rest[end + 1..])
+        }
+        _ => rest.split_at(rest.find([' ', '\t', '\n', ';', '&']).unwrap_or(rest.len())),
+    };
+    let then = then.trim_start_matches([' ', '\t']);
+    let goes_on = then.starts_with("&&") || then.starts_with([';', '\n']);
+    let plain =
+        !place.is_empty() && !place.starts_with('~') && !place.contains(['$', '`', '\\', '*', '?']);
+    (goes_on && plain).then(|| cwd.join(place))
+}
+
+/// Whether another session was seen at work in the repository at `root`
+/// since `since`: a shell command of its own, or a file tool on a file there.
+/// `dir` is where this session's own state is kept, next to the others'.
+fn others_at_work(dir: &Path, root: &Path, since: u64, now: u64) -> bool {
+    let Some(all) = dir.parent() else {
+        return false;
+    };
+    // Two sessions may know one repository by two names, through a link say.
+    let root = &real(root);
+    fs::read_dir(all)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|other| {
+            if other.path() == dir {
+                return false;
+            }
+            let Some(state) = fs::read_to_string(other.path().join("state.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<State>(&text).ok())
+            else {
+                return false;
+            };
+            let here = !state.root.is_empty() && real(Path::new(&state.root)) == *root;
+            let command = here
+                && (state.seen_at >= since
+                    || (state.open > 0 && now.saturating_sub(state.at) < COMMAND_LASTS_MS));
+            let edit = state.edited.iter().any(|edited| {
+                Path::new(&edited.path).starts_with(root)
+                    && (edited.at >= since
+                        || (edited.open && now.saturating_sub(edited.at) < EDIT_LASTS_MS))
+            });
+            command || edit
+        })
+}
+
+/// Of the files a command may have changed, what its own text shows it
+/// changed: the added lines the text spells out. A file all of whose added
+/// lines it spells out is the command's as it is, with what was removed. A
+/// file where it spells out fewer than half is left out: there the few are
+/// more likely someone else's lines that happen to read the same.
+///
+/// A line is spelled out when it is a whole line of the command (a heredoc's,
+/// or a script's given inline), or is long and stands somewhere in it. A
+/// short line says nothing either way, and goes with the rest of its file:
+/// `else:` or `}` is in any script, and in whatever a person saved meanwhile.
+fn spelled_out(files: Vec<Value>, command: &str) -> Vec<Value> {
+    let whole: std::collections::HashSet<&str> = command.lines().map(str::trim).collect();
+    let says = |line: &str| {
+        let text = line[1..].trim();
+        let length = text.chars().count();
+        (length >= TELLING && text.chars().any(char::is_alphanumeric))
+            .then(|| whole.contains(text) || (length >= 2 * TELLING && command.contains(text)))
+    };
+    files
+        .into_iter()
+        .filter_map(|mut file| {
+            let lines: Vec<&str> = file["lines"]
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            let added = || lines.iter().filter(|line| line.starts_with('+'));
+            let told: Vec<bool> = added().filter_map(|line| says(line)).collect();
+            let spelled = told.iter().filter(|told| **told).count();
+            if spelled == 0 || spelled * 2 < told.len() {
+                return None;
+            }
+            if told.contains(&false) {
+                let sure: Vec<&str> = added()
+                    .filter(|line| says(line) == Some(true))
+                    .copied()
+                    .collect();
+                file["lines"] = json!(sure);
+            }
+            Some(file)
+        })
+        .collect()
 }
 
 /// A path as the file system knows it, as far as it exists yet, so that two
@@ -180,8 +395,9 @@ fn place(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// One event at `now` (in milliseconds), with `dir` to keep what is remembered.
-fn step(dir: &Path, event: Event, now: u64) -> Option<Value> {
+/// One event at `now` (in milliseconds), which was `began`, with `dir` to
+/// keep what is remembered.
+fn step(dir: &Path, event: Event, now: u64, began: Instant) -> Option<Value> {
     crate::paths::create_private_dir(dir).ok()?;
     // Hooks run in parallel: one at a time looks at the tree.
     let lock = File::create(dir.join("lock")).ok()?;
@@ -198,9 +414,6 @@ fn step(dir: &Path, event: Event, now: u64) -> Option<Value> {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    if state.gave_up {
-        return None;
-    }
     let said = match event {
         Event::Edit { path, ended } => {
             let path = place(&path).to_string_lossy().into_owned();
@@ -212,7 +425,15 @@ fn step(dir: &Path, event: Event, now: u64) -> Option<Value> {
             });
             None
         }
-        Event::Shell { root, ended } => shell(dir, &mut state, root, ended, now),
+        Event::Shell {
+            root,
+            ended,
+            command,
+            sure,
+        } => {
+            let sure = sure.then_some(command);
+            shell(dir, &mut state, root, ended, sure, now, began)
+        }
     };
     if let Ok(text) = serde_json::to_string(&state) {
         let _ = fs::write(&state_path, text);
@@ -221,15 +442,28 @@ fn step(dir: &Path, event: Event, now: u64) -> Option<Value> {
 }
 
 /// A shell command's start or end: look at the working tree, and at its end
-/// answer what changed since the last look.
-fn shell(dir: &Path, state: &mut State, root: &Path, ended: bool, now: u64) -> Option<Value> {
+/// answer what changed since the last look. With `sure`, the command's text,
+/// only what is sure to be the command's.
+fn shell(
+    dir: &Path,
+    state: &mut State,
+    root: &Path,
+    ended: bool,
+    sure: Option<&str>,
+    now: u64,
+    began: Instant,
+) -> Option<Value> {
     let root_text = root.to_string_lossy();
+    if state.too_slow.iter().any(|slow| *slow == root_text) {
+        return None;
+    }
     if state.root != root_text {
-        // Another repository than last time: start over.
-        let _ = fs::remove_file(dir.join("index"));
+        // Another repository than last time: start over there. Each has an
+        // index of its own, so coming back to one is not a first look again.
         *state = State {
             root: root_text.into_owned(),
             edited: std::mem::take(&mut state.edited),
+            too_slow: std::mem::take(&mut state.too_slow),
             ..State::default()
         };
     }
@@ -269,6 +503,21 @@ fn shell(dir: &Path, state: &mut State, root: &Path, ended: bool, now: u64) -> O
                                                         < EDIT_LASTS_MS))
                                     })
                                 });
+                                // Where others work too, a command that took
+                                // a while, or ran beside another session,
+                                // changed for sure only what its text says.
+                                if let Some(command) = sure {
+                                    // From when the look before began to
+                                    // the end of this one: a file saved
+                                    // while either was under way is in it.
+                                    let took = now.saturating_sub(seen_before)
+                                        + began.elapsed().as_millis() as u64;
+                                    let alone = took <= QUICK_MS
+                                        && !others_at_work(dir, root, seen_before, now);
+                                    if !alone {
+                                        files = spelled_out(files, command);
+                                    }
+                                }
                                 if files.is_empty() {
                                     Value::Null
                                 } else {
@@ -293,7 +542,9 @@ fn shell(dir: &Path, state: &mut State, root: &Path, ended: bool, now: u64) -> O
         }
         Err(stop) => {
             state.open = 0;
-            state.gave_up = stop == Stop::TimedOut;
+            if stop == Stop::TimedOut {
+                state.too_slow.push(state.root.clone());
+            }
             if ended {
                 said = Some(json!({ "changes_skipped": "the working tree could not be read" }));
             }
@@ -341,7 +592,7 @@ impl Git<'_> {
             .stderr(Stdio::null());
         if let Some(objects) = private {
             command
-                .env("GIT_INDEX_FILE", self.dir.join("index"))
+                .env("GIT_INDEX_FILE", self.index())
                 .env("GIT_OBJECT_DIRECTORY", self.dir.join("objects"))
                 .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", objects);
         }
@@ -391,6 +642,21 @@ impl Git<'_> {
         }
     }
 
+    /// Our index for this repository. A session that works in two (a
+    /// worktree beside the checkout it began in) has one for each.
+    fn index(&self) -> PathBuf {
+        // FNV-1a over the root: a name that stays the same from run to run.
+        let name = self
+            .root
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        self.dir.join(format!("index-{name:016x}"))
+    }
+
     fn text(&self, args: &[&str], private: Option<&Path>) -> Result<String, Stop> {
         let (out, _) = self.run(args, None, private)?;
         Ok(String::from_utf8_lossy(&out).trim().to_string())
@@ -415,7 +681,7 @@ impl Git<'_> {
         fs::create_dir_all(self.dir.join("objects")).map_err(|_| Stop::Failed)?;
         // Our index starts as a copy of the repository's, so git knows which
         // files it has already read. From then on it is the last tree seen.
-        let ours = self.dir.join("index");
+        let ours = self.index();
         if !ours.exists() && Path::new(index).is_file() {
             fs::copy(index, &ours).map_err(|_| Stop::Failed)?;
         }
@@ -588,6 +854,11 @@ pub fn of(record: &Value) -> impl Iterator<Item = (&str, bool, impl Iterator<Ite
 mod tests {
     use super::*;
 
+    /// One event at `now`, looked at in no time.
+    fn step(dir: &Path, event: Event, now: u64) -> Option<Value> {
+        super::step(dir, event, now, Instant::now())
+    }
+
     struct Repo {
         _home: tempfile::TempDir,
         root: PathBuf,
@@ -677,7 +948,29 @@ mod tests {
         /// A shell command's start or end, now.
         fn shell(&self, ended: bool) -> Option<Value> {
             let root = &self.root;
-            step(&self.dir, Event::Shell { root, ended }, self.now.get())
+            let event = Event::Shell {
+                root,
+                ended,
+                command: "",
+                sure: false,
+            };
+            step(&self.dir, event, self.now.get())
+        }
+
+        /// A shell command with this text that took `ms`, on a person's own
+        /// machine: `during` is what happens to the files while it runs.
+        fn sure(&self, command: &str, ms: u64, during: impl FnOnce()) -> Option<Value> {
+            let event = |ended| Event::Shell {
+                root: &self.root,
+                ended,
+                command,
+                sure: true,
+            };
+            self.now.set(self.now.get() + 10_000);
+            step(&self.dir, event(false), self.now.get());
+            during();
+            self.now.set(self.now.get() + ms);
+            step(&self.dir, event(true), self.now.get())
         }
 
         /// A file tool's start or end on a file, now. It answers nothing.
@@ -856,6 +1149,7 @@ mod tests {
             json!({ "hook": hook, "session_id": "s1",
                     "payload": { "tool_name": tool, "cwd": cwd } })
         };
+        let observe = |data: &Path, record: &Value| super::observe(data, record, Where::Sandbox);
         assert_eq!(
             observe(data, &event("PreToolUse", "Edit", &repo.root)),
             None
@@ -876,7 +1170,11 @@ mod tests {
             state.contains("hello.py") && state.contains(r#""open":true"#),
             "{state}"
         );
-        assert!(!repo.dir.join("index").exists());
+        assert_eq!(
+            fs::read_dir(&repo.dir).unwrap().count(),
+            2,
+            "a lock and what is noted"
+        );
 
         // Cursor names the events and the tool its own way, and the folder too.
         let cursor = |hook: &str| {
@@ -887,5 +1185,303 @@ mod tests {
         repo.write("old.txt", "one\n");
         let said = observe(data, &cursor("postToolUseFailure"));
         assert_eq!(repo.changes(said), [file("old.txt", "M", &["-two"])]);
+    }
+
+    #[test]
+    fn where_others_work_a_quick_command_alone_changed_all_that_changed() {
+        let repo = Repo::new();
+        // Nobody saves a file in half a second: whatever the command is.
+        let said = repo.sure("sed -i s/two/2/ old.txt && rm hello.py", 500, || {
+            repo.write("old.txt", "one\n2\n");
+            fs::remove_file(repo.root.join("hello.py")).unwrap();
+        });
+        assert_eq!(
+            repo.changes(said),
+            [
+                file(
+                    "hello.py",
+                    "D",
+                    &["-def greet(name):", "-    return \"hello \" + name"]
+                ),
+                file("old.txt", "M", &["-two", "+2"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn where_others_work_a_long_command_changed_what_its_text_spells_out() {
+        let repo = Repo::new();
+        let command = "cat > new.py <<'EOF'\ndef one_more_time():\n    try:\n        \
+                       return 'one more time'\n    else:\n        return result\n\nEOF\n\
+                       python3 - <<'EOF'\ns = s.replace('two', 'three is what the script puts here')\n\
+                       EOF\nmake test > /dev/null 2>&1";
+        let said = repo.sure(command, 90_000, || {
+            // A file the command writes out in full, and a line it puts in another.
+            repo.write(
+                "new.py",
+                "def one_more_time():\n    try:\n        return 'one more time'\n\n",
+            );
+            // In that other file someone saved a line of their own meanwhile.
+            repo.write(
+                "old.txt",
+                "one\nthree is what the script puts here\nmine, typed by hand\n",
+            );
+            // A file the command says nothing of.
+            repo.write("hello.py", "def greet(name):\n    return \"hi \" + name\n");
+            // Files someone saved with lines any script has, and with a few
+            // characters that are somewhere in this one.
+            repo.write("theirs.py", "try:\nelse:\n    return result\n1\nnull\n");
+            // And one where a single line of many happens to read the same.
+            repo.write(
+                "also_theirs.py",
+                "def one_more_time():\n    a line of their own\n    and another of their own\n",
+            );
+        });
+        assert_eq!(
+            repo.changes(said),
+            [
+                // All of it is in the command: the file is the command's as it is.
+                file(
+                    "new.py",
+                    "A",
+                    &[
+                        "+def one_more_time():",
+                        "+    try:",
+                        "+        return 'one more time'",
+                        "+"
+                    ]
+                ),
+                // Only the line that is.
+                file("old.txt", "M", &["+three is what the script puts here"]),
+            ]
+        );
+        // Nothing the text spells out: nothing is said, and the next command starts from here.
+        let said = repo.sure("make format", 90_000, || repo.write("old.txt", "one\n"));
+        assert_eq!(said, None);
+        let said = repo.sure("true", 500, || repo.write("old.txt", "one\nfour\n"));
+        assert_eq!(repo.changes(said), [file("old.txt", "M", &["+four"])]);
+    }
+
+    #[test]
+    fn where_others_work_a_command_beside_another_session_is_not_alone() {
+        let repo = Repo::new();
+        let other = repo.dir.with_file_name("s2");
+        let beside = |name: &str| {
+            let path = repo.root.join(name);
+            step(
+                &other,
+                Event::Edit { path, ended: true },
+                repo.now.get() + 100,
+            );
+        };
+        // Another session's file tool was at work in the repository meanwhile.
+        let said = repo.sure(
+            "echo 'three, as the command itself says it' >> old.txt",
+            500,
+            || {
+                beside("hello.py");
+                repo.write(
+                    "old.txt",
+                    "one\ntwo\nthree, as the command itself says it\n",
+                );
+                repo.write("hello.py", "def greet(name):\n    return name\n");
+            },
+        );
+        assert_eq!(
+            repo.changes(said),
+            [file(
+                "old.txt",
+                "M",
+                &["+three, as the command itself says it"]
+            )]
+        );
+        // What it did before this command began does not matter, nor what it does elsewhere.
+        let said = repo.sure("make", 500, || {
+            let path = repo.root.with_file_name("elsewhere/a.txt");
+            step(
+                &other,
+                Event::Edit { path, ended: true },
+                repo.now.get() + 100,
+            );
+            repo.write("old.txt", "one\n");
+        });
+        assert_eq!(
+            repo.changes(said),
+            [file(
+                "old.txt",
+                "M",
+                &["-two", "-three, as the command itself says it"]
+            )]
+        );
+
+        // The other session may know the repository by another name.
+        #[cfg(unix)]
+        {
+            let link = repo.root.with_file_name("link");
+            std::os::unix::fs::symlink(&repo.root, &link).unwrap();
+            let third = repo.dir.with_file_name("s3");
+            let said = repo.sure("make", 500, || {
+                let event = Event::Shell {
+                    root: &link,
+                    ended: false,
+                    command: "make",
+                    sure: true,
+                };
+                step(&third, event, repo.now.get() + 100);
+                repo.write("old.txt", "one\nfive\n");
+            });
+            assert_eq!(said, None);
+        }
+    }
+
+    #[test]
+    fn a_command_that_goes_somewhere_first_is_looked_at_there() {
+        let cwd = Path::new("/work/app");
+        let to = |command: &str| goes_to(command, cwd);
+        assert_eq!(to("cd /tmp/tree && make"), Some("/tmp/tree".into()));
+        assert_eq!(
+            to("  cd packages/web; ls"),
+            Some("/work/app/packages/web".into())
+        );
+        assert_eq!(
+            to("cd \"/tmp/my tree\" && make"),
+            Some("/tmp/my tree".into())
+        );
+        assert_eq!(to("cd '/tmp/tree'\nmake"), Some("/tmp/tree".into()));
+        // Not first, not followed by anything, or only a shell knows where.
+        for command in [
+            "make && cd /tmp/tree",
+            "cd /tmp/tree",
+            "cd $ROOT/tree && make",
+            "cd ~/tree && make",
+            "cd /tmp/tree | cat",
+            "cdx /tmp && ls",
+            "cd",
+        ] {
+            assert_eq!(to(command), None, "{command}");
+        }
+
+        // A worktree of the repository, somewhere else: the command names it.
+        let repo = Repo::new();
+        let tree = repo.root.with_file_name("tree");
+        repo.git(&[
+            "worktree",
+            "add",
+            "--quiet",
+            tree.to_str().unwrap(),
+            "-b",
+            "side",
+        ]);
+        let data = repo.dir.parent().unwrap().parent().unwrap();
+        let command = format!("cd {} && echo two >> a.txt", tree.display());
+        let event = |hook: &str| {
+            json!({ "hook": hook, "session_id": "s1",
+                    "payload": { "tool_name": "Bash", "cwd": repo.root, "tool_input": { "command": command } } })
+        };
+        let local = Where::Machine { sure: true };
+        let tree = &fs::canonicalize(&tree).unwrap();
+        assert_eq!(observe(data, &event("PreToolUse"), local), None);
+        fs::write(tree.join("a.txt"), "two\n").unwrap();
+        let said = observe(data, &event("PostToolUse"), local).expect("nothing was said");
+        assert_eq!(said["changes"][0]["path"], json!(tree.join("a.txt")));
+        assert_eq!(said["changes"][0]["lines"], json!(["+two"]));
+
+        // Back in the repository it began in, by whatever way round: the
+        // files are named as the session knows them.
+        fs::create_dir_all(repo.root.join("sub/dir")).unwrap();
+        let at = |hook: &str, cwd: &Path, command: &str| {
+            let event = json!({ "hook": hook, "session_id": "s1",
+                "payload": { "tool_name": "Bash", "cwd": cwd, "tool_input": { "command": command } } });
+            observe(data, &event, local)
+        };
+        for (cwd, command) in [
+            (repo.root.join("sub/dir"), "cd ../.. && make"),
+            (repo.root.clone(), "cd sub/dir && make"),
+            (repo.root.clone(), "cd sub/../sub && make"),
+        ] {
+            assert_eq!(at("PreToolUse", &cwd, command), None);
+            let mut text = fs::read_to_string(repo.root.join("old.txt")).unwrap();
+            text.push_str("more\n");
+            repo.write("old.txt", &text);
+            let said = at("PostToolUse", &cwd, command);
+            assert_eq!(
+                repo.changes(said),
+                [file("old.txt", "M", &["+more"])],
+                "{command}"
+            );
+        }
+        // Going from one to the other and back is not a first look each time.
+        let indexes = fs::read_dir(&repo.dir).unwrap().flatten();
+        let indexes =
+            indexes.filter(|file| file.file_name().to_string_lossy().starts_with("index-"));
+        assert_eq!(indexes.count(), 2);
+
+        // Another repository altogether is none of this session's work.
+        let other = repo.root.with_file_name("other");
+        fs::create_dir_all(&other).unwrap();
+        let init = Command::new("git")
+            .arg("-C")
+            .arg(&other)
+            .args(["init", "--quiet"])
+            .output();
+        assert!(init.unwrap().status.success());
+        let command = format!("cd {} && make", other.display());
+        assert_eq!(at("PreToolUse", &repo.root, &command), None);
+        fs::write(other.join("b.txt"), "theirs\n").unwrap();
+        repo.write("old.txt", "one\n");
+        let said = at("PostToolUse", &repo.root, &command).expect("nothing was said");
+        // It is looked at where the session is, as any command is.
+        assert!(
+            said["changes"][0]["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("repo/old.txt"),
+            "{said}"
+        );
+        assert_eq!(said["changes"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_repository_too_slow_to_look_at_is_left_alone_and_the_others_are_not() {
+        let repo = Repo::new();
+        let slow = repo.root.with_file_name("slow");
+        let mut state = State {
+            root: repo.root.to_string_lossy().into_owned(),
+            too_slow: vec![slow.to_string_lossy().into_owned()],
+            ..State::default()
+        };
+        let began = Instant::now();
+        assert_eq!(
+            shell(&repo.dir, &mut state, &slow, false, None, 1, began),
+            None
+        );
+        // Nothing was looked at, and what is known of the other stays.
+        assert_eq!(state.root, repo.root.to_string_lossy());
+        fs::create_dir_all(&repo.dir).unwrap();
+        assert_eq!(
+            shell(&repo.dir, &mut state, &repo.root, false, None, 2, began),
+            None
+        );
+        repo.write("old.txt", "one\n");
+        let said = shell(&repo.dir, &mut state, &repo.root, true, None, 3, began);
+        assert_eq!(repo.changes(said), [file("old.txt", "M", &["-two"])]);
+        assert_eq!(state.too_slow.len(), 1);
+    }
+
+    #[test]
+    fn a_home_directory_kept_in_git_is_not_looked_at_on_a_persons_machine() {
+        let Some(home) = crate::paths::home_dir() else {
+            return;
+        };
+        // Only where the home directory really is one: nothing is made there.
+        if !home.join(".git").exists() {
+            assert_eq!(real(&home), real(&home.join(".")));
+            return;
+        }
+        let data = tempfile::tempdir().unwrap();
+        let event = json!({ "hook": "PreToolUse", "session_id": "s1",
+            "payload": { "tool_name": "Bash", "cwd": home, "tool_input": { "command": "ls" } } });
+        observe(data.path(), &event, Where::Machine { sure: true });
+        assert!(!data.path().join("snapshots").exists());
     }
 }

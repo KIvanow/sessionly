@@ -75,7 +75,9 @@ export async function run(env, { api, deliver = send, log = console.log } = {}) 
     const then = await whenOpened(api, repo, data);
     if (then) {
       // As it was before any review: the server keeps the first report it gets.
-      const opened = buildReport({ ...data, ...then, reviews: [], comments: [], event: "opened", host, ignored });
+      // It says nothing of reviews and comments, so that those the server
+      // has stay until the report that follows brings them up to date.
+      const { feedback, feedback_total, ...opened } = buildReport({ ...data, ...then, reviews: [], comments: [], conversation: [], event: "opened", host, ignored });
       await deliver(url, token, named({ ...opened, state: "open", merged_at: null, closed_at: null }));
     }
   }
@@ -97,7 +99,7 @@ export async function run(env, { api, deliver = send, log = console.log } = {}) 
   // and takes nothing back.
   if (on(env.SESSIONLY_COMMENT ?? "true")) {
     try {
-      await upsertComment(api, repo, number, MARKER, text);
+      await upsertComment(api, repo, number, MARKER, text, data.conversation);
     } catch (err) {
       const why = String(err.message ?? err).replace(/\r?\n/g, " ");
       log(

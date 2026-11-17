@@ -140,12 +140,14 @@ pub fn capture(
     // A payload with no transcript path may be either agent's. If the
     // session already has events filed under exactly one of them, it stays
     // there, so that it is not in two places. Sessions with no id of their
-    // own are not one session, and are left where they were detected.
+    // own are not one session, and are left where they were detected. So is
+    // an event known to be Cursor's or Grok's: only those two are in doubt.
     let no_path = record["payload"]["transcript_path"]
         .as_str()
         .is_none_or(str::is_empty);
-    let source = if no_path && stem != "_unknown" {
-        let filed: Vec<&str> = [crate::paths::CODEX, crate::paths::CLAUDE_CODE]
+    let either = [crate::paths::CODEX, crate::paths::CLAUDE_CODE];
+    let source = if no_path && either.contains(&source) && stem != "_unknown" {
+        let filed: Vec<&str> = either
             .into_iter()
             .filter(|other| raw_root.join(other).join(format!("{stem}.jsonl")).exists())
             .collect();
@@ -169,27 +171,39 @@ pub fn capture(
 /// What a cloud agent's sandbox adds to a record: under `runtime`, what the
 /// platform says about the session (see `runtime`), and for a shell command
 /// what it changed in the working tree (see `changes`). On a person's own
-/// machine only the second, and only with the `shell_edits` setting on.
+/// machine only the second, and as much of it as the `shell_edits` setting
+/// says: there the agent is not the only one at work.
 fn where_it_runs(record: &mut Value) {
+    use crate::changes::Where;
+    use crate::config::ShellEdits;
     let text = |key: &str| record[key].as_str().unwrap_or_default().to_string();
     let Ok(data_dir) = crate::paths::data_dir() else {
         return;
     };
-    match crate::runtime::describe(&text("source"), &text("hook")) {
-        Some(said) => record["runtime"] = said,
+    let at = match crate::runtime::describe(&text("source"), &text("hook")) {
+        Some(said) => {
+            record["runtime"] = said;
+            Where::Sandbox
+        }
         None => {
-            // Only tool events are looked at: the setting is not read for the rest.
-            let asked = record["payload"]["tool_name"].is_string()
-                && crate::paths::config_path().is_ok_and(|path| crate::config::shell_edits(&path));
             if text("hook") == "SessionEnd" {
                 crate::changes::forget(&data_dir, record);
             }
-            if !asked {
+            // Only tool events are looked at: the setting is not read for the rest.
+            if !record["payload"]["tool_name"].is_string() {
                 return;
             }
+            let counted = crate::paths::config_path()
+                .map_or(ShellEdits::Off, |path| crate::config::shell_edits(&path));
+            if counted == ShellEdits::Off {
+                return;
+            }
+            Where::Machine {
+                sure: counted == ShellEdits::Sure,
+            }
         }
-    }
-    if let Some(Value::Object(seen)) = crate::changes::observe(&data_dir, record) {
+    };
+    if let Some(Value::Object(seen)) = crate::changes::observe(&data_dir, record, at) {
         for (key, value) in seen {
             record[key] = value;
         }
@@ -415,6 +429,17 @@ mod tests {
         assert!(lines
             .lines()
             .all(|l| l.contains("\"source\":\"claude-code\"")));
+    }
+
+    #[test]
+    fn an_event_known_to_be_another_agents_is_not_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("claude-code")).unwrap();
+        fs::write(dir.path().join("claude-code/k7.jsonl"), "").unwrap();
+        // Cursor's, with no transcript yet, and a file of that name elsewhere
+        let payload = r#"{"conversation_id":"k7","hook_event_name":"stop","transcript_path":null}"#;
+        let (path, _) = capture(dir.path(), &mut payload.as_bytes(), "t", local).unwrap();
+        assert_eq!(path, dir.path().join("cursor/k7.jsonl"));
     }
 
     #[test]

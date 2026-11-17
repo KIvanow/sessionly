@@ -20,6 +20,7 @@ import { Excluded } from "./Excluded.tsx";
 import { Login } from "./Login.tsx";
 import { Overview } from "./Overview.tsx";
 import { Pulls } from "./Pulls.tsx";
+import { PullView } from "./PullView.tsx";
 import { SessionView } from "./SessionView.tsx";
 import { Sessions } from "./Sessions.tsx";
 import { Team } from "./Team.tsx";
@@ -359,6 +360,16 @@ function Shell({
       return <Team token={token} people={people} address={address} myEmail={me.email} hosted={hosted} onSignOut={onSignOut} />;
     }
     if (page === "connect") return <Connect token={token} me={me} onSignOut={onSignOut} />;
+    if (page === "pull" && isAdmin && rest.length === 2 && /^[1-9]\d*$/.test(rest[1]!)) {
+      let repo: string | null = null;
+      try {
+        repo = decodeURIComponent(rest[0]!);
+      } catch {
+        // not an address this dashboard made: the overview, below
+      }
+      // A page of its own for each: none of one pull request shows under another's address.
+      if (repo) return <PullView key={`${repo}#${rest[1]}`} token={token} repo={repo} number={Number(rest[1])} onSignOut={onSignOut} />;
+    }
     if (page === "pulls" && isAdmin) {
       return (
         <Pulls token={token} scope={scope} setScope={setScope} repos={options.data?.repos ?? []} onSignOut={onSignOut} />
@@ -384,7 +395,7 @@ function Shell({
   const orgName = me.org !== "default" && me.org_name ? me.org_name : null;
   const heading = HEADINGS[page === "team" || page === "pulls" ? (isAdmin ? page : "") : (page ?? "")];
   const link = (target: string, label: string) => (
-    <a href={`#/${target}`} aria-current={page === target ? "page" : undefined}>
+    <a href={`#/${target}`} aria-current={page === target || (target === "pulls" && page === "pull") ? "page" : undefined}>
       {label}
     </a>
   );

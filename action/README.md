@@ -92,7 +92,13 @@ jobs:
 To the Sessionly server, for the pull request: repository, number, title, link, who opened it,
 state and dates, the email addresses on its commits (used to pick whose sessions count, not
 stored), counts of commits, reviews and review comments, and per changed file its path and a
-hash of each added line that has a letter or digit. Nothing else, and nothing to anyone else.
+hash of each added line that has a letter or digit.
+
+For each review and comment: who made it (their GitHub login, and whether that is a bot), when,
+the file and line it is on, a review's outcome, and its link on GitHub, which is what the
+pull request's page in the dashboard leads to. What a review or comment says is never sent.
+
+Nothing else, and nothing to anyone else.
 
 ## Develop
 

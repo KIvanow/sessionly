@@ -731,19 +731,23 @@ impl Client {
         ))
     }
 
+    /// Where one session is kept on the server.
+    fn session_url(&self, machine_id: &str, source: &str, session_id: &str) -> String {
+        format!(
+            "{}/api/v1/sessions/{}/{}/{}",
+            self.base,
+            url_segment(machine_id),
+            url_segment(source),
+            url_segment(session_id)
+        )
+    }
+
     /// Store or replace one session on the server.
     pub fn put_session(&self, upload: &Upload) -> Result<PutResult, SendError> {
         let s = &upload.session;
-        let url = format!(
-            "{}/api/v1/sessions/{}/{}/{}",
-            self.base,
-            url_segment(&s.machine_id),
-            url_segment(&s.source),
-            url_segment(&s.session_id)
-        );
         Self::check(
             self.agent
-                .put(url)
+                .put(self.session_url(&s.machine_id, &s.source, &s.session_id))
                 .header("Authorization", format!("Bearer {}", self.token))
                 .send_json(upload),
         )
@@ -751,6 +755,46 @@ impl Client {
             excluded: body.get("excluded").and_then(|v| v.as_bool()) == Some(true),
         })
     }
+
+    /// Take back a session this machine uploaded and no longer has as one.
+    pub fn delete_session(
+        &self,
+        machine_id: &str,
+        source: &str,
+        session_id: &str,
+    ) -> Result<TakenBack, SendError> {
+        let result = Self::check(
+            self.agent
+                .delete(self.session_url(machine_id, source, session_id))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .call(),
+        );
+        match result {
+            Ok(answer) if answer["removed"] == true => Ok(TakenBack::Removed),
+            Ok(_) => Ok(TakenBack::NotThere),
+            // A server from before it could take one back has no such
+            // address (404). One that can lets a token do only so much (403:
+            // a `ci` token, or an `env` token on a server that did not let
+            // those yet). Neither says the token is wrong or the session gone.
+            Err(SendError::Auth(m) | SendError::Rejected(m))
+                if m.starts_with("HTTP 403") || m.starts_with("HTTP 404") =>
+            {
+                Ok(TakenBack::NotNow)
+            }
+            Err(other) => Err(other),
+        }
+    }
+}
+
+/// What a server made of being asked to take a session back.
+#[derive(Debug, PartialEq)]
+pub enum TakenBack {
+    /// It had the session and has it no more.
+    Removed,
+    /// It has none filed under this token's owner: there is nothing to do.
+    NotThere,
+    /// It cannot, or will not for this token. It may yet, another time.
+    NotNow,
 }
 
 /// A 403 about the license or the caller's role is about this request, not
@@ -801,6 +845,11 @@ pub struct Report {
     /// Set when a dry run could not ask the server what is stopped or what
     /// it still has, with the reason: it counted without knowing.
     pub unasked: Option<String>,
+    /// Sessions taken back from the server: they are part of another now.
+    pub withdrawn: u64,
+    /// Sessions the server was asked to take back and still has, with the
+    /// reason. They are asked for again next time.
+    pub not_withdrawn: Vec<(String, String)>,
 }
 
 impl Report {
@@ -812,6 +861,12 @@ impl Report {
             self.excluded,
             self.failed.len()
         );
+        if self.withdrawn > 0 {
+            text.push_str(&format!("; took back {}", self.withdrawn));
+        }
+        if !self.not_withdrawn.is_empty() {
+            text.push_str(&format!("; {} not taken back", self.not_withdrawn.len()));
+        }
         if let Some(reason) = &self.stopped {
             text.push_str(&format!("; stopped: {reason}"));
         }
@@ -864,6 +919,8 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
             }
         }
     }
+    // The sessions the server has as they are now.
+    let mut there: HashSet<String> = HashSet::new();
     for id in ledger.session_ids()? {
         let Some(session) = ledger.get(&id)? else {
             continue;
@@ -892,6 +949,7 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
         }
         if !deleted && sent.as_deref() == Some(hash.as_str()) {
             report.unchanged += 1;
+            there.insert(id);
             continue;
         }
         if dry_run {
@@ -915,6 +973,7 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
                 ledger.mark_uploaded(&id, &server.url, &hash)?;
                 report.sent += 1;
                 unreachable = 0;
+                there.insert(id);
             }
             Err(err @ SendError::Auth(_)) => {
                 report.stopped = Some(err.to_string());
@@ -936,6 +995,53 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
     if let Some(times) = allowed_again {
         if held.is_some() && !dry_run && report.stopped.is_none() {
             ledger.saw_allowed_again(&server.url, times)?;
+        }
+    }
+    // Last, so the server never has less than it should: a session that is
+    // one no more is taken back only once the session its work is part of
+    // now is there. Until then it stays noted, as does one that could not be
+    // taken back, and is tried again next time.
+    if report.stopped.is_none() && !dry_run {
+        for gone in ledger.withdrawals(&server.url)? {
+            // One noted before it was known what it became part of goes only
+            // after a run in which every session was sent.
+            let safe = if gone.part_of.is_empty() {
+                report.failed.is_empty()
+            } else {
+                there.contains(&gone.part_of)
+            };
+            if !safe {
+                continue;
+            }
+            let id = gone.session_id;
+            match client.delete_session(&config.machine_id, &gone.source, &id) {
+                Ok(TakenBack::Removed) => {
+                    ledger.withdrawn(&id, &server.url)?;
+                    report.withdrawn += 1;
+                    unreachable = 0;
+                }
+                Ok(TakenBack::NotThere) => {
+                    ledger.withdrawn(&id, &server.url)?;
+                    unreachable = 0;
+                }
+                // The answer would be the same for every other one.
+                Ok(TakenBack::NotNow) => break,
+                Err(err @ SendError::Auth(_)) => {
+                    report.stopped = Some(err.to_string());
+                    break;
+                }
+                Err(err @ SendError::Rejected(_)) => {
+                    report.not_withdrawn.push((id, err.to_string()));
+                }
+                Err(err @ SendError::Unavailable(_)) => {
+                    report.not_withdrawn.push((id, err.to_string()));
+                    unreachable += 1;
+                    if unreachable >= MAX_UNREACHABLE {
+                        report.stopped = Some(err.to_string());
+                        break;
+                    }
+                }
+            }
         }
     }
     Ok(report)

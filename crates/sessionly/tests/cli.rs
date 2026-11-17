@@ -633,10 +633,13 @@ struct Received {
 }
 
 /// A minimal HTTP server that records requests and answers with `status`.
+/// A DELETE has an answer of its own (`deleting`): at first that the
+/// session was there and is removed.
 struct StubServer {
     url: String,
     received: Arc<Mutex<Vec<Received>>>,
     status: Arc<AtomicU16>,
+    deleting: Arc<Mutex<(u16, &'static str)>>,
     routes: Arc<Mutex<Vec<Route>>>,
 }
 
@@ -655,7 +658,9 @@ impl StubServer {
         let received = Arc::new(Mutex::new(Vec::new()));
         let status = Arc::new(AtomicU16::new(200));
         let routes = Arc::new(Mutex::new(Vec::<Route>::new()));
+        let deleting = Arc::new(Mutex::new((200, r#"{"removed":true}"#)));
         let (log, code, answer_routes) = (received.clone(), status.clone(), routes.clone());
+        let taking_back = deleting.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let mut reader = BufReader::new(stream);
@@ -688,17 +693,18 @@ impl StubServer {
                     .iter()
                     .find(|route| route.method == method && path.starts_with(&route.path))
                     .map(|route| (route.status, route.body.clone()));
+                let (status, answer) = own.unwrap_or_else(|| {
+                    let (status, answer) = match method.as_str() {
+                        "DELETE" => *taking_back.lock().unwrap(),
+                        _ => (code.load(Ordering::SeqCst), r#"{"error":"stub says no"}"#),
+                    };
+                    (status, answer.to_string())
+                });
                 log.lock().unwrap().push(Received {
                     method,
                     path,
                     auth,
                     body: String::from_utf8_lossy(&body).into_owned(),
-                });
-                let (status, answer) = own.unwrap_or_else(|| {
-                    (
-                        code.load(Ordering::SeqCst),
-                        r#"{"error":"stub says no"}"#.to_string(),
-                    )
                 });
                 let _ = reader.get_mut().write_all(
                     format!(
@@ -713,8 +719,20 @@ impl StubServer {
             url,
             received,
             status,
+            deleting,
             routes,
         }
+    }
+
+    fn deletes(&self) -> Vec<Received> {
+        self.requests()
+            .into_iter()
+            .filter(|r| r.method == "DELETE")
+            .collect()
+    }
+
+    fn answer_deletes_with(&self, status: u16, body: &'static str) {
+        *self.deleting.lock().unwrap() = (status, body);
     }
 
     /// Answer `method` requests whose path starts with `path` this way from
@@ -771,10 +789,11 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// On a person's own machine a shell command's changes are counted only
-/// once that person has asked for it.
+/// On a person's own machine a shell command's changes are counted as far
+/// as they are sure to be the command's, unless that person asks for all of
+/// them or for none.
 #[test]
-fn shell_edits_are_counted_on_this_machine_when_switched_on() {
+fn shell_edits_are_counted_on_this_machine_as_far_as_they_are_sure() {
     use serde_json::json;
     let home = tempfile::tempdir().unwrap();
     let repo = home.path().join("work/app");
@@ -791,19 +810,23 @@ fn shell_edits_are_counted_on_this_machine_when_switched_on() {
     git(&["init", "--quiet", "--initial-branch", "main"]);
     fs::write(repo.join("a.txt"), "one\n").unwrap();
 
-    // One command that appends a line to a.txt, as the hooks see it.
-    let command = |session: &str, id: &str, line: &str| {
+    // One command that appends a line to a.txt, as the hooks see it: one
+    // that is over at once, or one that takes a while.
+    let command = |session: &str, id: &str, text: &str, line: &str, long: bool| {
         for hook in ["PreToolUse", "PostToolUse"] {
             if hook == "PostToolUse" {
                 let mut text = fs::read_to_string(repo.join("a.txt")).unwrap();
                 text.push_str(line);
                 fs::write(repo.join("a.txt"), text).unwrap();
+                if long {
+                    std::thread::sleep(std::time::Duration::from_millis(2200));
+                }
             }
             let mut cmd = sessionly(home.path());
             cmd.arg("capture");
             let payload = json!({ "session_id": session, "hook_event_name": hook, "cwd": repo,
                 "tool_use_id": id, "tool_name": "Bash",
-                "tool_input": { "command": "echo >> a.txt" }, "tool_response": {} });
+                "tool_input": { "command": text }, "tool_response": {} });
             let out = run_with_stdin(cmd, payload.to_string().as_bytes());
             assert_silent_success(&out, "capture");
         }
@@ -814,16 +837,43 @@ fn shell_edits_are_counted_on_this_machine_when_switched_on() {
         shown["files"].clone()
     };
 
-    command("off-1", "t1", "two\n");
-    assert_eq!(files("off-1"), json!([]));
-    assert!(!home.path().join("data/snapshots").exists());
+    let added = |session: &str| {
+        let changed = files(session);
+        assert!(changed[0]["path"].as_str().unwrap().ends_with("a.txt"));
+        changed[0]["lines_added"].clone()
+    };
 
-    let said = stdout(run(home.path(), &["settings", "--shell-edits", "on"]));
-    assert!(said.contains("Shell:      on"), "{said}");
-    command("on-1", "t2", "three\nfour\n");
-    let changed = files("on-1");
-    assert!(changed[0]["path"].as_str().unwrap().ends_with("a.txt"));
-    assert_eq!(changed[0]["lines_added"], 2);
+    // As installed: a command that is over at once changed what changed.
+    let said = stdout(run(home.path(), &["settings"]));
+    assert!(said.contains("Shell:      sure"), "{said}");
+    command("sure-1", "t1", "make", "two\n", false);
+    assert_eq!(added("sure-1"), 1);
+    // One that took a while changed what its text spells out, and no more.
+    command("sure-2", "t2", "make", "three\n", true);
+    assert_eq!(files("sure-2"), json!([]));
+    command(
+        "sure-3",
+        "t3",
+        "echo 'four, as the command itself says it' >> a.txt; make",
+        "four, as the command itself says it\nfive, which only a person typed\n",
+        true,
+    );
+    assert_eq!(added("sure-3"), 1);
+
+    // All of it, by the name the setting had before as well.
+    for all in ["all", "on"] {
+        let said = stdout(run(home.path(), &["settings", "--shell-edits", all]));
+        assert!(said.contains("Shell:      all"), "{said}");
+    }
+    command("on-1", "t4", "make", "six\nseven\n", true);
+    assert_eq!(added("on-1"), 2);
+
+    // None of it: the files are not even looked at.
+    let said = stdout(run(home.path(), &["settings", "--shell-edits", "off"]));
+    assert!(said.contains("Shell:      off"), "{said}");
+    command("off-1", "t5", "echo eight >> a.txt", "eight\n", false);
+    assert_eq!(files("off-1"), json!([]));
+    assert!(!home.path().join("data/snapshots/off-1").exists());
 
     // What was kept to compare against goes when the session ends.
     let kept = home.path().join("data/snapshots/on-1");
@@ -833,6 +883,205 @@ fn shell_edits_are_counted_on_this_machine_when_switched_on() {
     let end = json!({ "session_id": "on-1", "hook_event_name": "SessionEnd", "reason": "other" });
     run_with_stdin(cmd, end.to_string().as_bytes());
     assert!(!kept.exists());
+}
+
+const CODEX_MAIN: &str = "019a8f00-0000-7000-8000-00000000000a";
+const CODEX_SUB: &str = "019a8f00-0000-7000-8000-00000000000b";
+
+/// A Codex thread of the session `CODEX_MAIN`: its rollout with one finished
+/// turn, and a hook event that names it. `spawned` makes it a subagent's.
+fn codex_thread(home: &Path, id: &str, spawned: bool) {
+    use serde_json::json;
+    let day = home.join(".codex/sessions/2026/11/16");
+    fs::create_dir_all(&day).unwrap();
+    let source = match spawned {
+        true => json!({ "subagent": { "thread_spawn":
+                        { "parent_thread_id": CODEX_MAIN, "depth": 1 } } }),
+        false => json!("cli"),
+    };
+    let at = "2026-11-16T10:00:00.000Z";
+    let rows = [
+        json!({ "timestamp": at, "type": "session_meta", "payload": {
+            "session_id": CODEX_MAIN, "id": id, "cwd": "/work", "source": source } }),
+        json!({ "timestamp": at, "type": "event_msg",
+                "payload": { "type": "task_started", "turn_id": "t1" } }),
+        json!({ "timestamp": at, "type": "event_msg",
+                "payload": { "type": "user_message", "message": "look around" } }),
+        json!({ "timestamp": at, "type": "event_msg",
+                "payload": { "type": "task_complete", "turn_id": "t1" } }),
+    ];
+    let rollout = day.join(format!("rollout-2026-11-16T10-00-00-{id}.jsonl"));
+    let text: String = rows.iter().map(|row| format!("{row}\n")).collect();
+    fs::write(&rollout, text).unwrap();
+    let mut cmd = sessionly(home);
+    cmd.arg("capture");
+    let payload = json!({ "session_id": id, "turn_id": "t1", "hook_event_name": "Stop",
+                          "transcript_path": rollout });
+    assert_silent_success(
+        &run_with_stdin(cmd, payload.to_string().as_bytes()),
+        "capture",
+    );
+}
+
+/// A machine whose Codex subagents were each uploaded to `server` as a
+/// session of their own: the session that spawned them is not known yet.
+fn upload_subagents_alone(home: &Path, server: &StubServer, subagents: &[&str]) {
+    for id in subagents {
+        codex_thread(home, id, true);
+    }
+    stdout(run(
+        home,
+        &["connect", &server.url, "--token", "secret-token"],
+    ));
+    let alone = stdout(run(home, &["upload"]));
+    let sent = format!("Uploaded {} sessions", subagents.len());
+    assert!(alone.contains(&sent), "{alone}");
+    assert!(server.deletes().is_empty());
+}
+
+/// A Codex subagent's thread can be uploaded as a session before the session
+/// that spawned it is known. Once it is part of that one, the server is told
+/// to drop its own copy, so its work is not there twice.
+#[test]
+fn a_subagent_uploaded_alone_is_taken_back_once_it_is_part_of_its_session() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    upload_subagents_alone(home.path(), &server, &[CODEX_SUB]);
+    assert!(server.puts()[0]
+        .path
+        .ends_with(&format!("/codex/{CODEX_SUB}")));
+
+    // The session that spawned it turns up: the subagent is part of that.
+    codex_thread(home.path(), CODEX_MAIN, false);
+    let folded = stdout(run(home.path(), &["upload"]));
+    assert!(
+        folded.contains("Uploaded 1 sessions") && folded.contains("Took back 1"),
+        "{folded}"
+    );
+    let puts = server.puts();
+    assert_eq!(puts.len(), 2);
+    assert!(puts[1].path.ends_with(&format!("/codex/{CODEX_MAIN}")));
+    let taken = server.deletes();
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0].path, puts[0].path);
+    assert_eq!(taken[0].auth.as_deref(), Some("Bearer secret-token"));
+
+    // Once is enough.
+    let again = stdout(run(home.path(), &["upload"]));
+    assert!(!again.contains("Took back"), "{again}");
+    assert_eq!(server.deletes().len(), 1);
+}
+
+/// The server's copy of a subagent is all it has of that work until the
+/// session it is part of has arrived there.
+#[test]
+fn a_subagent_is_not_taken_back_before_the_server_has_its_session() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    upload_subagents_alone(home.path(), &server, &[CODEX_SUB]);
+
+    // The session that spawned it is refused: too large, say. (What is
+    // stopped is still answered: only the session is too large.)
+    codex_thread(home.path(), CODEX_MAIN, false);
+    server.stopped(&[], 0);
+    server.answer_with(413);
+    let refused = run(home.path(), &["upload"]);
+    assert!(!refused.status.success());
+    let text = stderr(&refused);
+    assert!(
+        text.contains(&format!("{CODEX_MAIN} was not uploaded")),
+        "{text}"
+    );
+    assert!(server.deletes().is_empty());
+
+    // Once it is there, the copy goes.
+    server.answer_with(200);
+    let sent = stdout(run(home.path(), &["upload"]));
+    assert!(
+        sent.contains("Uploaded 1 sessions") && sent.contains("Took back 1"),
+        "{sent}"
+    );
+    assert_eq!(server.deletes().len(), 1);
+}
+
+/// A server that cannot take a session back, or will not for this token, has
+/// still stored every upload: that is no failure, and it is asked again later.
+#[test]
+fn a_take_back_the_server_cannot_do_waits_and_fails_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    upload_subagents_alone(home.path(), &server, &[CODEX_SUB]);
+    codex_thread(home.path(), CODEX_MAIN, false);
+
+    // A token that only uploads, on a server that lets it do nothing else.
+    server.answer_deletes_with(403, r#"{"error":"this token only uploads sessions"}"#);
+    let out = run(home.path(), &["upload"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).is_empty(), "{}", stderr(&out));
+    let text = stdout(out);
+    assert!(
+        text.contains("Uploaded 1 sessions") && !text.contains("Took back"),
+        "{text}"
+    );
+    assert_eq!(server.deletes().len(), 1);
+
+    // A server from before sessions could be taken back.
+    server.answer_deletes_with(404, r#"{"error":"not found"}"#);
+    let text = stdout(run(home.path(), &["upload"]));
+    assert!(!text.contains("Took back"), "{text}");
+    assert_eq!(server.deletes().len(), 2);
+
+    // A server that fails: said for what it is, not as a failed upload.
+    server.answer_deletes_with(503, r#"{"error":"try later"}"#);
+    let out = run(home.path(), &["upload"]);
+    assert!(!out.status.success());
+    let text = stderr(&out);
+    assert!(
+        text.contains(&format!("{CODEX_SUB} was not taken back")) && text.contains("try later"),
+        "{text}"
+    );
+    assert!(!text.contains("not uploaded"), "{text}");
+    assert_eq!(server.deletes().len(), 3);
+
+    // The server has none of this person's: nothing was taken back, and
+    // there is nothing more to ask.
+    server.answer_deletes_with(200, r#"{"removed":false}"#);
+    let text = stdout(run(home.path(), &["upload"]));
+    assert!(!text.contains("Took back"), "{text}");
+    assert_eq!(server.deletes().len(), 4);
+    stdout(run(home.path(), &["upload"]));
+    assert_eq!(server.deletes().len(), 4);
+}
+
+/// A server that is down is not asked once for every session to take back.
+#[test]
+fn take_backs_stop_when_the_server_cannot_be_reached() {
+    const SUBS: [&str; 5] = [
+        "019a8f00-0000-7000-8000-0000000000b1",
+        "019a8f00-0000-7000-8000-0000000000b2",
+        "019a8f00-0000-7000-8000-0000000000b3",
+        "019a8f00-0000-7000-8000-0000000000b4",
+        "019a8f00-0000-7000-8000-0000000000b5",
+    ];
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    upload_subagents_alone(home.path(), &server, &SUBS);
+    codex_thread(home.path(), CODEX_MAIN, false);
+
+    server.answer_deletes_with(503, r#"{"error":"try later"}"#);
+    let out = run(home.path(), &["upload"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("upload stopped early"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(server.deletes().len(), 3);
+
+    // All of them, once it is back.
+    server.answer_deletes_with(200, r#"{"removed":true}"#);
+    let text = stdout(run(home.path(), &["upload"]));
+    assert!(text.contains("Took back 5"), "{text}");
 }
 
 #[test]
@@ -1598,8 +1847,10 @@ fn a_cloud_session_is_uploaded_at_each_turns_end_for_whoever_started_it() {
     );
     assert!(shown.contains("2 changed (+4 -0)"), "{shown}");
 
-    // On a person's own machine the working tree is not looked at: what
-    // changes while a command runs may be the person's own typing.
+    // On a person's own machine the working tree is not looked at once that
+    // person has said so: what changes while a command runs may be their
+    // own typing. The sandbox's setting is not theirs to change.
+    run(home.path(), &["settings", "--shell-edits", "off"]);
     let mut local = shell("PreToolUse");
     local["session_id"] = json!("local-1");
     capture(home.path(), local.clone());

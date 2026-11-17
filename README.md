@@ -155,9 +155,9 @@ What it does and doesn't mean:
   it together with the session's age.
 - It measures survival, not quality or cause: code can be rewritten for reasons that have
   nothing to do with how it was written.
-- Only changes made through the agent's file tools are tracked, not edits made by shell
-  commands. A [session in the cloud](#cloud-sessions) is the exception, and so is a machine
-  where [shell edits](#shell-edits) are switched on.
+- Changes made through the agent's file tools are tracked, and of those made by shell
+  commands the ones that are sure to be the agent's (see [Shell edits](#shell-edits)). In a
+  [session in the cloud](#cloud-sessions) all of them are.
 - If the session's directory no longer exists, the last measurement is kept.
 
 ```
@@ -229,39 +229,59 @@ Limits to know about:
 - If the hooks were installed partway through a session and it hasn't been imported, its record
   says so (`captured_from_start: false`): prompts, tools and files cover the captured part, cost
   covers the whole session.
-- File changes made by shell commands (`sed`, `git apply`, generators) are not attributed to
-  files; only the agent's file tools are. A [session in the cloud](#cloud-sessions) is the
-  exception: there what each shell command changed is counted too. On your own machine you
-  can switch that on (see [Shell edits](#shell-edits)).
+- File changes made by shell commands (`sed`, `git apply`, generators) are attributed as far
+  as they are sure to be the agent's; a long command's are mostly not (see
+  [Shell edits](#shell-edits)). In a [session in the cloud](#cloud-sessions) all of what
+  each shell command changed is counted.
 - User name and email come from git config at sync time. They are a label, not verified identity.
 
 ### Shell edits
 
 Some agents, and some ways of working, edit with the shell instead of the file tools: a
 script that rewrites a file, `sed -i`, a heredoc, a formatter. Hooks are told that a command
-ran, not what it changed, so those sessions show few changed files or none, and their lines
-are missing from pull request figures. To count them on this machine:
+ran, not what it changed. So the files of the repository are compared just before and just
+after each shell command of Claude Code or Cursor, and what differs is looked at: the files
+and the lines, toward the session's totals, the rewrite rate and pull requests.
+
+In a [cloud session](#cloud-sessions) all of what differs is the command's: the agent is
+alone there. On your own machine it is not. You may save a file in your editor during a long
+test run, and a second agent session may be at work in the same checkout. So here only what
+is sure to be the command's is counted:
+
+- **Everything that changed, when the command was over within two seconds** and no other
+  session was seen at work in the repository meanwhile. Nobody saves a file in that time,
+  and most commands that edit are that quick. The two seconds run from the start of the look
+  before the command to the end of the look after it, so in a repository large enough for a
+  look to take a second, few commands are quick.
+- **Otherwise the added lines the command's own text spells out**: the lines of a heredoc,
+  or of a script given inline. A line counts when it is one of the command's own lines, or is
+  long (32 characters) and stands somewhere in it. Lines under 16 characters (`else:`, `}`)
+  are in any script and prove nothing; they go with the rest of their file. A file all of
+  whose added lines are spelled out counts as it is, with what was removed from it. A file
+  where fewer than half are is left out.
+
+What a long command changes without spelling it out (a formatter or a generator that takes a
+while, a `sed -i` across a large tree) is therefore not counted. To change what is:
 
 ```sh
-sessionly settings --shell-edits on
+sessionly settings --shell-edits all   # everything that changed while a command ran
+sessionly settings --shell-edits off   # nothing: only the agent's file tools
+sessionly settings --shell-edits sure  # as above, the default
 ```
 
-From then on the files of the repository are compared just before and just after each shell
-command of Claude Code or Cursor, the same way as in a [cloud session](#cloud-sessions), and
-what differs is counted as that command's: the files and the lines, toward the session's
-totals, the rewrite rate and pull requests.
-
-It is off by default because of what it cannot tell apart. **Anything that changes a file in
-the repository while an agent's command runs is counted as the agent's**: a file you save in
-your editor during a long test run, or what a second agent session does in the same
-checkout at that moment. Between commands nothing is attributed, so the window is only as
-long as the commands are. If that matters, leave it off, or give each agent a checkout of
-its own (a git worktree).
+With `all`, **anything that changes a file in the repository while an agent's command runs
+is counted as the agent's**, your own typing included. It fits a checkout only the agent
+works in (a git worktree of its own, say).
 
 What else to know:
 
-- It applies to sessions captured by hooks after it is switched on. Sessions already
-  recorded are not changed, and imported ones have nothing to compare.
+- A command that begins `cd <somewhere> &&` is looked at where it goes when that is another
+  worktree of the session's repository, so an agent working in a worktree somewhere else is
+  counted there. A command that goes to some other repository is not looked at there.
+- A home directory that is itself a git repository is not looked at on your own machine:
+  that would be every file you have.
+- It applies to sessions captured by hooks. Sessions already recorded are not changed, and
+  imported ones have nothing to compare.
 - Each shell command costs two looks at the working tree with git: about 15 ms each in
   this repository, more in a large one. One that takes more than five seconds is abandoned and not tried again
   in that session.
@@ -476,7 +496,11 @@ is read from its output and a patch's files from the patch text.
   is recorded either way. In the older layout only patches are recorded besides the script, so
   such a session has its edits but not its commands.
 - **A subagent** is a thread with a rollout file of its own. It is folded into the session
-  that started it, with its tool calls and tokens, as Claude Code's subagents are.
+  that started it, with its tool calls and tokens, as Claude Code's subagents are. A thread
+  is a subagent when Codex itself says so in the file's first record, not because it carries
+  another thread's session id, which a fork can too. A subagent whose session was not known
+  yet may have been uploaded as a session of its own; once it is part of its session, the
+  next upload asks the server to drop that copy.
 - **Going back to an earlier turn** (a revert) makes Codex start a new file for the thread
   that points at the part of the old one that still stands. The session is that part and
   what came after: the turns taken back are not in it. A fork is a thread of its own, so a
@@ -554,6 +578,13 @@ with `Authorization: Bearer <token>`:
 - `GET /api/v1/ping` answers 2xx if the token is accepted.
 - `PUT /api/v1/sessions/{machine_id}/{source}/{session_id}` stores or replaces one session. The
   body is the payload described under [What an upload contains](#what-an-upload-contains).
+- `DELETE /api/v1/sessions/{machine_id}/{source}/{session_id}` takes one back. The binary
+  sends it only for a session that has become part of another (a Codex subagent's thread
+  uploaded before its session was known), and only once the server has the session it is
+  part of. Only the person a session is filed under can take it back; the answer is
+  `{"removed": true}`, or `false` if there was none of theirs. A server from before this
+  answers 404, and a token that may not gets 403: the binary keeps the session noted and asks
+  again at a later upload, and until then such a server keeps the extra copy.
 - `GET`, `PUT` and `DELETE /api/v1/repos/excluded` list the repositories you stopped, stop one
   (and delete the sessions you already submitted from it), or allow one again. Every upload
   starts by reading the list, so a stopped repository's sessions are not sent at all.
@@ -757,7 +788,7 @@ sees their own sessions; an admin sees everyone's. A `ci` token is for the GitHu
 report pull requests and nothing else. An `env` token is for a cloud agent's environment (see
 [Cloud sessions](#cloud-sessions)): it can upload sessions and nothing else, and a cloud session
 it uploads is filed under the person the platform says started it, since several people start
-sessions in one environment. Whoever holds it can therefore upload a session in anyone's name,
+sessions in one environment. It can take back only a session filed under its own address. Whoever holds it can therefore upload a session in anyone's name,
 so give it only to those environments. An admin creates and revokes tokens through
 `POST /api/v1/tokens`, `GET /api/v1/tokens` and `DELETE /api/v1/tokens/{id}`, or from the command
 line with `pnpm token create --email ann@example.com` (with the embedded database, stop the
@@ -876,6 +907,11 @@ The **Pull requests** page (admins) then shows, for the period and repository ch
 - per pull request: lines added, how many an agent wrote and with which tool and model, how
   many of the agent's lines survived review, review rounds, and review comments by people and
   by bots (CodeRabbit and the like);
+- on a pull request's own page (its name in the list leads there): the sessions that wrote its
+  lines, each a link to the session; its files, with how much of each an agent wrote; and its
+  reviews and comments, counted apart for people, bots and the author, each with who, when,
+  which line, and a link to it on GitHub. What reviews and comments say is not sent to the
+  server and not stored;
 - **by model**: the same summed, so you can see whose lines get through review as written and
   whose take several rounds.
 
@@ -887,7 +923,8 @@ How to read it:
   ran in the cloud counts when it ran on the pull request's branch instead: there the commits
   are the agent's own. Everything else
   counts as not an agent's: people without Sessionly, sessions uploaded without line hashes,
-  changes made by shell commands on a person's machine, generated files. So the agent share
+  what a shell command changed on a person's machine where that is not
+  [sure to be the agent's](#shell-edits), generated files. So the agent share
   is a floor.
 - **Survived review** compares the pull request as it was opened with how it ended: of the
   agent's lines it had at the start, how many are still in it. It is only known for pull

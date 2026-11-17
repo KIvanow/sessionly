@@ -224,13 +224,13 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
             }
             "SessionEnd" => s.end_reason = text("reason"),
             "UserPromptSubmit" => s.prompts.push(Prompt {
-                prompt_id: text("prompt_id"),
+                prompt_id: turn_of(p),
                 at,
                 text: summarize(p["prompt"].as_str().unwrap_or_default()),
                 ..Default::default()
             }),
             hook @ ("Stop" | "StopFailure") => {
-                let id = text("prompt_id");
+                let id = turn_of(p);
                 // A turn can stop more than once (a stop hook can make the agent
                 // continue); the latest stop is when it really ended.
                 if let Some(prompt) = s.prompts.iter_mut().rev().find(|pr| pr.prompt_id == id) {
@@ -375,6 +375,15 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
     Some(s)
 }
 
+/// The turn a hook event belongs to. Claude Code names it `prompt_id`;
+/// Codex's hooks name it `turn_id`.
+fn turn_of(p: &Value) -> Option<String> {
+    [&p["prompt_id"], &p["turn_id"]]
+        .into_iter()
+        .find_map(|id| id.as_str().filter(|id| !id.is_empty()))
+        .map(String::from)
+}
+
 /// Find or create the tool call a tool event refers to.
 fn tool_call<'a>(
     s: &'a mut Session,
@@ -391,7 +400,7 @@ fn tool_call<'a>(
             let input = &p["tool_input"];
             s.tool_calls.push(ToolCall {
                 tool_use_id: id.to_string(),
-                prompt_id: text("prompt_id"),
+                prompt_id: turn_of(p),
                 agent_id: text("agent_id"),
                 model: text("model"),
                 at,
@@ -879,6 +888,33 @@ mod tests {
             from_events(&events, None, "claude-code").unwrap().active_ms,
             8_000
         );
+    }
+
+    #[test]
+    fn codex_hooks_name_the_turn_their_own_way() {
+        let events = vec![
+            event(
+                1,
+                "UserPromptSubmit",
+                json!({ "turn_id": "t1", "prompt": "one" }),
+            ),
+            event(
+                2,
+                "PreToolUse",
+                json!({ "turn_id": "t1", "tool_use_id": "c1", "tool_name": "Bash" }),
+            ),
+            event(3, "Stop", json!({ "turn_id": "t1" })),
+            event(
+                4,
+                "UserPromptSubmit",
+                json!({ "turn_id": "t2", "prompt": "two" }),
+            ),
+        ];
+        let s = from_events(&events, None, "codex").unwrap();
+        assert_eq!(s.tool_calls[0].prompt_id.as_deref(), Some("t1"));
+        // the stop is the first turn's, not the last prompt's
+        assert_eq!(s.prompts[0].outcome, Some(Outcome::Completed));
+        assert_eq!(s.prompts[1].outcome, None);
     }
 
     #[test]

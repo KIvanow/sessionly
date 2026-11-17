@@ -163,11 +163,11 @@ enum Command {
         /// which lines of a pull request an agent wrote
         #[arg(long, value_name = "on|off", value_parser = parse_on_off)]
         line_hashes: Option<bool>,
-        /// Count what an agent's shell commands change in a repository, by
-        /// comparing its files before and after each one. Anything else that
-        /// changes a file meanwhile is counted as the agent's too
-        #[arg(long, value_name = "on|off", value_parser = parse_on_off)]
-        shell_edits: Option<bool>,
+        /// How much of what changes in a repository while an agent's shell
+        /// command runs is counted as the agent's. Its files are compared
+        /// before and after each command
+        #[arg(long, value_enum)]
+        shell_edits: Option<config::ShellEdits>,
     },
     /// One background sync and upload (started by the capture hook)
     #[command(hide = true)]
@@ -641,14 +641,29 @@ fn run(command: Command) -> Result<()> {
                      so none are left out of this count: {reason}"
                 );
             }
+            if report.withdrawn > 0 {
+                println!(
+                    "Took back {} that are part of another session now",
+                    report.withdrawn
+                );
+            }
             for (id, reason) in &report.failed {
                 eprintln!("warning: {id} was not uploaded: {reason}");
+            }
+            for (id, reason) in &report.not_withdrawn {
+                eprintln!("warning: {id} was not taken back: {reason}");
             }
             if let Some(reason) = report.stopped {
                 bail!("upload stopped early: {reason}");
             }
             if !report.failed.is_empty() {
                 bail!("{} sessions were not uploaded", report.failed.len());
+            }
+            if !report.not_withdrawn.is_empty() {
+                bail!(
+                    "{} sessions were not taken back",
+                    report.not_withdrawn.len()
+                );
             }
         }
         Command::Exclude { repo } => exclude_repository(repo.as_deref())?,
@@ -686,8 +701,8 @@ fn run(command: Command) -> Result<()> {
         } => {
             let path = paths::config_path()?;
             let mut config = config::Config::load(&path)?;
-            let asked = [auto_sync, line_hashes, shell_edits];
-            if content.is_some() || asked.iter().any(Option::is_some) {
+            let asked = [auto_sync, line_hashes];
+            if content.is_some() || shell_edits.is_some() || asked.iter().any(Option::is_some) {
                 config.auto_sync = auto_sync.unwrap_or(config.auto_sync);
                 config.upload_content = content.unwrap_or(config.upload_content);
                 config.upload_line_hashes = line_hashes.unwrap_or(config.upload_line_hashes);
@@ -890,10 +905,15 @@ fn print_settings(config: &config::Config) {
     );
     println!(
         "Shell:      {}",
-        if config.shell_edits {
-            "on (what changes in a repository while an agent's command runs is counted as the agent's)"
-        } else {
-            "off (only what agents change with their file tools is counted)"
+        match config.shell_edits {
+            config::ShellEdits::Sure => {
+                "sure (of what changes while an agent's command runs, what is sure to be the command's is counted)"
+            }
+            config::ShellEdits::All => {
+                "all (what changes in a repository while an agent's command runs is counted as the agent's)"
+            }
+            config::ShellEdits::Off =>
+                "off (only what agents change with their file tools is counted)",
         }
     );
 }

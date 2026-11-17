@@ -7,6 +7,8 @@ type Mode = "sign-in" | "token" | "create";
 /** The providers as they call themselves. */
 export const PROVIDERS: Record<SignInProvider, string> = { google: "Google", github: "GitHub" };
 
+const PROVIDER_LOGOS: Record<SignInProvider, string> = { google: "/auth-google.svg", github: "/auth-github.svg" };
+
 /**
  * Getting in: with Google or GitHub where the server offers that, or with a
  * token. Where anyone may sign up, creating an organisation starts here too:
@@ -44,6 +46,7 @@ export function Login({
           providers.map((provider) => (
             // A link, not a request: the browser itself goes there and comes back.
             <a key={provider} className="button" href={`/api/v1/auth/${provider}${mode === "create" ? "?create" : ""}`}>
+              <img src={PROVIDER_LOGOS[provider]} alt="" width={18} height={18} />
               {mode === "create" ? "Continue" : "Sign in"} with {PROVIDERS[provider]}
             </a>
           ))}

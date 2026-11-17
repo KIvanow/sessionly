@@ -11,6 +11,7 @@ test("a page is counted by its name, never by what is in its address", () => {
   assert.equal(pageOf("#/sessions?user=ann@example.com"), "sessions");
   assert.equal(pageOf("#/session/acme/ann@example.com/0193-abcd"), "session");
   assert.equal(pageOf("#/team"), "team");
+  assert.equal(pageOf("#/pull/github.com%2Facme%2Fweb/7"), "pull");
   assert.equal(pageOf("#signed-in"), "other");
   assert.equal(pageOf("#/ann@example.com"), "other");
 });
