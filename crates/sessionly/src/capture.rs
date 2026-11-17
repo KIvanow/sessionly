@@ -240,6 +240,22 @@ pub fn run() -> i32 {
     0
 }
 
+/// Store an event that no hook sent (see `turn`), as `run` stores one that a
+/// hook did. Errors are logged the same way and never returned.
+pub fn store(payload: &Value) {
+    let received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
+    let Ok(raw_dir) = crate::paths::raw_root() else {
+        return;
+    };
+    let text = payload.to_string();
+    if let Err(err) = capture(&raw_dir, &mut text.as_bytes(), &received_at, where_it_runs) {
+        let _ = append(
+            &raw_dir.join("_errors.log"),
+            format!("{received_at} {err:#}\n").as_bytes(),
+        );
+    }
+}
+
 /// Append `bytes` in one write, under an exclusive lock so parallel hook calls
 /// never interleave. If the lock can't be had in time we write anyway: a hook
 /// must not stall the session.

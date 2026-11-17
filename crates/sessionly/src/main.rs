@@ -28,6 +28,7 @@ mod runtime;
 mod session;
 mod sync;
 mod transcript;
+mod turn;
 mod upload;
 mod watch;
 
@@ -366,15 +367,19 @@ fn install_in_repo(dir: &std::path::Path, checksums: Option<&std::path::Path>) -
     println!();
     println!("Sessions in the cloud will fetch sessionly {version} and capture with it.");
     println!("What is left to do:");
-    println!("  1. Commit those three files.");
+    println!("  1. Commit those four files.");
     println!("  2. Give the cloud environment SESSIONLY_URL and SESSIONLY_TOKEN, as secrets");
     println!("     (a token made for it on the server's Team page). Without them the");
-    println!("     session is captured in the sandbox and sent nowhere.");
-    println!("  3. Claude Code only: add the server's host to the environment's allowed");
-    println!("     domains. Cursor's cloud agents can reach it as they are.");
+    println!("     session is captured in the sandbox and sent nowhere. In Codex's cloud");
+    println!("     set them as environment variables: its tasks are not given secrets.");
+    println!("  3. Claude Code and Codex: add the server's host to the environment's");
+    println!("     allowed domains. Cursor's cloud agents can reach it as they are.");
     println!("Optional, also in the environment: SESSIONLY_LINE_HASHES=on (needed for");
     println!("pull request figures) and SESSIONLY_CONTENT=previews.");
     println!("On a person's own machine the script does nothing.");
+    println!("Codex's cloud runs no hooks: AGENTS.md asks the agent there to run the");
+    println!("script around each turn's work, which records the files and lines a turn");
+    println!("changed and nothing else (no prompts, tool calls, tokens or cost).");
     Ok(())
 }
 
@@ -386,6 +391,11 @@ fn main() -> ExitCode {
         .is_some_and(|arg| arg == "capture")
     {
         return ExitCode::from(capture::run() as u8);
+    }
+    // So is what an agent that runs no hooks is asked to run itself.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "turn") {
+        let which = std::env::args().nth(2).unwrap_or_default();
+        return ExitCode::from(turn::run(&which) as u8);
     }
     let cli = Cli::parse();
     // Exit quietly when output is piped into something that stops reading
@@ -969,6 +979,14 @@ fn status(target: &Target) -> Result<()> {
             "Cursor:     {}/{} events in .cursor/hooks.json",
             found.cursor_events,
             repo::CURSOR_EVENTS.len()
+        );
+        println!(
+            "Codex:      {}",
+            if found.codex_asked {
+                "asked in AGENTS.md to run the script around each turn"
+            } else {
+                "not asked in AGENTS.md (run: sessionly install --repo)"
+            }
         );
         return Ok(());
     }

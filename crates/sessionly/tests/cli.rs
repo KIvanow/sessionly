@@ -22,6 +22,8 @@ fn sessionly(home: &Path) -> Command {
         "CLAUDE_CODE_REMOTE_SESSION_ID",
         "CLAUDE_CODE_ENTRYPOINT",
         "CLAUDE_CODE_USER_EMAIL",
+        "CODEX_THREAD_ID",
+        "CODEX_ENVIRONMENT_ID",
         "SESSIONLY_URL",
         "SESSIONLY_CONTENT",
         "SESSIONLY_LINE_HASHES",
@@ -2158,8 +2160,161 @@ fn install_in_a_repository_round_trip() {
     assert!(!again.contains("wrote "), "{again}");
 
     let removed = stdout(run(home.path(), &["uninstall", "--repo", repo_arg]));
-    assert_eq!(removed.lines().count(), 3, "{removed}");
+    assert_eq!(removed.lines().count(), 4, "{removed}");
     assert!(!repo.join(".sessionly").exists() && !repo.join(".claude").exists());
+    assert!(!repo.join("AGENTS.md").exists());
     let status = stdout(run(home.path(), &["status", "--repo", repo_arg]));
     assert!(status.contains("not installed"), "{status}");
+    assert!(status.contains("not asked in AGENTS.md"), "{status}");
+}
+
+/// A Codex cloud task, as its sandbox was on 2026-11-17: no hooks run and
+/// there is no session file, git is set up as the person, and the agent
+/// runs what `AGENTS.md` asks it to.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_codex_cloud_task_records_what_each_turn_changed() {
+    use serde_json::json;
+    let cloud = CloudRepo::new(true);
+    let server = StubServer::start();
+    let repo = cloud.dir.path().join("repo");
+    let asked = fs::read_to_string(repo.join("AGENTS.md")).unwrap();
+    assert!(
+        asked.contains("sh .sessionly/hook.sh codex start"),
+        "{asked}"
+    );
+    assert!(asked.contains("sh .sessionly/hook.sh codex end"), "{asked}");
+
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
+    };
+    git(&["init", "--quiet", "--initial-branch", "work"]);
+    git(&["config", "user.name", "Ann"]);
+    git(&["config", "user.email", "ann@example.com"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/acme/probe.git",
+    ]);
+    fs::write(repo.join("hello.py"), "def greet():\n    pass\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "--quiet", "--no-gpg-sign", "-m", "start"]);
+
+    // As the agent runs it: no payload, and only what the sandbox sets.
+    let turn = |home: &str, which: &str, there: bool| {
+        let home = cloud.home(home);
+        fs::create_dir_all(&home).unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.args([".sessionly/hook.sh", "codex", which])
+            .current_dir(&repo)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("HOME", &home)
+            .env("CURSOR_AGENT_SOCKET", home.join("no-such-socket"))
+            .env("CODEX_THREAD_ID", "019a-thread")
+            .env("SESSIONLY_URL", &server.url)
+            .env("SESSIONLY_TOKEN", "environment-token")
+            .env("SESSIONLY_LINE_HASHES", "on");
+        if there {
+            cmd.env("CODEX_ENVIRONMENT_ID", "ccarenv_1");
+        }
+        assert_silent_success(&run_with_stdin(cmd, b""), which);
+    };
+
+    // Codex on a person's own machine names the thread too: nothing happens.
+    turn("laptop", "start", false);
+    turn("laptop", "end", false);
+    assert!(!cloud.home("laptop").join(".sessionly").exists());
+
+    turn("sandbox", "start", true);
+    fs::write(
+        repo.join("hello.py"),
+        "def greet():\n    return 'hi'\n\n# done\n",
+    )
+    .unwrap();
+    fs::write(repo.join("notes.txt"), "Tue Nov 17\n").unwrap();
+    // The upload is over when the command returns.
+    turn("sandbox", "end", true);
+    let puts = session_puts(&server);
+    assert_eq!(puts.len(), 1, "the turn was not uploaded when it ended");
+    assert_eq!(puts[0].path, "/api/v1/sessions/cloud/codex/019a-thread");
+    let sent: serde_json::Value = serde_json::from_str(&puts[0].body).unwrap();
+    let s = &sent["session"];
+    assert_eq!(s["source"], "codex");
+    assert_eq!(
+        s["runtime"],
+        json!({ "kind": "cloud", "id": "019a-thread" })
+    );
+    // Git there is the person's own.
+    assert_eq!(
+        s["user"],
+        json!({ "name": null, "email": "ann@example.com" })
+    );
+    assert_eq!(s["repo"]["remote"], "github.com/acme/probe");
+    assert_eq!(s["repo"]["branch"], "work");
+    assert_eq!(s["counts"]["prompts"], 1);
+    let files = |s: &serde_json::Value| -> Vec<(String, u64, u64)> {
+        s["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["path"].as_str().unwrap().to_string(),
+                    f["lines_added"].as_u64().unwrap(),
+                    f["lines_removed"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        files(s),
+        [
+            ("hello.py".to_string(), 3, 1),
+            ("notes.txt".to_string(), 1, 0)
+        ]
+    );
+    let hashes: usize = sent["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["hashes"].as_array().unwrap().len())
+        .sum();
+    assert!(hashes >= 3, "{}", sent["lines"]);
+
+    // A turn the agent forgot to end is ended by the next one's start, and
+    // one it forgot to start is still a turn, with nothing known to be its.
+    turn("sandbox", "start", true);
+    fs::write(repo.join("notes.txt"), "Tue Nov 17\nmore\n").unwrap();
+    turn("sandbox", "start", true);
+    fs::write(repo.join("notes.txt"), "Tue Nov 17\nmore\nand more\n").unwrap();
+    turn("sandbox", "end", true);
+    fs::write(repo.join("unseen.txt"), "nobody looked\n").unwrap();
+    turn("sandbox", "end", true);
+    let puts = session_puts(&server);
+    let sent: serde_json::Value = serde_json::from_str(&puts.last().unwrap().body).unwrap();
+    let s = &sent["session"];
+    assert_eq!(s["counts"]["prompts"], 4);
+    assert_eq!(
+        files(s),
+        [
+            ("hello.py".to_string(), 3, 1),
+            ("notes.txt".to_string(), 3, 0)
+        ]
+    );
+    // Looking at the working tree staged nothing.
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert_eq!(stdout(status), " M hello.py\n?? notes.txt\n?? unseen.txt\n");
 }
