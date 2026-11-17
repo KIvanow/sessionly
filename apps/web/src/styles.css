@@ -613,6 +613,7 @@ main.center .brand svg { width: 32px; height: 32px; }
 .login input { width: 100%; min-height: 44px; }
 .login p { margin: 0; font-size: 14px; }
 .login > button, .login > a.button, .login .place > button { min-height: 46px; font-size: 15px; }
+.login > a.button { gap: 8px; }
 .login .ways {
   display: flex;
   flex-wrap: wrap;
