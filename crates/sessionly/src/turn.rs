@@ -11,8 +11,9 @@
 //! single piece of work in it, and the working tree is compared between
 //! them as it is around a shell command (see `changes`). So such a session
 //! has its turns, when they began and ended, and the files and lines each
-//! changed. It has no prompt text, no tool calls, no model, no tokens and no
-//! cost, and it has a turn only if the agent did as it was asked.
+//! changed. It has no prompt text, no model, no tokens and no cost, and of
+//! tool calls only one per turn, named `Turn`, that stands for all of the
+//! turn's work. It has a turn only if the agent did as it was asked.
 //!
 //! Like `capture`, this prints nothing and always exits 0.
 
@@ -129,7 +130,9 @@ pub fn run(which: &str) -> i32 {
         "end" => {
             thread.end();
             // Not in the background, as after a hook: what a command leaves
-            // running in this sandbox may not outlive the command.
+            // running in this sandbox may not outlive the command. A run
+            // that finds another still going gives up after a while (see
+            // `auto`); what was stored here is then sent by the next one.
             if std::env::var_os("SESSIONLY_NO_AUTO").is_none() {
                 crate::auto::run(0);
             }

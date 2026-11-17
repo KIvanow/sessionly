@@ -402,7 +402,9 @@ So `sessionly install --repo` adds a section to `AGENTS.md` that asks the agent,
 cloud task only, to run the script twice in every turn in which it changes files:
 `sh .sessionly/hook.sh codex start` before its first change and `sh .sessionly/hook.sh codex
 end` after its last. The working tree is compared between the two, as it is around a shell
-command in the other clouds, and the session is uploaded before the second command returns.
+command in the other clouds, and the second command brings the ledger up to date and uploads
+the session before it returns. If another upload is still going after two minutes it gives up
+waiting, and what it stored is sent when the next turn ends.
 
 What such a session has:
 
@@ -420,7 +422,9 @@ What to know:
 - **It depends on the agent.** A turn is recorded only if the agent ran the commands. A turn
   it did not end is ended by the next one's start, with what changed until then. A turn it did
   not start is recorded with nothing known to be its. A turn in which it ran neither is not
-  there at all, and its lines count as not an agent's.
+  there at all, and its lines count as not an agent's. The one exception: if the turn before
+  it was started and never ended, that turn is still open, and it takes these lines too when
+  the next start ends it.
 - **Other agents read `AGENTS.md` too**, and so does Codex on a person's machine. The section
   says it is for Codex's cloud only, and the script does nothing anywhere else: it looks for
   `CODEX_ENVIRONMENT_ID`, which Codex sets only in its cloud. Your own text in `AGENTS.md` is

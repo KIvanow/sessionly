@@ -340,8 +340,12 @@ fn add_cursor(config: &mut Value) -> Result<()> {
 }
 
 /// `text` without our section, and without the empty line that set it apart.
+/// Only a section that begins once and ends once is ours to take out: with
+/// any other marks in it the text is left as it is, since what lies between
+/// two that do not belong together is somebody's own.
 fn without_section(text: &str) -> String {
-    let Some(start) = text.find(BEGIN) else {
+    let once = |mark: &str| text.matches(mark).count() == 1;
+    let Some(start) = text.find(BEGIN).filter(|_| once(BEGIN) && once(END)) else {
         return text.to_string();
     };
     let Some(length) = text[start..].find(END) else {
@@ -357,15 +361,24 @@ fn without_section(text: &str) -> String {
 }
 
 /// `text` with our section as it is now, after whatever else is there.
-fn with_section(text: &str) -> String {
+/// Refused where marks of ours would be left that are not a section: adding
+/// one more would make a pair of them, and the text between would be taken
+/// out the next time.
+fn with_section(text: &str) -> Result<String> {
     let mut out = without_section(text);
+    if out.contains(BEGIN) || out.contains(END) {
+        bail!(
+            "{INSTRUCTIONS} has `{BEGIN}` or `{END}` in it, but not as one section that \
+             begins once and ends once. Remove those lines, then run this again"
+        );
+    }
     if !out.is_empty() {
         if !out.ends_with('\n') {
             out.push('\n');
         }
         out.push('\n');
     }
-    out + SECTION
+    Ok(out + SECTION)
 }
 
 fn write_script(path: &Path, text: &str) -> Result<bool> {
@@ -399,6 +412,15 @@ pub fn install(dir: &Path, release: &Release) -> Result<Vec<Written>> {
             dir.display()
         );
     }
+    // Read first: where the section cannot be written, nothing is.
+    let instructions = dir.join(INSTRUCTIONS);
+    let asked_before = match fs::read_to_string(&instructions) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", instructions.display())),
+    };
+    let asked = with_section(&asked_before)?;
+
     let script_file = script_path(dir);
     let script_changed = write_script(&script_file, &script(release))?;
 
@@ -415,16 +437,9 @@ pub fn install(dir: &Path, release: &Release) -> Result<Vec<Written>> {
         hooks::save(&cursor, &config, false)?;
     }
 
-    let instructions = dir.join(INSTRUCTIONS);
-    let before = match fs::read_to_string(&instructions) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", instructions.display())),
-    };
-    let after = with_section(&before);
-    let instructions_changed = after != before;
+    let instructions_changed = asked != asked_before;
     if instructions_changed {
-        fs::write(&instructions, after)
+        fs::write(&instructions, asked)
             .with_context(|| format!("writing {}", instructions.display()))?;
     }
     Ok(vec![
@@ -742,9 +757,28 @@ mod tests {
         // Text after the section stays after it.
         let around = format!("# Rules\n\n{SECTION}\n## More\n");
         assert_eq!(without_section(&around), "# Rules\n\n## More\n");
-        // A section that never ends is somebody's own text.
-        let open = format!("{BEGIN}\nmine\n");
-        assert_eq!(without_section(&open), open);
+    }
+
+    #[test]
+    fn marks_that_are_not_one_section_are_left_alone_and_nothing_is_installed() {
+        for own in [
+            // A section that never ends, one that never begins, and a mark
+            // of somebody's own before a section of ours.
+            format!("{BEGIN}\nmine\n"),
+            format!("mine\n{END}\n"),
+            format!("{BEGIN}\nmine\n\n{SECTION}"),
+        ] {
+            assert_eq!(without_section(&own), own);
+            let dir = repo();
+            let file = dir.path().join(INSTRUCTIONS);
+            fs::write(&file, &own).unwrap();
+            let err = install(dir.path(), &release()).unwrap_err();
+            assert!(err.to_string().contains("AGENTS.md"), "{err}");
+            assert!(uninstall(dir.path()).unwrap().is_empty());
+            assert_eq!(fs::read_to_string(&file).unwrap(), own);
+            assert!(!dir.path().join(".sessionly").exists());
+            assert!(!dir.path().join(".claude").exists());
+        }
     }
 
     #[test]
