@@ -33,7 +33,7 @@ export function Excluded({
     const lines = [
       `Stop submitting ${repo}?`,
       "This deletes the sessions you submitted from it, and stops further ones.",
-      covers ? "Directories inside it are stopped too." : "",
+      covers ? "Directories inside it are stopped too, and so is a repository cloned into one." : "",
       "Sessions other people submitted are left as they are.",
       "The copy on each machine that captured them stays there, and is not sent again until you allow this repository.",
     ].filter((line) => line !== "");
@@ -53,7 +53,7 @@ export function Excluded({
 
   async function allow(name: string) {
     const sure = window.confirm(
-      `Allow ${name} again? The next upload from a machine that still has the sessions will send them. What was deleted stays gone until then.`,
+      `Allow ${name} again? The next upload from each machine that still has the sessions will send them. What was deleted stays gone until then.`,
     );
     if (!sure) return;
     setBusy(true);

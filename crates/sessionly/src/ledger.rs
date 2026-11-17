@@ -97,6 +97,18 @@ CREATE TABLE uploads (
 );
 ";
 
+/// What this machine last learned from each server. Made on open if it is
+/// missing, so that adding it rebuilt no ledger (which would send every
+/// session again). Losing it only means asking a server once more.
+const SERVERS: &str = "
+CREATE TABLE IF NOT EXISTS servers (
+    server        TEXT PRIMARY KEY,
+    -- how many times its person had allowed a repository again, when this
+    -- machine last compared what it sent with what the server has
+    allowed_again INTEGER NOT NULL
+);
+";
+
 /// Per-session rewrite totals, joined into listings.
 const REWRITE_TOTALS: &str = "
     (SELECT session_id,
@@ -366,6 +378,7 @@ impl Ledger {
             tx.execute_batch(TABLES)?;
             tx.pragma_update(None, "user_version", DB_VERSION)?;
         }
+        tx.execute_batch(SERVERS)?;
         tx.commit()?;
         Ok(Ledger { conn })
     }
@@ -548,13 +561,35 @@ impl Ledger {
         Ok(())
     }
 
-    /// Forget that `server` was sent a session. Called when its repository is
-    /// stopped: the server no longer has it, so the next upload after it is
-    /// allowed again must send it.
+    /// Forget that `server` was sent a session. Called when the server does
+    /// not have it: it refused it, or deleted it when its repository was
+    /// stopped. An upload after the repository is allowed again sends it.
     pub fn forget_upload(&mut self, session_id: &str, server: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM uploads WHERE session_id = ?1 AND server = ?2",
             [session_id, server],
+        )?;
+        Ok(())
+    }
+
+    /// How many times `server` said a repository had been allowed again,
+    /// when this machine last compared what it sent with what is there.
+    pub fn allowed_again_seen(&self, server: &str) -> Result<u64> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT allowed_again FROM servers WHERE server = ?1",
+                [server],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
+    pub fn saw_allowed_again(&mut self, server: &str, times: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO servers VALUES (?1, ?2)",
+            params![server, times],
         )?;
         Ok(())
     }
@@ -861,6 +896,36 @@ mod tests {
             .query_row("SELECT count(*) FROM session_files", [], |r| r.get(0))
             .unwrap();
         assert_eq!(files, 1);
+    }
+
+    #[test]
+    fn remembers_what_each_server_was_sent_and_last_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("l.db");
+        let (a, b) = ("https://a.example", "https://b.example");
+        let mut ledger = Ledger::open(&path).unwrap();
+        ledger.mark_uploaded("s1", a, "h1").unwrap();
+        ledger.mark_uploaded("s1", b, "h1").unwrap();
+        ledger.forget_upload("s1", a).unwrap();
+        assert_eq!(ledger.uploaded_hash("s1", a).unwrap(), None);
+        assert_eq!(
+            ledger.uploaded_hash("s1", b).unwrap().as_deref(),
+            Some("h1")
+        );
+
+        assert_eq!(ledger.allowed_again_seen(a).unwrap(), 0);
+        ledger.saw_allowed_again(a, 2).unwrap();
+        ledger.saw_allowed_again(a, 3).unwrap();
+        assert_eq!(ledger.allowed_again_seen(a).unwrap(), 3);
+        assert_eq!(ledger.allowed_again_seen(b).unwrap(), 0);
+        // Opening again keeps both: adding the table rebuilt nothing.
+        drop(ledger);
+        let ledger = Ledger::open(&path).unwrap();
+        assert_eq!(ledger.allowed_again_seen(a).unwrap(), 3);
+        assert_eq!(
+            ledger.uploaded_hash("s1", b).unwrap().as_deref(),
+            Some("h1")
+        );
     }
 
     #[test]

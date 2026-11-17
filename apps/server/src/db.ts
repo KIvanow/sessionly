@@ -637,6 +637,22 @@ const MIGRATIONS: string[] = [
    )`,
   toApp(`SELECT, INSERT, UPDATE, DELETE ON repo_exclusions`),
   ...rowLevelSecurity("repo_exclusions"),
+  // How many times a person allowed a repository again. What stopping it
+  // deleted can be sent again from then on, and a machine cannot know that
+  // by itself: it compares this number with the one it saw last.
+  `CREATE TABLE repos_allowed_again (
+     org_id      text NOT NULL REFERENCES orgs ON DELETE CASCADE,
+     owner_email text NOT NULL,
+     times       integer NOT NULL,
+     PRIMARY KEY (org_id, owner_email)
+   )`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON repos_allowed_again`),
+  ...rowLevelSecurity("repos_allowed_again"),
+  // Where a session ran, beside the name it is filed under: a stopped folder
+  // also covers a clone inside it that is filed under its remote.
+  `ALTER TABLE sessions ADD COLUMN repo_root text`,
+  `ALTER TABLE sessions ADD COLUMN cwd text`,
+  `UPDATE sessions SET repo_root = payload #>> '{session,repo,root}', cwd = payload #>> '{session,cwd}'`,
 ];
 
 /**

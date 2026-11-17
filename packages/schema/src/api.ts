@@ -258,6 +258,17 @@ export interface FilterOptions {
 /** Repositories this person stopped submitting (`GET /repos/excluded`). */
 export interface ExcludedRepos {
   repos: string[];
+  /**
+   * How many times this person allowed a repository again. A machine that
+   * sees a number it has not seen asks which of its sessions the server
+   * still has (`GET /sessions/held`), and sends the others again.
+   */
+  allowed_again: number;
+}
+
+/** The sessions of this person the server has from one machine (`GET /sessions/held?machine=`). */
+export interface HeldSessions {
+  sessions: { source: string; session_id: string }[];
 }
 
 /**

@@ -22,6 +22,7 @@ import {
   excludeRepo,
   filterOptions,
   getSession,
+  heldSessions,
   includeRepo,
   listExcluded,
   listFiles,
@@ -446,6 +447,16 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     return c.json(await listSessions(c.get("db"), c.get("principal"), filtersFrom(query), page));
   });
 
+  // Which sessions of theirs the server has from one machine, whoever asks:
+  // an admin's machine is told of the admin's sessions, like anyone's.
+  api.get("/sessions/held", async (c) => {
+    const p = c.get("principal");
+    if (p.role !== "admin" && p.role !== "member") return c.json({ error: "this token is not a person's" }, 403);
+    const machine = c.req.query("machine");
+    if (!machine) throw new BadRequest("name the machine");
+    return c.json(await heldSessions(c.get("db"), p.email, machine));
+  });
+
   api.get("/sessions/:machine/:source/:session", async (c) => {
     const { machine, source, session } = c.req.param();
     const found = await getSession(c.get("db"), c.get("principal"), {
@@ -473,10 +484,11 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     if (role !== "admin" && role !== "member") return c.json({ error: "this token is not a person's" }, 403);
     await next();
   });
-  excluded.get("/", async (c) => c.json({ repos: await listExcluded(c.get("db"), c.get("principal").email) }));
+  excluded.get("/", async (c) => c.json(await listExcluded(c.get("db"), c.get("principal").email)));
   excluded.put("/", async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { repo?: unknown };
-    return c.json(await excludeRepo(c.get("db"), c.get("principal").email, body.repo));
+    // Any JSON is a body, `null` too: only an object can name a repository.
+    const body = (await c.req.json().catch(() => null)) as { repo?: unknown } | null;
+    return c.json(await excludeRepo(c.get("db"), c.get("principal").email, body?.repo));
   });
   excluded.delete("/", async (c) => {
     const repo = await includeRepo(c.get("db"), c.get("principal").email, c.req.query("repo"));
