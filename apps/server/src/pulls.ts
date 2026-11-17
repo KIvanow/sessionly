@@ -63,10 +63,10 @@ function samePath(claimed: string, path: string): boolean {
   return outside && claimed.endsWith(`/${path}`);
 }
 
-type Writer = { tool: string; model: string | null; session?: SessionKey };
+export type Writer = { tool: string; model: string | null; session?: SessionKey };
 
 /** For each added line of each file, the agent that wrote it, or null. */
-function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[][] {
+export function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[][] {
   // Looking only at claims on a file of the same name keeps this quick.
   const byName = new Map<string, Claim[]>();
   for (const claim of claims) {
@@ -110,18 +110,20 @@ const sorted = <T extends LinesBy>(rows: Map<string, T>): T[] =>
 /**
  * Which lines of a pull request agents wrote: as it was first reported
  * (`first`), as it is now (`now`), and how many of the agents' first lines
- * are still in it.
+ * are still in it. `lines` are the writers of `now`, where they were worked
+ * out already.
  */
 export function attribute(
   first: FileHashes[],
   now: FileHashes[],
   claims: Claim[],
+  lines: (Writer | null)[][] = writers(now, claims),
 ): Omit<PullAttribution, "from_open" | "cloud"> {
   const count = (files: FileHashes[]) => files.reduce((sum, f) => sum + f.hashes.length, 0);
 
   const nowBy = new Map<string, LinesBy>();
   let agentNow = 0;
-  for (const line of writers(now, claims).flat()) {
+  for (const line of lines.flat()) {
     if (!line) continue;
     agentNow += 1;
     tally(nowBy, line, () => ({ tool: line.tool, model: line.model, lines: 0 })).lines += 1;
@@ -161,10 +163,10 @@ export function attribute(
 /**
  * A pull request's lines as they are now, file by file and session by
  * session: where its agent lines are, and which sessions they came from.
+ * `lines` are its writers, the same ones `attribute` counts.
  */
-export function breakdown(now: FileHashes[], claims: Claim[]): { files: PullFile[]; sessions: Omit<PullSession, "session">[] } {
+export function breakdown(now: FileHashes[], lines: (Writer | null)[][]): { files: PullFile[]; sessions: Omit<PullSession, "session">[] } {
   const sessions = new Map<string, Omit<PullSession, "session">>();
-  const lines = writers(now, claims);
   const files = now.map((file, i) => {
     let agent = 0;
     for (const line of lines[i]!) {
@@ -401,8 +403,10 @@ export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttr
   );
   const first = existing ? json<FileHashes[]>(existing.first_files) : report.files;
   const claims = await claimsFor(db, report);
+  // Worked out once, for the figures and for the page: the two then agree.
+  const lines = writers(report.files, claims);
   const attribution: PullAttribution = {
-    ...attribute(first, report.files, claims),
+    ...attribute(first, report.files, claims, lines),
     from_open: (existing?.first_event ?? report.event) === "opened",
     cloud: await cloudOf(db, report),
   };
@@ -431,7 +435,7 @@ export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttr
     files_without_diff: report.files_without_diff,
     last_files: JSON.stringify(report.files),
     attribution: JSON.stringify(attribution),
-    detail: JSON.stringify(breakdown(report.files, claims)),
+    detail: JSON.stringify(breakdown(report.files, lines)),
     // An Action from before these were sent says nothing of them: what is here stays.
     feedback: report.feedback ? JSON.stringify(report.feedback) : null,
     feedback_total: report.feedback ? (report.feedback_total ?? report.feedback.length) : null,

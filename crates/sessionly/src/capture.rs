@@ -172,15 +172,16 @@ pub fn capture(
 /// machine only the second, and as much of it as the `shell_edits` setting
 /// says: there the agent is not the only one at work.
 fn where_it_runs(record: &mut Value) {
+    use crate::changes::Where;
     use crate::config::ShellEdits;
     let text = |key: &str| record[key].as_str().unwrap_or_default().to_string();
     let Ok(data_dir) = crate::paths::data_dir() else {
         return;
     };
-    let counted = match crate::runtime::describe(&text("source"), &text("hook")) {
+    let at = match crate::runtime::describe(&text("source"), &text("hook")) {
         Some(said) => {
             record["runtime"] = said;
-            ShellEdits::All
+            Where::Sandbox
         }
         None => {
             if text("hook") == "SessionEnd" {
@@ -190,15 +191,17 @@ fn where_it_runs(record: &mut Value) {
             if !record["payload"]["tool_name"].is_string() {
                 return;
             }
-            crate::paths::config_path()
-                .map_or(ShellEdits::Off, |path| crate::config::shell_edits(&path))
+            let counted = crate::paths::config_path()
+                .map_or(ShellEdits::Off, |path| crate::config::shell_edits(&path));
+            if counted == ShellEdits::Off {
+                return;
+            }
+            Where::Machine {
+                sure: counted == ShellEdits::Sure,
+            }
         }
     };
-    if counted == ShellEdits::Off {
-        return;
-    }
-    let sure = counted == ShellEdits::Sure;
-    if let Some(Value::Object(seen)) = crate::changes::observe(&data_dir, record, sure) {
+    if let Some(Value::Object(seen)) = crate::changes::observe(&data_dir, record, at) {
         for (key, value) in seen {
             record[key] = value;
         }

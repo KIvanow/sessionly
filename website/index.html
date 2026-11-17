@@ -573,8 +573,9 @@ SESSIONLY_LINE_HASHES=on</pre>
           </div>
           <p class="note">
             Capture was checked in real sessions on both platforms on 14 November 2026, with
-            Sessionly 0.3. Shell edits are counted only in a sandbox: on a person's machine,
-            whatever the person saved while a command ran would be put down to the agent. Claude
+            Sessionly 0.3. In a sandbox all of a shell command's edits are counted. On a person's
+            machine only those sure to be the agent's are: whatever the person saved while a long
+            command ran would otherwise be put down to the agent. Claude
             Code's documentation says a repository's hooks are not loaded in sessions over several
             repositories or started from Slack; that was not tried.
           </p>

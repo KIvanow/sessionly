@@ -4,7 +4,7 @@ import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
 import type { Db } from "../src/db.ts";
 import { testDb, tokenFor } from "./helpers.ts";
-import { attribute, breakdown, type Claim } from "../src/pulls.ts";
+import { attribute, breakdown, type Claim, writers } from "../src/pulls.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
 const h = (n: number) => n.toString(16).padStart(16, "0");
@@ -93,7 +93,7 @@ test("a pull request's lines, file by file and session by session", () => {
     claim("grok", "grok-4", "src/b.ts", 3, 11),
   ];
   const now = [file("src/b.ts", 10, 11), file("src/a.ts", 1, 2, 3, 4, 99), file("README.md", 60)];
-  assert.deepEqual(breakdown(now, claims), {
+  assert.deepEqual(breakdown(now, writers(now, claims)), {
     files: [
       { path: "src/a.ts", lines: 5, agent_lines: 4 },
       { path: "src/b.ts", lines: 2, agent_lines: 2 },
@@ -106,7 +106,8 @@ test("a pull request's lines, file by file and session by session", () => {
   });
   // the sessions add up to what `attribute` counts for agents with a session
   assert.equal(attribute(now, now, claims).now.agent_lines, 6);
-  assert.deepEqual(breakdown([], claims), { files: [], sessions: [] });
+  assert.equal(attribute(now, now, claims, writers(now, claims)).now.agent_lines, 6);
+  assert.deepEqual(breakdown([], writers([], claims)), { files: [], sessions: [] });
 });
 
 let db: Db;

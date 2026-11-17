@@ -361,7 +361,8 @@ function Shell({
       } catch {
         // not an address this dashboard made: the overview, below
       }
-      if (repo) return <PullView token={token} repo={repo} number={Number(rest[1])} onSignOut={onSignOut} />;
+      // A page of its own for each: none of one pull request shows under another's address.
+      if (repo) return <PullView key={`${repo}#${rest[1]}`} token={token} repo={repo} number={Number(rest[1])} onSignOut={onSignOut} />;
     }
     if (page === "pulls" && isAdmin) {
       return (

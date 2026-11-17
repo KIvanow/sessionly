@@ -408,6 +408,11 @@ test("backfill first reports a pull request as it was when opened", async () => 
   );
   assert.deepEqual(opened.files, [{ path: "src/parser.rs", hashes: [lineHash("early();")] }]);
   assert.deepEqual(opened.aliases, ["github.com/oldco/web"]);
+  // The first says nothing of reviews and comments, rather than that there
+  // are none: the server would drop those it has until the second arrives.
+  assert.deepEqual(["feedback" in opened, "feedback_total" in opened], [false, false]);
+  assert.equal(closed.feedback_total, closed.feedback.length);
+  assert.ok(closed.feedback.length > 0);
   assert.deepEqual([closed.event, closed.state, closed.commits, closed.reviews], ["closed", "merged", 3, 2]);
   assert.equal(closed.files[0].hashes.length, 2);
 

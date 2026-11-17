@@ -250,10 +250,15 @@ is sure to be the command's is counted:
 
 - **Everything that changed, when the command was over within two seconds** and no other
   session was seen at work in the repository meanwhile. Nobody saves a file in that time,
-  and most commands that edit are that quick.
+  and most commands that edit are that quick. The two seconds run from the start of the look
+  before the command to the end of the look after it, so in a repository large enough for a
+  look to take a second, few commands are quick.
 - **Otherwise the added lines the command's own text spells out**: the lines of a heredoc,
-  or of a script given inline. A file all of whose added lines are spelled out counts as it
-  is, with what was removed from it. A file where none are is left out.
+  or of a script given inline. A line counts when it is one of the command's own lines, or is
+  long (32 characters) and stands somewhere in it. Lines under 16 characters (`else:`, `}`)
+  are in any script and prove nothing; they go with the rest of their file. A file all of
+  whose added lines are spelled out counts as it is, with what was removed from it. A file
+  where fewer than half are is left out.
 
 What a long command changes without spelling it out (a formatter or a generator that takes a
 while, a `sed -i` across a large tree) is therefore not counted. To change what is:
@@ -270,8 +275,11 @@ works in (a git worktree of its own, say).
 
 What else to know:
 
-- A command that begins `cd <somewhere> &&` is looked at in the repository it goes to, so
-  an agent working in a worktree somewhere else is counted there.
+- A command that begins `cd <somewhere> &&` is looked at where it goes when that is another
+  worktree of the session's repository, so an agent working in a worktree somewhere else is
+  counted there. A command that goes to some other repository is not looked at there.
+- A home directory that is itself a git repository is not looked at on your own machine:
+  that would be every file you have.
 - It applies to sessions captured by hooks. Sessions already recorded are not changed, and
   imported ones have nothing to compare.
 - Each shell command costs two looks at the working tree with git: about 15 ms each in
@@ -877,7 +885,8 @@ How to read it:
   ran in the cloud counts when it ran on the pull request's branch instead: there the commits
   are the agent's own. Everything else
   counts as not an agent's: people without Sessionly, sessions uploaded without line hashes,
-  changes made by shell commands on a person's machine, generated files. So the agent share
+  what a shell command changed on a person's machine where that is not
+  [sure to be the agent's](#shell-edits), generated files. So the agent share
   is a floor.
 - **Survived review** compares the pull request as it was opened with how it ended: of the
   agent's lines it had at the start, how many are still in it. It is only known for pull

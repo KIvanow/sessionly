@@ -785,8 +785,8 @@ fn shell_edits_are_counted_on_this_machine_as_far_as_they_are_sure() {
     command(
         "sure-3",
         "t3",
-        "echo four >> a.txt; make",
-        "four\nfive\n",
+        "echo 'four, as the command itself says it' >> a.txt; make",
+        "four, as the command itself says it\nfive, which only a person typed\n",
         true,
     );
     assert_eq!(added("sure-3"), 1);
