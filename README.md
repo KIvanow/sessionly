@@ -582,7 +582,7 @@ ignores fields it doesn't know.
 
 ### Uploading
 
-The binary uploads to a Sessionly server (see [Server](#server)). It uses three endpoints, all
+The binary uploads to a Sessionly server (see [Server](#server)). It uses these endpoints, all
 with `Authorization: Bearer <token>`:
 
 - `GET /api/v1/ping` answers 2xx if the token is accepted.
@@ -595,11 +595,20 @@ with `Authorization: Bearer <token>`:
   `{"removed": true}`, or `false` if there was none of theirs. A server from before this
   answers 404, and a token that may not gets 403: the binary keeps the session noted and asks
   again at a later upload, and until then such a server keeps the extra copy.
+- `GET`, `PUT` and `DELETE /api/v1/repos/excluded` list the repositories you stopped, stop one
+  (and delete the sessions you already submitted from it), or allow one again. Every upload
+  starts by reading the list, so a stopped repository's sessions are not sent at all.
+- `GET /api/v1/sessions/held?machine={machine_id}` lists the sessions of yours the server has
+  from this machine. It is asked once after a repository was allowed again, to find what
+  stopping it deleted.
 
 ```sh
 sessionly connect https://sessionly.example.com   # asks for the token, checks it, saves both
 sessionly upload                                   # send new and changed sessions now
 sessionly upload --dry-run                         # only count what would be sent
+sessionly exclude ~/Documents                      # stop submitting it, and delete what you already sent
+sessionly exclude                                  # list the repositories you stopped
+sessionly include ~/Documents                      # submit one again
 sessionly settings --content previews              # opt in to sending previews
 sessionly disconnect                               # stop uploading, forget the token
 ```
@@ -609,6 +618,22 @@ sessionly disconnect                               # stop uploading, forget the 
 - Plain `http://` is accepted only for a server on this machine.
 - A session is sent again only when its payload changed. Failed uploads are retried on the next
   run.
+- `sessionly exclude ~/Documents` stops that repository and deletes the sessions you already
+  submitted from it. A directory is named by its origin remote when it has one, otherwise by
+  the `~/…` path the dashboard shows. A path also covers folders inside it (`~/Downloads` stops
+  `~/Downloads/notes` and leaves `~/Downloads-backup`), including a clone in there that has a
+  remote; a remote such as `github.com/owner/name` is only itself. Only your sessions are
+  deleted, and pull requests are left as they are.
+- The list of what you stopped is kept on the server, so it holds for every machine of yours
+  and for the dashboard. The copy on the machine that captured a session stays, and is not
+  sent while its repository is stopped. After `sessionly include` (or **Allow again** on the
+  dashboard), the next upload from each machine that still has the sessions sends them again,
+  whether or not that machine uploaded anything in between. Until then what was deleted stays
+  gone.
+- Sessions from a cloud environment are stopped the same way: the server refuses them for the
+  person they are filed under. An environment's token only uploads: it cannot ask what the
+  server still has, so a cloud session deleted this way comes back only if it goes on after
+  its repository is allowed again.
 
 ### Automatic sync
 
@@ -819,6 +844,8 @@ light or dark as the system is, and serves the same two typefaces itself, from
 - **Sessions:** a searchable, paged list. Period, person, repository, tool and model filters
   apply to both pages; a session counts under its most used model. Once a session from the
   cloud has been uploaded, a further filter separates those from sessions on people's machines.
+  Choosing one repository offers **Stop submitting**, which deletes the sessions you submitted
+  from it and stops further ones. Repositories you stopped are listed there, with **Allow again**.
 - **One session:** cost and tokens per model, prompts with how long each took and how it ended,
   files changed with how much of each survives, tools, and subagents.
 - **Team** (admins): add and remove people where they sign in with Google or GitHub, and create and
@@ -940,7 +967,10 @@ and `GET /api/v1/prs/summary` (admins; filters `repo`, `state`, `since`). For se
 (filters `user`, `repo`, `model`, `model_is`, `tool`, `runtime` (`local` or `cloud`), `q`,
 `since`, `until`, paging `limit`, `offset`),
 `GET /api/v1/sessions/{machine_id}/{source}/{session_id}`, `GET /api/v1/files` (files agents
-changed, with `repo_is` for one repository) and `GET /api/v1/filters`.
+changed, with `repo_is` for one repository), `GET /api/v1/filters`,
+`GET`, `PUT` and `DELETE /api/v1/repos/excluded` (stop a repository for the person the token
+belongs to, or allow it again) and `GET /api/v1/sessions/held?machine=` (which sessions of
+that person the server has from one machine).
 
 The payload types in `packages/schema` are generated from `schema/upload.schema.json`, which is
 generated from the Rust types. `pnpm gen` regenerates them and a test fails if they are stale.

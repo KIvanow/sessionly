@@ -640,6 +640,15 @@ struct StubServer {
     received: Arc<Mutex<Vec<Received>>>,
     status: Arc<AtomicU16>,
     deleting: Arc<Mutex<(u16, &'static str)>>,
+    routes: Arc<Mutex<Vec<Route>>>,
+}
+
+/// An answer of its own for some requests.
+struct Route {
+    method: String,
+    path: String,
+    status: u16,
+    body: String,
 }
 
 impl StubServer {
@@ -648,8 +657,10 @@ impl StubServer {
         let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let received = Arc::new(Mutex::new(Vec::new()));
         let status = Arc::new(AtomicU16::new(200));
+        let routes = Arc::new(Mutex::new(Vec::<Route>::new()));
         let deleting = Arc::new(Mutex::new((200, r#"{"removed":true}"#)));
-        let (log, code, taking_back) = (received.clone(), status.clone(), deleting.clone());
+        let (log, code, answer_routes) = (received.clone(), status.clone(), routes.clone());
+        let taking_back = deleting.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let mut reader = BufReader::new(stream);
@@ -676,10 +687,19 @@ impl StubServer {
                 }
                 let mut body = vec![0u8; length];
                 let _ = reader.read_exact(&mut body);
-                let (status, answer) = match method.as_str() {
-                    "DELETE" => *taking_back.lock().unwrap(),
-                    _ => (code.load(Ordering::SeqCst), r#"{"error":"stub says no"}"#),
-                };
+                let own = answer_routes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|route| route.method == method && path.starts_with(&route.path))
+                    .map(|route| (route.status, route.body.clone()));
+                let (status, answer) = own.unwrap_or_else(|| {
+                    let (status, answer) = match method.as_str() {
+                        "DELETE" => *taking_back.lock().unwrap(),
+                        _ => (code.load(Ordering::SeqCst), r#"{"error":"stub says no"}"#),
+                    };
+                    (status, answer.to_string())
+                });
                 log.lock().unwrap().push(Received {
                     method,
                     path,
@@ -700,6 +720,7 @@ impl StubServer {
             received,
             status,
             deleting,
+            routes,
         }
     }
 
@@ -712,6 +733,36 @@ impl StubServer {
 
     fn answer_deletes_with(&self, status: u16, body: &'static str) {
         *self.deleting.lock().unwrap() = (status, body);
+    }
+
+    /// Answer `method` requests whose path starts with `path` this way from
+    /// now on, whatever the other requests are answered.
+    fn answer_route(&self, method: &str, path: &str, status: u16, body: &str) {
+        let mut routes = self.routes.lock().unwrap();
+        routes.retain(|route| !(route.method == method && route.path == path));
+        routes.push(Route {
+            method: method.to_string(),
+            path: path.to_string(),
+            status,
+            body: body.to_string(),
+        });
+    }
+
+    /// What `GET /repos/excluded` answers: the stopped repositories, and how
+    /// many times one was allowed again.
+    fn stopped(&self, repos: &[&str], allowed_again: u64) {
+        let body = serde_json::json!({ "repos": repos, "allowed_again": allowed_again });
+        self.answer_route("GET", "/api/v1/repos/excluded", 200, &body.to_string());
+    }
+
+    /// What `GET /sessions/held` answers: the sessions the server has.
+    fn holds(&self, ids: &[&str]) {
+        let sessions: Vec<_> = ids
+            .iter()
+            .map(|id| serde_json::json!({ "source": "claude-code", "session_id": id }))
+            .collect();
+        let body = serde_json::json!({ "sessions": sessions });
+        self.answer_route("GET", "/api/v1/sessions/held", 200, &body.to_string());
     }
 
     fn requests(&self) -> Vec<Received> {
@@ -929,8 +980,10 @@ fn a_subagent_is_not_taken_back_before_the_server_has_its_session() {
     let server = StubServer::start();
     upload_subagents_alone(home.path(), &server, &[CODEX_SUB]);
 
-    // The session that spawned it is refused: too large, say.
+    // The session that spawned it is refused: too large, say. (What is
+    // stopped is still answered: only the session is too large.)
     codex_thread(home.path(), CODEX_MAIN, false);
+    server.stopped(&[], 0);
     server.answer_with(413);
     let refused = run(home.path(), &["upload"]);
     assert!(!refused.status.success());
@@ -1119,6 +1172,329 @@ fn upload_sends_each_session_once_and_again_when_it_changes() {
     assert!(server.puts()[3].body.contains("Parser module"));
 }
 
+/// Sessions sent to the server, ignoring the requests that stop a repository.
+fn session_puts(server: &StubServer) -> Vec<Received> {
+    server
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "PUT" && r.path.starts_with("/api/v1/sessions/"))
+        .collect()
+}
+
+#[test]
+fn stopping_a_repository_skips_it_until_it_is_allowed_again() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    let private = home.path().join("private-notes");
+    let public = home.path().join("public-notes");
+    fs::create_dir_all(&private).unwrap();
+    fs::create_dir_all(&public).unwrap();
+    // Their own repositories, so an ancestor's remote is not what they are filed under.
+    for dir in [&private, &public] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["init", "--quiet", "--initial-branch", "main"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init: {}", stderr(&out));
+    }
+    capture_editing_session(home.path(), "priv-1", &private);
+    capture_editing_session(home.path(), "pub-1", &public);
+
+    let early = run(home.path(), &["exclude"]);
+    assert!(!early.status.success());
+    assert!(
+        stderr(&early).contains("sessionly connect"),
+        "{}",
+        stderr(&early)
+    );
+
+    stdout(run(home.path(), &["connect", &server.url, "--token", "t"]));
+    let sent = stdout(run(home.path(), &["upload"]));
+    assert!(sent.contains("Uploaded 2 sessions"), "{sent}");
+    assert_eq!(session_puts(&server).len(), 2);
+
+    // The list is the server's, and is kept nowhere on this machine.
+    server.stopped(&["github.com/acme/web"], 0);
+    let listed = stdout(run(home.path(), &["exclude"]));
+    assert!(listed.contains("github.com/acme/web"), "{listed}");
+    let config = fs::read_to_string(home.path().join("data/config.json")).unwrap();
+    assert!(!config.contains("github.com/acme/web"), "{config}");
+    server.stopped(&[], 0);
+    assert!(stdout(run(home.path(), &["exclude"])).contains("Nothing is stopped."));
+
+    let exported = json_of(home.path(), &["export", "priv-1"]);
+    let session = &exported["session"];
+    let name = session["repo"]["remote"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            session["repo"]["root"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| session["cwd"].as_str())
+        .unwrap()
+        .to_string();
+    let asked_to_stop = || {
+        let put = server
+            .requests()
+            .into_iter()
+            .rfind(|r| r.method == "PUT" && r.path == "/api/v1/repos/excluded")
+            .unwrap();
+        serde_json::from_str::<serde_json::Value>(&put.body).unwrap()["repo"].clone()
+    };
+    server.answer_route(
+        "PUT",
+        "/api/v1/repos/excluded",
+        200,
+        &format!(r#"{{"repo":{name:?},"sessions_removed":1,"covers_folders":true}}"#),
+    );
+    // A directory named from where the command runs is the same repository.
+    let here = sessionly(home.path())
+        .current_dir(&private)
+        .args(["exclude", "."])
+        .output()
+        .unwrap();
+    assert!(here.status.success(), "{}", stderr(&here));
+    assert_eq!(asked_to_stop(), name);
+    let beside = sessionly(home.path())
+        .current_dir(&public)
+        .args(["exclude", "../public-notes/../private-notes"])
+        .output()
+        .unwrap();
+    assert!(beside.status.success(), "{}", stderr(&beside));
+    assert_eq!(asked_to_stop(), name);
+
+    let stopped = stdout(run(home.path(), &["exclude", &private.to_string_lossy()]));
+    assert!(
+        stopped.contains(&format!("Stopped submitting {name}.")),
+        "{stopped}"
+    );
+    assert!(stopped.contains("1 session already submitted"), "{stopped}");
+    assert!(
+        stopped.contains("Directories inside it are stopped too."),
+        "{stopped}"
+    );
+    assert!(
+        stopped.contains(&format!("sessionly include {name}")),
+        "{stopped}"
+    );
+    assert_eq!(asked_to_stop(), name);
+
+    // While it is stopped it is counted and not sent, by a dry run and a real one.
+    server.stopped(&[&name], 0);
+    let puts_before = session_puts(&server).len();
+    for args in [&["upload", "--dry-run"][..], &["upload"]] {
+        let skipped = stdout(run(home.path(), args));
+        assert!(
+            skipped.contains("upload 0 sessions") || skipped.contains("Uploaded 0 sessions"),
+            "{skipped}"
+        );
+        assert!(
+            skipped.contains("1 from repositories you stopped submitting"),
+            "{skipped}"
+        );
+    }
+    assert_eq!(session_puts(&server).len(), puts_before);
+
+    // Allowed again. The server deleted the session when it was stopped,
+    // and says so when this machine asks what it still has.
+    server.answer_route(
+        "DELETE",
+        "/api/v1/repos/excluded",
+        200,
+        &format!(r#"{{"repo":{name:?},"removed":true}}"#),
+    );
+    let allowed = stdout(run(home.path(), &["include", &name]));
+    assert!(allowed.contains("will be submitted again"), "{allowed}");
+    server.stopped(&[], 1);
+    server.holds(&["pub-1"]);
+    let asked_what_is_held = || {
+        server
+            .requests()
+            .into_iter()
+            .filter(|r| r.method == "GET" && r.path.starts_with("/api/v1/sessions/held"))
+            .collect::<Vec<_>>()
+    };
+    // A dry run counts it, and leaves it to be sent.
+    let dry = stdout(run(home.path(), &["upload", "--dry-run"]));
+    assert!(
+        dry.contains("Would upload 1 sessions") && dry.contains("1 already up to date"),
+        "{dry}"
+    );
+    assert_eq!(session_puts(&server).len(), puts_before);
+    let resent = stdout(run(home.path(), &["upload"]));
+    assert!(
+        resent.contains("Uploaded 1 sessions") && resent.contains("1 already up to date"),
+        "{resent}"
+    );
+    assert_eq!(session_puts(&server).len(), puts_before + 1);
+    assert!(session_puts(&server)
+        .last()
+        .unwrap()
+        .path
+        .ends_with("/priv-1"));
+    let machine_id = exported["session"]["machine_id"].as_str().unwrap();
+    assert_eq!(
+        asked_what_is_held().last().unwrap().path,
+        format!("/api/v1/sessions/held?machine={machine_id}")
+    );
+
+    // Nothing was allowed since: the server is not asked what it has again.
+    let asked = asked_what_is_held().len();
+    server.holds(&[]);
+    let level = stdout(run(home.path(), &["upload"]));
+    assert!(
+        level.contains("Uploaded 0 sessions") && level.contains("2 already up to date"),
+        "{level}"
+    );
+    assert_eq!(asked_what_is_held().len(), asked);
+
+    // Stopped and allowed again while this machine ran no upload at all,
+    // from the dashboard or another machine: it is sent again all the same.
+    server.stopped(&[], 2);
+    server.holds(&["pub-1"]);
+    let again = stdout(run(home.path(), &["upload"]));
+    assert!(again.contains("Uploaded 1 sessions"), "{again}");
+    assert_eq!(session_puts(&server).len(), puts_before + 2);
+    assert!(session_puts(&server)
+        .last()
+        .unwrap()
+        .path
+        .ends_with("/priv-1"));
+
+    server.answer_route(
+        "DELETE",
+        "/api/v1/repos/excluded",
+        404,
+        r#"{"error":"no such repository"}"#,
+    );
+    let missing = run(home.path(), &["include", &name]);
+    assert!(!missing.status.success());
+    assert!(
+        stderr(&missing).contains("is not stopped"),
+        "{}",
+        stderr(&missing)
+    );
+
+    // A server from before a repository could be stopped.
+    for method in ["GET", "PUT", "DELETE"] {
+        server.answer_route(
+            method,
+            "/api/v1/repos/excluded",
+            404,
+            r#"{"error":"not found"}"#,
+        );
+    }
+    for args in [
+        &["exclude"][..],
+        &["exclude", "github.com/acme/missing"],
+        &["include", "github.com/acme/missing"],
+    ] {
+        let old = run(home.path(), args);
+        assert!(!old.status.success());
+        assert!(stderr(&old).contains("newer version"), "{}", stderr(&old));
+    }
+    // Nothing is stopped there, and uploading goes on as before.
+    let plain = stdout(run(home.path(), &["upload"]));
+    assert!(
+        plain.contains("Uploaded 0 sessions") && plain.contains("2 already up to date"),
+        "{plain}"
+    );
+}
+
+#[test]
+fn a_token_that_only_uploads_sends_without_asking_what_is_stopped() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    capture_editing_session(home.path(), "env-1", &repo);
+    stdout(run(home.path(), &["connect", &server.url, "--token", "t"]));
+    // What a server answers a cloud environment's token on any other route.
+    for path in ["/api/v1/repos/excluded", "/api/v1/sessions/held"] {
+        server.answer_route(
+            "GET",
+            path,
+            403,
+            r#"{"error":"this token only uploads sessions"}"#,
+        );
+    }
+    let dry = run(home.path(), &["upload", "--dry-run"]);
+    assert!(!stderr(&dry).contains("warning"), "{}", stderr(&dry));
+    assert!(stdout(dry).contains("Would upload 1 sessions"));
+
+    // The server refuses a session whose person stopped its repository,
+    // and says so. It is not marked as sent.
+    server.answer_route(
+        "PUT",
+        "/api/v1/sessions/",
+        200,
+        r#"{"stored":false,"excluded":true}"#,
+    );
+    let refused = stdout(run(home.path(), &["upload"]));
+    assert!(
+        refused.contains("Uploaded 0 sessions")
+            && refused.contains("from repositories you stopped submitting"),
+        "{refused}"
+    );
+    server.answer_route("PUT", "/api/v1/sessions/", 200, r#"{"stored":true}"#);
+    let sent = stdout(run(home.path(), &["upload"]));
+    assert!(sent.contains("Uploaded 1 sessions"), "{sent}");
+    assert_eq!(session_puts(&server).len(), 2);
+}
+
+#[test]
+fn a_server_that_cannot_say_what_is_stopped_is_sent_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    capture_editing_session(home.path(), "ask-1", &repo);
+    stdout(run(home.path(), &["connect", &server.url, "--token", "t"]));
+    server.answer_route(
+        "GET",
+        "/api/v1/repos/excluded",
+        503,
+        r#"{"error":"try later"}"#,
+    );
+    let out = run(home.path(), &["upload"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("upload stopped early"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(session_puts(&server).is_empty());
+
+    // Counting needs no server: a dry run counts, and says what it did not know.
+    let dry = run(home.path(), &["upload", "--dry-run"]);
+    assert!(dry.status.success(), "{}", stderr(&dry));
+    assert!(
+        stderr(&dry).contains("was not asked which repositories are stopped"),
+        "{}",
+        stderr(&dry)
+    );
+    assert!(stdout(dry).contains("Would upload 1 sessions"));
+
+    // The list arrives, and what the server still has does not: nothing is
+    // marked as compared, and the next run asks again.
+    server.stopped(&[], 1);
+    server.answer_route(
+        "GET",
+        "/api/v1/sessions/held",
+        503,
+        r#"{"error":"try later"}"#,
+    );
+    assert!(!run(home.path(), &["upload"]).status.success());
+    assert!(session_puts(&server).is_empty());
+    server.holds(&[]);
+    let sent = stdout(run(home.path(), &["upload"]));
+    assert!(sent.contains("Uploaded 1 sessions"), "{sent}");
+}
+
 #[test]
 fn upload_failures_are_reported_and_retried_later() {
     let home = tempfile::tempdir().unwrap();
@@ -1127,6 +1503,8 @@ fn upload_failures_are_reported_and_retried_later() {
     fs::create_dir_all(&repo).unwrap();
     capture_editing_session(home.path(), "fail-1", &repo);
     stdout(run(home.path(), &["connect", &server.url, "--token", "t"]));
+    // What is stopped is answered throughout: it is the uploads that fail.
+    server.stopped(&[], 0);
 
     server.answer_with(401);
     let out = run(home.path(), &["upload"]);

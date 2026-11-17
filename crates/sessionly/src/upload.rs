@@ -318,12 +318,160 @@ mod tests {
     }
 }
 
+/// The repository a server files a session under: its remote, or its root,
+/// or the working directory. Empty remote is kept, matching the server,
+/// which uses `remote ?? root ?? cwd` and does not skip an empty string.
+pub fn submitted_repo(session: &Session) -> Option<String> {
+    if let Some(repo) = &session.repo {
+        if let Some(remote) = &repo.remote {
+            return Some(remote.clone());
+        }
+        return Some(repo.root.clone());
+    }
+    session.cwd.clone()
+}
+
+// Which name stops which sessions. The rule itself is written in
+// `packages/schema/src/repo.ts`, which the server and the dashboard use; the
+// four functions below follow it, name for name.
+
+/// A name as rules are written: trimmed, slashes one way, no trailing slash.
+/// `/` and nothing are no name.
+fn written(text: &str) -> String {
+    let mut name = text.trim().replace('\\', "/");
+    while name.len() > 1 && name.ends_with('/') {
+        name.pop();
+    }
+    if name == "/" {
+        name.clear();
+    }
+    name
+}
+
+/// A path, which covers what is inside it. Anything else is a remote.
+fn is_path(name: &str) -> bool {
+    name == "~" || name.starts_with("~/") || name.starts_with('/')
+}
+
+/// Whether sessions filed under `repo` are stopped by `rule`. `~/Downloads`
+/// covers `~/Downloads/notes` and not `~/Downloads-backup`.
+pub fn repo_covered(repo: &str, rule: &str) -> bool {
+    let name = repo.replace('\\', "/");
+    let stopped = written(rule);
+    if stopped.is_empty() {
+        return false;
+    }
+    name == stopped || (is_path(&stopped) && name.starts_with(&format!("{stopped}/")))
+}
+
+/// Whether one session is stopped by one of `rules`. A path also stops a
+/// session that ran inside it and is filed under something else: a clone
+/// with a remote, in a stopped folder.
+pub fn session_excluded(session: &Session, rules: &[String]) -> bool {
+    let filed = submitted_repo(session);
+    let root = session.repo.as_ref().map(|repo| repo.root.as_str());
+    rules.iter().any(|rule| {
+        let places = if is_path(&written(rule)) {
+            [filed.as_deref(), root, session.cwd.as_deref()]
+        } else {
+            [filed.as_deref(), None, None]
+        };
+        places
+            .into_iter()
+            .flatten()
+            .any(|name| repo_covered(name, rule))
+    })
+}
+
+/// The repository `text` names, as a server files sessions.
+///
+/// A directory that exists is the repository it is in: the origin remote,
+/// if it has one, otherwise the path shortened to `~/…`. Anything else is
+/// already a name, such as `github.com/owner/name` or `~/Documents`.
+pub fn repository_name(text: &str) -> Result<String> {
+    let path = expand_home(text.trim());
+    let resolved = if path.is_dir() {
+        // `.` and `Documents` are directories too: named from the root of
+        // the file system, as sessions are, or they would match none.
+        let path = absolute(&path);
+        let root = crate::git::repo_root(&path).unwrap_or(path);
+        if let Some(remote) = crate::git::origin_remote(&root) {
+            remote
+        } else {
+            // The directory the command runs in is named as the file system
+            // knows it, which need not be how the home directory is named
+            // (on macOS `/var` is a link to `/private/var`): both are tried.
+            let home = crate::paths::home_dir();
+            let real = home.as_deref().and_then(|dir| dir.canonicalize().ok());
+            let root = root.to_string_lossy();
+            [home, real]
+                .into_iter()
+                .flatten()
+                .map(|home| relative_path(&root, None, Some(&home.to_string_lossy())))
+                .find(|short| short.starts_with('~'))
+                .unwrap_or_else(|| root.into_owned())
+        }
+    } else {
+        text.to_string()
+    };
+    // The same shape the server accepts. `/` exists as a directory, and is
+    // still not a repository name.
+    let repo = written(&resolved);
+    if repo.is_empty() {
+        anyhow::bail!("name the repository");
+    }
+    if repo.chars().count() > 1024 {
+        anyhow::bail!("that repository name is too long");
+    }
+    if repo.chars().any(|c| c.is_control()) {
+        anyhow::bail!("that repository name is not valid");
+    }
+    Ok(repo)
+}
+
+/// `path` from the root of the file system, with `.` and `..` worked out.
+/// Links are not followed: where one leads need not be the name the
+/// sessions were filed under.
+fn absolute(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let full = std::env::current_dir()
+        .map(|dir| dir.join(path))
+        .unwrap_or_else(|_| path.to_path_buf());
+    let mut out = std::path::PathBuf::new();
+    for part in full.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// `~/…` and `~` from the home directory. Anything else is used as given,
+/// so a name like `github.com/owner/name` is not looked up as a path
+/// unless that path exists.
+fn expand_home(text: &str) -> std::path::PathBuf {
+    let Some(home) = crate::paths::home_dir() else {
+        return std::path::PathBuf::from(text);
+    };
+    if text == "~" {
+        return home;
+    }
+    text.strip_prefix("~/")
+        .map(|rest| home.join(rest))
+        .unwrap_or_else(|| std::path::PathBuf::from(text))
+}
+
 // ---------------------------------------------------------------------------
 // Sending
 // ---------------------------------------------------------------------------
 
 use crate::config::{Config, Server};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::time::Duration;
 
 const USER_AGENT: &str = concat!("sessionly/", env!("CARGO_PKG_VERSION"));
@@ -356,6 +504,32 @@ pub struct Client {
     agent: ureq::Agent,
     base: String,
     token: String,
+}
+
+/// What one session upload did. `excluded` means the repository is stopped.
+pub struct PutResult {
+    pub excluded: bool,
+}
+
+/// What the server says of the repositories this person stopped.
+pub struct Stopped {
+    pub repos: Vec<String>,
+    /// How many times they allowed one again. What stopping deleted can be
+    /// sent again from then on, so a number this machine has not seen means
+    /// asking which of its sessions the server still has.
+    pub allowed_again: u64,
+}
+
+impl SendError {
+    /// The server has no such route: it is older than stopping a repository.
+    /// (Allowing a repository that is not stopped is a 404 too, and says so.)
+    pub fn no_such_route(&self) -> bool {
+        matches!(
+            self,
+            SendError::Rejected(message)
+                if message.starts_with("HTTP 404") && !message.contains("no such repository")
+        )
+    }
 }
 
 /// Whose certificates to accept: those in the file `SSL_CERT_FILE` names,
@@ -470,6 +644,93 @@ impl Client {
         )
     }
 
+    pub fn put(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, SendError> {
+        Self::check(
+            self.agent
+                .put(format!("{}{path}", self.base))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .send_json(body),
+        )
+    }
+
+    pub fn delete(&self, path: &str) -> Result<serde_json::Value, SendError> {
+        Self::check(
+            self.agent
+                .delete(format!("{}{path}", self.base))
+                .header("Authorization", format!("Bearer {}", self.token))
+                .call(),
+        )
+    }
+
+    /// The repositories this person stopped. None from a server that is
+    /// older than stopping one: nothing is stopped there.
+    pub fn stopped(&self) -> Result<Option<Stopped>, SendError> {
+        let value = match self.get("/api/v1/repos/excluded") {
+            Ok(value) => value,
+            Err(err) if err.no_such_route() => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        // An older server may answer any address with the dashboard's page.
+        let Some(repos) = value.get("repos").and_then(|repos| repos.as_array()) else {
+            return Ok(None);
+        };
+        Ok(Some(Stopped {
+            repos: repos
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect(),
+            allowed_again: value
+                .get("allowed_again")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0),
+        }))
+    }
+
+    /// The sessions of this person the server has from `machine`, as
+    /// (source, session id). None if the answer is not a list of them.
+    pub fn held_sessions(
+        &self,
+        machine: &str,
+    ) -> Result<Option<HashSet<(String, String)>>, SendError> {
+        let value = self.get(&format!(
+            "/api/v1/sessions/held?machine={}",
+            url_segment(machine)
+        ))?;
+        let Some(list) = value.get("sessions").and_then(|list| list.as_array()) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            list.iter()
+                .filter_map(|item| {
+                    Some((
+                        item.get("source")?.as_str()?.to_string(),
+                        item.get("session_id")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect(),
+        ))
+    }
+
+    /// Stop submitting `repo` and delete the sessions already submitted from it.
+    pub fn exclude_repo(&self, repo: &str) -> Result<serde_json::Value, SendError> {
+        self.put(
+            "/api/v1/repos/excluded",
+            &serde_json::json!({ "repo": repo }),
+        )
+    }
+
+    /// Submit `repo` again. Sessions already deleted are not restored by this.
+    pub fn include_repo(&self, repo: &str) -> Result<serde_json::Value, SendError> {
+        self.delete(&format!(
+            "/api/v1/repos/excluded?repo={}",
+            url_segment(repo)
+        ))
+    }
+
     /// Where one session is kept on the server.
     fn session_url(&self, machine_id: &str, source: &str, session_id: &str) -> String {
         format!(
@@ -482,7 +743,7 @@ impl Client {
     }
 
     /// Store or replace one session on the server.
-    pub fn put_session(&self, upload: &Upload) -> Result<(), SendError> {
+    pub fn put_session(&self, upload: &Upload) -> Result<PutResult, SendError> {
         let s = &upload.session;
         Self::check(
             self.agent
@@ -490,7 +751,9 @@ impl Client {
                 .header("Authorization", format!("Bearer {}", self.token))
                 .send_json(upload),
         )
-        .map(|_| ())
+        .map(|body| PutResult {
+            excluded: body.get("excluded").and_then(|v| v.as_bool()) == Some(true),
+        })
     }
 
     /// Take back a session this machine uploaded and no longer has as one.
@@ -573,10 +836,15 @@ pub struct Report {
     pub sent: u64,
     /// Sessions the server already has in their current form.
     pub unchanged: u64,
+    /// Sessions from a repository this person stopped submitting.
+    pub excluded: u64,
     /// Sessions that could not be sent, with the reason.
     pub failed: Vec<(String, String)>,
     /// Set when the run stopped early; nothing after that point was tried.
     pub stopped: Option<String>,
+    /// Set when a dry run could not ask the server what is stopped or what
+    /// it still has, with the reason: it counted without knowing.
+    pub unasked: Option<String>,
     /// Sessions taken back from the server: they are part of another now.
     pub withdrawn: u64,
     /// Sessions the server was asked to take back and still has, with the
@@ -587,9 +855,10 @@ pub struct Report {
 impl Report {
     pub fn summary(&self) -> String {
         let mut text = format!(
-            "uploaded {} ({} unchanged, {} failed)",
+            "uploaded {} ({} unchanged, {} excluded, {} failed)",
             self.sent,
             self.unchanged,
+            self.excluded,
             self.failed.len()
         );
         if self.withdrawn > 0 {
@@ -614,8 +883,44 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
     let client = Client::new(server);
     let mut report = Report::default();
     let mut unreachable = 0;
+    // The server's list is what decides, and the server refuses a stopped
+    // repository itself. Asking first keeps such a session from being sent
+    // at all. A token that only uploads (a cloud environment's) may not
+    // ask, and is answered 403: it sends, and the server sorts it out.
+    let stopped = match client.stopped() {
+        Ok(stopped) => stopped,
+        Err(SendError::Auth(message)) if message.starts_with("HTTP 403") => None,
+        // Counting needs no server. Without one, nothing is known to be stopped.
+        Err(err) if dry_run => {
+            report.unasked = Some(err.to_string());
+            None
+        }
+        // A server that does not answer this would not take a session either.
+        Err(err) => {
+            report.stopped = Some(err.to_string());
+            return Ok(report);
+        }
+    };
+    let allowed_again = stopped.as_ref().map(|stopped| stopped.allowed_again);
+    let mut rules = stopped.map(|stopped| stopped.repos).unwrap_or_default();
+    // A repository was allowed again since this machine last looked. What
+    // stopping it deleted is still marked here as sent, from this machine
+    // or while another did the stopping and allowing: ask what is there.
+    let mut held = None;
+    if let Some(times) = allowed_again {
+        if times != ledger.allowed_again_seen(&server.url)? {
+            match client.held_sessions(&config.machine_id) {
+                Ok(sessions) => held = sessions,
+                Err(err) if dry_run => report.unasked = Some(err.to_string()),
+                Err(err) => {
+                    report.stopped = Some(err.to_string());
+                    return Ok(report);
+                }
+            }
+        }
+    }
     // The sessions the server has as they are now.
-    let mut there: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut there: HashSet<String> = HashSet::new();
     for id in ledger.session_ids()? {
         let Some(session) = ledger.get(&id)? else {
             continue;
@@ -626,8 +931,23 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
             config.upload_content,
             config.upload_line_hashes,
         )?;
+        if session_excluded(&payload.session, &rules) {
+            report.excluded += 1;
+            continue;
+        }
         let hash = payload_hash(&payload);
-        if ledger.uploaded_hash(&id, &server.url)?.as_deref() == Some(hash.as_str()) {
+        let sent = ledger.uploaded_hash(&id, &server.url)?;
+        // Sent once, and the server does not have it: it was deleted when
+        // its repository was stopped, and is sent again.
+        let deleted = sent.is_some()
+            && held.as_ref().is_some_and(|held| {
+                let s = &payload.session;
+                !held.contains(&(s.source.clone(), s.session_id.clone()))
+            });
+        if deleted && !dry_run {
+            ledger.forget_upload(&id, &server.url)?;
+        }
+        if !deleted && sent.as_deref() == Some(hash.as_str()) {
             report.unchanged += 1;
             there.insert(id);
             continue;
@@ -637,7 +957,19 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
             continue;
         }
         match client.put_session(&payload) {
-            Ok(()) => {
+            Ok(result) if result.excluded => {
+                // Stopped since the list was read, or the list could not be
+                // read. The rest of that repository need not be sent to learn it.
+                if let Some(name) = submitted_repo(&payload.session) {
+                    if !rules.iter().any(|rule| rule == &name) {
+                        rules.push(name);
+                    }
+                }
+                ledger.forget_upload(&id, &server.url)?;
+                report.excluded += 1;
+                unreachable = 0;
+            }
+            Ok(_) => {
                 ledger.mark_uploaded(&id, &server.url, &hash)?;
                 report.sent += 1;
                 unreachable = 0;
@@ -656,6 +988,13 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
                     break;
                 }
             }
+        }
+    }
+    // Every session was compared with what the server has: nothing more to
+    // ask until a repository is allowed again.
+    if let Some(times) = allowed_again {
+        if held.is_some() && !dry_run && report.stopped.is_none() {
+            ledger.saw_allowed_again(&server.url, times)?;
         }
     }
     // Last, so the server never has less than it should: a session that is
@@ -841,5 +1180,141 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
         assert_eq!(url_segment("abc-123_x.y"), "abc-123_x.y");
         assert_eq!(url_segment("a/b ?#"), "a%2Fb%20%3F%23");
         assert_eq!(url_segment("é"), "%C3%A9");
+    }
+}
+
+#[cfg(test)]
+mod repo_rules {
+    use super::*;
+
+    #[test]
+    fn a_path_covers_what_is_inside_it_and_a_remote_does_not() {
+        assert!(repo_covered("~/Downloads", "~/Downloads"));
+        assert!(repo_covered("~/Downloads/notes", "~/Downloads"));
+        assert!(repo_covered("~/Downloads\\notes", "~/Downloads"));
+        assert!(repo_covered("~/Downloads/a", "~/Downloads/"));
+        assert!(!repo_covered("~/Downloads-backup", "~/Downloads"));
+        assert!(!repo_covered("~/downloads", "~/Downloads"));
+        assert!(repo_covered("github.com/acme/web", "github.com/acme/web"));
+        assert!(!repo_covered(
+            "github.com/acme/web-ui",
+            "github.com/acme/web"
+        ));
+        assert!(!repo_covered(
+            "github.com/acme/web/extra",
+            "github.com/acme/web"
+        ));
+        assert!(repo_covered("~/Documents", "~"));
+        assert!(repo_covered("~/Documents", "~/"));
+        assert!(!repo_covered("/tmp/x", "~"));
+        assert!(!repo_covered("github.com/acme/web", "~"));
+        assert!(repo_covered("~/100%_done/child", "~/100%_done"));
+        assert!(!repo_covered("~/100XYdone/child", "~/100%_done"));
+        assert!(!repo_covered("", "~/Documents"));
+        assert!(!repo_covered("~/Documents", ""));
+        assert!(!repo_covered("~/Documents", " "));
+        assert!(!repo_covered("~/Documents", "/"));
+    }
+
+    #[test]
+    fn a_stopped_folder_covers_a_clone_inside_it_that_is_filed_under_its_remote() {
+        let rules = |rule: &str| vec![rule.to_string()];
+        let clone = Session {
+            cwd: Some("~/Documents/client-x/app".into()),
+            repo: Some(crate::session::Repo {
+                root: "~/Documents/client-x".into(),
+                remote: Some("github.com/acme/client-x".into()),
+                branch: None,
+            }),
+            ..Default::default()
+        };
+        assert!(session_excluded(&clone, &rules("~/Documents")));
+        assert!(session_excluded(&clone, &rules("~/Documents/client-x/app")));
+        assert!(session_excluded(&clone, &rules("github.com/acme/client-x")));
+        assert!(!session_excluded(&clone, &rules("~/Docs")));
+        assert!(!session_excluded(&clone, &[]));
+        // A remote is only the name a session is filed under.
+        let odd = Session {
+            repo: Some(crate::session::Repo {
+                root: "github.com/acme/other".into(),
+                remote: Some("github.com/acme/web".into()),
+                branch: None,
+            }),
+            ..Default::default()
+        };
+        assert!(!session_excluded(&odd, &rules("github.com/acme/other")));
+        let loose = Session {
+            cwd: Some("~/Downloads/notes".into()),
+            ..Default::default()
+        };
+        assert!(session_excluded(&loose, &rules("~/Downloads")));
+        assert!(!session_excluded(&Session::default(), &rules("~")));
+    }
+
+    #[test]
+    fn a_path_is_worked_out_from_the_root_without_following_links() {
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(absolute(std::path::Path::new(".")), here);
+        assert_eq!(absolute(std::path::Path::new("notes/../.")), here);
+        assert_eq!(absolute(std::path::Path::new("notes")), here.join("notes"));
+        #[cfg(unix)]
+        assert_eq!(
+            absolute(std::path::Path::new("/a/./b/../c")),
+            std::path::Path::new("/a/c")
+        );
+    }
+
+    #[test]
+    fn a_directory_is_named_as_its_remote_or_its_shortened_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        };
+        git(&["init", "--quiet", "--initial-branch", "main"]);
+        let path = dir.path().to_string_lossy().into_owned();
+        let home = crate::paths::home_dir().map(|home| home.to_string_lossy().into_owned());
+        assert_eq!(
+            repository_name(&path).unwrap(),
+            relative_path(&path, None, home.as_deref())
+        );
+
+        git(&["remote", "add", "origin", "git@github.com:acme/hidden.git"]);
+        assert_eq!(repository_name(&path).unwrap(), "github.com/acme/hidden");
+        let nested = dir.path().join("docs");
+        std::fs::create_dir(&nested).unwrap();
+        assert_eq!(
+            repository_name(&nested.to_string_lossy()).unwrap(),
+            "github.com/acme/hidden"
+        );
+
+        assert_eq!(
+            repository_name("github.com/acme/web").unwrap(),
+            "github.com/acme/web"
+        );
+        assert_eq!(
+            repository_name(" ~/sessionly-test-no-such-repo-9f3a/ ").unwrap(),
+            "~/sessionly-test-no-such-repo-9f3a"
+        );
+        assert_eq!(
+            repository_name("~\\sessionly-test-no-such-repo-9f3a\\notes").unwrap(),
+            "~/sessionly-test-no-such-repo-9f3a/notes"
+        );
+        assert_eq!(repository_name("~").unwrap(), "~");
+        assert_eq!(repository_name("~/").unwrap(), "~");
+        assert!(repository_name("").is_err());
+        assert!(repository_name("   ").is_err());
+        assert!(repository_name("/").is_err());
+        assert!(repository_name(&"a".repeat(1025)).is_err());
+        assert!(repository_name("has\nbreak").is_err());
+        // As the server checks a name: any control character, and length in characters.
+        assert!(repository_name("has\u{85}a control").is_err());
+        assert!(repository_name(&"😀".repeat(1024)).is_ok());
+        assert!(repository_name(&"😀".repeat(1025)).is_err());
     }
 }

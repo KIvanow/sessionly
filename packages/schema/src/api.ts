@@ -255,6 +255,34 @@ export interface FilterOptions {
   runtimes: string[];
 }
 
+/** Repositories this person stopped submitting (`GET /repos/excluded`). */
+export interface ExcludedRepos {
+  repos: string[];
+  /**
+   * How many times this person allowed a repository again. A machine that
+   * sees a number it has not seen asks which of its sessions the server
+   * still has (`GET /sessions/held`), and sends the others again.
+   */
+  allowed_again: number;
+}
+
+/** The sessions of this person the server has from one machine (`GET /sessions/held?machine=`). */
+export interface HeldSessions {
+  sessions: { source: string; session_id: string }[];
+}
+
+/**
+ * Stopping one repository (`PUT /repos/excluded`): sessions of theirs already
+ * submitted from it are deleted, and later uploads are not stored.
+ */
+export interface ExcludedRepo {
+  repo: string;
+  /** How many of their sessions were deleted. */
+  sessions_removed: number;
+  /** A path: directories inside it are stopped too. A remote is only itself. */
+  covers_folders: boolean;
+}
+
 export interface TokenInfo {
   id: string;
   email: string;

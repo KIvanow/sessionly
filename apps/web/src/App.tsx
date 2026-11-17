@@ -16,6 +16,7 @@ import { arrive, doors, landingOf } from "./arrival.ts";
 import { Arrived } from "./Arrived.tsx";
 import { Brand } from "./Brand.tsx";
 import { Connect } from "./Connect.tsx";
+import { Excluded } from "./Excluded.tsx";
 import { Login } from "./Login.tsx";
 import { Overview } from "./Overview.tsx";
 import { Pulls } from "./Pulls.tsx";
@@ -342,11 +343,16 @@ function Shell({
     pick: null,
   });
   const options = useApi<FilterOptions>(token, "/filters", onSignOut);
+  const [revision, setRevision] = useState(0);
   const [page, ...rest] = route.split("/");
   const isAdmin = me.role === "admin";
+  const refresh = () => {
+    options.reload();
+    setRevision((n) => n + 1);
+  };
 
   const view = useMemo(() => {
-    if (page === "sessions") return <Sessions token={token} scope={scope} onSignOut={onSignOut} />;
+    if (page === "sessions") return <Sessions key={revision} token={token} scope={scope} onSignOut={onSignOut} />;
     if (page === "session" && rest.length === 3) {
       return <SessionView token={token} address={rest.join("/")} onSignOut={onSignOut} />;
     }
@@ -371,6 +377,7 @@ function Shell({
     }
     return (
       <Overview
+        key={revision}
         token={token}
         scope={scope}
         showUsers={isAdmin}
@@ -378,9 +385,13 @@ function Shell({
         onSignOut={onSignOut}
       />
     );
-  }, [page, rest.join("/"), token, scope, isAdmin, options.data, people, address, hosted, me]);
+  }, [page, rest.join("/"), token, scope, isAdmin, options.data, people, address, hosted, me, revision]);
 
   const scoped = page === "" || page === "sessions";
+  const repos = options.data?.repos ?? [];
+  // A stopped repository leaves the list once its sessions are gone. Keep it
+  // while it is selected, so the control under the filters still names it.
+  const repoChoices = scope.repo && !repos.includes(scope.repo) ? [scope.repo, ...repos] : repos;
   const orgName = me.org !== "default" && me.org_name ? me.org_name : null;
   const heading = HEADINGS[page === "team" || page === "pulls" ? (isAdmin ? page : "") : (page ?? "")];
   const link = (target: string, label: string) => (
@@ -452,7 +463,9 @@ function Shell({
               Repository
               <select value={scope.repo} onChange={(e) => setScope({ ...scope, repo: e.target.value })}>
                 <option value="">All repositories</option>
-                {options.data?.repos.map((r) => <option key={r}>{r}</option>)}
+                {repoChoices.map((r) => (
+                  <option key={r}>{r}</option>
+                ))}
               </select>
             </label>
             {(options.data?.tools.length ?? 0) > 1 && (
@@ -504,6 +517,7 @@ function Shell({
             )}
           </form>
         )}
+        {scoped && <Excluded token={token} repo={scope.repo} onChange={refresh} onSignOut={onSignOut} />}
         {view}
       </main>
     </>

@@ -1,5 +1,17 @@
 // Storing uploaded sessions and answering the dashboard's questions about them.
-import type { FileRow, GroupBy, Session, SessionRow, Totals, Upload } from "@sessionly/schema";
+import {
+  parseRepo,
+  sessionCovered,
+  type ExcludedRepos,
+  type FileRow,
+  type GroupBy,
+  type HeldSessions,
+  type Session,
+  type SessionPlace,
+  type SessionRow,
+  type Totals,
+  type Upload,
+} from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
 import type { OrgDb } from "./db.ts";
 
@@ -30,16 +42,31 @@ export function ownerOf(upload: Upload, uploader: Principal): string {
   return uploader.role === "env" && cloud && /^\S+@\S+$/.test(named) ? named : uploader.email;
 }
 
+/** What storing an upload did. `excluded` means the repository is stopped, so nothing was stored. */
+export type StoreResult = { stored: boolean; excluded?: true };
+
 /**
  * Store one session, replacing an earlier upload of the same session.
- * Returns false if what the server has was kept instead.
+ * `stored` is false when what the server has was kept instead, or when the
+ * person has stopped the repository: then a copy of theirs is removed.
  */
-export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal): Promise<boolean> {
+export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal): Promise<StoreResult> {
   const s: Session = upload.session ?? {};
   const owner = { email: ownerOf(upload, uploader) };
   const cloud = s.runtime?.kind === "cloud";
   const counts = s.counts ?? {};
   const key = [db.orgId, s.machine_id, s.source, s.session_id];
+  const repoName = s.repo?.remote ?? s.repo?.root ?? s.cwd ?? null;
+  const place: SessionPlace = { repo: repoName, root: s.repo?.root ?? null, cwd: s.cwd ?? null };
+  // A row filed under the environment's own address is this person's too:
+  // storing this would have moved it to them.
+  const mayRefile = uploader.role === "env" ? uploader.email : null;
+  // Before the row is read: stopping the repository removes what is there.
+  await oneAtATime(db, owner.email, "storing");
+  if (await submissionStopped(db, owner.email, place)) {
+    await dropOwn(db, key, owner.email, mayRefile);
+    return { stored: false, excluded: true };
+  }
   const [existing] = await db.query<{ owner_email: string; runtime: string | null; prompts: number }>(
     `SELECT owner_email, runtime, prompts FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
@@ -54,7 +81,7 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   // A cloud session can outlive its sandbox. The next sandbox has seen only
   // what happened since it started: what it sends must not replace more.
   if (existing?.runtime === "cloud" && cloud && (counts.prompts ?? 0) < Number(existing.prompts)) {
-    return false;
+    return { stored: false };
   }
   const usage = s.usage ?? [];
   const rewrite = upload.rewrite ?? null;
@@ -68,7 +95,9 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     runtime_id: s.runtime?.id ?? null,
     user_email: s.user?.email ?? null,
     user_name: s.user?.name ?? null,
-    repo: s.repo?.remote ?? s.repo?.root ?? s.cwd ?? null,
+    repo: repoName,
+    repo_root: place.root,
+    cwd: place.cwd,
     branch: s.repo?.branch ?? null,
     title: s.title ?? null,
     started_at: s.started_at ?? null,
@@ -109,7 +138,6 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   // The check above read the row a moment ago. If someone else stored this
   // very session in between, it is theirs: the update is skipped, not won by
   // whoever came last.
-  const mayRefile = uploader.role === "env" ? uploader.email : null;
   const stored = await db.query(
     `INSERT INTO sessions (${names.join(", ")}) VALUES (${placeholders.join(", ")})
      ON CONFLICT (org_id, machine_id, source, session_id)
@@ -119,8 +147,129 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     [...Object.values(columns), mayRefile],
   );
   if (stored.length === 0) throw new Conflict("this session was uploaded by someone else");
-  return true;
+  return { stored: true };
 }
+
+/**
+ * Storing a person's session and stopping a repository of theirs take turns.
+ * Otherwise each could finish without seeing what the other wrote, and a
+ * session would stay in a repository that is stopped. Uploads do not wait
+ * for one another. Held until the transaction ends.
+ */
+async function oneAtATime(db: OrgDb, email: string, doing: "storing" | "stopping"): Promise<void> {
+  const lock = doing === "stopping" ? "pg_advisory_xact_lock" : "pg_advisory_xact_lock_shared";
+  await db.query(`SELECT ${lock}(hashtext($1))`, [`sessionly-stop:${db.orgId}:${email}`]);
+}
+
+/**
+ * Delete this person's copy of one session, if it is theirs. `refiled` is the
+ * address of the environment uploading it, whose copy is this person's too.
+ */
+async function dropOwn(db: OrgDb, key: unknown[], email: string, refiled: string | null): Promise<void> {
+  await db.query(
+    `DELETE FROM sessions
+     WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4
+       AND (owner_email = $5 OR owner_email = $6)`,
+    [...key, email, refiled],
+  );
+}
+
+/** Whether this person stopped the repository a session is filed under, or a folder it ran in. */
+async function submissionStopped(db: OrgDb, email: string, place: SessionPlace): Promise<boolean> {
+  const rules = await db.query<{ repo: string }>(
+    `SELECT repo FROM repo_exclusions WHERE org_id = $1 AND owner_email = $2`,
+    [db.orgId, email],
+  );
+  return rules.some((rule) => sessionCovered(place, rule.repo));
+}
+
+/** The repositories this person stopped, in name order, and how often they allowed one again. */
+export async function listExcluded(db: OrgDb, email: string): Promise<ExcludedRepos> {
+  const rows = await db.query<{ repo: string }>(
+    `SELECT repo FROM repo_exclusions WHERE org_id = $1 AND owner_email = $2 ORDER BY repo`,
+    [db.orgId, email],
+  );
+  const [allowed] = await db.query<{ times: number }>(
+    `SELECT times FROM repos_allowed_again WHERE org_id = $1 AND owner_email = $2`,
+    [db.orgId, email],
+  );
+  return { repos: rows.map((row) => row.repo), allowed_again: num(allowed?.times) };
+}
+
+/**
+ * The sessions of this person the server has from one machine. A machine
+ * asks after a repository was allowed again: what it sent and is not here
+ * was deleted, and is sent again.
+ */
+export async function heldSessions(db: OrgDb, email: string, machine: string): Promise<HeldSessions> {
+  const sessions = await db.query<{ source: string; session_id: string }>(
+    `SELECT source, session_id FROM sessions
+     WHERE org_id = $1 AND owner_email = $2 AND machine_id = $3 ORDER BY source, session_id`,
+    [db.orgId, email, machine],
+  );
+  return { sessions };
+}
+
+/**
+ * Stop `raw` for this person and delete the sessions of theirs it covers.
+ * Doing it again deletes any that arrived since.
+ */
+export async function excludeRepo(
+  db: OrgDb,
+  email: string,
+  raw: unknown,
+): Promise<{ repo: string; sessions_removed: number; covers_folders: boolean }> {
+  const parsed = parseRepo(raw);
+  if (!parsed.ok) throw new RepoNameError(parsed.error);
+  const { repo, coversFolders } = parsed.name;
+  await oneAtATime(db, email, "stopping");
+  await db.query(
+    `INSERT INTO repo_exclusions (org_id, owner_email, repo) VALUES ($1, $2, $3)
+     ON CONFLICT (org_id, owner_email, repo) DO NOTHING`,
+    [db.orgId, email, repo],
+  );
+  // Which sessions the name covers is decided by the one rule everything
+  // else uses, on the few places this person's sessions are from.
+  const places = await db.query<{ repo: string | null; root: string | null; cwd: string | null }>(
+    `SELECT DISTINCT repo, repo_root AS root, cwd FROM sessions WHERE org_id = $1 AND owner_email = $2`,
+    [db.orgId, email],
+  );
+  const gone = places.filter((place) => sessionCovered(place, repo));
+  if (gone.length === 0) return { repo, sessions_removed: 0, covers_folders: coversFolders };
+  const removed = await db.query(
+    `DELETE FROM sessions s
+     USING unnest($3::text[], $4::text[], $5::text[]) AS gone(repo, root, cwd)
+     WHERE s.org_id = $1 AND s.owner_email = $2
+       AND s.repo IS NOT DISTINCT FROM gone.repo
+       AND s.repo_root IS NOT DISTINCT FROM gone.root
+       AND s.cwd IS NOT DISTINCT FROM gone.cwd
+     RETURNING 1`,
+    [db.orgId, email, gone.map((place) => place.repo), gone.map((place) => place.root), gone.map((place) => place.cwd)],
+  );
+  return { repo, sessions_removed: removed.length, covers_folders: coversFolders };
+}
+
+/** Allow a repository again. Returns its name, or null if it was not stopped. Nothing deleted is restored. */
+export async function includeRepo(db: OrgDb, email: string, raw: unknown): Promise<string | null> {
+  const parsed = parseRepo(raw);
+  if (!parsed.ok) throw new RepoNameError(parsed.error);
+  const rows = await db.query<{ repo: string }>(
+    `DELETE FROM repo_exclusions WHERE org_id = $1 AND owner_email = $2 AND repo = $3 RETURNING repo`,
+    [db.orgId, email, parsed.name.repo],
+  );
+  if (!rows[0]) return null;
+  // What stopping deleted may be sent again from now on. Each machine of
+  // this person sees the number change and asks what is still here.
+  await db.query(
+    `INSERT INTO repos_allowed_again (org_id, owner_email, times) VALUES ($1, $2, 1)
+     ON CONFLICT (org_id, owner_email) DO UPDATE SET times = repos_allowed_again.times + 1`,
+    [db.orgId, email],
+  );
+  return rows[0].repo;
+}
+
+/** `parseRepo` refused the name. The route says so as a 400. */
+export class RepoNameError extends Error {}
 
 /**
  * Take back one session its uploader no longer has: what it held is now part

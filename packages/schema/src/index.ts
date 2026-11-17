@@ -4,4 +4,5 @@ import uploadSchema from "../../../schema/upload.schema.json" with { type: "json
 
 export type * from "./api.ts";
 export type * from "./upload.ts";
+export { parseRepo, repoCovered, sessionCovered, type RepoName, type SessionPlace } from "./repo.ts";
 export { uploadSchema };

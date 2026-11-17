@@ -19,10 +19,15 @@ import { emailFrom, newUserId, offers, openRoutes, type Accounts } from "./signu
 import { addUser, forgetAccount, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
 import {
   Conflict,
+  excludeRepo,
   filterOptions,
   getSession,
+  heldSessions,
+  includeRepo,
+  listExcluded,
   listFiles,
   listSessions,
+  RepoNameError,
   removeUpload,
   storeUpload,
   summarize,
@@ -349,7 +354,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
 
   const failed = failureLog();
   api.onError((err, c) => {
-    if (err instanceof BadRequest) return c.json({ error: err.message }, 400);
+    if (err instanceof BadRequest || err instanceof RepoNameError) return c.json({ error: err.message }, 400);
     if (err instanceof BadReport) return c.json({ error: err.message }, 422);
     if (err instanceof ApiError) return c.json({ error: err.message, code: err.code }, err.status);
     if (err instanceof UserProblem) return c.json({ error: err.message, code: err.code }, err.status);
@@ -416,15 +421,16 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   api.put("/sessions/:machine/:source/:session", async (c) => {
     const upload = c.get("upload");
     if (!upload) throw new Error("the upload was not checked");
-    let stored: boolean;
+    let result: { stored: boolean; excluded?: true };
     try {
-      stored = await storeUpload(c.get("db"), upload, c.get("principal"));
+      result = await storeUpload(c.get("db"), upload, c.get("principal"));
     } catch (err) {
       if (err instanceof Conflict) return c.json({ error: err.message }, 409);
       throw err;
     }
-    // Not stored: the server already has more of this cloud session.
-    return c.json({ stored });
+    // Not stored, and not excluded: the server already has more of this cloud session.
+    // Excluded: the person stopped the repository, so the session was not kept.
+    return c.json(result);
   });
 
   // The uploader takes a session back: its machine no longer has it as one
@@ -459,6 +465,16 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     return c.json(await listSessions(c.get("db"), c.get("principal"), filtersFrom(query), page));
   });
 
+  // Which sessions of theirs the server has from one machine, whoever asks:
+  // an admin's machine is told of the admin's sessions, like anyone's.
+  api.get("/sessions/held", async (c) => {
+    const p = c.get("principal");
+    if (p.role !== "admin" && p.role !== "member") return c.json({ error: "this token is not a person's" }, 403);
+    const machine = c.req.query("machine");
+    if (!machine) throw new BadRequest("name the machine");
+    return c.json(await heldSessions(c.get("db"), p.email, machine));
+  });
+
   api.get("/sessions/:machine/:source/:session", async (c) => {
     const { machine, source, session } = c.req.param();
     const found = await getSession(c.get("db"), c.get("principal"), {
@@ -476,6 +492,27 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   });
 
   api.get("/filters", async (c) => c.json(await filterOptions(c.get("db"), c.get("principal"))));
+
+  // Repositories a person stopped submitting. Only their own sessions are
+  // deleted; a token that is not a person's cannot do this (ci and env are
+  // already refused above, and this refuses anything else).
+  const excluded = new Hono<Env>();
+  excluded.use("*", async (c, next) => {
+    const role = c.get("principal").role;
+    if (role !== "admin" && role !== "member") return c.json({ error: "this token is not a person's" }, 403);
+    await next();
+  });
+  excluded.get("/", async (c) => c.json(await listExcluded(c.get("db"), c.get("principal").email)));
+  excluded.put("/", async (c) => {
+    // Any JSON is a body, `null` too: only an object can name a repository.
+    const body = (await c.req.json().catch(() => null)) as { repo?: unknown } | null;
+    return c.json(await excludeRepo(c.get("db"), c.get("principal").email, body?.repo));
+  });
+  excluded.delete("/", async (c) => {
+    const repo = await includeRepo(c.get("db"), c.get("principal").email, c.req.query("repo"));
+    return repo ? c.json({ repo, removed: true }) : c.json({ error: "no such repository" }, 404);
+  });
+  api.route("/repos/excluded", excluded);
 
   // Pull requests: the GitHub Action reports them, admins read them.
   const adminsOnly = (p: Principal) => {
