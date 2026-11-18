@@ -77,14 +77,16 @@ What to know about the workflow:
 | `ignore` | see below | Files to leave out, separated by commas or new lines. |
 | `other-names` | | Names clones of the repository may still have as their origin, as `owner/name` separated by commas or new lines (20 at most): for example from before it was renamed or moved to another owner. |
 | `backfill` | `false` | For a pull request from before the Action was added: first report it as it was when opened, worked out from its commits, so what review changed can still be measured. See [below](#pull-requests-from-before-the-action). |
-| `pr-number` | | The pull request to report, when the workflow was not started by one. |
+| `pr-number` | | The pull request to report, when the workflow was not started by one. Or several: `all` for the latest ones, `20-60` for a range. See [below](#pull-requests-from-before-the-action). |
+| `since` | 90 days ago | With `pr-number: all`, how far back to go: a date such as `2026-01-31`. |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 An input that is on or off takes `true`, `yes`, `on` or `1` for on, in any case; anything else
 is off.
 
 Outputs: `lines` (tracked lines the pull request adds) and `agent-lines` (how many a coding
-agent wrote).
+agent wrote). A run that reports several (`all` or a range) sets neither: its figures, one
+row for each pull request, are on the run's summary page.
 
 **`ignore`.** By default: `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`,
 `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `composer.lock`, `Gemfile.lock`, `*.min.js`,
@@ -130,6 +132,15 @@ The **Pull requests** page (admins) then shows, for the period, repository and s
 **The list starts on merged pull requests.** Open and closed ones are there once you change the
 state filter. The period goes by when a pull request was merged or closed, or for an open one
 when it was opened.
+
+**Figures that are behind.** A pull request's lines are matched to sessions when the Action
+reports it, and the last report is usually the one for its merge. A session uploaded after that
+(the machine was offline, the session was still going) is not in the figures. **Match again** on
+a pull request's page, or **Match these to sessions again** above the list, matches the lines as
+last reported against the sessions the server holds now, without asking GitHub; the page says
+when that was last done. What only GitHub knows (reviews, comments, the title, new commits)
+comes with a report: run the workflow by hand for those. A pull request last reported to
+a server of version 0.5.0 or older has to be reported once more before it can be matched again.
 
 ## How to read it
 
@@ -213,11 +224,19 @@ does not work:
   made, and the pull request's survived-review figure is shown as not known, although it is
   as it was opened.
 
+**Several in one run.** `pr-number` also takes `all`, for the pull requests created since
+`since` (90 days ago unless given), the latest first, or a range such as `20-60`. One run
+reports at most 100; when there are more, its warning names the range to give next, which
+holds the rest of them and none from before `since`. A range you write yourself takes no notice
+of `since`. When GitHub allows the run no more requests, it stops and names the range to give
+later.
+Such a run posts no comments, and a number in a range that is an issue is passed over.
+
 ## What is sent
 
 To the Sessionly server, for the pull request: repository, number, title, link, who opened it,
-state and dates, the email addresses on its commits (used to pick whose sessions count, not
-stored), counts of commits, reviews and review comments, and per changed file its path and a
+state and dates, the email addresses on its commits (used to pick whose sessions count; the
+server keeps a hash of each, not the address), counts of commits, reviews and review comments, and per changed file its path and a
 hash of each added line that has a letter or digit (the first 8 bytes of the SHA-256 of the
 line without the whitespace at its ends, as the `sessionly` binary makes them).
 

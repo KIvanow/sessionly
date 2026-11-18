@@ -1,6 +1,7 @@
-// A pull request's page: where it is, and its reviews and comments counted
-// by whose they are.
-import type { PullFeedback } from "@sessionly/schema";
+// A pull request's page: where it is, how current its figures are, and its
+// reviews and comments counted by whose they are.
+import type { PullFeedback, PullMatches, PullRow } from "@sessionly/schema";
+import { dateTime } from "./format.ts";
 
 /** Where a pull request's page is: the repository's name has slashes, so it goes in as one part. */
 export function pullHref(p: { repo: string; number: number }): string {
@@ -63,4 +64,49 @@ export function countFeedback(feedback: PullFeedback[], author: string): Feedbac
     } else row[f.kind] += 1;
   }
   return rows.map((r) => ({ ...r, names: [...r.names].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([name]) => name) }));
+}
+
+/**
+ * How current a pull request's figures are: when the Action last reported
+ * it, and when its lines were matched to sessions if that was later. `when`
+ * writes a time out.
+ */
+export function matchedLine(
+  p: Pick<PullRow, "updated_at" | "matched_at" | "matchable">,
+  when: (iso: string | null) => string = dateTime,
+): string {
+  const reported = `Last reported by the Action ${when(p.updated_at)}`;
+  if (!p.matchable) {
+    return `${reported}, before what its lines are matched by was kept: sessions uploaded since then count with its next report.`;
+  }
+  // A report matches the lines as it is stored: the two times are then one.
+  const since = p.matched_at != null && Date.parse(p.matched_at) - Date.parse(p.updated_at) > 1000;
+  return since
+    ? `${reported}; its lines were matched to sessions again ${when(p.matched_at)}.`
+    : `${reported}. Sessions uploaded since then are not counted yet.`;
+}
+
+/**
+ * Match again every pull request the filters choose. The server does some
+ * at a time: `send` is asked until none remain, and `progress` hears how
+ * many are done after each answer.
+ */
+export async function matchAll(
+  send: (body: Record<string, string | undefined>) => Promise<PullMatches>,
+  filters: { repo?: string; state?: string; since?: string },
+  progress: (done: number) => void = () => {},
+): Promise<{ matched: number; needs_report: number; failed: number }> {
+  let matched = 0;
+  let started: string | undefined;
+  let left = Infinity;
+  for (;;) {
+    const answer = await send({ ...filters, started });
+    matched += answer.matched;
+    started = answer.started;
+    progress(matched);
+    // An answer that got no further would be asked for forever: what remains could not be matched.
+    const stuck = answer.matched === 0 && answer.remaining >= left;
+    if (answer.remaining === 0 || stuck) return { matched, needs_report: answer.needs_report, failed: answer.remaining };
+    left = answer.remaining;
+  }
 }

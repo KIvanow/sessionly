@@ -232,3 +232,29 @@ export function render(report, attribution, server) {
   );
   return out.join("\n");
 }
+
+/**
+ * The figures of several pull requests reported in one run, as Markdown for
+ * the run summary: one row each, the latest first as they were reported.
+ */
+export function renderMany(reported, server, failed = []) {
+  const home = server ? `${String(server).replace(/\/+$/, "")}/#/pulls` : null;
+  const out = [`### ${home ? `[Sessionly](${home})` : "Sessionly"}`, ""];
+  // The run's warnings say why.
+  const not = failed.length > 0 ? ["", `Could not be reported: ${failed.map((n) => `#${n}`).join(", ")}.`] : [];
+  if (reported.length === 0) return [...out, "No pull requests were reported.", ...not].join("\n");
+  out.push(
+    `Reported ${count(reported.length)} pull ${reported.length === 1 ? "request" : "requests"}.`,
+    "",
+    "| Pull request | Lines added | By an agent | Share |",
+    "|---|---:|---:|---:|",
+    ...reported.map(({ report, attribution: { now } }) => {
+      // A title is someone's text: nothing in it may end the cell or start a link.
+      const title = (report.title ?? "").replace(/[|\[\]<>`\r\n]/g, " ").trim();
+      const name = `#${report.number}${title ? ` ${title}` : ""}`;
+      return `| ${name} | ${count(now.lines)} | ${count(now.agent_lines)} | ${percent(now.agent_lines, now.lines)} |`;
+    }),
+    ...not,
+  );
+  return out.join("\n");
+}

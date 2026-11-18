@@ -56,15 +56,18 @@ shows a warning that the token is missing.
 | `ignore` | lock files, `*.min.js`, `*.min.css`, `*.snap`, `*.map` | Files to leave out, separated by commas or new lines: a file name, a path, or a pattern with `*`. A list of your own replaces the default one, so to add generated files, repeat the defaults you want to keep (they are in `action.yml`). |
 | `other-names` | | Names clones of the repository may still have as their origin, as `owner/name`: for example from before it was renamed or moved to another owner. |
 | `backfill` | `false` | For a pull request from before the Action was added: first report it as it was when opened, worked out from its commits, so what review changed can still be measured. Not possible after a rebase or squash of the branch. |
-| `pr-number` | | The pull request to report, when the workflow was not started by one. |
+| `pr-number` | | The pull request to report, when the workflow was not started by one. Also `all` for the repository's latest, or `20-60` for those numbered from one to the other (see below). |
+| `since` | 90 days ago | With `pr-number: all`, the date from which pull requests are reported, by when they were created. |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 Outputs: `lines` (tracked lines the pull request adds) and `agent-lines` (how many a coding
-agent wrote).
+agent wrote). A run that reports several (`all` or a range) sets neither: its figures, one
+row for each pull request, are on the run's summary page.
 
 ## Pull requests from before the Action
 
-A manually started workflow can report existing pull requests one at a time:
+A manually started workflow can report existing pull requests: one by its number, the latest
+with `all`, or those numbered from one to another with `20-60`.
 
 ```yaml
 on:
@@ -87,11 +90,36 @@ jobs:
           backfill: true
 ```
 
+Reporting several is for bringing a repository up to date: after adding the Action, or after
+updating it to a version that reports more than the one before. It differs from reporting one:
+
+- **At most 100 in one run.** Each takes six requests to GitHub (eight with `backfill`), and a
+  workflow's token is allowed a thousand an hour. `all` takes the latest 100 created since
+  `since`; when there are more, the run's warning names the range to start it with next
+  (`371-412`, say), which holds the rest of them and none from before `since`. A range you
+  write yourself takes no notice of `since`.
+- **Nothing is written on the pull requests.** No comment is posted or changed, whatever
+  `comment` says. The run's summary page has one row for each.
+- **One that cannot be reported does not stop the rest.** It is named in a warning and on the
+  summary page, and the run fails at the end only with `fail-on-error`. When GitHub allows the
+  run no more requests, it stops there and names the range to start it with later. It also
+  stops when the Sessionly server refuses for a reason the next report would meet too (the
+  token, too many requests, no answer): reading the rest from GitHub would be for nothing.
+- In a range, numbers that belong to issues are passed over. A range with no pull request in
+  it at all is said as a failure: in a private repository, a `github-token` without access to
+  it is answered as if every number were an issue's.
+
+Sessions that were uploaded after a pull request's last report need none of this: the Pull
+requests page of the dashboard matches them without asking GitHub ("Match again"). The one
+exception is a pull request last reported to a server of version 0.5.0 or older: it has to be
+reported once more, and can be matched again from the dashboard from then on.
+
 ## What is sent
 
 To the Sessionly server, for the pull request: repository, number, title, link, who opened it,
-state and dates, the email addresses on its commits (used to pick whose sessions count, not
-stored), counts of commits, reviews and review comments, and per changed file its path and a
+state and dates, the email addresses on its commits (used to pick whose sessions count; the
+server stores a hash of each, not the address, so that the lines can be matched again when
+sessions arrive later), counts of commits, reviews and review comments, and per changed file its path and a
 hash of each added line that has a letter or digit.
 
 For each review and comment: who made it (their GitHub login, and whether that is a bot), when,

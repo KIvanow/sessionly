@@ -215,6 +215,7 @@ All in `infra/.env`; `.env.example` describes each. The ones that decide who get
 |---|---|
 | `SESSIONLY_SIGNUP` | `open`: anyone can create an organisation. `off`: nobody can; the ones that exist carry on. |
 | `SESSIONLY_SIGNUP_CODE` | If set, signing up needs this code as well: a waiting list, or invitations. |
+| `SESSIONLY_HASH_KEY` | Required: 32 characters or more of random text (`openssl rand -hex 32`). What the server keeps of the email addresses on a pull request's commits is hashed with it, so the database alone does not confirm a guessed address. Keep it out of the database's backups, and keep it the same: after a change, pull requests have to be reported once more before their lines can be matched again. |
 | `SESSIONLY_RATE_PER_MINUTE` | Requests one token may make a minute (default 600). |
 
 A setting that is a count (this one, the two below, `SESSIONLY_DB_POOL`,

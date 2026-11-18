@@ -1314,6 +1314,7 @@ test("the environment sets how people get in", () => {
     SESSIONLY_PUBLIC_URL: "https://app.example.com",
     SESSIONLY_GITHUB_CLIENT_ID: "Iv1.test",
     SESSIONLY_GITHUB_CLIENT_SECRET: "secret-of-github",
+    SESSIONLY_HASH_KEY: "k".repeat(32),
   };
   const both = { ...env, SESSIONLY_GOOGLE_CLIENT_ID: "test.apps.googleusercontent.com", SESSIONLY_GOOGLE_CLIENT_SECRET: "secret-of-google" };
   assert.deepEqual(hostedProblems(env), []);

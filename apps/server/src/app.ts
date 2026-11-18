@@ -35,7 +35,17 @@ import {
   type GroupBy,
 } from "./sessions.ts";
 import type { PullReport, Telemetry } from "@sessionly/schema";
-import { BadReport, checkReport, getPull, listPulls, storePull, summarizePulls, type PullFilters } from "./pulls.ts";
+import {
+  BadReport,
+  checkReport,
+  getPull,
+  listPulls,
+  rematchPull,
+  rematchPulls,
+  storePull,
+  summarizePulls,
+  type PullFilters,
+} from "./pulls.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
 /** A record lists every tool call, so a long session is several megabytes. */
@@ -90,6 +100,30 @@ function time(value: string | undefined, name: string): string | undefined {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) throw new BadRequest(`${name} is not a date or time`);
   return date.toISOString();
+}
+
+/**
+ * What a request to match pull requests again asks for: one (`repo` and
+ * `number`), or those the list's filters choose. Anything that cannot be
+ * read as that is refused: left out, it would choose more than was meant.
+ */
+function matchAsked(sent: unknown): { repo?: string; state?: string; since?: string; started?: string; number?: number } {
+  if (typeof sent !== "object" || sent === null || Array.isArray(sent)) throw new BadRequest("the body is not a JSON object");
+  const body = sent as Record<string, unknown>;
+  const said = (key: string) => {
+    const value = body[key];
+    if (value === undefined || value === null || value === "") return undefined;
+    if (typeof value !== "string") throw new BadRequest(`${key} must be text`);
+    return value;
+  };
+  const asked = { repo: said("repo"), state: said("state"), since: said("since"), started: said("started") };
+  if (!("number" in body)) return asked;
+  const number = body.number;
+  // No higher than the column holds.
+  if (typeof number !== "number" || !Number.isInteger(number) || number < 1 || number > 2147483647) {
+    throw new BadRequest("number must be a pull request number");
+  }
+  return { ...asked, number };
 }
 
 function filtersFrom(query: Record<string, string>): Filters {
@@ -206,6 +240,8 @@ export interface Options {
   accounts?: Accounts;
   /** Where the dashboard counts which of its pages are opened; none: it counts nothing. */
   telemetry?: Telemetry | null;
+  /** What the committers kept of a pull request are hashed with (SESSIONLY_HASH_KEY); none: a plain hash. */
+  hashKey?: string;
 }
 
 /**
@@ -312,6 +348,18 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     }
     c.set("report", checkReport(body));
     await next();
+  });
+
+  // Matching again the pull requests the list's filters choose. Each has a
+  // transaction of its own, so this is answered here, before the one the
+  // rest of a request runs in: none is held for as long as all of them take.
+  api.post("/prs/match", async (c, next) => {
+    const asked = matchAsked(await c.req.json().catch(() => null));
+    if (asked.number !== undefined) return next();
+    adminsOnly(c.get("principal"));
+    const filters = pullFilters({ repo: asked.repo ?? "", state: asked.state ?? "", since: asked.since ?? "" });
+    const each = <T>(fn: (db: OrgDb) => Promise<T>) => ownerDb.asOrg(c.get("principal").orgId, fn);
+    return c.json(await rematchPulls(each, filters, time(asked.started, "started"), options.hashKey, failed));
   });
 
   // Adding a person puts an organisation in front of them the next time
@@ -528,7 +576,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   api.put("/prs", async (c) => {
     const report = c.get("report");
     if (!report) throw new Error("the report was not checked");
-    return c.json({ stored: true, attribution: await storePull(c.get("db"), report) });
+    return c.json({ stored: true, attribution: await storePull(c.get("db"), report, options.hashKey) });
   });
   api.get("/prs/summary", async (c) => {
     adminsOnly(c.get("principal"));
@@ -542,6 +590,23 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const number = wholeNumber(query.number, 0, 2 ** 31 - 1, "number");
     const pull = await getPull(c.get("db"), query.repo, number);
     return pull ? c.json(pull) : c.json({ error: "no such pull request" }, 404);
+  });
+  // Match one pull request's lines again against the sessions held now.
+  // (Several, which the list's filters choose, are matched further up.)
+  api.post("/prs/match", async (c) => {
+    adminsOnly(c.get("principal"));
+    const { repo, number } = matchAsked(await c.req.json().catch(() => null));
+    if (!repo) throw new BadRequest("repo is required");
+    const matched = await rematchPull(c.get("db"), repo, number!, options.hashKey);
+    if (!matched) return c.json({ error: "no such pull request" }, 404);
+    if (matched === "needs_report") {
+      throw new ApiError(
+        409,
+        "needs_report",
+        "this pull request was last reported before what it is matched by was kept; the Action has to report it once more",
+      );
+    }
+    return c.json(matched);
   });
   api.get("/prs", async (c) => {
     adminsOnly(c.get("principal"));

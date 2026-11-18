@@ -327,7 +327,8 @@ export interface PullReport {
    * pull request only if they are by one of these people (a session records
    * the email git is set up with, which is the one commits carry), or ran in
    * the cloud on the pull request's branch (there the commits are the
-   * agent's). Used for matching and not stored. Without any, every session
+   * agent's). Used for matching; of each, only a hash is stored, to match the
+   * lines again when more sessions are held. Without any, every session
    * in the repository is looked at.
    */
   commit_emails?: string[];
@@ -468,7 +469,18 @@ export interface PullRow {
   review_rounds: number;
   files_without_diff: number;
   attribution: PullAttribution;
+  /** When the Action last reported it. */
   updated_at: string;
+  /**
+   * When its lines were last matched against the sessions held: at its last
+   * report, or later if they were matched again since.
+   */
+  matched_at: string | null;
+  /**
+   * Whether its lines can be matched again without a new report. Not so for
+   * one last reported before what it is matched by was kept.
+   */
+  matchable: boolean;
   /**
    * The version of the Sessionly Action that last reported it (`0.2.0`).
    * Null when that report named none, or was not from the Action.
@@ -479,6 +491,26 @@ export interface PullRow {
    * named no version. A report from another client is not.
    */
   reporter_older: boolean;
+}
+
+/** A pull request's lines matched again against the sessions held now. */
+export interface PullMatch {
+  attribution: PullAttribution;
+  matched_at: string;
+}
+
+/** Several pull requests matched again, some at a time. */
+export interface PullMatches {
+  /** Matched by this request. */
+  matched: number;
+  /** Could not be matched by this request, and still among the remaining. */
+  failed: number;
+  /** Still to be matched: ask again with the same `started` until there are none. */
+  remaining: number;
+  /** Left as they were: only a new report from the Action can match them. */
+  needs_report: number;
+  /** When the first request of the run was made; later ones send it back. */
+  started: string;
 }
 
 /** A file of a pull request: the tracked lines it adds, and how many an agent wrote. */

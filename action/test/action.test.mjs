@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { all, github } from "../src/github.mjs";
 import { addedHashes, ignoring, lineHash } from "../src/lines.mjs";
-import { eventName, run, send, whenOpened } from "../src/main.mjs";
+import { eventName, MOST_AT_ONCE, run, send, wanted, whenOpened } from "../src/main.mjs";
 import { buildReport, feedbackOf, MARKER, render, reviewRounds } from "../src/report.mjs";
 
 const ACTION_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
@@ -448,6 +448,145 @@ test("a run that is not about a pull request, or lacks an input, says so", async
   assert.deepEqual(moved.report.aliases, ["git.example.com/oldco/website", "git.example.com/ann/web-old"]);
   assert.equal(moved.report.repo, "git.example.com/acme/web");
   await assert.rejects(run({ ...env, SESSIONLY_TOKEN: "" }, { api: fakeGithub() }), /token input is missing/);
+});
+
+test("the pr-number input names one pull request, several, or the latest", () => {
+  assert.deepEqual(wanted("7"), { number: 7 });
+  assert.deepEqual(wanted(7), { number: 7 });
+  assert.deepEqual(wanted(" ALL "), { all: true });
+  assert.deepEqual(wanted("20-60"), { from: 20, to: 60 });
+  assert.deepEqual(wanted("20 - 20"), { from: 20, to: 20 });
+  for (const not of ["", undefined, "0", "-3", "1.5", "60-20", "0-5", "some", "7,8", "1-18014398509481984", "18014398509481984"]) assert.equal(wanted(not), null, String(not));
+});
+
+/**
+ * A repository whose pull requests are `pulls` (number and when created, the
+ * latest first). Numbers in `issues` are not pull requests, and those in
+ * `broken` cannot be read.
+ */
+function fakeRepository(pulls, { issues = [], broken = [], limited = [], search = true } = {}) {
+  const calls = [];
+  const request = async (method, path) => {
+    calls.push([method, path.replace(/[?&]per_page=.*$/, "")]);
+    if (method !== "GET") return {};
+    const listed = /\/pulls\?state=all.*&page=(\d+)$/.exec(path);
+    if (listed) return pulls.slice((Number(listed[1]) - 1) * 100, Number(listed[1]) * 100);
+    if (path.startsWith("/search/issues")) {
+      if (!search) throw new Error(`GitHub answered 403 to GET ${path}: Resource not accessible by integration`);
+      const from = Date.parse(/created:>=([^&\s]+)/.exec(decodeURIComponent(path))[1]);
+      const within = pulls.filter((pull) => Date.parse(pull.created_at) >= from);
+      return { total_count: within.length, items: within.slice(-1) };
+    }
+    if (path.includes("/issues/")) return [];
+    if (path.includes("/files")) return FILES;
+    if (path.includes("/reviews")) return GITHUB.reviews;
+    if (path.includes("/comments")) return GITHUB.comments;
+    if (path.includes("/commits")) return GITHUB.commits;
+    const number = Number(/\/pulls\/(\d+)$/.exec(path)[1]);
+    if (issues.includes(number)) throw new Error(`GitHub answered 404 to GET ${path}: {"message":"Not Found"}`);
+    if (limited.includes(number)) throw new Error(`GitHub answered 403 to GET ${path}: {"message":"API rate limit exceeded for installation"}`);
+    if (broken.includes(number)) throw new Error(`GitHub answered 502 to GET ${path}: Bad Gateway`);
+    return { ...PULL, number, title: `Change | number ${number}` };
+  };
+  return { request, calls };
+}
+
+test("all of a repository's latest pull requests are reported in one run, and nothing is written on them", async () => {
+  const day = (n) => ({ number: n, created_at: `2026-11-${String(n).padStart(2, "0")}T10:00:00Z` });
+  const api = fakeRepository([day(12), day(11), day(10), day(9), day(3)], { broken: [10] });
+  const sent = [];
+  const logged = [];
+  const env = environment({ SESSIONLY_PR_NUMBER: "all", SESSIONLY_SINCE: "2026-11-05", SESSIONLY_COMMENT: "true", GITHUB_EVENT_NAME: "workflow_dispatch" });
+  const going = run(env, { api, deliver: async (url, token, report) => (sent.push(report), ATTRIBUTION), log: (line) => logged.push(line) });
+  // one that cannot be read is said, the others are still reported, and the run says so at its end
+  await assert.rejects(going, /1 of 4 pull requests could not be reported: #10/);
+  assert.deepEqual(sent.map((report) => [report.number, report.event]), [[12, "manual"], [11, "manual"], [9, "manual"]]);
+  assert.ok(logged.some((line) => /::warning title=Sessionly::#10 could not be reported \(GitHub answered 502/.test(line)));
+  // no comment on any of them, though comments are on
+  assert.deepEqual(api.calls.filter(([method]) => method !== "GET"), []);
+  const summary = readFileSync(env.GITHUB_STEP_SUMMARY, "utf8");
+  assert.match(summary, /Reported 3 pull requests\./);
+  // a title cannot end its cell
+  assert.match(summary, /\| #12 Change {3}number 12 \| 1,200 \| 450 \| 38% \|/);
+  assert.equal(readFileSync(env.GITHUB_OUTPUT, "utf8"), "");
+
+  // ninety days back when since does not say; a since that is no date is refused
+  const recent = fakeRepository([{ number: 2, created_at: new Date().toISOString() }, { number: 1, created_at: "2020-01-01T00:00:00Z" }]);
+  const quiet = { deliver: async () => ATTRIBUTION, log() {} };
+  const out = await run(environment({ SESSIONLY_PR_NUMBER: "all" }), { api: recent, ...quiet });
+  assert.deepEqual(out.reported.map(({ report }) => report.number), [2]);
+  await assert.rejects(run(environment({ SESSIONLY_PR_NUMBER: "all", SESSIONLY_SINCE: "lately" }), { api: recent, ...quiet }), /since input is not a date/);
+  const nothing = environment({ SESSIONLY_PR_NUMBER: "all" });
+  await run(nothing, { api: fakeRepository([]), ...quiet });
+  assert.match(readFileSync(nothing.GITHUB_STEP_SUMMARY, "utf8"), /No pull requests were reported\./);
+});
+
+test("no more are reported at once than GitHub allows for, and the run says how to go on", async () => {
+  const many = Array.from({ length: MOST_AT_ONCE + 30 }, (_, i) => ({ number: 500 - i, created_at: "2026-11-10T10:00:00Z" }));
+  const logged = [];
+  const quiet = { deliver: async () => ATTRIBUTION, log: (line) => logged.push(line) };
+  const latest = await run(environment({ SESSIONLY_PR_NUMBER: "all", SESSIONLY_SINCE: "2026-01-01" }), { api: fakeRepository(many), ...quiet });
+  assert.deepEqual([latest.reported.length, latest.more], [MOST_AT_ONCE, 30]);
+  assert.equal(latest.reported.at(-1).report.number, 501 - MOST_AT_ONCE);
+  assert.ok(logged.some((line) => line.includes(`30 more were left for another run`) && line.includes(`pr-number 371-${500 - MOST_AT_ONCE} `)), logged.join("\n"));
+  // where GitHub's search will not say how many are left or where they begin, the run says what it can
+  logged.length = 0;
+  const unsaid = await run(environment({ SESSIONLY_PR_NUMBER: "all", SESSIONLY_SINCE: "2026-01-01" }), { api: fakeRepository(many, { search: false }), ...quiet });
+  assert.deepEqual([unsaid.reported.length, unsaid.more], [MOST_AT_ONCE, null]);
+  assert.ok(logged.some((line) => line.includes("More were left") && line.includes(`pr-number 1-${500 - MOST_AT_ONCE} `) && line.includes("narrow it")), logged.join("\n"));
+  // the ones before `since` are not among those to go on with
+  logged.length = 0;
+  const old = [...many, { number: 300, created_at: "2025-06-01T10:00:00Z" }];
+  await run(environment({ SESSIONLY_PR_NUMBER: "all", SESSIONLY_SINCE: "2026-01-01" }), { api: fakeRepository(old), ...quiet });
+  assert.ok(logged.some((line) => line.includes(`pr-number 371-${500 - MOST_AT_ONCE} `)), logged.join("\n"));
+
+  // by number: the latest first, issues in between passed over without a word
+  logged.length = 0;
+  const api = fakeRepository([], { issues: [41, 43] });
+  const some = await run(environment({ SESSIONLY_PR_NUMBER: "40-44", SESSIONLY_BACKFILL: "true" }), { api, ...quiet });
+  assert.deepEqual(some.reported.map(({ report }) => report.number), [44, 42, 40]);
+  assert.ok(!logged.some((line) => line.includes("::warning")), logged.join("\n"));
+  assert.deepEqual(api.calls.filter(([method]) => method !== "GET"), []);
+  const wide = await run(environment({ SESSIONLY_PR_NUMBER: `1-${MOST_AT_ONCE + 5}` }), { api: fakeRepository([]), ...quiet });
+  assert.deepEqual([wide.reported.length, wide.more, wide.reported.at(-1).report.number], [MOST_AT_ONCE, 5, 6]);
+  assert.ok(logged.some((line) => line.includes("pr-number 1-5")), logged.join("\n"));
+
+  // one that cannot be read is named on the summary page, and the rest go on
+  logged.length = 0;
+  const partly = environment({ SESSIONLY_PR_NUMBER: "10-12" });
+  await assert.rejects(run(partly, { api: fakeRepository([], { broken: [11] }), ...quiet }), /1 of 3 pull requests could not be reported: #11/);
+  assert.match(readFileSync(partly.GITHUB_STEP_SUMMARY, "utf8"), /Reported 2 pull requests\.[\s\S]*Could not be reported: #11\./);
+  // the six requests for a number are not all made to learn it is an issue's
+  const issue = fakeRepository([], { issues: [31] });
+  await run(environment({ SESSIONLY_PR_NUMBER: "30-31" }), { api: issue, ...quiet });
+  assert.deepEqual(issue.calls.filter(([, path]) => /\/(pulls|issues)\/31/.test(path)).map(([, path]) => path), ["/repos/acme/web/pulls/31"]);
+  // a range with no pull request in it is more likely a token that cannot see the repository
+  await assert.rejects(
+    run(environment({ SESSIONLY_PR_NUMBER: "50-52" }), { api: fakeRepository([], { issues: [50, 51, 52] }), ...quiet }),
+    /none of #50 to #52 is a pull request the github-token can read/,
+  );
+  // a server that refuses for a reason the next would meet too is not sent the rest
+  logged.length = 0;
+  const unread = fakeRepository([]);
+  const refused = async () => {
+    throw Object.assign(new Error("the Sessionly server answered 401: missing or unknown token"), { status: 401 });
+  };
+  await assert.rejects(run(environment({ SESSIONLY_PR_NUMBER: "60-70" }), { api: unread, deliver: refused, log: quiet.log }), /answered 401.*#70 and the ones before it were not reported/);
+  assert.ok(!unread.calls.some(([, path]) => /\/pulls\/69$/.test(path)), "read on after the server refused");
+  // one that the server finds wrong is its own trouble: the rest go on
+  let sent = 0;
+  const wrong = async () => {
+    sent += 1;
+    if (sent === 1) throw Object.assign(new Error("the Sessionly server answered 422: the report does not match the schema"), { status: 422 });
+    return ATTRIBUTION;
+  };
+  await assert.rejects(run(environment({ SESSIONLY_PR_NUMBER: "60-62" }), { api: fakeRepository([]), deliver: wrong, log: quiet.log }), /1 of 3 pull requests could not be reported: #62/);
+  // when GitHub allows no more requests, the ones left are not asked for
+  logged.length = 0;
+  const limited = fakeRepository([], { limited: [18, 17, 16] });
+  await assert.rejects(run(environment({ SESSIONLY_PR_NUMBER: "15-20" }), { api: limited, ...quiet }), /#18 and the ones before it were not reported/);
+  assert.ok(logged.some((line) => line.includes("pr-number 15-18 ")), logged.join("\n"));
+  assert.ok(!limited.calls.some(([, path]) => /\/pulls\/1[5-7]$/.test(path)), "asked on after the limit");
 });
 
 test("over the network: pages from GitHub, and the server's answer or refusal", async () => {

@@ -410,7 +410,10 @@
             </li>
             <li>
               The commit email addresses the Action sends are used to pick the sessions to compare
-              with and are not stored.
+              with. The addresses are not stored: a hash of each is, so that a pull request's
+              lines can be compared again when sessions arrive after its last report. On the
+              hosted service the hash is keyed with a secret that is not in the database, so
+              the database alone does not confirm a guessed address.
             </li>
           </ul>
 
