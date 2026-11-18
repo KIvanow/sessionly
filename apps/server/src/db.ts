@@ -683,6 +683,11 @@ const MIGRATIONS: string[] = [
   // version, is an Action from before this was sent, or a name that did not
   // fit. Another client's name is kept so that report is not read as one.
   `ALTER TABLE pull_requests ADD COLUMN reporter_name text`,
+  // Rows stored before a report said who sent it. An empty name is not a
+  // client: one has to be at least one character, so a later report cannot
+  // send this. These rows are not judged. A report that names no one still
+  // stores null, and is.
+  `UPDATE pull_requests SET reporter_name = '' WHERE reporter_name IS NULL`,
 ];
 
 /**

@@ -546,19 +546,19 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   const foreign = (await at(43)).body;
   assert.equal(foreign.reporter_version, null);
   assert.equal(foreign.reporter_older, false);
-  // Pull request 43 is another client's, so it is skipped. The newest one the
-  // Action reported, or that named no one, is 42, which named no one.
-  assert.equal(foreign.repo_reporter_older, true);
+  // Pull request 40 was reported by the current Action within the last 30
+  // days, so a later one that named no one does not name the repository.
+  assert.equal(foreign.repo_reporter_older, false);
   assert.equal(foreign.repo_reporter_version, null);
   // A later report that names none replaces it: the page then says the Action is old.
   assert.equal((await call(tokens.ci, "PUT", "/prs", pinned({ number: 43, event: "synchronize" }))).status, 200);
   assert.equal(await versionOf(43), null);
   assert.equal((await at(43)).body.reporter_older, true);
 
-  // That report is the newest, and it named no one, so the repository is named.
+  // The current report is still inside 30 days, so the repository is not named.
   const summary = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/pinned")).body;
-  assert.deepEqual(summary.older_actions, [repo]);
-  // The newest pull request the Action reported is the current one, so an earlier one that named no one is not enough.
+  assert.deepEqual(summary.older_actions, []);
+  // The most recent report is from the current Action.
   const currentRepo = "github.com/acme/current";
   const current = await call(tokens.ci, "PUT", "/prs", report({
     repo: currentRepo,
@@ -578,8 +578,8 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(currentSummary.total.pulls, 3);
   assert.deepEqual(currentSummary.older_actions, []);
 
-  // Upgraded since: the merged pull request is old, the open one is current.
-  // The merged list, and that pull request's page, do not ask for a workflow edit.
+  // Upgraded since: the merged pull request is old, and the open one, reported
+  // after it, is current. The merged list does not ask for a workflow edit.
   const upgraded = "github.com/acme/upgraded";
   assert.equal((await call(tokens.ci, "PUT", "/prs", report({
     repo: upgraded, number: 1, state: "merged", merged_at: "2026-11-01T00:00:00Z",
@@ -594,7 +594,7 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(mergedPage.reporter_version, null);
   assert.equal(mergedPage.reporter_older, true);
   assert.equal(mergedPage.repo_reporter_older, false);
-  // The notice quotes the version that newest pull request named.
+  // The notice would quote the version the most recent report named.
   assert.equal(mergedPage.repo_reporter_version, CURRENT_ACTION);
   assert.equal(mergedPage.reporter_current, CURRENT_ACTION);
   const openPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(upgraded)}&number=2`)).body;
@@ -602,14 +602,16 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(openPage.reporter_older, false);
   assert.equal(openPage.repo_reporter_older, false);
   assert.equal(openPage.repo_reporter_version, CURRENT_ACTION);
-  // The newest pull request here named no one, after the current one.
+  // A later report that named no one does not bring the notice back: the
+  // current report is still inside 30 days. The version quoted is that later
+  // report's, which named none.
   const oldPage = (await at(41)).body;
   assert.equal(oldPage.reporter_older, true);
-  assert.equal(oldPage.repo_reporter_older, true);
+  assert.equal(oldPage.repo_reporter_older, false);
   assert.equal(oldPage.repo_reporter_version, null);
 
-  // The newest pull request reports with the current Action. Reporting an
-  // older one again, with no reporter, does not change the answer.
+  // A current report, then a re-run with no reporter on an older pull request.
+  // The re-run is the most recent report, and it does not bring the notice back.
   const reread = "github.com/acme/reread";
   assert.equal((await call(tokens.ci, "PUT", "/prs", report({
     repo: reread, number: 2, state: "open", reporter: { name: "sessionly-action", version: CURRENT_ACTION },
@@ -627,10 +629,10 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(rereadPage.reporter_version, null);
   assert.equal(rereadPage.reporter_older, true);
   assert.equal(rereadPage.repo_reporter_older, false);
-  assert.equal(rereadPage.repo_reporter_version, CURRENT_ACTION);
+  assert.equal(rereadPage.repo_reporter_version, null);
 
-  // Every report is old, so the repository is named. The page quotes the
-  // newest of them, which named no version.
+  // Every recent report is old, so the repository is named. The page quotes
+  // the most recent of them, which named no version.
   const still = "github.com/acme/still-old";
   assert.equal((await call(tokens.ci, "PUT", "/prs", report({
     repo: still, number: 1, reporter: { name: "sessionly-action", version: "0.1.0" },
@@ -643,31 +645,52 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(stillPage.repo_reporter_older, true);
   assert.equal(stillPage.repo_reporter_version, null);
 
-  // One current report does not hide a newer pull request that named no
-  // reporter. The open list still names the repository: that pull request is merged.
-  const rerun = "github.com/acme/rerun";
+  // A current report 31 days ago, and an old one since. The current one no
+  // longer keeps the notice off.
+  const faded = "github.com/acme/faded";
   assert.equal((await call(tokens.ci, "PUT", "/prs", report({
-    repo: rerun, number: 1, state: "open", reporter: { name: "sessionly-action", version: CURRENT_ACTION },
+    repo: faded, number: 1, state: "open", reporter: { name: "sessionly-action", version: CURRENT_ACTION },
   }))).status, 200);
-  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
-    repo: rerun, number: 2, state: "merged", merged_at: "2026-11-02T00:00:00Z",
-  }))).status, 200);
-  const rerunOpen = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/rerun&state=open")).body;
-  assert.equal(rerunOpen.total.pulls, 1);
-  assert.deepEqual(rerunOpen.older_actions, [rerun]);
-  const currentPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(rerun)}&number=1`)).body;
-  assert.equal(currentPage.reporter_version, CURRENT_ACTION);
-  assert.equal(currentPage.reporter_older, false);
-  assert.equal(currentPage.repo_reporter_older, true);
-  assert.equal(currentPage.repo_reporter_version, null);
-  const oldRerun = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(rerun)}&number=2`)).body;
-  assert.equal(oldRerun.reporter_version, null);
-  assert.equal(oldRerun.reporter_older, true);
-  assert.equal(oldRerun.repo_reporter_older, true);
-  assert.equal(oldRerun.repo_reporter_version, null);
+  await db.query(
+    `UPDATE pull_requests SET updated_at = clock_timestamp() - interval '31 days' WHERE repo = $1 AND number = 1`,
+    [faded],
+  );
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({ repo: faded, number: 2 }))).status, 200);
+  const fadedSummary = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/faded")).body;
+  assert.deepEqual(fadedSummary.older_actions, [faded]);
+  const fadedCurrent = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(faded)}&number=1`)).body;
+  assert.equal(fadedCurrent.reporter_version, CURRENT_ACTION);
+  assert.equal(fadedCurrent.reporter_older, false);
+  assert.equal(fadedCurrent.repo_reporter_older, true);
+  assert.equal(fadedCurrent.repo_reporter_version, null);
+  const fadedOld = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(faded)}&number=2`)).body;
+  assert.equal(fadedOld.reporter_version, null);
+  assert.equal(fadedOld.reporter_older, true);
+  assert.equal(fadedOld.repo_reporter_older, true);
+  assert.equal(fadedOld.repo_reporter_version, null);
 
-  // Another client reports the newest pull request, so it is skipped. The
-  // repository is judged by the newest Action pull request below it.
+  // A higher-numbered merged pull request reported old, then a lower-numbered
+  // open one reported with the current Action. The upgrade clears the notice.
+  const lower = "github.com/acme/lower-open";
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: lower, number: 8, state: "merged", merged_at: "2026-11-01T00:00:00Z",
+  }))).status, 200);
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: lower, number: 3, state: "open", reporter: { name: "sessionly-action", version: CURRENT_ACTION },
+  }))).status, 200);
+  const lowerMerged = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/lower-open&state=merged")).body;
+  assert.equal(lowerMerged.total.pulls, 1);
+  assert.deepEqual(lowerMerged.older_actions, []);
+  const lowerOld = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(lower)}&number=8`)).body;
+  assert.equal(lowerOld.reporter_older, true);
+  assert.equal(lowerOld.repo_reporter_older, false);
+  assert.equal(lowerOld.repo_reporter_version, CURRENT_ACTION);
+  const lowerNew = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(lower)}&number=3`)).body;
+  assert.equal(lowerNew.reporter_older, false);
+  assert.equal(lowerNew.repo_reporter_older, false);
+  assert.equal(lowerNew.repo_reporter_version, CURRENT_ACTION);
+
+  // Another client's report is skipped. The most recent report from the Action is old.
   const other = "github.com/acme/other-client";
   assert.equal((await call(tokens.ci, "PUT", "/prs", report({
     repo: other,
@@ -724,6 +747,18 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(aheadPage.repo_reporter_older, false);
   assert.equal(aheadPage.repo_reporter_version, "0.3.0-rc.1");
   assert.deepEqual((await call(tokens.admin, "GET", "/prs/summary?repo=acme/ahead")).body.older_actions, []);
+
+  // A row stored before reports said who sent them is marked with an empty
+  // name. It is not an older Action, and it does not name the repository.
+  const prior = "github.com/acme/before-names";
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({ repo: prior, number: 1 }))).status, 200);
+  await db.query(`UPDATE pull_requests SET reporter_name = '' WHERE repo = $1 AND number = 1`, [prior]);
+  const priorPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(prior)}&number=1`)).body;
+  assert.equal(priorPage.reporter_version, null);
+  assert.equal(priorPage.reporter_older, false);
+  assert.equal(priorPage.repo_reporter_older, false);
+  assert.equal(priorPage.repo_reporter_version, null);
+  assert.deepEqual((await call(tokens.admin, "GET", "/prs/summary?repo=acme/before-names")).body.older_actions, []);
 });
 
 test("a pull request's lines are matched again when its sessions arrive after its last report", async () => {

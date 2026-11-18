@@ -80,16 +80,20 @@ version is kept only when the name is `sessionly-action`. The three numbers are 
 when they are equal a pre-release is older than the release. A pre-release of a higher version
 is not an older Action. A `sessionly-action` version the server cannot read is not one either.
 Another client's report is stored under its own name, and is not treated as an older Action.
-A report that names no reporter still is: an Action from before this was sent.
+A report that names no reporter still is: an Action from before this was sent. A row stored
+before a report said who sent it is marked with an empty name, which a client cannot send,
+and is not judged.
 `GET /prs` and `GET /prs/detail` give `reporter_version` (null when none was kept) and
 `reporter_older`. `GET /prs/detail` also gives `reporter_current`, the version of the Action
-this server knows, and `repo_reporter_older`: the newest pull request the Action reported,
-or that named no reporter, came from an older Action. A pull request another client reported
-is skipped, and a repository with no such pull request is not old. `repo_reporter_version` is
-the version that pull request named, which is what the repository notice quotes. One current
-report on an older pull request does not hide a newer one.
-`GET /prs/summary` gives `older_actions`, the repositories in the filter for which that
-newest pull request came from an older Action.
+this server knows, and `repo_reporter_older`: the repository's most recent report from the
+Action, or that named no reporter, is from an older Action, and none from the last 30 days
+came from the current Action or a newer one. A pull request another client reported is
+skipped, and a repository with no such report is not old. `repo_reporter_version` is the
+version that most recent report named, which is what the repository notice quotes. A current
+report keeps the notice off for 30 days, whichever pull request it was, and a re-run of an
+older one in that time does not bring it back.
+`GET /prs/summary` gives `older_actions`, the repositories in the filter that report with an
+older Action by that rule.
 
 ## Tokens and people
 

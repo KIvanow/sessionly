@@ -48,8 +48,9 @@ What to know about the workflow:
 - `@main` follows this repository's main branch. To decide yourself when the Action changes,
   name a commit instead (`KIvanow/sessionly/action@<commit sha>`), as this repository's own
   [workflow](https://github.com/KIvanow/sessionly/blob/main/.github/workflows/sessionly.yml) does.
-  The list, and a pull request's page, say when the newest pull request the Action reported,
-  or that named no reporter, is from an older Action, and the page names that report's
+  The list, and a pull request's page, say when the repository's most recent report from the
+  Action, or that named no reporter, is from an older one, and no report from the last 30 days
+  came from the current Action or a newer one. The page names that most recent report's
   version. If the workflow pins the Action to a commit or tag, move that pin to a newer one;
   with `@main`, the next report uses the current Action. A pull request that was itself last
   reported by an older one says so, without asking for a change that a later report already

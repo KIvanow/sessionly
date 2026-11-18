@@ -229,7 +229,8 @@ export function olderAction(version: string | null, current: string): boolean {
 
 /**
  * Whether a stored report counts as an older Action. One that named no
- * reporter does. Another client's does not. A `sessionly-action` version
+ * reporter does. Another client's does not, and neither does a row marked
+ * `''` from before reports said who sent them. A `sessionly-action` version
  * this server cannot read does not either: it is not known to be old.
  */
 function reportIsOlder(name: string | null, version: string | null): boolean {
@@ -238,32 +239,70 @@ function reportIsOlder(name: string | null, version: string | null): boolean {
   return olderAction(version, CURRENT_ACTION);
 }
 
+/** How long a current or newer Action report keeps a repository off the notice. */
+const ACTION_WINDOW_DAYS = 30;
+
 /** Who sent one report, and the Action version it named. */
 interface StoredReport {
   name: string | null;
   version: string | null;
 }
 
+/** Whether a repository reports with an older Action, and the version to quote. */
+interface RepoReporter {
+  older: boolean;
+  version: string | null;
+}
+
 /**
- * The newest pull request each repository has that the Action reported, or
- * that named no reporter. Another client's is skipped. The primary key
- * `(org_id, repo, number)` gives that order. A repository with no such row
- * is not old. An exact name, not the list's partial match.
+ * Each repository's most recent judged report, and whether the repository
+ * reports with an older Action. A judged report named the Action, or named
+ * no one. Another client's is skipped, and so is a row marked `''` from
+ * before reports said who sent them. The repository is older when that most
+ * recent report is, and none of its judged reports from the last
+ * `ACTION_WINDOW_DAYS` days came from the current Action or a newer one.
+ * One with no judged report is not. An exact name, not the list's partial match.
  */
-async function newestActionReports(db: OrgDb, repos: string[]): Promise<Map<string, StoredReport>> {
+async function repoReporters(db: OrgDb, repos: string[]): Promise<Map<string, RepoReporter>> {
   if (repos.length === 0) return new Map();
-  const rows = await db.query<{ repo: string; reporter_name: unknown; reporter_version: unknown }>(
-    `SELECT DISTINCT ON (repo) repo, reporter_name, reporter_version
-     FROM pull_requests
-     WHERE org_id = $1 AND repo = ANY($2::text[])
-       AND (reporter_name IS NULL OR reporter_name = $3)
-     ORDER BY repo, number DESC`,
-    [db.orgId, repos, ACTION_REPORTER],
-  );
+  const judged = `org_id = $1 AND repo = ANY($2::text[]) AND (reporter_name IS NULL OR reporter_name = $3)`;
+  const [recent, window] = await Promise.all([
+    db.query<{ repo: string; reporter_name: unknown; reporter_version: unknown }>(
+      `SELECT DISTINCT ON (repo) repo, reporter_name, reporter_version
+       FROM pull_requests
+       WHERE ${judged}
+       ORDER BY repo, updated_at DESC`,
+      [db.orgId, repos, ACTION_REPORTER],
+    ),
+    db.query<{ repo: string; reporter_name: unknown; reporter_version: unknown }>(
+      `SELECT DISTINCT repo, reporter_name, reporter_version
+       FROM pull_requests
+       WHERE ${judged} AND updated_at >= now() - make_interval(days => $4::int)`,
+      [db.orgId, repos, ACTION_REPORTER, ACTION_WINDOW_DAYS],
+    ),
+  ]);
   const text = (value: unknown) => (typeof value === "string" ? value : null);
-  const byRepo = new Map<string, StoredReport>();
-  for (const row of rows) {
-    byRepo.set(String(row.repo), { name: text(row.reporter_name), version: text(row.reporter_version) });
+  const reportOf = (row: { reporter_name: unknown; reporter_version: unknown }): StoredReport => ({
+    name: text(row.reporter_name),
+    version: text(row.reporter_version),
+  });
+  const inWindow = new Map<string, StoredReport[]>();
+  for (const row of window) {
+    const repo = String(row.repo);
+    const list = inWindow.get(repo);
+    const report = reportOf(row);
+    if (list) list.push(report);
+    else inWindow.set(repo, [report]);
+  }
+  const byRepo = new Map<string, RepoReporter>();
+  for (const row of recent) {
+    const repo = String(row.repo);
+    const report = reportOf(row);
+    const currentSince = (inWindow.get(repo) ?? []).some((one) => !reportIsOlder(one.name, one.version));
+    byRepo.set(repo, {
+      older: reportIsOlder(report.name, report.version) && !currentSince,
+      version: report.version,
+    });
   }
   return byRepo;
 }
@@ -609,10 +648,11 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     // An Action from before these were sent says nothing of them: what is here stays.
     feedback: report.feedback ? JSON.stringify(report.feedback) : null,
     feedback_total: report.feedback ? (report.feedback_total ?? report.feedback.length) : null,
-    // Who sent this report. The version is the Action's, and only then: another
-    // client's is not an older Action. A report that names no reporter still
-    // is, so a missing one replaces a version that was stored.
-    reporter_name: report.reporter?.name ?? null,
+    // Who sent this report. Null, never '', when it named no one: '' is only
+    // the mark on rows stored before a report said who sent it, and those are
+    // not judged. The version is the Action's, and only then. A missing name
+    // still counts as an older Action, so it replaces a version that was stored.
+    reporter_name: report.reporter?.name || null,
     reporter_version: report.reporter?.name === ACTION_REPORTER ? (report.reporter.version ?? null) : null,
     // only used when the row is new
     first_event: report.event,
@@ -830,18 +870,21 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
   );
   if (!r) return null;
   const detail = r.detail == null ? null : json<{ files: PullFile[]; sessions: Omit<PullSession, "session">[] }>(r.detail);
-  const report = (await newestActionReports(db, [repo])).get(repo);
+  const [reporter, sessions] = await Promise.all([
+    repoReporters(db, [repo]).then((found) => found.get(repo)),
+    detail ? withSessions(db, detail.sessions ?? []) : Promise.resolve(null),
+  ]);
   return {
     ...pullRow(r),
     reporter_current: CURRENT_ACTION,
-    repo_reporter_older: report != null && reportIsOlder(report.name, report.version),
-    repo_reporter_version: report?.version ?? null,
+    repo_reporter_older: reporter?.older ?? false,
+    repo_reporter_version: reporter?.version ?? null,
     draft: r.draft === true,
     head_ref: (r.head_ref as string) ?? null,
     base_ref: (r.base_ref as string) ?? null,
     closed_at: iso(r.closed_at),
     files: detail?.files ?? null,
-    sessions: detail ? await withSessions(db, detail.sessions ?? []) : null,
+    sessions,
     feedback: r.feedback == null ? null : json<PullFeedback[]>(r.feedback),
     feedback_total: r.feedback == null || r.feedback_total == null ? null : num(r.feedback_total),
   };
@@ -958,9 +1001,10 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       row.surviving += by.surviving;
     }
   }
-  // Which repositories the filter contains. Each is judged by its newest
-  // pull request that the Action reported, or that named no one.
-  const reports = await newestActionReports(db, [...new Set(rows.map((pull) => pull.repo))]);
-  const older = [...reports].filter(([, report]) => reportIsOlder(report.name, report.version)).map(([repo]) => repo);
+  // Which repositories the filter contains. Each is judged by its most
+  // recent report from the Action, or that named no one, and by the last
+  // ACTION_WINDOW_DAYS days of those reports.
+  const reporters = await repoReporters(db, [...new Set(rows.map((pull) => pull.repo))]);
+  const older = [...reporters].filter(([, one]) => one.older).map(([repo]) => repo);
   return { by_model: sorted(byModel), older_actions: older.sort(), total };
 }

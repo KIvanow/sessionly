@@ -560,14 +560,16 @@ export interface PullDetail extends PullRow {
   /** How many there are on GitHub: more than `feedback` has when only the latest were kept. */
   feedback_total: number | null;
   /**
-   * The newest pull request in this repository that the Action reported, or
-   * that named no reporter, came from an older Action. A pull request
-   * another client reported is skipped. A repository with none is not old.
+   * The repository's most recent report from the Action, or that named no
+   * reporter, is from an older Action, and none from the last 30 days came
+   * from the current Action or a newer one. A pull request another client
+   * reported is skipped, and so is one stored before a report said who sent
+   * it. A repository with no such report is not old.
    */
   repo_reporter_older: boolean;
   /**
-   * The version that pull request named. Null when it named none, or when
-   * the repository has no such pull request. The repository notice quotes
+   * The version that most recent report named. Null when it named none, or
+   * when the repository has no such report. The repository notice quotes
    * this, not this pull request's version.
    */
   repo_reporter_version: string | null;
@@ -606,9 +608,10 @@ export interface PullSummary {
   /** Most lines first. */
   by_model: PullsByModel[];
   /**
-   * Repositories that have a pull request in the filter, and whose newest
-   * pull request that the Action reported, or that named no reporter, came
-   * from an older Action. A pull request another client reported is skipped.
+   * Repositories that have a pull request in the filter and report with an
+   * older Action: the most recent report from the Action, or that named no
+   * reporter, is old, and none from the last 30 days came from the current
+   * Action or a newer one.
    */
   older_actions: string[];
   total: {
