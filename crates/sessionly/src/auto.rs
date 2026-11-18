@@ -117,36 +117,6 @@ fn asked_within_a_day(checked_at: &str) -> bool {
     age >= chrono::Duration::zero() && age < UPDATE_INTERVAL
 }
 
-/// Whether this run would upload. The release check is part of an upload,
-/// not of a machine that only keeps a local ledger. Read the same way as
-/// the upload itself, without creating a machine id.
-fn upload_configured(data_dir: &Path) -> bool {
-    server_configured(data_dir, |name| std::env::var(name).ok())
-}
-
-fn server_configured(data_dir: &Path, env: impl Fn(&str) -> Option<String>) -> bool {
-    let saved = fs::read_to_string(data_dir.join("config.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .is_some_and(|config| {
-            config
-                .get("server")
-                .is_some_and(|server| server.is_object())
-        });
-    if saved {
-        return true;
-    }
-    let var = |name: &str| {
-        env(name)
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    };
-    match (var("SESSIONLY_URL"), var("SESSIONLY_TOKEN")) {
-        (Some(url), Some(_)) => crate::config::check_server_url(&url).is_ok(),
-        _ => false,
-    }
-}
-
 /// The line for `status` (and for `list` and `summary` in a terminal) when a
 /// newer release was recorded. Nothing in a cloud environment, where the
 /// repository's script picks the version, or when the setting is off.
@@ -163,11 +133,11 @@ pub fn pending_update(data_dir: &Path) -> Option<String> {
 /// Ask, at most once a day, whether a newer release is out, and remember the
 /// version the release page named in `update-check.json`. A failed ask is
 /// silent and is not tried again until the day is up. The request carries no
-/// account or session; a cloud environment is not asked, nor a machine that
-/// switched it off, nor one that has no server to upload to.
+/// account or session. The caller asks only for a run that had a server to
+/// upload to. A cloud environment is not asked, nor a machine that switched
+/// the check off.
 fn note_release(data_dir: &Path) {
-    if crate::runtime::in_cloud() || !update_check_enabled(data_dir) || !upload_configured(data_dir)
-    {
+    if crate::runtime::in_cloud() || !update_check_enabled(data_dir) {
         return;
     }
     let path = data_dir.join("update-check.json");
@@ -232,16 +202,19 @@ pub fn run(after_ms: u64) -> i32 {
     let Ok(data_dir) = crate::paths::data_dir() else {
         return 0;
     };
-    let outcome = match locked(&data_dir) {
-        Ok(Some(_lock)) => once().unwrap_or_else(|err| format!("failed: {err:#}")),
-        Ok(None) => "skipped: another run was still going".to_string(),
-        Err(err) => format!("failed: {err:#}"),
+    let (outcome, ask) = match locked(&data_dir) {
+        Ok(Some(_lock)) => once(),
+        Ok(None) => ("skipped: another run was still going".to_string(), false),
+        Err(err) => (format!("failed: {err:#}"), false),
     };
     // The lock is dropped, and the log line is written, before asking GitHub.
     // A session ending meanwhile waits on the lock, not on that request.
     log(&data_dir, &outcome);
     // After the upload, and never from a hook: the hooks stay offline.
-    note_release(&data_dir);
+    // No server, or a config that could not be read, means nothing is asked.
+    if ask {
+        note_release(&data_dir);
+    }
     0
 }
 
@@ -264,21 +237,32 @@ fn locked(data_dir: &Path) -> Result<Option<File>> {
     Ok(Some(file))
 }
 
-fn once() -> Result<String> {
-    let config = Config::load(&crate::paths::config_path()?)?.with_environment();
-    let mut ledger = Ledger::open(&crate::paths::ledger_path()?)?;
-    let (synced, _) = crate::sync::sync_all(&mut ledger, &config, false)?;
-    let mut outcome = format!(
-        "synced {} ({} unchanged, {} failed)",
-        synced.synced,
-        synced.unchanged,
-        synced.failed.len()
-    );
-    if config.server.is_some() {
-        let uploaded = crate::upload::run(&mut ledger, &config, false)?;
-        outcome.push_str(&format!("; {}", uploaded.summary()));
-    }
-    Ok(outcome)
+/// What the run did, and whether it had a server. A failed upload still has
+/// one, when the config said so: the release check is about the machine, not
+/// about this upload succeeding. A config that cannot be read has neither.
+fn once() -> (String, bool) {
+    let config = match crate::paths::config_path().and_then(|path| Config::load(&path)) {
+        Ok(config) => config.with_environment(),
+        Err(err) => return (format!("failed: {err:#}"), false),
+    };
+    let has_server = config.server.is_some();
+    let outcome = (|| -> Result<String> {
+        let mut ledger = Ledger::open(&crate::paths::ledger_path()?)?;
+        let (synced, _) = crate::sync::sync_all(&mut ledger, &config, false)?;
+        let mut outcome = format!(
+            "synced {} ({} unchanged, {} failed)",
+            synced.synced,
+            synced.unchanged,
+            synced.failed.len()
+        );
+        if has_server {
+            let uploaded = crate::upload::run(&mut ledger, &config, false)?;
+            outcome.push_str(&format!("; {}", uploaded.summary()));
+        }
+        Ok(outcome)
+    })()
+    .unwrap_or_else(|err| format!("failed: {err:#}"));
+    (outcome, has_server)
 }
 
 fn log(data_dir: &Path, outcome: &str) {
@@ -328,23 +312,20 @@ mod tests {
 
     #[test]
     fn a_release_is_asked_only_when_a_server_is_set() {
+        // `once` asks when the loaded config has a server. An empty server
+        // object does not load, so it is not asked, and null is no server.
         let dir = tempfile::tempdir().unwrap();
-        let none = |_: &str| None;
-        assert!(!server_configured(dir.path(), none));
-        fs::write(dir.path().join("config.json"), r#"{"server":null}"#).unwrap();
-        assert!(!server_configured(dir.path(), none));
-        let named = |name: &str| match name {
-            "SESSIONLY_URL" => Some("https://sessionly.example.com".to_string()),
-            "SESSIONLY_TOKEN" => Some("t".to_string()),
-            _ => None,
-        };
-        assert!(server_configured(dir.path(), named));
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{"machine_id":"m","server":{}}"#).unwrap();
+        assert!(Config::load(&path).is_err());
+        fs::write(&path, r#"{"machine_id":"m","server":null}"#).unwrap();
+        assert!(Config::load(&path).unwrap().server.is_none());
         fs::write(
-            dir.path().join("config.json"),
-            r#"{"server":{"url":"http://127.0.0.1:9","token":"t"}}"#,
+            &path,
+            r#"{"machine_id":"m","server":{"url":"http://127.0.0.1:9","token":"t"}}"#,
         )
         .unwrap();
-        assert!(server_configured(dir.path(), none));
+        assert!(Config::load(&path).unwrap().server.is_some());
     }
 
     #[test]
