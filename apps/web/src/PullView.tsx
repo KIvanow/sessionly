@@ -298,7 +298,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
   );
 }
 
-/** The agent tile's note: the count, and, when that count moved, what it was until the report before. */
+/** The agent tile's note: the count, and, when that count moved, what it was until this report. */
 function agentNote(agentLines: number, lines: number, shift: string | null): string {
   const now = `${count(agentLines)} of ${count(lines)} lines`;
   return shift ? `${now}. ${shift}` : now;
@@ -308,7 +308,7 @@ function History({ history }: { history: PullHistory[] }) {
   return (
     <section className="card" aria-label="History">
       <h2>History</h2>
-      <p className="muted hint">Each time the figures moved: when, what prompted it, and why.</p>
+      <p className="muted hint">Each time the figures moved, and when a newer Action reported them as they were.</p>
       {history.length === 0 ? (
         <p className="muted">No earlier figures were kept.</p>
       ) : (

@@ -620,6 +620,15 @@ async function match(
 /** How many reports of one pull request are kept. The oldest past this are dropped. */
 const HISTORY_KEPT = 50;
 
+/**
+ * One request stores or matches a pull request at a time. A row lock waits
+ * only when the row is already there; this waits for the first report too,
+ * so two of them do not each keep a copy of the same figures.
+ */
+async function holdPull(db: OrgDb, repo: string, number: number): Promise<void> {
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`pull:${db.orgId}:${repo}:${number}`]);
+}
+
 /** A session's key and its lines in a pull request, as a history row stores them. */
 interface ReportSession {
   machine_id: string;
@@ -671,6 +680,7 @@ function newerAction(before: string | null, version: string | null): boolean {
 
 const signed = (n: number): string => `${n > 0 ? "+" : ""}${n}`;
 const sessionsWord = (n: number): string => (n === 1 ? "1 session" : `${n} sessions`);
+const linesChanged = (n: number): string => (n === 1 ? "1 session's lines changed" : `${n} sessions' lines changed`);
 
 type RawSessionChange = ReportSession & { lines_before: number };
 
@@ -688,8 +698,9 @@ interface RawChange {
 /**
  * What changed between two reports, and the reason in words. New commits
  * first, then sessions that arrived, then sessions that are gone, then a
- * newer Action, and otherwise that it was matched again. With no earlier
- * report there is nothing to compare, and no reason.
+ * newer Action, then a session whose line count changed, and otherwise
+ * that it was matched again. With no earlier report there is nothing to
+ * compare, and no reason.
  */
 export function historyChange(now: HistoryFigures, before: HistoryFigures | null): RawChange {
   if (!before) {
@@ -728,6 +739,7 @@ export function historyChange(now: HistoryFigures, before: HistoryFigures | null
   else if (added.length > 0) reason = `${sessionsWord(added.length)} uploaded since: ${delta} agent lines`;
   else if (gone.length > 0) reason = `${sessionsWord(gone.length)} no longer matched: ${delta} agent lines`;
   else if (newerAction(before.reporter_version, now.reporter_version)) reason = "a newer Action";
+  else if (changed.length > 0) reason = `${linesChanged(changed.length)}: ${delta} agent lines`;
 
   return {
     lines_before: before.lines,
@@ -742,25 +754,25 @@ export function historyChange(now: HistoryFigures, before: HistoryFigures | null
 
 /**
  * Keep the figures of a report, in the same transaction as the pull request.
- * A row is written only when the lines, the agent lines, the commits or the
- * set of sessions and their line counts differ from the latest one, and only
- * the latest `HISTORY_KEPT` stay. A newer Action on a report that moves
- * nothing else is written onto the latest row, so the next change is not
- * explained by a version that was already current.
+ * A row is written when the lines, the agent lines, the commits or the set
+ * of sessions and their line counts differ from the latest one, and when a
+ * newer Action reports the same figures. That row keeps the version that
+ * produced it; the one before it is left as it was, so a later change is
+ * not explained by a version that already had a row. Only the latest
+ * `HISTORY_KEPT` stay.
  */
 async function recordReport(
   db: OrgDb,
   report: HistoryFigures & { repo: string; number: number; event: string },
 ): Promise<void> {
   const [latest] = await db.query<{
-    id: unknown;
     commits: unknown;
     lines: unknown;
     agent_lines: unknown;
     sessions: unknown;
     reporter_version: unknown;
   }>(
-    `SELECT id, commits, lines, agent_lines, sessions, reporter_version
+    `SELECT commits, lines, agent_lines, sessions, reporter_version
      FROM pull_request_reports
      WHERE org_id = $1 AND repo = $2 AND number = $3
      ORDER BY at DESC, id DESC
@@ -774,12 +786,9 @@ async function recordReport(
     num(latest.lines) === report.lines &&
     num(latest.agent_lines) === report.agent_lines &&
     sessionSignature(sessionsOf(latest.sessions)) === sessionSignature(report.sessions);
-  if (same && latest) {
-    if (newerAction(version, report.reporter_version)) {
-      await db.query(`UPDATE pull_request_reports SET reporter_version = $2 WHERE id = $1`, [latest.id, report.reporter_version]);
-    }
-    return;
-  }
+  // Same figures, and not a newer Action: the row already there still says
+  // which version produced it.
+  if (same && !newerAction(version, report.reporter_version)) return;
   await db.query(
     `INSERT INTO pull_request_reports
        (org_id, repo, number, event, commits, lines, agent_lines, sessions, reporter_version)
@@ -815,6 +824,7 @@ async function recordReport(
  * for good: they are what review started from.
  */
 export async function storePull(db: OrgDb, report: PullReport, key?: string): Promise<PullAttribution> {
+  await holdPull(db, report.repo, report.number);
   // Held until the history is written, so a rematch of the same pull request
   // waits and the two do not each keep the figures from before the other.
   const [existing] = await db.query<{ first_files: unknown; first_event: string }>(
@@ -919,6 +929,7 @@ export async function rematchPull(
   number: number,
   key?: string,
 ): Promise<PullMatch | "needs_report" | null> {
+  await holdPull(db, repo, number);
   // The row is held until this is stored, so that a report arriving meanwhile
   // waits, and its files are not left beside figures made from the ones before.
   const [r] = await db.query(

@@ -100,17 +100,19 @@ older Action by that rule.
 
 `history` on `GET /prs/detail` is the figures each time they moved, newest first, 50 at most.
 A row is kept when the lines, the agent lines, the commits, or the set of sessions and their
-line counts differ from the latest one. Each row has `at`, `event` (`opened`, `synchronize`,
+line counts differ from the latest one, and when a newer Action reports the same figures.
+Each row has `at`, `event` (`opened`, `synchronize`,
 `review`, `closed`, `manual`, or `match` when the lines were matched again on the server),
 `commits`, `lines`, `agent_lines`, `sessions` (each session's key and its lines, no hashes),
-`reporter_version`, and `change` against the row before it: the lines, agent lines and commits
+`reporter_version` (the version that produced that row), and `change` against the row before
+it: the lines, agent lines and commits
 before and after, `sessions_added`, `sessions_gone`, `sessions_changed`, and `reason`. The
 reason is, in this order: new commits (`2 new commits`); sessions uploaded since (`1 session
-uploaded since: +17 agent lines`); sessions no longer matched; `a newer Action`; otherwise
+uploaded since: +17 agent lines`); sessions no longer matched; `a newer Action`; a session
+whose line count changed (`1 session's lines changed: +1 agent lines`); otherwise
 `matched again, nothing new`. The first row's reason is null. A pull request stored before
 this was kept has one row, from the figures it had then. A report that only brings a newer
-Action is written onto the latest row, so the next change is not explained by a version that
-was already current.
+Action is a row of its own, and the row before it keeps the version that produced those figures.
 
 ## Tokens and people
 

@@ -135,8 +135,8 @@ export function figureBecause(reason: string): string {
 
 /**
  * The sentence beside the agent figure when that figure moved: what it was
- * until the previous report, and why. Null when there is nothing earlier,
- * or when the agent lines are the same as then.
+ * until this report, and why. Null when there is nothing earlier, or when
+ * the agent lines are the same as then.
  */
 export function figureShift(
   history: readonly { at: string; agent_lines: number; change: { reason: string | null } }[],
@@ -146,5 +146,5 @@ export function figureShift(
   const latest = history[0];
   const previous = history[1];
   if (!latest?.change.reason || !previous || previous.agent_lines === latest.agent_lines) return null;
-  return `Was ${amount(previous.agent_lines)} until ${when(previous.at)}: ${figureBecause(latest.change.reason)}.`;
+  return `Was ${amount(previous.agent_lines)} until ${when(latest.at)}: ${figureBecause(latest.change.reason)}.`;
 }

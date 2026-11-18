@@ -589,7 +589,9 @@ export interface PullHistoryChange {
    * Why the figures moved, in a few words, chosen in this order: new
    * commits (`2 new commits`); sessions uploaded since (`1 session uploaded
    * since: +17 agent lines`); sessions no longer matched; `a newer Action`;
-   * otherwise `matched again, nothing new`. Null on the first report.
+   * a session whose line count changed (`1 session's lines changed: +1
+   * agent lines`); otherwise `matched again, nothing new`. Null on the
+   * first report.
    */
   reason: string | null;
 }
@@ -612,9 +614,8 @@ export interface PullHistory {
   /** The sessions matched then, and how many lines of the pull request each had. */
   sessions: PullHistorySession[];
   /**
-   * The Action's version on the report, once one was sent. A later report
-   * that names a newer one, and moves nothing else, is written onto this
-   * row rather than kept as a row of its own.
+   * The Action's version on the report that produced these figures. A later
+   * report that names a newer one, and moves nothing else, is a later row.
    */
   reporter_version: string | null;
   change: PullHistoryChange;

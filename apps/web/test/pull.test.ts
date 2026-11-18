@@ -9,10 +9,11 @@ test("a moved agent figure says what it was, and why", () => {
     { at: "2026-11-17T19:23:00.000Z", agent_lines: 365, change: { reason: null } },
   ];
   assert.equal(figureBecause("1 session uploaded since: +17 agent lines"), "1 session uploaded since");
+  assert.equal(figureBecause("1 session's lines changed: +1 agent lines"), "1 session's lines changed");
   assert.equal(figureBecause("2 new commits"), "2 new commits");
   assert.equal(
-    figureShift(history, () => "17 Nov, 19:23", (n) => String(n)),
-    "Was 365 until 17 Nov, 19:23: 1 session uploaded since.",
+    figureShift(history, (iso) => (iso === history[0]!.at ? "17 Nov, 21:00" : `wrong ${iso}`), (n) => String(n)),
+    "Was 365 until 17 Nov, 21:00: 1 session uploaded since.",
   );
   // The agent lines did not move: the history still says why, and the headline does not.
   assert.equal(
