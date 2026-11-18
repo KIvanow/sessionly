@@ -366,11 +366,9 @@ main > p { margin: 0; }
 /* A bar for a share: the track is the whole, the fill the part. */
 .track { display: block; height: 8px; margin: 6px 0 2px; background: var(--track); }
 .track i { display: block; height: 100%; background: var(--blue); }
-.tiles.three { grid-template-columns: repeat(3, 1fr); }
 .tiles.five { grid-template-columns: repeat(5, 1fr); }
 @media (max-width: 1280px) { .tiles.five { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 1020px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 719px) { .tiles.three { grid-template-columns: 1fr; } }
+@media (max-width: 1020px) { .tiles, .tiles.five { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 860px) { .headline { grid-template-columns: 1fr; } }
 
 /* Tables */

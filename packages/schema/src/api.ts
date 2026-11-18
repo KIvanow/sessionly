@@ -456,9 +456,13 @@ export interface PullCost {
   /** Sessions with lines in it, and how many of those have no cost figure or were deleted: `usd` is then a floor. */
   sessions: number;
   sessions_without_cost: number;
-  /** `usd` for each agent line it has now. */
+  /** What an agent line of it cost: `usd` for each line of the sessions that have a cost figure. */
   per_agent_line_usd: number | null;
-  /** `usd` for each agent line that survived review. Null where that is not known. */
+  /**
+   * What an agent line that survived review cost: the agent lines it was
+   * opened with, at `per_agent_line_usd` each, for each of them still there.
+   * Null where what survived is not known, or nothing did.
+   */
   per_surviving_line_usd: number | null;
 }
 
@@ -538,8 +542,9 @@ export interface PullSession {
   hashed_lines: number | null;
   /**
    * Its cost in this pull request: the session's cost, in the proportion of
-   * `lines` to `hashed_lines` (the whole at most). Null where the session has
-   * no cost figure, or has been deleted.
+   * `lines` to `hashed_lines`, or to its lines in all pull requests when
+   * those are more (the same lines can be in several). Null where the
+   * session has no cost figure, or has been deleted.
    */
   cost_share_usd: number | null;
   session: Pick<
@@ -618,11 +623,16 @@ export interface PullSummary {
      */
     cost_usd: number | null;
     cost_estimated: boolean;
-    /** Pull requests whose cost is a floor: some session of theirs has no cost figure. */
+    /**
+     * Pull requests whose cost is a floor or not known: some session of
+     * theirs has no cost figure, or they have agent lines and were last
+     * reported before their sessions were kept. `cost_usd` is then a floor.
+     */
     pulls_with_cost_missing: number;
     /**
-     * Over the pull requests reported from the moment they were opened: their
-     * cost for each agent line that survived review. Null when there is none.
+     * Over the pull requests reported from the moment they were opened that
+     * have a cost: what the agent lines they were opened with cost, for each
+     * of those that survived review. Null when there is none.
      */
     per_surviving_line_usd: number | null;
   };

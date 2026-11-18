@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { byOf, countFeedback, feedbackLabel, matchAll, matchedLine, pullCost, pullCostNote, pullHref, web } from "../src/pull.ts";
+import { byOf, countFeedback, feedbackLabel, matchAll, matchedLine, pullCost, pullCostNote, pullHref, pullsCostNote, web } from "../src/pull.ts";
 
 test("a pull request says how current its figures are", () => {
   const when = (iso: string | null) => `<${iso}>`;
@@ -107,4 +107,15 @@ test("a pull request's cost is said with what is not sure about it", () => {
   assert.equal(pullCostNote({ ...none, sessions: 0, sessions_without_cost: 0 }), "no session was matched to its lines");
   assert.equal(pullCost(null), "–");
   assert.match(pullCostNote(null), /were not kept/);
+  // what a line cost is small, and is not shown as nothing
+  assert.equal(pullCostNote({ ...whole, per_agent_line_usd: 0.00004, per_surviving_line_usd: null }), "$0.000040 per agent line");
+});
+
+test("the cost of several pull requests says what it leaves out", () => {
+  const total = { cost_usd: 42, pulls_with_cost_missing: 0, per_surviving_line_usd: 0.25 };
+  assert.equal(pullsCostNote(total), "$0.25 per agent line that survived review; what the matched sessions cost, each for its share of lines");
+  assert.equal(pullsCostNote({ ...total, pulls_with_cost_missing: 2, per_surviving_line_usd: null }), "not known in full for 2 pull requests");
+  // no figure: because nothing was matched, or because what was matched has none
+  assert.equal(pullsCostNote({ cost_usd: null, pulls_with_cost_missing: 0, per_surviving_line_usd: null }), "no session was matched to their lines");
+  assert.equal(pullsCostNote({ cost_usd: null, pulls_with_cost_missing: 1, per_surviving_line_usd: null }), "not known in full for 1 pull request: no cost figure for the sessions matched");
 });

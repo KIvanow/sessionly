@@ -2,10 +2,10 @@ import type { LinesBy, PullList, PullMatches, PullRow, PullSummary } from "@sess
 import { useEffect, useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { scopeParams, type Scope } from "./App.tsx";
-import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName, usd } from "./format.ts";
+import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
-import { matchAll, pullCost, pullHref, web } from "./pull.ts";
+import { matchAll, pullCost, pullHref, pullsCostNote, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -119,16 +119,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
             <Tile
               label="Agent cost"
               value={pullCost({ usd: total.cost_usd, estimated: total.cost_estimated, sessions_without_cost: total.pulls_with_cost_missing })}
-              note={
-                total.cost_usd == null
-                  ? "none of the matched sessions has a cost figure"
-                  : [
-                      total.per_surviving_line_usd != null ? `${usd(total.per_surviving_line_usd)} per agent line that survived review` : null,
-                      "what the matched sessions cost, each for its share of lines",
-                    ]
-                      .filter(Boolean)
-                      .join("; ")
-              }
+              note={pullsCostNote(total)}
             />
           </section>
           <ByModel summary={summary.data!} />

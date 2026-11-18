@@ -172,15 +172,20 @@ a server of version 0.5.0 or older has to be reported once more before it can be
   [`sessionly install --repo`](cloud-sessions.md) in the repository fixes it for later ones.
 - **Agent cost** is what the sessions matched to a pull request cost, each counted for its
   share: the session's cost times its lines in the pull request, divided by all the lines the
-  session uploaded hashes of (the whole cost at most). A session that wrote into three pull
-  requests is split between them and counted once, and what it spent on work that reached no
-  pull request is in none. Divided by the agent's lines it gives the cost of a line, and by
-  the agent's lines that survived review, where that is known, the cost of a line that got
-  through. Three things to read with it. It is **the cost of the matched sessions, not of
-  making the pull request**: lines that are not an agent's carry none. It is **a floor** when
-  a session has no cost figure or was deleted since, and then reads "at least". And it is
-  **an estimate**, marked `~`, when any of those sessions' costs is. The figure is worked out
-  when the page is read, from what the sessions cost now. The Action's comment does not show it.
+  session uploaded hashes of. A session that wrote into three pull requests is split between
+  them and counted once, and what it spent on work that reached no pull request is in none.
+  Where the same lines are in several pull requests (one stacked on another, a release of
+  what was merged before), the session is split between those by its lines in each, so it
+  is still counted once. Divided by the lines of the sessions that have a cost figure, it
+  gives the cost of an agent line. The cost of a line that got through review, where that is
+  known, is the agent's lines the pull request was opened with at that cost each, divided by
+  those that survived. Three things to read with it. It is **the cost of the matched
+  sessions, not of making the pull request**: lines that are not an agent's carry none. It
+  is **a floor** when a session has no cost figure or was deleted since, and then reads "at
+  least"; the total above the list is one too when a pull request with agent lines was last
+  reported before its sessions were kept. And it is **an estimate**, marked `~`, when any of
+  those sessions' costs is. The figure is worked out when the page is read, from what the
+  sessions cost now. The Action's comment does not show it.
 - **By model is a description, not a ranking.** Harder work goes to stronger models, a pull
   request with two models counts under both, and a handful of pull requests says little.
 - The model is known per line for Claude Code, and for Cursor turns the hooks saw; otherwise

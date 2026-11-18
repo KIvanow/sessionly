@@ -22,7 +22,8 @@ function trim(n: number): string {
 
 /** Dollars: "$0.0042" below a cent, otherwise "$1,234.56". */
 export function usd(n: number): string {
-  if (n > 0 && n < 0.01) return `$${n.toFixed(4)}`;
+  // Under a cent, as many places as say something: what one line cost is often a hundredth of one.
+  if (n > 0 && n < 0.01) return `$${n.toFixed(Math.min(8, Math.max(4, 1 - Math.floor(Math.log10(n)))))}`;
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 

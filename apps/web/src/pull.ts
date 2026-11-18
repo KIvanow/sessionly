@@ -29,6 +29,15 @@ export function pullCostNote(c: PullCost | null): string {
   return [...each, missing].filter(Boolean).join("; ");
 }
 
+/** The small print under the cost of several pull requests. */
+export function pullsCostNote(total: { cost_usd: number | null; pulls_with_cost_missing: number; per_surviving_line_usd: number | null }): string {
+  const missing = total.pulls_with_cost_missing;
+  const floor = missing > 0 ? `not known in full for ${count(missing)} ${missing === 1 ? "pull request" : "pull requests"}` : null;
+  if (total.cost_usd == null) return floor ? `${floor}: no cost figure for the sessions matched` : "no session was matched to their lines";
+  const each = total.per_surviving_line_usd != null ? `${usd(total.per_surviving_line_usd)} per agent line that survived review` : null;
+  return [each, floor ?? "what the matched sessions cost, each for its share of lines"].filter(Boolean).join("; ");
+}
+
 /** Where a pull request's page is: the repository's name has slashes, so it goes in as one part. */
 export function pullHref(p: { repo: string; number: number }): string {
   return `#/pull/${encodeURIComponent(p.repo)}/${p.number}`;

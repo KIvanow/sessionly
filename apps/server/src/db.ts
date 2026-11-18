@@ -674,6 +674,38 @@ const MIGRATIONS: string[] = [
   // When its lines were last matched: by a report, or again since.
   `ALTER TABLE pull_requests ADD COLUMN matched_at timestamptz DEFAULT now()`,
   `UPDATE pull_requests SET matched_at = updated_at`,
+  // How many line hashes a session uploaded: what its lines in a pull
+  // request are a share of, for what it cost there. Kept beside the payload
+  // so that reading it does not open the payload.
+  `ALTER TABLE sessions ADD COLUMN hashed_lines integer NOT NULL DEFAULT 0`,
+  `UPDATE sessions SET hashed_lines =
+     (SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(payload->'lines') = 'array' THEN payload->'lines' ELSE '[]'::jsonb END) AS l
+      WHERE jsonb_typeof(l->'hashes') = 'array')`,
+  // The sessions with lines in a pull request, and how many: what its
+  // `detail` says of them, as rows, so that all the pull requests a session
+  // has lines in can be found by the session. Its cost is split between them.
+  `CREATE TABLE pull_sessions (
+     org_id     text NOT NULL REFERENCES orgs ON DELETE CASCADE,
+     repo       text NOT NULL,
+     number     integer NOT NULL,
+     machine_id text NOT NULL,
+     source     text NOT NULL,
+     session_id text NOT NULL,
+     lines      integer NOT NULL,
+     PRIMARY KEY (org_id, repo, number, machine_id, source, session_id),
+     FOREIGN KEY (org_id, repo, number) REFERENCES pull_requests ON DELETE CASCADE
+   )`,
+  `CREATE INDEX pull_sessions_session ON pull_sessions (org_id, machine_id, source, session_id)`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON pull_sessions`),
+  ...rowLevelSecurity("pull_sessions"),
+  `INSERT INTO pull_sessions (org_id, repo, number, machine_id, source, session_id, lines)
+   SELECT p.org_id, p.repo, p.number, s.machine_id, s.source, s.session_id, s.lines
+   FROM pull_requests p,
+        jsonb_to_recordset(CASE WHEN jsonb_typeof(p.detail->'sessions') = 'array' THEN p.detail->'sessions' ELSE '[]'::jsonb END)
+          AS s(machine_id text, source text, session_id text, lines integer)
+   WHERE s.machine_id IS NOT NULL AND s.source IS NOT NULL AND s.session_id IS NOT NULL AND s.lines IS NOT NULL
+   ON CONFLICT DO NOTHING`,
 ];
 
 /**

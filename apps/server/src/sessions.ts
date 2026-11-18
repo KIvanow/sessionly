@@ -128,6 +128,7 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     rw_lines_added: rewrite?.lines_added ?? null,
     rw_lines_surviving: rewrite?.lines_surviving ?? null,
     rw_measured_at: rewrite?.measured_at ?? null,
+    hashed_lines: (upload.lines ?? []).reduce((sum, file) => sum + (file.hashes?.length ?? 0), 0),
     payload: JSON.stringify(upload),
   };
   const names = Object.keys(columns);
