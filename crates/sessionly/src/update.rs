@@ -106,6 +106,13 @@ fn latest() -> Result<String> {
     Ok(tag.trim_start_matches('v').to_string())
 }
 
+/// The version the newest release's page names, without the `v`, and without
+/// deciding whether it is newer than this binary. `sessionly update` keeps
+/// its own answer for that.
+pub(crate) fn published() -> Result<String> {
+    latest()
+}
+
 /// What `sessionly update` did, for its one line of output.
 #[derive(Debug, PartialEq)]
 pub enum Outcome {

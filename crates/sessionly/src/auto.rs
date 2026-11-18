@@ -106,12 +106,45 @@ fn read_update_check(path: &Path) -> Option<UpdateCheck> {
     serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
 }
 
-/// Whether `checked_at` is less than a day ago. One that cannot be read is not.
+/// Whether `checked_at` is less than a day ago, and not in the future. One
+/// that cannot be read is not. A future one is not either: a clock that was
+/// ahead, and is then put right, would otherwise wait out the whole gap.
 fn asked_within_a_day(checked_at: &str) -> bool {
     let Ok(at) = DateTime::parse_from_rfc3339(checked_at) else {
         return false;
     };
-    Utc::now().signed_duration_since(at) < UPDATE_INTERVAL
+    let age = Utc::now().signed_duration_since(at);
+    age >= chrono::Duration::zero() && age < UPDATE_INTERVAL
+}
+
+/// Whether this run would upload. The release check is part of an upload,
+/// not of a machine that only keeps a local ledger. Read the same way as
+/// the upload itself, without creating a machine id.
+fn upload_configured(data_dir: &Path) -> bool {
+    server_configured(data_dir, |name| std::env::var(name).ok())
+}
+
+fn server_configured(data_dir: &Path, env: impl Fn(&str) -> Option<String>) -> bool {
+    let saved = fs::read_to_string(data_dir.join("config.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .is_some_and(|config| {
+            config
+                .get("server")
+                .is_some_and(|server| server.is_object())
+        });
+    if saved {
+        return true;
+    }
+    let var = |name: &str| {
+        env(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    match (var("SESSIONLY_URL"), var("SESSIONLY_TOKEN")) {
+        (Some(url), Some(_)) => crate::config::check_server_url(&url).is_ok(),
+        _ => false,
+    }
 }
 
 /// The line for `status` (and for `list` and `summary` in a terminal) when a
@@ -128,11 +161,13 @@ pub fn pending_update(data_dir: &Path) -> Option<String> {
 }
 
 /// Ask, at most once a day, whether a newer release is out, and remember the
-/// answer in `update-check.json`. A failed ask is silent and is not tried
-/// again until the day is up. Nothing is sent about the machine. A cloud
-/// environment is not asked, and neither is a machine that switched it off.
+/// version the release page named in `update-check.json`. A failed ask is
+/// silent and is not tried again until the day is up. The request carries no
+/// account or session; a cloud environment is not asked, nor a machine that
+/// switched it off, nor one that has no server to upload to.
 fn note_release(data_dir: &Path) {
-    if crate::runtime::in_cloud() || !update_check_enabled(data_dir) {
+    if crate::runtime::in_cloud() || !update_check_enabled(data_dir) || !upload_configured(data_dir)
+    {
         return;
     }
     let path = data_dir.join("update-check.json");
@@ -143,28 +178,24 @@ fn note_release(data_dir: &Path) {
     {
         return;
     }
-    let Ok(exe) = std::env::current_exe() else {
+    let kept = previous.and_then(|check| check.latest);
+    // Remember the attempt before asking. If this cannot be written, or the
+    // process stops during the ask, the next run must not ask again at once.
+    if !write_update_check(&path, kept.as_deref()) {
+        return;
+    }
+    let Ok(version) = crate::update::published() else {
         return;
     };
-    let this = env!("CARGO_PKG_VERSION");
-    let latest = match crate::update::run(&exe, this, None, true) {
-        Ok(crate::update::Outcome::Available(version)) => Some(version),
-        // This is the newest, or newer than what was published.
-        Ok(crate::update::Outcome::Current | crate::update::Outcome::Updated(_, _)) => {
-            Some(this.to_string())
-        }
-        // Keep what was known. The time is still written, so the next day is the next ask.
-        Err(_) => previous.and_then(|check| check.latest),
-    };
-    write_update_check(&path, latest.as_deref());
+    let _ = write_update_check(&path, Some(&version));
 }
 
-fn write_update_check(path: &Path, latest: Option<&str>) {
+fn write_update_check(path: &Path, latest: Option<&str>) -> bool {
     let Ok(text) = serde_json::to_string_pretty(&serde_json::json!({
         "checked_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         "latest": latest,
     })) else {
-        return;
+        return false;
     };
     let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     let mut options = OpenOptions::new();
@@ -178,9 +209,10 @@ fn write_update_check(path: &Path, latest: Option<&str>) {
         .open(&tmp)
         .and_then(|mut file| file.write_all(format!("{text}\n").as_bytes()));
     if written.is_ok() && fs::rename(&tmp, path).is_ok() {
-        return;
+        return true;
     }
     let _ = fs::remove_file(&tmp);
+    false
 }
 
 fn age(path: &Path) -> Option<Duration> {
@@ -296,6 +328,27 @@ mod tests {
     }
 
     #[test]
+    fn a_release_is_asked_only_when_a_server_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let none = |_: &str| None;
+        assert!(!server_configured(dir.path(), none));
+        fs::write(dir.path().join("config.json"), r#"{"server":null}"#).unwrap();
+        assert!(!server_configured(dir.path(), none));
+        let named = |name: &str| match name {
+            "SESSIONLY_URL" => Some("https://sessionly.example.com".to_string()),
+            "SESSIONLY_TOKEN" => Some("t".to_string()),
+            _ => None,
+        };
+        assert!(server_configured(dir.path(), named));
+        fs::write(
+            dir.path().join("config.json"),
+            r#"{"server":{"url":"http://127.0.0.1:9","token":"t"}}"#,
+        )
+        .unwrap();
+        assert!(server_configured(dir.path(), none));
+    }
+
+    #[test]
     fn a_check_is_fresh_for_a_day() {
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
         assert!(asked_within_a_day(&now));
@@ -303,6 +356,9 @@ mod tests {
             (Utc::now() - chrono::Duration::hours(25)).to_rfc3339_opts(SecondsFormat::Secs, true);
         assert!(!asked_within_a_day(&yesterday));
         assert!(!asked_within_a_day("not a time"));
+        let ahead =
+            (Utc::now() + chrono::Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        assert!(!asked_within_a_day(&ahead));
         // Written, and not newer than this binary: nothing to say.
         let path = tempfile::tempdir().unwrap();
         write_update_check(&path.path().join("update-check.json"), Some("0.0.1"));

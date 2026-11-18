@@ -549,7 +549,7 @@ export interface PullSummary {
   /** Most lines first. */
   by_model: PullsByModel[];
   /**
-   * Repositories in the filter whose last report came from an older Action
+   * Repositories whose newest report in the filter came from an older Action
    * than this server knows, or from one that named no version.
    */
   older_actions: string[];

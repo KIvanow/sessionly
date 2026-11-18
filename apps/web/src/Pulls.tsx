@@ -27,7 +27,8 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
   const [offset, setOffset] = useState(0);
   useEffect(() => setOffset(0), [state, scope]);
   const params = { since: scopeParams(scope, true).since, repo: scope.repo || undefined, state: state || undefined };
-  const summary = useApi<PullSummary>(token, `/prs/summary${query(params)}`, onSignOut);
+  const summaryPath = `/prs/summary${query(params)}`;
+  const summary = useApi<PullSummary>(token, summaryPath, onSignOut);
   const list = useApi<PullList>(token, `/prs${query({ ...params, limit: PAGE, offset })}`, onSignOut);
   const everything = useApi<PullList>(token, "/prs?limit=1", onSignOut);
   const total = summary.data?.total;
@@ -99,7 +100,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
           <div className="card-head">
             <h2>Pull requests</h2>
           </div>
-          <OlderActions repos={summary.data?.older_actions ?? []} />
+          <OlderActions repos={summary.dataPath === summaryPath ? (summary.data?.older_actions ?? []) : []} />
           <div className="scroll">
             <table className="rows">
               <thead>
@@ -215,13 +216,15 @@ function ByModel({ summary }: { summary: PullSummary }) {
   );
 }
 
-/** One notice when a pull request in the current filter was last reported by an older Action. */
+/** One notice when a repository's newest report in the current filter came from an older Action. */
 function OlderActions({ repos }: { repos: string[] }) {
   if (repos.length === 0) return null;
   return (
     <p className="muted hint">
       {nameSome(repos)} {repos.length === 1 ? "reports" : "report"} with an older version of the Sessionly Action.
-      Change the version in <code>.github/workflows/sessionly.yml</code>, then run the workflow for the pull request.
+      Change the version in <code>.github/workflows/sessionly.yml</code>. A re-run keeps the old version: push a
+      commit for an open pull request, or start the workflow by hand with the pull request's number for one that
+      has been merged.
     </p>
   );
 }

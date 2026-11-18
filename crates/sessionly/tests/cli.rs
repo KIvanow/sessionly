@@ -1600,6 +1600,8 @@ fn a_session_ending_uploads_in_the_background() {
     let home = tempfile::tempdir().unwrap();
     let server = StubServer::start();
     stdout(run(home.path(), &["connect", &server.url, "--token", "t"]));
+    // The release check runs after the upload and can stall the log line.
+    stdout(run(home.path(), &["settings", "--update-check", "off"]));
     let hook = |payload: serde_json::Value| {
         let mut cmd = sessionly(home.path());
         cmd.arg("capture")
@@ -2474,13 +2476,25 @@ fn a_background_upload_notes_a_newer_release_once_a_day() {
             .unwrap()
     };
 
+    // Not connected: nothing is uploaded, so nothing is asked.
+    let disconnected = auto();
+    assert!(
+        disconnected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&disconnected.stderr)
+    );
+    let check = home.path().join("data/update-check.json");
+    assert!(!check.exists(), "a local ledger asked for a release");
+
+    let server = StubServer::start();
+    stdout(run(home.path(), &["connect", &server.url, "--token", "t"]));
+
     let first = auto();
     assert!(
         first.status.success(),
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
-    let check = home.path().join("data/update-check.json");
     let saved: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&check).unwrap()).unwrap();
     assert_eq!(saved["latest"], "99.0.0");

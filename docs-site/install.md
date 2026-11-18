@@ -64,9 +64,10 @@ sessionly update            # --check only says whether there is one; --version 
 ```
 
 A background upload asks once a day whether a newer release is out, and `sessionly status`
-says so (`list` and `summary` do too, when their output is a terminal). `sessionly settings
---update-check off` stops the question and the line. The capture hooks never ask, and neither
-does a cloud environment, where [`install --repo`](cloud-sessions.md) picks the version.
+says so (`list` and `summary` do too, when their output is a terminal). A machine with no
+server is not asked. `sessionly settings --update-check off` stops the question and the line.
+The capture hooks never ask, and neither does a cloud environment, where
+[`install --repo`](cloud-sessions.md) picks the version.
 
 It downloads the release's archive for this machine, checks it against the release's
 `SHA256SUMS`, runs the new binary once to see that it is the version asked for, and then puts

@@ -49,5 +49,6 @@ What to know:
   begun.
 - With auto sync off, the ledger is still brought up to date by `list`, `summary`, `show` and
   `sync`, and uploads happen when you run `sessionly upload`.
-- Once a day the run asks whether a newer release of sessionly is out. The capture hook does
-  not: it stays offline. `sessionly settings --update-check off` stops the question.
+- Once a day, a run that uploads asks whether a newer release of sessionly is out. A machine
+  that is not connected is not asked. The capture hook is not either: it stays offline.
+  `sessionly settings --update-check off` stops the question.

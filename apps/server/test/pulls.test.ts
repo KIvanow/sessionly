@@ -496,14 +496,26 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal((await call(tokens.ci, "PUT", "/prs", pinned({ number: 43, event: "synchronize" }))).status, 200);
   assert.equal(await versionOf(43), null);
 
-  // The list's filter, not one page of it: this repository has a pull request from an older Action.
+  // The list's filter, not one page of it. The newest report here named no version.
   const summary = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/pinned")).body;
   assert.deepEqual(summary.older_actions, [repo]);
-  // One whose every pull request is from the current Action is not named.
-  await call(tokens.ci, "PUT", "/prs", report({
-    repo: "github.com/acme/current",
+  // One whose newest report is from the current Action is not named, even when an older pull request is.
+  const currentRepo = "github.com/acme/current";
+  const current = await call(tokens.ci, "PUT", "/prs", report({
+    repo: currentRepo,
     number: 1,
     reporter: { name: "sessionly-action", version: CURRENT_ACTION },
   }));
-  assert.deepEqual((await call(tokens.admin, "GET", "/prs/summary?repo=acme/current")).body.older_actions, []);
+  assert.equal(current.status, 200);
+  const caughtUp = await call(tokens.ci, "PUT", "/prs", report({ repo: currentRepo, number: 2 }));
+  assert.equal(caughtUp.status, 200);
+  const currentAgain = await call(tokens.ci, "PUT", "/prs", report({
+    repo: currentRepo,
+    number: 3,
+    reporter: { name: "sessionly-action", version: CURRENT_ACTION },
+  }));
+  assert.equal(currentAgain.status, 200);
+  const currentSummary = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/current")).body;
+  assert.equal(currentSummary.total.pulls, 3);
+  assert.deepEqual(currentSummary.older_actions, []);
 });

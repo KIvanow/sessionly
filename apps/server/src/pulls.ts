@@ -641,7 +641,9 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
   const { sql, params } = where(db.orgId, filters);
   const rows = (await db.query(`SELECT ${ROW_COLUMNS} FROM pull_requests ${sql}`, params)).map(pullRow);
   const byModel = new Map<string, PullsByModel>();
-  const older = new Set<string>();
+  // The newest report of each repository in the filter. An older pull request
+  // does not mean the repository still reports with an old Action.
+  const latest = new Map<string, { at: string; version: string | null }>();
   const total = {
     pulls: rows.length,
     pulls_with_agent_lines: 0,
@@ -667,7 +669,10 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       bot_review_comments: 0,
     }));
   for (const pull of rows) {
-    if (olderAction(pull.reporter_version, pull.reporter_current)) older.add(pull.repo);
+    const known = latest.get(pull.repo);
+    if (!known || pull.updated_at > known.at) {
+      latest.set(pull.repo, { at: pull.updated_at, version: pull.reporter_version });
+    }
     const a = pull.attribution;
     total.lines += a.now.lines;
     total.agent_lines += a.now.agent_lines;
@@ -696,5 +701,8 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       row.surviving += by.surviving;
     }
   }
-  return { by_model: sorted(byModel), older_actions: [...older].sort(), total };
+  const older = [...latest.entries()]
+    .filter(([, row]) => olderAction(row.version, CURRENT_ACTION))
+    .map(([repo]) => repo);
+  return { by_model: sorted(byModel), older_actions: older.sort(), total };
 }

@@ -41,6 +41,15 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
           {p.head_ref && <>, from <code>{p.head_ref}</code>{p.base_ref && <> into <code>{p.base_ref}</code></>}</>}
         </p>
       </div>
+      {olderAction(p.reporter_version, p.reporter_current) && (
+        <p className="muted">
+          This repository reports with an older version of the Sessionly Action (
+          {p.reporter_version ? `${p.reporter_version}; current is ${p.reporter_current}` : `current is ${p.reporter_current}`}
+          ). Change the version in <code>.github/workflows/sessionly.yml</code>. A re-run keeps the old version: push a
+          commit for an open pull request, or start the workflow by hand with this pull request's number if it has
+          been merged.
+        </p>
+      )}
       <section className="tiles" aria-label="Totals">
         <Tile label="Lines added" value={count(a.now.lines)} note={`in ${count(p.commits)} ${p.commits === 1 ? "commit" : "commits"}`} />
         <Tile
@@ -285,18 +294,9 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
   );
 }
 
-/** For a pull request last reported before this was kept. */
+/** For a pull request last reported before this was kept, by the current Action. An older Action is named once, above. */
 function Earlier({ what, reported, current }: { what: string; reported: string | null; current: string }) {
-  // An old pin sends the same report again, so "the next report" never brings what is missing.
-  if (olderAction(reported, current)) {
-    const which = reported ? `${reported}; current is ${current}` : `current is ${current}`;
-    return (
-      <p className="muted">
-        This repository reports with an older version of the Sessionly Action ({which}). Change the version
-        in <code>.github/workflows/sessionly.yml</code>, then run the workflow for this pull request.
-      </p>
-    );
-  }
+  if (olderAction(reported, current)) return null;
   return (
     <p className="muted">
       {what} were not kept when this pull request was last reported. They appear with its next report from

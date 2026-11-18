@@ -49,7 +49,9 @@ What to know about the workflow:
   name a commit instead (`KIvanow/sessionly/action@<commit sha>`), as this repository's own
   [workflow](https://github.com/KIvanow/sessionly/blob/main/.github/workflows/sessionly.yml) does.
   A pull request's page, and the list, say when the version that last reported is older than
-  the current Action, and which line of the workflow to change.
+  the current Action, and which line of the workflow to change. Re-running that same run keeps
+  the workflow file it started with. Push a commit on an open pull request, or start the
+  workflow by hand with the pull request's number for one that has been merged.
 - The job needs Node 20 or later on the runner, which GitHub's own runners have. It does not
   check the repository out.
 - A problem (server down, token refused) is a warning on the run, not a failed check, unless
