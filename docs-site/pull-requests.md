@@ -51,14 +51,14 @@ What to know about the workflow:
   The list, and a pull request's page, say when the repository's most recent report from the
   Action, or that named no reporter, is from an older one, and no report from the last 30 days
   came from the current Action or a newer one. The page names that most recent report's
-  version. If the workflow pins the Action to a commit or tag, move that pin to a newer one;
-  with `@main`, the next report uses the current Action. A pull request that was itself last
-  reported by an older one says so, without asking for a change that a later report already
-  shows was made. Re-running the same workflow run keeps the workflow
-  file it started with. Push a commit on an open pull request. For one that has been merged,
-  [start the workflow by hand](#pull-requests-from-before-the-action) with its number. GitHub
-  offers that run only when `workflow_dispatch` is in the workflow on the default branch, and
-  the changed file has to be there before you start it.
+  version. If the workflow pins the Action to a commit or tag, move that pin to a newer one.
+  A re-run of that pin keeps the old version: push a commit on an open pull request, or
+  [start the workflow by hand](#pull-requests-from-before-the-action) with its number if it
+  has been merged. With `@main`, re-run the job: it fetches the Action again. A pull request
+  that was itself last reported by an older one says so, without asking for a change that a
+  later report already shows was made. GitHub offers a run you start by hand only when
+  `workflow_dispatch` is in the workflow on the default branch, and the changed file has to
+  be there before you start it.
 - The job needs Node 20 or later on the runner, which GitHub's own runners have. It does not
   check the repository out.
 - A problem (server down, token refused) is a warning on the run, not a failed check, unless

@@ -1,6 +1,7 @@
 import type { PullDetail, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
+import { ActionNotice } from "./ActionNotice.tsx";
 import { type By, byOf, countFeedback, feedbackLabel, matchedLine, web } from "./pull.ts";
 import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
@@ -333,21 +334,18 @@ function ReporterNotice({
 }) {
   if (!repoOlder && !older) return null;
   const phrase = (version: string | null) => (version ? `${version}; current is ${current}` : `current is ${current}`);
-  const again =
-    "A re-run keeps the old version: push a commit for an open pull request, or start the workflow by hand with this pull request's number if it has been merged.";
   if (repoOlder) {
     return (
       <p className="muted">
-        This repository reports with an older version of the Sessionly Action ({phrase(repoReported)}). If{" "}
-        <code>.github/workflows/sessionly.yml</code> pins the Action to a commit or tag, move it to a newer one;
-        with <code>@main</code>, the next report uses the current Action.
-        {older ? ` ${again}` : ""}
+        This repository reports with an older version of the Sessionly Action ({phrase(repoReported)}).{" "}
+        <ActionNotice pull="this" rerun={older} />
       </p>
     );
   }
   return (
     <p className="muted">
-      This pull request was last reported by an older version of the Sessionly Action ({phrase(reported)}). {again}
+      This pull request was last reported by an older version of the Sessionly Action ({phrase(reported)}).{" "}
+      <ActionNotice pull="this" rerun move={false} />
     </p>
   );
 }

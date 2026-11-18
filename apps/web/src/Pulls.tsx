@@ -5,6 +5,7 @@ import { scopeParams, type Scope } from "./App.tsx";
 import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
+import { ActionNotice } from "./ActionNotice.tsx";
 import { matchAll, nameSome, pullHref, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
@@ -261,16 +262,13 @@ function ByModel({ summary }: { summary: PullSummary }) {
   );
 }
 
-/** One notice when every report a repository in the filter has came from an older Action. */
+/** Repositories in this filter that report with an older Action, and what to change. */
 function OlderActions({ repos }: { repos: string[] }) {
   if (repos.length === 0) return null;
   return (
     <p className="muted hint">
-      {nameSome(repos.map(repoName))} {repos.length === 1 ? "reports" : "report"} with an older version of the Sessionly Action.
-      If <code>.github/workflows/sessionly.yml</code> pins the Action to a commit or tag, move it to a newer one;
-      with <code>@main</code>, the next report uses the current Action. A re-run keeps the old version: push a
-      commit for an open pull request, or start the workflow by hand with the pull request's number for one that
-      has been merged.
+      {nameSome(repos.map(repoName))} {repos.length === 1 ? "reports" : "report"} with an older version of the Sessionly Action.{" "}
+      <ActionNotice pull="the" rerun />
     </p>
   );
 }
