@@ -885,6 +885,8 @@ interface Share {
   estimated: boolean;
   /** Its cost leaves requests out: what it cost here is then a floor. */
   partial: boolean;
+  /** Of an `unshared` one: a pull request whose lines were not kept cannot be matched again, only reported again. */
+  stuck: boolean;
   /** It has a cost, and what share of it is here is not known yet: its line hashes are still to be counted. */
   uncounted: boolean;
   /**
@@ -933,13 +935,14 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
               sum(o.weight) FILTER (WHERE r.state <> 'closed') AS in_pulls,
               sum(o.weight) FILTER (WHERE r.state = 'closed') AS in_closed,
               bool_or(o.matched IS NULL) AS unkept,
+              bool_or(o.matched IS NULL AND r.committers IS NULL) AS unkept_for_good,
               sum(coalesce(o.opened_weight, o.opened_lines, 0)) FILTER (WHERE r.state <> 'closed' AND r.first_event = 'opened') AS opened_in_pulls,
               sum(coalesce(o.opened_weight, o.opened_lines, 0)) FILTER (WHERE r.state = 'closed' AND r.first_event = 'opened') AS opened_in_closed
        FROM pull_sessions o JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number
        WHERE o.org_id = $1
          AND (o.machine_id, o.source, o.session_id) IN (SELECT machine_id, source, session_id FROM mine)
        GROUP BY o.machine_id, o.source, o.session_id)
-     SELECT mine.*, t.pulls, t.unkept, t.in_pulls, t.in_closed, t.opened_in_pulls, t.opened_in_closed, s.session_id IS NOT NULL AS held,
+     SELECT mine.*, t.pulls, t.unkept, t.unkept_for_good, t.in_pulls, t.in_closed, t.opened_in_pulls, t.opened_in_closed, s.session_id IS NOT NULL AS held,
             s.hashed_lines,
             s.cost_usd, s.cost_source, s.unpriced_requests, ${about}
      FROM mine
@@ -992,6 +995,7 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
       estimated: row.cost_source !== "recorded",
       uncounted: uncounted && whole != null,
       unshared: held && row.unkept === true && num(row.pulls) > 1,
+      stuck: row.unkept_for_good === true,
       partial: row.cost_source === "partial_estimate" || num(row.unpriced_requests) > 0,
       opened_lines: num(row.opened_lines),
       opened_usd: cost == null ? null : money(opened > 0 ? (cost * opened) / amongOpened : 0),
@@ -1012,6 +1016,7 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   let without = 0;
   let partial = 0;
   let unshared = 0;
+  let stuck = 0;
   let uncounted = 0;
   // The lines that cost is of: a session with no cost figure says nothing of what a line cost.
   let costed = 0;
@@ -1045,6 +1050,7 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
     if (share.estimated) estimated = true;
     if (share.partial) partial += 1;
     if (share.unshared) unshared += 1;
+    if (share.unshared && share.stuck) stuck += 1;
   }
   const a = pull.attribution;
   const each = usd != null && costed > 0 ? usd / costed : null;
@@ -1060,6 +1066,7 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
     sessions_without_cost: without,
     sessions_with_cost_partial: partial,
     sessions_unshared: unshared,
+    sessions_unshared_for_good: stuck,
     sessions_uncounted: uncounted,
     per_agent_line_usd: each == null ? null : money(each),
     opened_usd: opened == null ? null : money(opened),

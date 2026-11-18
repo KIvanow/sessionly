@@ -744,46 +744,64 @@ const MIGRATIONS: string[] = [
 /**
  * Count the line hashes of the sessions stored before the count was kept,
  * some at a time so that nothing waits on it for long. Run after the server
- * has started; several copies doing it at once pass over each other's rows.
- * Those with lines in a pull request come first: until they are counted,
- * reading a pull request's cost opens their payloads. A batch that fails
- * (payloads can be large) is tried again as a smaller one, down to one
- * session, and only that failing is an error. Returns how many it counted.
+ * has started, and again while any are left; several copies doing it at
+ * once count each session once. Those with lines in a pull request come
+ * first: until one is counted, a pull request says its share is not known.
+ * A batch that fails (payloads can be large) is tried again as a smaller
+ * one, down to one session; a session that fails alone is passed over, and
+ * is among the `failed`, to be tried the next time.
  */
-export async function countHashedLines(db: Db, atOnce = 50): Promise<number> {
+export async function countHashedLines(db: Db, atOnce = 50): Promise<{ counted: number; failed: number }> {
   const inPulls = `AND EXISTS (SELECT 1 FROM pull_sessions p WHERE p.org_id = u.org_id AND p.machine_id = u.machine_id
                                AND p.source = u.source AND p.session_id = u.session_id)`;
+  type Key = { org_id: string; machine_id: string; source: string; session_id: string };
   let counted = 0;
+  let failed = 0;
   for (const which of [inPulls, ""]) {
     let some = atOnce;
+    // The last session looked at: the next ones are those after it, so one that fails is not met again.
+    let last: Key | undefined;
     for (;;) {
-      let rows: unknown[];
+      const keys = await db.query<Key>(
+        `SELECT u.org_id, u.machine_id, u.source, u.session_id FROM sessions u
+         WHERE u.hashed_lines IS NULL ${which}
+           AND ($1::jsonb IS NULL OR (u.org_id, u.machine_id, u.source, u.session_id) >
+                 ($1::jsonb->>'org_id', $1::jsonb->>'machine_id', $1::jsonb->>'source', $1::jsonb->>'session_id'))
+         ORDER BY u.org_id, u.machine_id, u.source, u.session_id LIMIT $2`,
+        [last ? JSON.stringify(last) : null, some],
+      );
+      if (keys.length === 0) break;
       try {
-        rows = await db.transaction(
+        const rows = await db.transaction(
           (tx) =>
             tx.query(
               `UPDATE sessions s SET hashed_lines =
                  (SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
                   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'lines') = 'array' THEN s.payload->'lines' ELSE '[]'::jsonb END) AS l
                   WHERE jsonb_typeof(l->'hashes') = 'array')
-               WHERE (s.org_id, s.machine_id, s.source, s.session_id) IN
-                 (SELECT u.org_id, u.machine_id, u.source, u.session_id FROM sessions u
-                  WHERE u.hashed_lines IS NULL ${which} LIMIT $1 FOR UPDATE SKIP LOCKED)
+               FROM jsonb_to_recordset($1::jsonb) AS k(org_id text, machine_id text, source text, session_id text)
+               WHERE s.org_id = k.org_id AND s.machine_id = k.machine_id AND s.source = k.source
+                 AND s.session_id = k.session_id AND s.hashed_lines IS NULL
                RETURNING 1`,
-              [some],
+              [JSON.stringify(keys)],
             ),
           PATIENT,
         );
+        counted += rows.length;
+        last = keys[keys.length - 1];
+        some = Math.min(atOnce, some * 2);
       } catch (err) {
-        if (some === 1) throw err;
-        some = Math.max(1, Math.floor(some / 2));
-        continue;
+        if (keys.length > 1) {
+          some = Math.max(1, Math.floor(keys.length / 2));
+          continue;
+        }
+        console.error(`The line hashes of session ${keys[0]!.session_id} could not be counted:`, err);
+        failed += 1;
+        last = keys[0];
       }
-      counted += rows.length;
-      if (rows.length === 0) break;
     }
   }
-  return counted;
+  return { counted, failed };
 }
 
 /**

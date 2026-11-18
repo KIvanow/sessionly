@@ -51,9 +51,14 @@ export function pullCostNote(c: PullCost | null): string {
     c.sessions_with_cost_partial > 0
       ? `the cost of ${count(c.sessions_with_cost_partial)} ${c.sessions_with_cost_partial === 1 ? "session leaves" : "sessions leave"} requests out`
       : null;
+  // Matching again says which lines are whose. One last reported before what it is matched by was kept needs a report.
+  const how =
+    c.sessions_unshared_for_good > 0
+      ? "one of those has to be reported again by the Action before they can be shared out"
+      : "match those again to share them out";
   const unshared =
     c.sessions_unshared > 0
-      ? `${count(c.sessions_unshared)} ${c.sessions_unshared === 1 ? "session has" : "sessions have"} lines in other pull requests, perhaps these: match those again to share them out`
+      ? `${count(c.sessions_unshared)} ${c.sessions_unshared === 1 ? "session has" : "sessions have"} lines in other pull requests, perhaps these: ${how}`
       : null;
   const each = [
     // A cost that leaves requests out, over all of that session's lines, is a floor for each.

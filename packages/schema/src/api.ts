@@ -465,6 +465,12 @@ export interface PullCost {
    */
   sessions_unshared: number;
   /**
+   * How many of those have such lines in a pull request that cannot be
+   * matched again (see `matchable`): only a new report of it by the Action
+   * says which lines they are.
+   */
+  sessions_unshared_for_good: number;
+  /**
    * How many of those without a cost here have one, whose share is not known
    * yet: after an upgrade the server counts the line hashes of the sessions
    * it held, and until it has, what part of one is in a pull request cannot
