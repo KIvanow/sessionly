@@ -269,11 +269,13 @@ function People({
             <input type="checkbox" checked={also} onChange={(e) => setAlso(e.target.checked)} />
             <span>
               Also delete their{" "}
-              {removing.sessions === null ? "sessions" : `${removing.sessions} ${removing.sessions === 1 ? "session" : "sessions"}`}
+              {removing.sessions === null ? "sessions" : `${removing.sessions} ${removing.sessions === 1 ? "session" : "sessions"}`}{" "}
+              and the repositories they stopped
             </span>
           </label>
           <p className="muted">
-            Pull requests stay. A session that was removed is shown as “(deleted since)” on a pull request.
+            Pull requests stay. A session that was removed is shown as “(deleted since)” on a pull request. If you
+            delete them, a CI or cloud token that keeps working can submit those repositories again.
           </p>
           <div className="ask-actions">
             <button type="button" onClick={confirmRemove}>

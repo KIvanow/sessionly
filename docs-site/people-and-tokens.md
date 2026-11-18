@@ -77,7 +77,8 @@ Team page has no list of people.
 or `env` token that was made under their address keeps working: revoke those yourself on the
 Team page. Nobody can remove themselves. The confirmation can also delete that person's
 sessions, and the repositories they stopped. Pull requests stay, and a session that is gone
-is shown as "(deleted since)" on a pull request. Leaving the box unticked keeps the sessions.
+is shown as "(deleted since)" on a pull request. A CI or cloud token that keeps working can
+then submit a repository they had stopped. Leaving the box unticked keeps the sessions.
 
 **The owner** is who signed an organisation up on a hosted service; a server of your own has
 none, and there the admin token from the environment is the owner for a download. An owner
