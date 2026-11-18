@@ -256,6 +256,7 @@ test("the Action reports a pull request through review; admins read how the agen
     cost_estimated: false,
     pulls_with_cost_missing: 1,
     per_surviving_line_usd: null,
+    per_surviving_line_is_floor: false,
   });
   assert.deepEqual(summary.by_model.find((m: any) => m.model === "claude-opus-5-5"), {
     tool: "claude-code",
@@ -632,7 +633,7 @@ test("what a pull request's sessions cost it: each for the share of its lines th
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 1, files: [file("c.ts", ...range(1000, 40), 5000)] }));
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 2, event: "synchronize", files: [file("c.ts", ...range(1040, 10))] }));
   const a = await detail(1);
-  assert.deepEqual(a.cost, { usd: 4, estimated: false, sessions: 1, sessions_without_cost: 0, sessions_with_cost_partial: 0, per_agent_line_usd: 0.1, opened_usd: 4, per_surviving_line_usd: 0.1 });
+  assert.deepEqual(a.cost, { usd: 4, estimated: false, sessions: 1, sessions_without_cost: 0, sessions_with_cost_partial: 0, per_agent_line_usd: 0.1, opened_usd: 4, opened_is_floor: false, per_surviving_line_usd: 0.1 });
   assert.deepEqual([a.sessions[0].lines, a.sessions[0].hashed_lines, a.sessions[0].cost_share_usd, a.sessions[0].session.cost_usd], [40, 100, 4, 10]);
   // not seen from the start: what a line that survived cost is not known, what one that is there cost is
   const b = await detail(2);
@@ -640,7 +641,7 @@ test("what a pull request's sessions cost it: each for the share of its lines th
   // review takes half of them out: the session's share is of the lines that are left
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 1, event: "closed", state: "merged", files: [file("c.ts", ...range(1000, 20), 5000)] }));
   // and a line that got through cost two: forty were paid for, twenty are left
-  assert.deepEqual((await detail(1)).cost, { usd: 2, estimated: false, sessions: 1, sessions_without_cost: 0, sessions_with_cost_partial: 0, per_agent_line_usd: 0.1, opened_usd: 4, per_surviving_line_usd: 0.2 });
+  assert.deepEqual((await detail(1)).cost, { usd: 2, estimated: false, sessions: 1, sessions_without_cost: 0, sessions_with_cost_partial: 0, per_agent_line_usd: 0.1, opened_usd: 4, opened_is_floor: false, per_surviving_line_usd: 0.2 });
 
   // all of a session's lines in one pull request: its cost is the pull request's, estimated as it is
   await upload("c-whole", "d.ts", range(2000, 5), { total_usd: 2, source: "estimated" });
@@ -651,14 +652,18 @@ test("what a pull request's sessions cost it: each for the share of its lines th
   assert.equal((await detail(3)).cost.usd, 52);
   assert.equal((await call(tokens.ann, "DELETE", "/sessions/m1/claude-code/c-gone")).status, 200);
   const c = await detail(3);
-  // what a line cost is said of the lines that have a cost: five of the ten
-  assert.deepEqual(c.cost, { usd: 2, estimated: true, sessions: 3, sessions_without_cost: 2, sessions_with_cost_partial: 0, per_agent_line_usd: 0.4, opened_usd: 4, per_surviving_line_usd: 0.4 });
+  // what a line cost is said of the lines that have a cost: five of the ten.
+  // what it was opened with cost is what is known of it, and said to be a floor
+  assert.deepEqual(c.cost, { usd: 2, estimated: true, sessions: 3, sessions_without_cost: 2, sessions_with_cost_partial: 0, per_agent_line_usd: 0.4, opened_usd: 2, opened_is_floor: true, per_surviving_line_usd: 0.2 });
+  // the lines of the one taken back are not kept past it; that it had two is
+  const kept = await db.query(`SELECT session_id, lines, matched IS NULL AS forgotten FROM pull_sessions WHERE repo = $1 AND number = 3 ORDER BY session_id`, [repo]);
+  assert.deepEqual(kept.map((row) => [row.session_id, Number(row.lines), row.forgotten]), [["c-gone", 2, true], ["c-none", 3, false], ["c-whole", 5, false]]);
   const shares = Object.fromEntries(c.sessions.map((s: any) => [s.session_id, [s.hashed_lines, s.cost_share_usd]]));
   assert.deepEqual(shares, { "c-whole": [5, 2], "c-none": [3, null], "c-gone": [null, null] });
 
   // one with no session at all has no cost, which is not a cost of nothing
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 4, files: [file("g.ts", 6000)] }));
-  assert.deepEqual((await detail(4)).cost, { usd: null, estimated: false, sessions: 0, sessions_without_cost: 0, sessions_with_cost_partial: 0, per_agent_line_usd: null, opened_usd: null, per_surviving_line_usd: null });
+  assert.deepEqual((await detail(4)).cost, { usd: null, estimated: false, sessions: 0, sessions_without_cost: 0, sessions_with_cost_partial: 0, per_agent_line_usd: null, opened_usd: null, opened_is_floor: false, per_surviving_line_usd: null });
 
   // the list says the same of each as its page, and the summary is their sum
   const list = (await call(tokens.admin, "GET", "/prs?repo=acme/cost")).body.pulls;
@@ -669,9 +674,9 @@ test("what a pull request's sessions cost it: each for the share of its lines th
     [list.reduce((sum: number, row: any) => sum + (row.cost.usd ?? 0), 0), true, 1],
   );
   assert.equal(total.cost_usd, 5);
-  // of those seen from the start: #1's forty lines at 0.1 and #3's ten at 0.4, for the 30 that survived
+  // of those seen from the start: #1's forty lines at 0.1 and the two dollars known of #3's, for the 30 that survived
   assert.equal(total.agent_lines_surviving, 30);
-  assert.equal(total.per_surviving_line_usd, 0.266667);
+  assert.deepEqual([total.per_surviving_line_usd, total.per_surviving_line_is_floor], [0.2, true]);
 
   // the same lines in two pull requests (one stacked on the other): the session is split, not counted twice
   await upload("c-twice", "h.ts", range(7000, 10), { total_usd: 6, source: "recorded" });

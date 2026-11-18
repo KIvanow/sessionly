@@ -691,7 +691,8 @@ const MIGRATIONS: string[] = [
   // split between them. `matched` is which lines, as the hashes by file;
   // `weight` is how many they count as, a line that is in several pull
   // requests being shared out between them. Null and the number of lines
-  // for one from before these were kept, until it is matched again.
+  // for one from before these were kept, until it is matched again, and
+  // for a session deleted since: its lines are not kept past it.
   // `opened_lines` is how many of the lines the pull request was first
   // reported with are the session's: a session all of whose lines went in
   // review stays here by them, with no lines. Null from before, likewise.

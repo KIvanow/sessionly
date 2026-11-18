@@ -466,6 +466,8 @@ export interface PullCost {
    * too. Null on one not reported from the moment it was opened.
    */
   opened_usd: number | null;
+  /** Whether a session with lines among those has no cost figure, or one that leaves requests out: both figures of it are then floors. */
+  opened_is_floor: boolean;
   /** What an agent line that survived review cost: `opened_usd` for each of them still there. Null when none is. */
   per_surviving_line_usd: number | null;
 }
@@ -624,8 +626,9 @@ export interface PullSummary {
     cloud_pulls_without_session: number;
     /**
      * What the sessions matched to these pull requests cost (see `PullCost`):
-     * the sum of theirs. Null when none has a cost. Without those closed
-     * unmerged, whose lines may be in another too, unless only they are asked for.
+     * the sum of theirs. Null when none has a cost. Those closed
+     * unmerged, whose lines may be in another too, are in no figure of cost
+     * here unless only they are asked for.
      */
     cost_usd: number | null;
     cost_estimated: boolean;
@@ -643,5 +646,7 @@ export interface PullSummary {
      * none did.
      */
     per_surviving_line_usd: number | null;
+    /** Whether a session of those lines has no cost figure, or not all of it. */
+    per_surviving_line_is_floor: boolean;
   };
 }
