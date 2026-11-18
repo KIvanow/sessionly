@@ -325,7 +325,7 @@ function ReporterNotice({
   older,
 }: {
   reported: string | null;
-  /** The newest version the repository has reported. */
+  /** The version the repository's most recent judged report named. */
   repoReported: string | null;
   current: string;
   repoOlder: boolean;
@@ -340,7 +340,8 @@ function ReporterNotice({
       <p className="muted">
         This repository reports with an older version of the Sessionly Action ({phrase(repoReported)}). If{" "}
         <code>.github/workflows/sessionly.yml</code> pins the Action to a commit or tag, move it to a newer one;
-        with <code>@main</code>, the next report uses the current Action. {again}
+        with <code>@main</code>, the next report uses the current Action.
+        {older ? ` ${again}` : ""}
       </p>
     );
   }
