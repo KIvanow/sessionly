@@ -199,16 +199,21 @@ export function breakdown(now: FileHashes[], lines: (Writer | null)[][]): { file
 
 const FEEDBACK_KINDS = ["review", "inline", "conversation"];
 const REVIEW_STATES = ["approved", "changes_requested", "commented", "dismissed"];
-const ACTION_VERSION = /^\d+\.\d+\.\d+$/;
+/** `X.Y.Z`, or that with a pre-release suffix of at most 50 characters. */
+const ACTION_VERSION = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]{1,50})?$/;
 /** Reports from this client are the Action's. Any other name is not judged. */
 const ACTION_REPORTER = "sessionly-action";
 
-/** Whether `version` is older than `current`, number by number. None is: it named no version. */
+/** The three numbers of an Action version, ignoring a pre-release suffix. */
+function actionNumbers(text: string | null): number[] | null {
+  const match = text ? ACTION_VERSION.exec(text) : null;
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+/** Whether `version` is older than `current`, number by number. One that cannot be read is. */
 export function olderAction(version: string | null, current: string): boolean {
-  const numbers = (text: string | null): number[] | null =>
-    text && ACTION_VERSION.test(text) ? text.split(".").map(Number) : null;
-  const now = numbers(current);
-  const then = numbers(version);
+  const now = actionNumbers(current);
+  const then = actionNumbers(version);
   if (!now) return false;
   if (!then) return true;
   for (let i = 0; i < now.length; i++) {
@@ -219,49 +224,84 @@ export function olderAction(version: string | null, current: string): boolean {
 
 /**
  * Whether a stored report counts as an older Action. One that named no
- * reporter does. Another client's does not: its version is not the Action's.
+ * reporter does. Another client's does not. A `sessionly-action` version
+ * this server cannot read does not either: it is not known to be old.
  */
 function reportIsOlder(name: string | null, version: string | null): boolean {
   if (name != null && name !== ACTION_REPORTER) return false;
+  if (name === ACTION_REPORTER && actionNumbers(version) == null) return false;
   return olderAction(version, CURRENT_ACTION);
 }
 
-/** Who sent a repository's newest report, and the Action version it named. */
-interface NewestReport {
+/** Who sent one report, and the Action version it named. */
+interface StoredReport {
   name: string | null;
   version: string | null;
 }
 
 /**
- * Each repository's newest report, any state and any date. An exact name,
- * not the list's partial match: a closed pull request must not keep the
- * notice once a later one was reported by the current Action.
+ * The distinct reports each repository has, any state and any date. An exact
+ * name, not the list's partial match. One current or newer Action report,
+ * or a report that is not an older Action, keeps the notice off.
  */
-async function newestReports(db: OrgDb, repos: string[]): Promise<Map<string, NewestReport>> {
+async function storedReports(db: OrgDb, repos: string[]): Promise<Map<string, StoredReport[]>> {
   if (repos.length === 0) return new Map();
   const rows = await db.query<{ repo: string; reporter_name: unknown; reporter_version: unknown }>(
-    `SELECT DISTINCT ON (repo) repo, reporter_name, reporter_version
+    `SELECT DISTINCT repo, reporter_name, reporter_version
      FROM pull_requests
-     WHERE org_id = $1 AND repo = ANY($2::text[])
-     ORDER BY repo, updated_at DESC`,
+     WHERE org_id = $1 AND repo = ANY($2::text[])`,
     [db.orgId, repos],
   );
   const text = (value: unknown) => (typeof value === "string" ? value : null);
-  return new Map(
-    rows.map((row) => [String(row.repo), { name: text(row.reporter_name), version: text(row.reporter_version) }]),
-  );
+  const byRepo = new Map<string, StoredReport[]>();
+  for (const row of rows) {
+    const repo = String(row.repo);
+    const report = { name: text(row.reporter_name), version: text(row.reporter_version) };
+    const list = byRepo.get(repo);
+    if (list) list.push(report);
+    else byRepo.set(repo, [report]);
+  }
+  return byRepo;
+}
+
+/** Old only when every report is. None at all is: there is nothing newer. */
+function repoIsOlder(reports: StoredReport[] | undefined): boolean {
+  return !reports || reports.length === 0 || reports.every((report) => reportIsOlder(report.name, report.version));
+}
+
+/** Whether `found` is a higher version than `than`, at the first number that differs. */
+function higherNumbers(found: number[], than: number[]): boolean {
+  for (let i = 0; i < found.length; i++) {
+    if (found[i] !== than[i]) return found[i]! > than[i]!;
+  }
+  return false;
+}
+
+/** The highest version a repository named. A pre-release counts as its three numbers. */
+function newestReportedVersion(reports: StoredReport[] | undefined): string | null {
+  let best: string | null = null;
+  let bestNumbers: number[] | null = null;
+  for (const report of reports ?? []) {
+    const numbers = actionNumbers(report.version);
+    if (!numbers || !report.version) continue;
+    if (!bestNumbers || higherNumbers(numbers, bestNumbers)) {
+      best = report.version;
+      bestNumbers = numbers;
+    }
+  }
+  return best;
 }
 
 /**
- * Who sent a report, when they said so in a way that fits. Anything else is
- * left out, and the report is still taken: an odd client is not refused.
+ * Who sent a report, when the name fits. A version that does not is left
+ * out and the name is still kept. The report is still taken either way.
  */
 function checkReporter(value: unknown): PullReport["reporter"] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const r = value as Record<string, unknown>;
   if (typeof r.name !== "string" || r.name.length < 1 || r.name.length > 50) return undefined;
-  if (typeof r.version !== "string" || !ACTION_VERSION.test(r.version)) return undefined;
-  return { name: r.name, version: r.version };
+  if (typeof r.version === "string" && ACTION_VERSION.test(r.version)) return { name: r.name, version: r.version };
+  return { name: r.name };
 }
 
 /** A link that can be followed from the dashboard: a web address, and nothing that runs. */
@@ -597,7 +637,7 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     // client's is not an older Action. A report that names no reporter still
     // is, so a missing one replaces a version that was stored.
     reporter_name: report.reporter?.name ?? null,
-    reporter_version: report.reporter?.name === ACTION_REPORTER ? report.reporter.version : null,
+    reporter_version: report.reporter?.name === ACTION_REPORTER ? (report.reporter.version ?? null) : null,
     // only used when the row is new
     first_event: report.event,
     first_files: JSON.stringify(first),
@@ -814,12 +854,12 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
   );
   if (!r) return null;
   const detail = r.detail == null ? null : json<{ files: PullFile[]; sessions: Omit<PullSession, "session">[] }>(r.detail);
-  const newest = (await newestReports(db, [repo])).get(repo) ?? { name: null, version: null };
+  const reports = (await storedReports(db, [repo])).get(repo);
   return {
     ...pullRow(r),
     reporter_current: CURRENT_ACTION,
-    repo_reporter_older: reportIsOlder(newest.name, newest.version),
-    repo_reporter_version: newest.version,
+    repo_reporter_older: repoIsOlder(reports),
+    repo_reporter_version: newestReportedVersion(reports),
     draft: r.draft === true,
     head_ref: (r.head_ref as string) ?? null,
     base_ref: (r.base_ref as string) ?? null,
@@ -942,11 +982,9 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       row.surviving += by.surviving;
     }
   }
-  // Which repositories the filter contains. Whether each still reports with
-  // an older Action is its newest report, merged or not.
-  const newest = await newestReports(db, [...new Set(rows.map((pull) => pull.repo))]);
-  const older = [...newest]
-    .filter(([, report]) => reportIsOlder(report.name, report.version))
-    .map(([repo]) => repo);
+  // Which repositories the filter contains. One is old when every report it
+  // has, merged or not, is an older Action.
+  const reports = await storedReports(db, [...new Set(rows.map((pull) => pull.repo))]);
+  const older = [...reports].filter(([, list]) => repoIsOlder(list)).map(([repo]) => repo);
   return { by_model: sorted(byModel), older_actions: older.sort(), total };
 }

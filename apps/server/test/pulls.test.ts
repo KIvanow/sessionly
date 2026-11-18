@@ -32,8 +32,13 @@ test("an Action is old when it named no version, or an earlier one, number by nu
   assert.equal(olderAction("0.10.0", "0.9.0"), false);
   assert.equal(olderAction("0.2.1", "0.2.0"), false);
   assert.equal(olderAction("1.0.0", "0.9.9"), false);
-  // Not three numbers: treated as a report that did not say.
+  // A pre-release counts as its three numbers, so the current version's is not older.
+  assert.equal(olderAction("0.2.0-rc.1", "0.2.0"), false);
+  assert.equal(olderAction("0.3.0-rc.1", "0.2.0"), false);
+  assert.equal(olderAction("0.1.0-rc.1", "0.2.0"), true);
+  // Not a version this comparison can read: treated as one that did not say.
   assert.equal(olderAction("0.2", "0.2.0"), true);
+  assert.equal(olderAction("v0.2.0", "0.2.0"), true);
   assert.equal(olderAction("0.2.0", ""), false);
 });
 
@@ -488,12 +493,33 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(unnamed.reporter_older, true);
   assert.equal(unnamed.reporter_current, CURRENT_ACTION);
 
-  // A version that does not fit is dropped, not a reason to refuse the report.
+  // A pre-release is kept. Its three numbers are what is compared, so one of
+  // the current version is not an older Action, and an earlier one is.
+  const pre = await call(tokens.ci, "PUT", "/prs", pinned({
+    number: 42,
+    reporter: { name: "sessionly-action", version: "0.2.0-rc.1" },
+  }));
+  assert.equal(pre.status, 200);
+  assert.equal(await versionOf(42), "0.2.0-rc.1");
+  assert.equal((await at(42)).body.reporter_older, false);
+  assert.equal((await call(tokens.ci, "PUT", "/prs", pinned({
+    number: 42, event: "synchronize", reporter: { name: "sessionly-action", version: "0.1.0-rc.1" },
+  }))).status, 200);
+  assert.equal(await versionOf(42), "0.1.0-rc.1");
+  assert.equal((await at(42)).body.reporter_older, true);
+  // A version the server cannot read is left out. The name is kept, so the
+  // report is not an older Action: the server does not know.
+  for (const version of ["v0.2.0", "0.2", "2024.11", `0.2.0-${"a".repeat(51)}`]) {
+    const response = await call(tokens.ci, "PUT", "/prs", pinned({
+      number: 42, event: "synchronize", reporter: { name: "sessionly-action", version },
+    }));
+    assert.equal(response.status, 200, version);
+    assert.equal(await versionOf(42), null, version);
+    assert.equal((await at(42)).body.reporter_older, false, version);
+  }
+  // A name that does not fit is the same as none: an older Action.
   const name = "n".repeat(50);
   for (const reporter of [
-    { name: "sessionly-action", version: "v0.2.0" },
-    { name: "sessionly-action", version: "0.2" },
-    { name: "sessionly-action", version: "0.2.0-rc.1" },
     { name: "x".repeat(51), version: "0.2.0" },
     { name: "", version: "0.2.0" },
     { version: "0.2.0" },
@@ -503,7 +529,6 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
     const response = await call(tokens.ci, "PUT", "/prs", pinned({ number: 42, event: "synchronize", reporter }));
     assert.equal(response.status, 200, JSON.stringify(reporter));
     assert.equal(await versionOf(42), null, JSON.stringify(reporter));
-    // A reporter that does not fit is the same as none: an older Action.
     assert.equal((await at(42)).body.reporter_older, true, JSON.stringify(reporter));
   }
   // A name of 50 characters is accepted, extra fields and all. It is not the
@@ -522,9 +547,10 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(await versionOf(43), null);
   assert.equal((await at(43)).body.reporter_older, true);
 
-  // The list's filter, not one page of it. The newest report here named no version.
+  // A later report that names nobody does not put the repository back on the
+  // list: an earlier pull request was reported by the current Action.
   const summary = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/pinned")).body;
-  assert.deepEqual(summary.older_actions, [repo]);
+  assert.deepEqual(summary.older_actions, []);
   // One whose newest report is from the current Action is not named, even when an older pull request is.
   const currentRepo = "github.com/acme/current";
   const current = await call(tokens.ci, "PUT", "/prs", report({
@@ -561,7 +587,7 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(mergedPage.reporter_version, null);
   assert.equal(mergedPage.reporter_older, true);
   assert.equal(mergedPage.repo_reporter_older, false);
-  // The notice would quote the open report, which is current, not this one.
+  // The notice would quote the newest version the repository reported.
   assert.equal(mergedPage.repo_reporter_version, CURRENT_ACTION);
   assert.equal(mergedPage.reporter_current, CURRENT_ACTION);
   const openPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(upgraded)}&number=2`)).body;
@@ -569,13 +595,48 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(openPage.reporter_older, false);
   assert.equal(openPage.repo_reporter_older, false);
   assert.equal(openPage.repo_reporter_version, CURRENT_ACTION);
-  // Still on the old Action: the newest report named none, so the page does ask.
+  // A later report that names nobody does not bring the notice back.
   const oldPage = (await at(41)).body;
-  assert.equal(oldPage.repo_reporter_older, true);
-  assert.equal(oldPage.repo_reporter_version, null);
+  assert.equal(oldPage.reporter_older, true);
+  assert.equal(oldPage.repo_reporter_older, false);
+  assert.equal(oldPage.repo_reporter_version, CURRENT_ACTION);
 
-  // A later re-run from an old Action is the repository's version. The open
-  // pull request, reported by the current one, does not lend it its number.
+  // Re-running one pull request with no reporter leaves the current report
+  // on the other, so the repository is not asked to change its workflow.
+  const reread = "github.com/acme/reread";
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: reread, number: 1, state: "open", reporter: { name: "sessionly-action", version: CURRENT_ACTION },
+  }))).status, 200);
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: reread, number: 2, state: "merged", merged_at: "2026-11-02T00:00:00Z",
+    reporter: { name: "sessionly-action", version: CURRENT_ACTION },
+  }))).status, 200);
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: reread, number: 2, event: "synchronize", state: "merged", merged_at: "2026-11-02T00:00:00Z",
+  }))).status, 200);
+  const rereadOpen = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/reread&state=open")).body;
+  assert.equal(rereadOpen.total.pulls, 1);
+  assert.deepEqual(rereadOpen.older_actions, []);
+  const rereadPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(reread)}&number=2`)).body;
+  assert.equal(rereadPage.reporter_version, null);
+  assert.equal(rereadPage.reporter_older, true);
+  assert.equal(rereadPage.repo_reporter_older, false);
+  assert.equal(rereadPage.repo_reporter_version, CURRENT_ACTION);
+
+  // Every report is old, so the repository is named, and the page quotes the newest of them.
+  const still = "github.com/acme/still-old";
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: still, number: 1, reporter: { name: "sessionly-action", version: "0.1.0" },
+  }))).status, 200);
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({ repo: still, number: 2 }))).status, 200);
+  const stillSummary = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/still-old")).body;
+  assert.deepEqual(stillSummary.older_actions, [still]);
+  const stillPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(still)}&number=2`)).body;
+  assert.equal(stillPage.reporter_older, true);
+  assert.equal(stillPage.repo_reporter_older, true);
+  assert.equal(stillPage.repo_reporter_version, "0.1.0");
+
+  // A later report from an older Action does not outweigh one from the current.
   const rerun = "github.com/acme/rerun";
   assert.equal((await call(tokens.ci, "PUT", "/prs", report({
     repo: rerun, number: 1, state: "open", reporter: { name: "sessionly-action", version: CURRENT_ACTION },
@@ -586,15 +647,17 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   }))).status, 200);
   const rerunOpen = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/rerun&state=open")).body;
   assert.equal(rerunOpen.total.pulls, 1);
-  assert.deepEqual(rerunOpen.older_actions, [rerun]);
+  assert.deepEqual(rerunOpen.older_actions, []);
   const currentPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(rerun)}&number=1`)).body;
   assert.equal(currentPage.reporter_version, CURRENT_ACTION);
   assert.equal(currentPage.reporter_older, false);
-  assert.equal(currentPage.repo_reporter_older, true);
-  assert.equal(currentPage.repo_reporter_version, "0.1.0");
+  assert.equal(currentPage.repo_reporter_older, false);
+  assert.equal(currentPage.repo_reporter_version, CURRENT_ACTION);
   const oldRerun = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(rerun)}&number=2`)).body;
   assert.equal(oldRerun.reporter_version, "0.1.0");
-  assert.equal(oldRerun.repo_reporter_version, "0.1.0");
+  assert.equal(oldRerun.reporter_older, true);
+  assert.equal(oldRerun.repo_reporter_older, false);
+  assert.equal(oldRerun.repo_reporter_version, CURRENT_ACTION);
 
   // Another client over an old Action. The repository is not asked to change
   // its workflow, and that client's own report is not an older Action. The
@@ -619,12 +682,37 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(otherOld.reporter_version, "0.1.0");
   assert.equal(otherOld.reporter_older, true);
   assert.equal(otherOld.repo_reporter_older, false);
-  assert.equal(otherOld.repo_reporter_version, null);
+  assert.equal(otherOld.repo_reporter_version, "0.1.0");
   const otherNew = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(other)}&number=2`)).body;
   assert.equal(otherNew.reporter_version, null);
   assert.equal(otherNew.reporter_older, false);
   assert.equal(otherNew.repo_reporter_older, false);
-  assert.equal(otherNew.repo_reporter_version, null);
+  assert.equal(otherNew.repo_reporter_version, "0.1.0");
+
+  // Another client's version, even one that is not three numbers, is not an older Action.
+  const client = "github.com/acme/acme-ci";
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: client, number: 1, reporter: { name: "acme-ci", version: "2024.11" },
+  }))).status, 200);
+  const clientPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(client)}&number=1`)).body;
+  assert.equal(clientPage.reporter_version, null);
+  assert.equal(clientPage.reporter_older, false);
+  assert.equal(clientPage.repo_reporter_older, false);
+  assert.equal(clientPage.repo_reporter_version, null);
+  const clientSummary = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/acme-ci")).body;
+  assert.deepEqual(clientSummary.older_actions, []);
+
+  // A newer pre-release is not a reason to downgrade.
+  const ahead = "github.com/acme/ahead";
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: ahead, number: 1, reporter: { name: "sessionly-action", version: "0.3.0-rc.1" },
+  }))).status, 200);
+  const aheadPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(ahead)}&number=1`)).body;
+  assert.equal(aheadPage.reporter_version, "0.3.0-rc.1");
+  assert.equal(aheadPage.reporter_older, false);
+  assert.equal(aheadPage.repo_reporter_older, false);
+  assert.equal(aheadPage.repo_reporter_version, "0.3.0-rc.1");
+  assert.deepEqual((await call(tokens.admin, "GET", "/prs/summary?repo=acme/ahead")).body.older_actions, []);
 });
 
 test("a pull request's lines are matched again when its sessions arrive after its last report", async () => {

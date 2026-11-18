@@ -261,7 +261,7 @@ function ByModel({ summary }: { summary: PullSummary }) {
   );
 }
 
-/** One notice when a repository in the filter has a newest report, of any state, from an older Action. */
+/** One notice when every report a repository in the filter has came from an older Action. */
 function OlderActions({ repos }: { repos: string[] }) {
   if (repos.length === 0) return null;
   return (

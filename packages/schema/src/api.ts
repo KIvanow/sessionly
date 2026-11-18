@@ -374,12 +374,15 @@ export interface PullReport {
   feedback_total?: number;
   /**
    * Who sent the report. Left out by an Action from before this was sent.
-   * A name longer than 50 characters, or a version that is not three
-   * numbers, is dropped, and the report is still accepted. The version is
-   * stored only when the name is `sessionly-action`. Another client is not
-   * compared with the Action.
+   * The name is 1 to 50 characters; one that is not is dropped, and the
+   * report is still accepted. The version is `X.Y.Z`, or that with a
+   * pre-release suffix (`-` and up to 50 of `0-9`, `A-Z`, `a-z`, `.` or `-`).
+   * A version that is neither is left out and the name is still kept. The
+   * version is stored only when the name is `sessionly-action`. Another
+   * client is not compared with the Action, and neither is a
+   * `sessionly-action` version this server cannot read.
    */
-  reporter?: { name: string; version: string };
+  reporter?: { name: string; version?: string };
 }
 
 /**
@@ -483,12 +486,14 @@ export interface PullRow {
   matchable: boolean;
   /**
    * The version of the Sessionly Action that last reported it (`0.2.0`).
-   * Null when that report named none, or was not from the Action.
+   * Null when that report named none, was not from the Action, or named a
+   * version this server cannot read.
    */
   reporter_version: string | null;
   /**
-   * This pull request was last reported by an older Action, or by one that
-   * named no version. A report from another client is not.
+   * This pull request was last reported by an older Action. A report from
+   * another client is not, and neither is a `sessionly-action` version this
+   * server cannot read. A report that named no one still is.
    */
   reporter_older: boolean;
 }
@@ -554,13 +559,15 @@ export interface PullDetail extends PullRow {
   /** How many there are on GitHub: more than `feedback` has when only the latest were kept. */
   feedback_total: number | null;
   /**
-   * The repository's newest report, of any state and date, came from an older
-   * Action. A pull request merged before an upgrade is not that on its own.
+   * Every report this repository has, of any state and date, came from an
+   * older Action. One from the current Action or a newer one, or from
+   * another client, means it is not. A pull request merged before an
+   * upgrade is not that on its own.
    */
   repo_reporter_older: boolean;
   /**
-   * The version the newest report named. Null when it named none. The
-   * repository notice quotes this, not this pull request's version.
+   * The newest version any report in the repository named. Null when none
+   * did. The repository notice quotes this, not this pull request's version.
    */
   repo_reporter_version: string | null;
   /** The version of the Action this server knows as current. */

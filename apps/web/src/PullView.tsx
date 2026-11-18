@@ -325,7 +325,7 @@ function ReporterNotice({
   older,
 }: {
   reported: string | null;
-  /** The version the repository's newest report named. */
+  /** The newest version the repository has reported. */
   repoReported: string | null;
   current: string;
   repoOlder: boolean;
