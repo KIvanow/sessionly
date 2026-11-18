@@ -28,15 +28,20 @@ export interface OrgDb extends Queryable {
  * list short.
  */
 export interface Db extends Queryable {
-  /** Run `fn` as the app role with row-level security set to `orgId`, in one transaction. */
-  asOrg<T>(orgId: string, fn: (db: OrgDb) => Promise<T>): Promise<T>;
+  /**
+   * Run `fn` as the app role with row-level security set to `orgId`, in one
+   * transaction. With `snapshot`, every statement of it sees the database as
+   * it was when the first one ran: for a request that only reads, and reads
+   * in several statements what has to agree.
+   */
+  asOrg<T>(orgId: string, fn: (db: OrgDb) => Promise<T>, options?: { snapshot?: boolean }): Promise<T>;
   /**
    * Run `fn` in one transaction, as the owner. `patient` is for bringing the
    * database up to date: no limit on how long a statement may take, since a
    * large table takes as long as it takes, and the copies that wait for the
    * one that is doing it wait as long.
    */
-  transaction<T>(fn: (tx: Queryable) => Promise<T>, options?: { patient?: boolean }): Promise<T>;
+  transaction<T>(fn: (tx: Queryable) => Promise<T>, options?: { patient?: boolean; snapshot?: boolean }): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -118,6 +123,9 @@ interface Grant {
 
 /** A name as SQL may spell it, whatever is in it. */
 const quoted = (name: string) => `"${name.replace(/"/g, '""')}"`;
+
+/** A transaction all of whose statements see what the first one saw. */
+const SNAPSHOT = " ISOLATION LEVEL REPEATABLE READ";
 
 /** What turns a transaction into one organisation's view. `SET LOCAL` ends with it. */
 async function enter(tx: Queryable, role: string, orgId: string): Promise<OrgDb> {
@@ -281,7 +289,7 @@ export async function openDb(
     // What the pool says of a connection it dropped while unused, which
     // must be heard as well.
     pool.on("error", (err, client) => lost(client, err));
-    const transaction: Db["transaction"] = async (fn, { patient = false } = {}) => {
+    const transaction: Db["transaction"] = async (fn, { patient = false, snapshot = false } = {}) => {
       const client = await pool.connect();
       // Set if the connection may still be inside the transaction: it is
       // then thrown away, not handed to the next request with a role and an
@@ -312,7 +320,7 @@ export async function openDb(
         // let go, and not kept until the system notices.
         const limit = patient ? 0 : queryMs;
         await run(
-          `BEGIN; SET LOCAL statement_timeout = ${limit}; SET LOCAL idle_in_transaction_session_timeout = ${limit}`,
+          `BEGIN${snapshot ? SNAPSHOT : ""}; SET LOCAL statement_timeout = ${limit}; SET LOCAL idle_in_transaction_session_timeout = ${limit}`,
         );
         const out = await fn({ query: async (text, params) => (await run(text, params)).rows });
         try {
@@ -340,7 +348,7 @@ export async function openDb(
       // failed, whatever the reason.
       query: async (text, params) => (await pool.query(within(text, params, giveUpMs))).rows,
       transaction,
-      asOrg: (orgId, fn) => transaction(async (tx) => fn(await enter(tx, appRole, orgId))),
+      asOrg: (orgId, fn, options) => transaction(async (tx) => fn(await enter(tx, appRole, orgId)), options),
       close: () => pool.end(),
     };
     // A host that takes the connection and says nothing is named, with how
@@ -358,14 +366,15 @@ export async function openDb(
       mkdirSync(dir, { recursive: true });
       lite = new PGlite(dir);
     }
-    const transaction: Db["transaction"] = (fn) =>
-      lite.transaction((tx) =>
-        fn({ query: async (text, params) => (await tx.query(text, params as unknown[])).rows as never[] }),
-      ) as Promise<never>;
+    const transaction: Db["transaction"] = (fn, { snapshot = false } = {}) =>
+      lite.transaction(async (tx) => {
+        if (snapshot) await tx.query(`SET TRANSACTION${SNAPSHOT}`);
+        return fn({ query: async (text, params) => (await tx.query(text, params as unknown[])).rows as never[] });
+      }) as Promise<never>;
     db = {
       query: async (text, params) => (await lite.query(text, params as unknown[])).rows as never[],
       transaction,
-      asOrg: (orgId, fn) => transaction(async (tx) => fn(await enter(tx, appRole, orgId))),
+      asOrg: (orgId, fn, options) => transaction(async (tx) => fn(await enter(tx, appRole, orgId)), options),
       close: () => lite.close(),
     };
   }
@@ -690,7 +699,141 @@ const MIGRATIONS: string[] = [
   // send this. These rows are not judged. A report that names no one still
   // stores null, and is.
   `UPDATE pull_requests SET reporter_name = '' WHERE reporter_name IS NULL`,
+  // How many line hashes a session uploaded: what its lines in a pull
+  // request are a share of, for what it cost there. Kept beside the payload
+  // so that reading it does not open the payload, and by the database
+  // itself whenever a payload is stored, so that a server from before this,
+  // still running beside a newer one, keeps it too. Sessions already here
+  // are counted after the server has started, some at a time
+  // (`countHashedLines`): null until then, and counted from the payload.
+  `ALTER TABLE sessions ADD COLUMN hashed_lines integer`,
+  `CREATE INDEX sessions_uncounted ON sessions (org_id) WHERE hashed_lines IS NULL`,
+  `CREATE FUNCTION sessions_hashed_lines() RETURNS trigger LANGUAGE plpgsql AS $f$
+   BEGIN
+     NEW.hashed_lines := (
+       SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
+       FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.payload->'lines') = 'array' THEN NEW.payload->'lines' ELSE '[]'::jsonb END) AS l
+       WHERE jsonb_typeof(l->'hashes') = 'array');
+     RETURN NEW;
+   END $f$`,
+  `CREATE TRIGGER sessions_hashed_lines BEFORE INSERT OR UPDATE OF payload ON sessions
+   FOR EACH ROW EXECUTE FUNCTION sessions_hashed_lines()`,
+  // The sessions with lines in a pull request, as rows, so that all the pull
+  // requests a session has lines in can be found by the session: its cost is
+  // split between them. `matched` is which lines, as the hashes by file;
+  // `weight` is how many they count as, a line that is in several pull
+  // requests being shared out between them. Null and the number of lines
+  // for one from before these were kept, until it is matched again, and
+  // for a session deleted since: its lines are not kept past it.
+  // `opened_lines`, `opened_matched` and `opened_weight` are the same of the
+  // lines the pull request was first reported with: a session all of whose
+  // lines went in review stays here by them, with no lines. Null from
+  // before, likewise.
+  `CREATE TABLE pull_sessions (
+     org_id     text NOT NULL REFERENCES orgs ON DELETE CASCADE,
+     repo       text NOT NULL,
+     number     integer NOT NULL,
+     machine_id text NOT NULL,
+     source     text NOT NULL,
+     session_id text NOT NULL,
+     lines      integer NOT NULL,
+     weight     double precision NOT NULL,
+     matched    jsonb,
+     opened_lines integer,
+     opened_weight double precision,
+     opened_matched jsonb,
+     PRIMARY KEY (org_id, repo, number, machine_id, source, session_id),
+     FOREIGN KEY (org_id, repo, number) REFERENCES pull_requests ON DELETE CASCADE
+   )`,
+  `CREATE INDEX pull_sessions_session ON pull_sessions (org_id, machine_id, source, session_id)`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON pull_sessions`),
+  ...rowLevelSecurity("pull_sessions"),
+  `INSERT INTO pull_sessions (org_id, repo, number, machine_id, source, session_id, lines, weight)
+   SELECT p.org_id, p.repo, p.number, s.machine_id, s.source, s.session_id, s.lines, s.lines
+   FROM pull_requests p,
+        jsonb_to_recordset(CASE WHEN jsonb_typeof(p.detail->'sessions') = 'array' THEN p.detail->'sessions' ELSE '[]'::jsonb END)
+          AS s(machine_id text, source text, session_id text, lines integer)
+   WHERE s.machine_id IS NOT NULL AND s.source IS NOT NULL AND s.session_id IS NOT NULL AND s.lines IS NOT NULL
+   ON CONFLICT DO NOTHING`,
 ];
+
+/**
+ * Count the line hashes of the sessions stored before the count was kept,
+ * some at a time so that nothing waits on it for long. Run after the server
+ * has started, and again while any are left; several copies doing it at
+ * once count each session once. Those with lines in a pull request come
+ * first: until one is counted, a pull request says its share is not known.
+ * A batch that fails (payloads can be large) is tried again as a smaller
+ * one, down to one session; a session that fails alone is passed over, and
+ * is among the `failed`, to be tried the next time.
+ *
+ * It waits for no session another transaction holds: that one may be
+ * deleting several sessions, in an order of its own (stopping a
+ * repository), and the two could each wait for the other. A session held is
+ * passed over and is among the `failed` too.
+ */
+export async function countHashedLines(db: Db, atOnce = 50): Promise<{ counted: number; failed: number }> {
+  const inPulls = `AND EXISTS (SELECT 1 FROM pull_sessions p WHERE p.org_id = u.org_id AND p.machine_id = u.machine_id
+                               AND p.source = u.source AND p.session_id = u.session_id)`;
+  type Key = { org_id: string; machine_id: string; source: string; session_id: string };
+  let counted = 0;
+  let failed = 0;
+  for (const which of [inPulls, ""]) {
+    let some = atOnce;
+    // The last session looked at: the next ones are those after it, so one that fails is not met again.
+    let last: Key | undefined;
+    for (;;) {
+      const keys = await db.query<Key>(
+        `SELECT u.org_id, u.machine_id, u.source, u.session_id FROM sessions u
+         WHERE u.hashed_lines IS NULL ${which}
+           AND ($1::jsonb IS NULL OR (u.org_id, u.machine_id, u.source, u.session_id) >
+                 ($1::jsonb->>'org_id', $1::jsonb->>'machine_id', $1::jsonb->>'source', $1::jsonb->>'session_id'))
+         ORDER BY u.org_id, u.machine_id, u.source, u.session_id LIMIT $2`,
+        [last ? JSON.stringify(last) : null, some],
+      );
+      if (keys.length === 0) break;
+      try {
+        const { rows, held } = await db.transaction(async (tx) => {
+          // The ones no other transaction holds, held now, in the order they were chosen in.
+          const free = await tx.query(
+            `SELECT s.org_id, s.machine_id, s.source, s.session_id FROM sessions s
+             JOIN jsonb_to_recordset($1::jsonb) AS k(org_id text, machine_id text, source text, session_id text)
+               ON s.org_id = k.org_id AND s.machine_id = k.machine_id AND s.source = k.source AND s.session_id = k.session_id
+             ORDER BY s.org_id, s.machine_id, s.source, s.session_id
+             FOR UPDATE OF s SKIP LOCKED`,
+            [JSON.stringify(keys)],
+          );
+          const rows = await tx.query(
+            `UPDATE sessions s SET hashed_lines =
+               (SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
+                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'lines') = 'array' THEN s.payload->'lines' ELSE '[]'::jsonb END) AS l
+                WHERE jsonb_typeof(l->'hashes') = 'array')
+             FROM jsonb_to_recordset($1::jsonb) AS k(org_id text, machine_id text, source text, session_id text)
+             WHERE s.org_id = k.org_id AND s.machine_id = k.machine_id AND s.source = k.source
+               AND s.session_id = k.session_id AND s.hashed_lines IS NULL
+             RETURNING 1`,
+            [JSON.stringify(free)],
+          );
+          // One deleted meanwhile is counted with them: the next time, it is not there to try.
+          return { rows, held: keys.length - free.length };
+        }, PATIENT);
+        counted += rows.length;
+        failed += held;
+        last = keys[keys.length - 1];
+        some = Math.min(atOnce, some * 2);
+      } catch (err) {
+        if (keys.length > 1) {
+          some = Math.max(1, Math.floor(keys.length / 2));
+          continue;
+        }
+        console.error(`The line hashes of session ${keys[0]!.session_id} could not be counted:`, err);
+        failed += 1;
+        last = keys[0];
+      }
+    }
+  }
+  return { counted, failed };
+}
 
 /**
  * A statement granting `privileges` (as `SELECT, INSERT ON a, b`, or
