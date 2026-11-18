@@ -48,12 +48,12 @@ What to know about the workflow:
 - `@main` follows this repository's main branch. To decide yourself when the Action changes,
   name a commit instead (`KIvanow/sessionly/action@<commit sha>`), as this repository's own
   [workflow](https://github.com/KIvanow/sessionly/blob/main/.github/workflows/sessionly.yml) does.
-  The list, and a pull request's page, say when every report the repository has is from an
-  older Action, and the page names the newest version it has reported. If the workflow pins
-  the Action to a commit or tag, move that pin to a newer one; with `@main`, the next report
-  uses the current Action. A pull request that was itself last reported by an older one says
-  so, without asking for a change that a later report already shows was made. Re-running the
-  same workflow run keeps the workflow
+  The list, and a pull request's page, say when the newest pull request the Action reported,
+  or that named no reporter, is from an older Action, and the page names that report's
+  version. If the workflow pins the Action to a commit or tag, move that pin to a newer one;
+  with `@main`, the next report uses the current Action. A pull request that was itself last
+  reported by an older one says so, without asking for a change that a later report already
+  shows was made. Re-running the same workflow run keeps the workflow
   file it started with. Push a commit on an open pull request. For one that has been merged,
   [start the workflow by hand](#pull-requests-from-before-the-action) with its number. GitHub
   offers that run only when `workflow_dispatch` is in the workflow on the default branch, and

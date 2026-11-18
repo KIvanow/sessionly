@@ -82,14 +82,13 @@ one either. Another client's report is stored under its own name, and is not tre
 older Action. A report that names no reporter still is: an Action from before this was sent.
 `GET /prs` and `GET /prs/detail` give `reporter_version` (null when none was kept) and
 `reporter_older`. `GET /prs/detail` also gives `reporter_current`, the version of the Action
-this server knows, and `repo_reporter_older`: every report the repository has, of any state,
-came from an older Action. One from the current Action or a newer one, or from another
-client, means it is not. `repo_reporter_version` is the newest version any of those reports
-named, which is what the repository notice quotes. A pull request merged before an upgrade
-is not that on its own.
-`GET /prs/summary` gives `older_actions`, the repositories in the filter whose every report,
-of any state, came from an older Action. A report from the current Action, a newer one, or
-another client keeps the repository off that list.
+this server knows, and `repo_reporter_older`: the newest pull request the Action reported,
+or that named no reporter, came from an older Action. A pull request another client reported
+is skipped, and a repository with no such pull request is not old. `repo_reporter_version` is
+the version that pull request named, which is what the repository notice quotes. One current
+report on an older pull request does not hide a newer one.
+`GET /prs/summary` gives `older_actions`, the repositories in the filter for which that
+newest pull request came from an older Action.
 
 ## Tokens and people
 

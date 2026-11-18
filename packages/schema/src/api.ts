@@ -559,15 +559,15 @@ export interface PullDetail extends PullRow {
   /** How many there are on GitHub: more than `feedback` has when only the latest were kept. */
   feedback_total: number | null;
   /**
-   * Every report this repository has, of any state and date, came from an
-   * older Action. One from the current Action or a newer one, or from
-   * another client, means it is not. A pull request merged before an
-   * upgrade is not that on its own.
+   * The newest pull request in this repository that the Action reported, or
+   * that named no reporter, came from an older Action. A pull request
+   * another client reported is skipped. A repository with none is not old.
    */
   repo_reporter_older: boolean;
   /**
-   * The newest version any report in the repository named. Null when none
-   * did. The repository notice quotes this, not this pull request's version.
+   * The version that pull request named. Null when it named none, or when
+   * the repository has no such pull request. The repository notice quotes
+   * this, not this pull request's version.
    */
   repo_reporter_version: string | null;
   /** The version of the Action this server knows as current. */
@@ -606,8 +606,8 @@ export interface PullSummary {
   by_model: PullsByModel[];
   /**
    * Repositories that have a pull request in the filter, and whose newest
-   * report of any state came from an older Action, or from one that named
-   * no version. A newest report from another client does not count.
+   * pull request that the Action reported, or that named no reporter, came
+   * from an older Action. A pull request another client reported is skipped.
    */
   older_actions: string[];
   total: {
