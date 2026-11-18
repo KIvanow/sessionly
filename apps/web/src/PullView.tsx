@@ -338,8 +338,9 @@ function ReporterNotice({
   if (repoOlder) {
     return (
       <p className="muted">
-        This repository reports with an older version of the Sessionly Action ({phrase(repoReported)}). Change the
-        version in <code>.github/workflows/sessionly.yml</code>. {again}
+        This repository reports with an older version of the Sessionly Action ({phrase(repoReported)}). If{" "}
+        <code>.github/workflows/sessionly.yml</code> pins the Action to a commit or tag, move it to a newer one;
+        with <code>@main</code>, the next report uses the current Action. {again}
       </p>
     );
   }

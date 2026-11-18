@@ -267,7 +267,8 @@ function OlderActions({ repos }: { repos: string[] }) {
   return (
     <p className="muted hint">
       {nameSome(repos.map(repoName))} {repos.length === 1 ? "reports" : "report"} with an older version of the Sessionly Action.
-      Change the version in <code>.github/workflows/sessionly.yml</code>. A re-run keeps the old version: push a
+      If <code>.github/workflows/sessionly.yml</code> pins the Action to a commit or tag, move it to a newer one;
+      with <code>@main</code>, the next report uses the current Action. A re-run keeps the old version: push a
       commit for an open pull request, or start the workflow by hand with the pull request's number for one that
       has been merged.
     </p>
