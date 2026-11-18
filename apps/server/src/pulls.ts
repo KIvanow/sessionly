@@ -210,7 +210,11 @@ function actionNumbers(text: string | null): number[] | null {
   return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
 }
 
-/** Whether `version` is older than `current`, number by number. One that cannot be read is. */
+/**
+ * Whether `version` is older than `current`, number by number. When the
+ * numbers are equal, a pre-release is older than the release. One that
+ * cannot be read is.
+ */
 export function olderAction(version: string | null, current: string): boolean {
   const now = actionNumbers(current);
   const then = actionNumbers(version);
@@ -219,7 +223,8 @@ export function olderAction(version: string | null, current: string): boolean {
   for (let i = 0; i < now.length; i++) {
     if (then[i] !== now[i]) return then[i]! < now[i]!;
   }
-  return false;
+  // A parsed version has a `-` only as its pre-release suffix.
+  return Boolean(version?.includes("-")) && !current.includes("-");
 }
 
 /**

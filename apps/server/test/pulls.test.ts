@@ -32,8 +32,10 @@ test("an Action is old when it named no version, or an earlier one, number by nu
   assert.equal(olderAction("0.10.0", "0.9.0"), false);
   assert.equal(olderAction("0.2.1", "0.2.0"), false);
   assert.equal(olderAction("1.0.0", "0.9.9"), false);
-  // A pre-release counts as its three numbers, so the current version's is not older.
-  assert.equal(olderAction("0.2.0-rc.1", "0.2.0"), false);
+  // Same numbers: a pre-release is older than the release. A higher version's is not.
+  assert.equal(olderAction("0.2.0-rc.1", "0.2.0"), true);
+  assert.equal(olderAction("0.2.0", "0.2.0-rc.1"), false);
+  assert.equal(olderAction("0.2.0-rc.1", "0.2.0-rc.2"), false);
   assert.equal(olderAction("0.3.0-rc.1", "0.2.0"), false);
   assert.equal(olderAction("0.1.0-rc.1", "0.2.0"), true);
   // Not a version this comparison can read: treated as one that did not say.
@@ -496,15 +498,15 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(unnamed.reporter_older, true);
   assert.equal(unnamed.reporter_current, CURRENT_ACTION);
 
-  // A pre-release is kept. Its three numbers are what is compared, so one of
-  // the current version is not an older Action, and an earlier one is.
+  // A pre-release is kept. One of the current version is older than the
+  // release, and an earlier one is too.
   const pre = await call(tokens.ci, "PUT", "/prs", pinned({
     number: 42,
     reporter: { name: "sessionly-action", version: "0.2.0-rc.1" },
   }));
   assert.equal(pre.status, 200);
   assert.equal(await versionOf(42), "0.2.0-rc.1");
-  assert.equal((await at(42)).body.reporter_older, false);
+  assert.equal((await at(42)).body.reporter_older, true);
   assert.equal((await call(tokens.ci, "PUT", "/prs", pinned({
     number: 42, event: "synchronize", reporter: { name: "sessionly-action", version: "0.1.0-rc.1" },
   }))).status, 200);

@@ -75,11 +75,12 @@ A report may name who sent it: `reporter`, `{ "name": "sessionly-action", "versi
 The name is 1 to 50 characters. The version is three numbers of at most 9 digits each, or
 those with a pre-release suffix such as `0.3.0-rc.1` (`0.10.0` counts; `v0.2.0`, `2024.11`
 and `1.2.1000000000` do not). A version that does not fit is left out and the name is still
-kept; a name that does not fit is left out altogether. The report is stored either way. The version is kept only when the name is
-`sessionly-action`, and only the three numbers are compared, so a pre-release of the current
-version is not an older Action. A `sessionly-action` version the server cannot read is not
-one either. Another client's report is stored under its own name, and is not treated as an
-older Action. A report that names no reporter still is: an Action from before this was sent.
+kept; a name that does not fit is left out altogether. The report is stored either way. The
+version is kept only when the name is `sessionly-action`. The three numbers are compared, and
+when they are equal a pre-release is older than the release. A pre-release of a higher version
+is not an older Action. A `sessionly-action` version the server cannot read is not one either.
+Another client's report is stored under its own name, and is not treated as an older Action.
+A report that names no reporter still is: an Action from before this was sent.
 `GET /prs` and `GET /prs/detail` give `reporter_version` (null when none was kept) and
 `reporter_older`. `GET /prs/detail` also gives `reporter_current`, the version of the Action
 this server knows, and `repo_reporter_older`: the newest pull request the Action reported,
