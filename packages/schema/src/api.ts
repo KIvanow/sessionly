@@ -464,6 +464,13 @@ export interface PullCost {
    * counted in each. `usd` is then an estimate, until those are matched again.
    */
   sessions_unshared: number;
+  /**
+   * How many of those without a cost here have one, whose share is not known
+   * yet: after an upgrade the server counts the line hashes of the sessions
+   * it held, and until it has, what part of one is in a pull request cannot
+   * be said. Counted among `sessions_without_cost`.
+   */
+  sessions_uncounted: number;
   /** What an agent line of it cost: `usd` for each line of the sessions that have a cost figure. */
   per_agent_line_usd: number | null;
   /**
@@ -553,7 +560,7 @@ export interface PullSession {
   session_id: string;
   /** Lines of the pull request, as last reported, put down to this session. */
   lines: number;
-  /** Line hashes the session uploaded: the lines of it that could be matched to any pull request. Null once it has been deleted. */
+  /** Line hashes the session uploaded: the lines of it that could be matched to any pull request. Null once it has been deleted, or while they are still to be counted after an upgrade. */
   hashed_lines: number | null;
   /**
    * Its cost in this pull request: the session's cost, in the proportion of

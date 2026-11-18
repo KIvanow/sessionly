@@ -33,9 +33,19 @@ export function pullCostNote(c: PullCost | null): string {
       ? `none of the agent lines it was opened with is left: they cost ${opened}${usdOf(c.opened_usd)}`
       : "no session was matched to its lines";
   }
-  const missing =
-    c.sessions_without_cost > 0
-      ? `${count(c.sessions_without_cost)} of ${count(c.sessions)} ${c.sessions === 1 ? "session" : "sessions"} ${c.sessions_without_cost === 1 ? "has" : "have"} no cost figure`
+  const without = c.sessions_without_cost - c.sessions_uncounted;
+  const missing = [
+    without > 0 ? `${count(without)} of ${count(c.sessions)} ${c.sessions === 1 ? "session" : "sessions"} ${without === 1 ? "has" : "have"} no cost figure` : null,
+    c.sessions_uncounted > 0
+      ? `the share of ${count(c.sessions_uncounted)} ${c.sessions_uncounted === 1 ? "session is" : "sessions is"} still being worked out since the upgrade`
+      : null,
+  ]
+    .filter(Boolean)
+    .join("; ");
+  // Review replaced every agent line it was opened with: what those cost is in no other figure here.
+  const gone =
+    c.opened_usd != null && c.per_surviving_line_usd == null
+      ? `none of the agent lines it was opened with is left: they cost ${opened}${usdOf(c.opened_usd)}`
       : null;
   const partial =
     c.sessions_with_cost_partial > 0
@@ -51,7 +61,7 @@ export function pullCostNote(c: PullCost | null): string {
     // There when the cost now is not: the lines with a cost went, and ones without stayed.
     c.per_surviving_line_usd != null ? `${opened}${usdEach(c.per_surviving_line_usd)} per line that survived review` : null,
   ];
-  return [...each, missing, partial, unshared].filter(Boolean).join("; ");
+  return [...each, gone, missing, partial, unshared].filter(Boolean).join("; ");
 }
 
 /** The small print under the cost of several pull requests. */

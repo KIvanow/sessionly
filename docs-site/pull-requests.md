@@ -181,7 +181,8 @@ a server of version 0.5.0 or older has to be reported once more before it can be
   a report or a **Match again** made with this version on: until then, a pull request from
   before counts all its lines as its own, its cost is marked as an estimate where a session
   of it has lines in other pull requests, and what the lines it was opened with cost is not
-  known. Divided by the lines of the sessions that have a cost figure, it
+  known. For a while after the upgrade the server is still counting the line hashes of the
+  sessions it held, and a pull request of one not counted yet says so in place of a cost. Divided by the lines of the sessions that have a cost figure, it
   gives the cost of an agent line. The cost of a line that got through review, where that is
   known, is what the agent's lines the pull request was opened with cost, divided by those
   that survived; a pull request none of whose agent lines survived still says what they

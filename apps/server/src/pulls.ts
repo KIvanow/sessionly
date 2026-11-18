@@ -885,6 +885,8 @@ interface Share {
   estimated: boolean;
   /** Its cost leaves requests out: what it cost here is then a floor. */
   partial: boolean;
+  /** It has a cost, and what share of it is here is not known yet: its line hashes are still to be counted. */
+  uncounted: boolean;
   /**
    * It has lines in several pull requests, and in one of them they were kept
    * before which lines they are was: the same ones, perhaps, counted in
@@ -902,11 +904,6 @@ interface Share {
 }
 
 const pullKey = (p: { repo: unknown; number: unknown }): string => `${p.repo}\n${p.number}`;
-
-/** A session's line hashes counted from its payload: for one stored before the count was kept beside it. */
-const HASHED_FROM_PAYLOAD = `(SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
-   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'lines') = 'array' THEN s.payload->'lines' ELSE '[]'::jsonb END) AS l
-   WHERE jsonb_typeof(l->'hashes') = 'array')`;
 
 /**
  * What each session cost in each of the pull requests chosen: the session's
@@ -943,7 +940,7 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
          AND (o.machine_id, o.source, o.session_id) IN (SELECT machine_id, source, session_id FROM mine)
        GROUP BY o.machine_id, o.source, o.session_id)
      SELECT mine.*, t.pulls, t.unkept, t.in_pulls, t.in_closed, t.opened_in_pulls, t.opened_in_closed, s.session_id IS NOT NULL AS held,
-            coalesce(s.hashed_lines, ${HASHED_FROM_PAYLOAD}) AS hashed_lines,
+            s.hashed_lines,
             s.cost_usd, s.cost_source, s.unpriced_requests, ${about}
      FROM mine
      LEFT JOIN totals t ON t.machine_id = mine.machine_id AND t.source = mine.source AND t.session_id = mine.session_id
@@ -960,7 +957,12 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
     // between them, as the others are of theirs: neither is counted twice.
     const closed = row.closed === true;
     const among = Math.max(num(row.hashed_lines), num(closed ? row.in_closed : row.in_pulls), weight);
-    const cost = held && row.cost_usd != null ? Number(row.cost_usd) : null;
+    const whole = held && row.cost_usd != null ? Number(row.cost_usd) : null;
+    // From before its line hashes were counted, and not counted yet (the
+    // server does that after it starts): what share its lines here are is
+    // not known until then, and its payload is not opened to find out.
+    const uncounted = held && row.hashed_lines == null;
+    const cost = uncounted ? null : whole;
     const lines = num(row.lines);
     // The lines it was first reported with, shared likewise with the others that were opened with them.
     const opened = row.opened_weight == null ? num(row.opened_lines) : num(row.opened_weight);
@@ -971,7 +973,7 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
         source: String(row.source),
         session_id: String(row.session_id),
         lines,
-        hashed_lines: held ? num(row.hashed_lines) : null,
+        hashed_lines: held && !uncounted ? num(row.hashed_lines) : null,
         cost_share_usd: cost == null ? null : money(among > 0 ? (cost * weight) / among : 0),
         session: held
           ? {
@@ -980,7 +982,7 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
               title: (row.title as string) ?? null,
               started_at: iso(row.started_at),
               active_ms: num(row.active_ms),
-              cost_usd: cost,
+              cost_usd: whole,
               cost_source: (row.cost_source as string) ?? null,
               primary_model: (row.primary_model as string) ?? null,
               prompts: num(row.prompts),
@@ -988,6 +990,7 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
           : null,
       },
       estimated: row.cost_source !== "recorded",
+      uncounted: uncounted && whole != null,
       unshared: held && row.unkept === true && num(row.pulls) > 1,
       partial: row.cost_source === "partial_estimate" || num(row.unpriced_requests) > 0,
       opened_lines: num(row.opened_lines),
@@ -1009,6 +1012,7 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   let without = 0;
   let partial = 0;
   let unshared = 0;
+  let uncounted = 0;
   // The lines that cost is of: a session with no cost figure says nothing of what a line cost.
   let costed = 0;
   // What the lines it was first reported with cost, where every session says
@@ -1033,6 +1037,7 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
     sessions += 1;
     if (cost == null) {
       without += 1;
+      if (share.uncounted) uncounted += 1;
       continue;
     }
     usd = (usd ?? 0) + cost;
@@ -1055,6 +1060,7 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
     sessions_without_cost: without,
     sessions_with_cost_partial: partial,
     sessions_unshared: unshared,
+    sessions_uncounted: uncounted,
     per_agent_line_usd: each == null ? null : money(each),
     opened_usd: opened == null ? null : money(opened),
     opened_is_floor: opened != null && openedFloor,
