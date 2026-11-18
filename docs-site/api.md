@@ -78,7 +78,9 @@ an older Action. A report that names no reporter still is: an Action from before
 sent. `GET /prs` and `GET /prs/detail` give `reporter_version` (null when none was kept) and
 `reporter_older`. `GET /prs/detail` also gives `reporter_current`, the version of the Action
 this server knows, and `repo_reporter_older`: the repository's newest report, of any state,
-came from an older Action. A pull request merged before an upgrade is not that on its own.
+came from an older Action. `repo_reporter_version` is the version that report named, which is
+what the repository notice quotes. A pull request merged before an upgrade is not that on its
+own.
 `GET /prs/summary` gives `older_actions`, the repositories in the filter whose newest report
 of any state came from an older Action, or from one that named no version. A newest report
 from another client does not put the repository on that list.

@@ -526,6 +526,11 @@ export interface PullDetail extends PullRow {
    * Action. A pull request merged before an upgrade is not that on its own.
    */
   repo_reporter_older: boolean;
+  /**
+   * The version the newest report named. Null when it named none. The
+   * repository notice quotes this, not this pull request's version.
+   */
+  repo_reporter_version: string | null;
   /** The version of the Action this server knows as current. */
   reporter_current: string;
 }

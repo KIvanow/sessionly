@@ -49,8 +49,9 @@ What to know about the workflow:
   name a commit instead (`KIvanow/sessionly/action@<commit sha>`), as this repository's own
   [workflow](https://github.com/KIvanow/sessionly/blob/main/.github/workflows/sessionly.yml) does.
   The list, and a pull request's page, say to change that line when the repository's newest
-  report is from an older Action. A pull request that was itself last reported by an older one
-  says so, without asking for a change that a later report already shows was made. Re-running
+  report is from an older Action, and the page names that report's version. A pull request
+  that was itself last reported by an older one says so, without asking for a change that a
+  later report already shows was made. Re-running
   the same workflow run keeps the workflow file it started with. Push a commit on an open pull
   request, or start the workflow by hand with the pull request's number for one that has been
   merged.

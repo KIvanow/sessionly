@@ -223,14 +223,19 @@ function reportIsOlder(name: string | null, version: string | null): boolean {
   return olderAction(version, CURRENT_ACTION);
 }
 
+/** Who sent a repository's newest report, and the Action version it named. */
+interface NewestReport {
+  name: string | null;
+  version: string | null;
+}
+
 /**
- * Of `repos`, those whose newest report — any state, any date — came from an
- * older Action. An exact name, not the list's partial match: a closed pull
- * request must not keep the notice once a later one was reported by the
- * current Action.
+ * Each repository's newest report, any state and any date. An exact name,
+ * not the list's partial match: a closed pull request must not keep the
+ * notice once a later one was reported by the current Action.
  */
-async function reposOnOlderAction(db: OrgDb, repos: string[]): Promise<Set<string>> {
-  if (repos.length === 0) return new Set();
+async function newestReports(db: OrgDb, repos: string[]): Promise<Map<string, NewestReport>> {
+  if (repos.length === 0) return new Map();
   const rows = await db.query<{ repo: string; reporter_name: unknown; reporter_version: unknown }>(
     `SELECT DISTINCT ON (repo) repo, reporter_name, reporter_version
      FROM pull_requests
@@ -238,15 +243,9 @@ async function reposOnOlderAction(db: OrgDb, repos: string[]): Promise<Set<strin
      ORDER BY repo, updated_at DESC`,
     [db.orgId, repos],
   );
-  return new Set(
-    rows
-      .filter((row) =>
-        reportIsOlder(
-          typeof row.reporter_name === "string" ? row.reporter_name : null,
-          typeof row.reporter_version === "string" ? row.reporter_version : null,
-        ),
-      )
-      .map((row) => String(row.repo)),
+  const text = (value: unknown) => (typeof value === "string" ? value : null);
+  return new Map(
+    rows.map((row) => [String(row.repo), { name: text(row.reporter_name), version: text(row.reporter_version) }]),
   );
 }
 
@@ -611,11 +610,12 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
   );
   if (!r) return null;
   const detail = r.detail == null ? null : json<{ files: PullFile[]; sessions: Omit<PullSession, "session">[] }>(r.detail);
-  const olderRepo = await reposOnOlderAction(db, [repo]);
+  const newest = (await newestReports(db, [repo])).get(repo) ?? { name: null, version: null };
   return {
     ...pullRow(r),
     reporter_current: CURRENT_ACTION,
-    repo_reporter_older: olderRepo.has(repo),
+    repo_reporter_older: reportIsOlder(newest.name, newest.version),
+    repo_reporter_version: newest.version,
     draft: r.draft === true,
     head_ref: (r.head_ref as string) ?? null,
     base_ref: (r.base_ref as string) ?? null,
@@ -740,6 +740,9 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
   }
   // Which repositories the filter contains. Whether each still reports with
   // an older Action is its newest report, merged or not.
-  const older = await reposOnOlderAction(db, [...new Set(rows.map((pull) => pull.repo))]);
-  return { by_model: sorted(byModel), older_actions: [...older].sort(), total };
+  const newest = await newestReports(db, [...new Set(rows.map((pull) => pull.repo))]);
+  const older = [...newest]
+    .filter(([, report]) => reportIsOlder(report.name, report.version))
+    .map(([repo]) => repo);
+  return { by_model: sorted(byModel), older_actions: older.sort(), total };
 }

@@ -561,14 +561,40 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(mergedPage.reporter_version, null);
   assert.equal(mergedPage.reporter_older, true);
   assert.equal(mergedPage.repo_reporter_older, false);
+  // The notice would quote the open report, which is current, not this one.
+  assert.equal(mergedPage.repo_reporter_version, CURRENT_ACTION);
   assert.equal(mergedPage.reporter_current, CURRENT_ACTION);
   const openPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(upgraded)}&number=2`)).body;
   assert.equal(openPage.reporter_version, CURRENT_ACTION);
   assert.equal(openPage.reporter_older, false);
   assert.equal(openPage.repo_reporter_older, false);
+  assert.equal(openPage.repo_reporter_version, CURRENT_ACTION);
   // Still on the old Action: the newest report named none, so the page does ask.
   const oldPage = (await at(41)).body;
   assert.equal(oldPage.repo_reporter_older, true);
+  assert.equal(oldPage.repo_reporter_version, null);
+
+  // A later re-run from an old Action is the repository's version. The open
+  // pull request, reported by the current one, does not lend it its number.
+  const rerun = "github.com/acme/rerun";
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: rerun, number: 1, state: "open", reporter: { name: "sessionly-action", version: CURRENT_ACTION },
+  }))).status, 200);
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: rerun, number: 2, state: "merged", merged_at: "2026-11-02T00:00:00Z",
+    reporter: { name: "sessionly-action", version: "0.1.0" },
+  }))).status, 200);
+  const rerunOpen = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/rerun&state=open")).body;
+  assert.equal(rerunOpen.total.pulls, 1);
+  assert.deepEqual(rerunOpen.older_actions, [rerun]);
+  const currentPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(rerun)}&number=1`)).body;
+  assert.equal(currentPage.reporter_version, CURRENT_ACTION);
+  assert.equal(currentPage.reporter_older, false);
+  assert.equal(currentPage.repo_reporter_older, true);
+  assert.equal(currentPage.repo_reporter_version, "0.1.0");
+  const oldRerun = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(rerun)}&number=2`)).body;
+  assert.equal(oldRerun.reporter_version, "0.1.0");
+  assert.equal(oldRerun.repo_reporter_version, "0.1.0");
 
   // Another client over an old Action. The repository is not asked to change
   // its workflow, and that client's own report is not an older Action. The
@@ -593,8 +619,10 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(otherOld.reporter_version, "0.1.0");
   assert.equal(otherOld.reporter_older, true);
   assert.equal(otherOld.repo_reporter_older, false);
+  assert.equal(otherOld.repo_reporter_version, null);
   const otherNew = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(other)}&number=2`)).body;
   assert.equal(otherNew.reporter_version, null);
   assert.equal(otherNew.reporter_older, false);
   assert.equal(otherNew.repo_reporter_older, false);
+  assert.equal(otherNew.repo_reporter_version, null);
 });
