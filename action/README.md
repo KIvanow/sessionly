@@ -102,8 +102,12 @@ updating it to a version that reports more than the one before. It differs from 
   `comment` says. The run's summary page has one row for each.
 - **One that cannot be reported does not stop the rest.** It is named in a warning and on the
   summary page, and the run fails at the end only with `fail-on-error`. When GitHub allows the
-  run no more requests, it stops there and names the range to start it with later.
-- In a range, numbers that belong to issues are passed over.
+  run no more requests, it stops there and names the range to start it with later. It also
+  stops when the Sessionly server refuses for a reason the next report would meet too (the
+  token, too many requests, no answer): reading the rest from GitHub would be for nothing.
+- In a range, numbers that belong to issues are passed over. A range with no pull request in
+  it at all is said as a failure: in a private repository, a `github-token` without access to
+  it is answered as if every number were an issue's.
 
 Sessions that were uploaded after a pull request's last report need none of this: the Pull
 requests page of the dashboard matches them without asking GitHub ("Match again"). The one

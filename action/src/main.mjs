@@ -67,7 +67,7 @@ export async function send(url, token, report) {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(`the Sessionly server answered ${response.status}: ${body.error ?? "no reason given"}`);
+    throw Object.assign(new Error(`the Sessionly server answered ${response.status}: ${body.error ?? "no reason given"}`), { status: response.status });
   }
   return body.attribution;
 }
@@ -100,6 +100,14 @@ export async function run(env, { api, deliver = send, log = console.log } = {}) 
     if (otherNames.length > 0) report.aliases = otherNames.map((name) => `${host}/${name}`);
     return report;
   };
+  /** Send a report. A failure is marked as the server's, which a run of several goes by. */
+  const sendTo = async (report) => {
+    try {
+      return await deliver(url, token, report);
+    } catch (err) {
+      throw Object.assign(err instanceof Error ? err : new Error(String(err)), { sending: true });
+    }
+  };
   /** Read one pull request and report it; what was read comes back with what the server answered. */
   const reportOne = async (number, event) => {
     const data = await readPull(api, repo, number);
@@ -111,11 +119,11 @@ export async function run(env, { api, deliver = send, log = console.log } = {}) 
         // that follows. It says nothing of reviews and comments, so that those
         // the server has stay.
         const { feedback, feedback_total, ...opened } = buildReport({ ...data, ...then, reviews: [], comments: [], conversation: [], event: "opened", host, ignored });
-        await deliver(url, token, named({ ...opened, state: "open", merged_at: null, closed_at: null }));
+        await sendTo(named({ ...opened, state: "open", merged_at: null, closed_at: null }));
       }
     }
     const report = named(buildReport({ ...data, event, host, ignored }));
-    const attribution = await deliver(url, token, report);
+    const attribution = await sendTo(report);
     log(`Reported ${report.repo}#${number}: ${attribution.now.agent_lines} of ${attribution.now.lines} added lines matched to a coding agent.`);
     return { data, report, attribution };
   };
@@ -179,8 +187,11 @@ async function runMany(env, which, { api, repo, reportOne, log, url }) {
 
   const reported = [];
   const failed = [];
-  // The first one not tried, when GitHub stopped answering for now.
+  // Numbers in a range that turned out not to be pull requests.
+  let passed = 0;
+  // The first one not reported, when GitHub or the server would take no more.
   let stopped;
+  let serverSaid;
   for (const number of numbers) {
     try {
       const { report, attribution } = await reportOne(number, "manual");
@@ -188,7 +199,19 @@ async function runMany(env, which, { api, repo, reportOne, log, url }) {
     } catch (err) {
       const why = String(err.message ?? err).replace(/\r?\n/g, " ");
       // Issues and pull requests are numbered together.
-      if (!which.all && new RegExp(`answered 404 to GET /repos/[^ ]+/pulls/${number}[/:?]`).test(why)) continue;
+      if (!which.all && new RegExp(`answered 404 to GET /repos/[^ ]+/pulls/${number}:`).test(why)) {
+        passed += 1;
+        continue;
+      }
+      // The server's refusal is about this report only when it says the report
+      // is wrong or too large. Anything else (the token, too many requests, no
+      // answer at all) the next would meet too, after six more requests to GitHub.
+      if (err.sending && ![400, 413, 422].includes(err.status)) {
+        stopped = number;
+        serverSaid = why;
+        log(`::warning title=Sessionly::#${number} could not be sent (${why}), and neither could the ones after it: the run stops here.`);
+        break;
+      }
       // The ones after it would get the same answer: they are left for a later run.
       if (/GitHub answered (403|429) to .*rate limit/i.test(why)) {
         stopped = number;
@@ -203,18 +226,31 @@ async function runMany(env, which, { api, repo, reportOne, log, url }) {
     }
   }
   const oldest = numbers.at(-1);
-  if (more > 0 && stopped === undefined) {
+  if (more !== 0 && stopped === undefined) {
+    // How many, and where they begin, is not known when GitHub's search would not say.
+    const left = more === null ? "More were" : `${more} more ${more === 1 ? "was" : "were"}`;
+    const within = from === undefined ? " (a range takes no notice of since: narrow it to stay within that)" : "";
     log(
-      `::warning title=Sessionly::${more} more ${more === 1 ? "was" : "were"} left for another run: at most ${MOST_AT_ONCE} are reported at once. ` +
-        `Run again with pr-number ${from}-${oldest - 1} for the ones before these.`,
+      `::warning title=Sessionly::${left} left for another run: at most ${MOST_AT_ONCE} are reported at once. ` +
+        `Run again with pr-number ${from ?? 1}-${oldest - 1} for the ones before these${within}.`,
     );
   }
   log(`Reported ${reported.length} pull ${reported.length === 1 ? "request" : "requests"} of ${repo}.`);
   if (on(env.SESSIONLY_SUMMARY ?? "true") && env.GITHUB_STEP_SUMMARY) {
     appendFileSync(env.GITHUB_STEP_SUMMARY, `${renderMany(reported, url, failed)}\n`);
   }
+  if (serverSaid !== undefined) {
+    throw new Error(`${serverSaid}: #${stopped} and the ones before it were not reported`);
+  }
   if (stopped !== undefined) {
     throw new Error(`GitHub allowed no more requests: #${stopped} and the ones before it were not reported`);
+  }
+  // Every number an issue's is unlikely: a token that cannot see the repository is answered the same.
+  if (numbers.length > 0 && passed === numbers.length) {
+    throw new Error(
+      `none of #${which.from} to #${which.to} is a pull request the github-token can read: GitHub answered 404 to each. ` +
+        "In a private repository that is also what a token without access to it is told.",
+    );
   }
   if (failed.length > 0) {
     throw new Error(`${failed.length} of ${numbers.length} pull requests could not be reported: ${failed.map((n) => `#${n}`).join(", ")}`);

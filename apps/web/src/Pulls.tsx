@@ -45,7 +45,8 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
       const waiting = done.needs_report
         ? ` ${count(done.needs_report)} ${done.needs_report === 1 ? "was" : "were"} last reported before that could be done, and ${done.needs_report === 1 ? "waits" : "wait"} for the Action to report ${done.needs_report === 1 ? "it" : "them"} once more.`
         : "";
-      setMatched(`Matched ${count(done.matched)} ${done.matched === 1 ? "pull request" : "pull requests"} against the sessions held now.${waiting}`);
+      const not = done.failed ? ` ${count(done.failed)} could not be matched; the server's log says why.` : "";
+      setMatched(`Matched ${count(done.matched)} ${done.matched === 1 ? "pull request" : "pull requests"} against the sessions held now.${waiting}${not}`);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) onSignOut();
       setMatched((err as Error).message);

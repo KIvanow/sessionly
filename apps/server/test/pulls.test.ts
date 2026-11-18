@@ -505,6 +505,15 @@ test("a pull request's lines are matched again when its sessions arrive after it
   const strangers = report({ ...about, number: 3, commit_emails: ["zed@elsewhere.example"] });
   assert.equal((await call(tokens.ci, "PUT", "/prs", strangers)).body.attribution.now.agent_lines, 0);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 3 })).body.attribution.now.agent_lines, 0);
+  // nor those of a session whose git address is empty: that one is its uploader's
+  const empty = session("s-empty", "claude-code", "claude-opus-5-5", "2026-11-10T11:30:00Z", [{ path: "a.ts", model: null, hashes: [h(802)] }]);
+  empty.session.repo.remote = repo;
+  (empty.session as Record<string, unknown>).user = { email: "" };
+  assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-empty", empty)).status, 200);
+  await db.query(`UPDATE sessions SET user_email = '' WHERE session_id = 's-empty'`);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 3 })).body.attribution.now.agent_lines, 0);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 1 })).body.attribution.now.agent_lines, 3);
+  await call(tokens.ann, "DELETE", "/sessions/m1/claude-code/s-empty");
   // a report that named no committers has every session in the repository looked at, then as before
   const anyone = report({ ...about, number: 4, commit_emails: [] });
   assert.equal((await call(tokens.ci, "PUT", "/prs", anyone)).body.attribution.now.agent_lines, 3);
@@ -521,6 +530,33 @@ test("a pull request's lines are matched again when its sessions arrive after it
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 99 })).status, 404);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { number: 1 })).status, 400);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: "1" })).status, 400);
+  // a number that is there and is none does not make it a request for all of the repository's
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: null })).status, 400);
+
+  // with a key, what is kept cannot be made from an address without it, and says which key it was
+  const keyed = createApp(db, { hashKey: "k".repeat(32) });
+  const ask = async (to: typeof app, method: string, path: string, body: unknown, token = tokens.admin) => {
+    const response = await to.request(`/api/v1${path}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, body: (await response.json()) as any };
+  };
+  assert.equal((await ask(keyed, "PUT", "/prs", report({ ...about, number: 6 }), tokens.ci)).status, 200);
+  const [withKey] = await db.query<{ committers: unknown }>(`SELECT committers::text AS committers FROM pull_requests WHERE repo = $1 AND number = 6`, [repo]);
+  assert.match(String(withKey!.committers), /^\["[0-9a-f]{8}\.[0-9a-f]{64}"\]$/);
+  assert.notEqual(String(withKey!.committers).slice(11), String(kept!.committers).slice(2));
+  assert.equal((await ask(keyed, "POST", "/prs/match", { repo, number: 6 })).body.attribution.now.agent_lines, 2);
+  // kept with another key (here: none), it waits for a report
+  assert.equal((await ask(keyed, "POST", "/prs/match", { repo, number: 1 })).status, 409);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 6 })).status, 409);
+  // and matching the list's says so of each from then on: only the one kept with this key
+  // is matched, and the one that named no committers, of which nothing is kept
+  const mixed = await ask(keyed, "POST", "/prs/match", { repo });
+  assert.deepEqual([mixed.body.matched, mixed.body.failed, mixed.body.remaining, mixed.body.needs_report], [2, 0, 0, 4]);
+  assert.equal((await detail(1)).matchable, false);
+  assert.equal((await detail(6)).matchable, true);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 2147483648 })).status, 400);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 2147483647 })).status, 404);
 });

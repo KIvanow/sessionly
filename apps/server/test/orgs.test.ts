@@ -1028,8 +1028,10 @@ test("a hosted service refuses what only a single install may have", () => {
     SESSIONLY_GOOGLE_CLIENT_ID: "test.apps.googleusercontent.com",
     SESSIONLY_GOOGLE_CLIENT_SECRET: "secret",
     SESSIONLY_PUBLIC_URL: "https://app.example.com",
+    SESSIONLY_HASH_KEY: "k".repeat(32),
   };
   assert.deepEqual(hostedProblems(set), []);
+  assert.match(hostedProblems({ ...set, SESSIONLY_HASH_KEY: "short" }).join(), /SESSIONLY_HASH_KEY/);
   assert.match(hostedProblems({ ...set, SESSIONLY_ADMIN_TOKEN: "x" }).join(), /no admin of every organisation/);
   assert.match(hostedProblems({}).join(), /postgres:\/\//);
   assert.match(hostedProblems({ ...set, DATABASE_URL: "file:/data" }).join(), /postgres:\/\//);

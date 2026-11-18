@@ -485,6 +485,8 @@ export interface PullMatch {
 export interface PullMatches {
   /** Matched by this request. */
   matched: number;
+  /** Could not be matched by this request, and still among the remaining. */
+  failed: number;
   /** Still to be matched: ask again with the same `started` until there are none. */
   remaining: number;
   /** Left as they were: only a new report from the Action can match them. */

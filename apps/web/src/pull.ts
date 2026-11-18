@@ -86,15 +86,18 @@ export async function matchAll(
   send: (body: Record<string, string | undefined>) => Promise<PullMatches>,
   filters: { repo?: string; state?: string; since?: string },
   progress: (done: number) => void = () => {},
-): Promise<{ matched: number; needs_report: number }> {
+): Promise<{ matched: number; needs_report: number; failed: number }> {
   let matched = 0;
   let started: string | undefined;
+  let left = Infinity;
   for (;;) {
     const answer = await send({ ...filters, started });
     matched += answer.matched;
     started = answer.started;
     progress(matched);
-    // An answer that matched none would be asked for forever.
-    if (answer.remaining === 0 || answer.matched === 0) return { matched, needs_report: answer.needs_report };
+    // An answer that got no further would be asked for forever: what remains could not be matched.
+    const stuck = answer.matched === 0 && answer.remaining >= left;
+    if (answer.remaining === 0 || stuck) return { matched, needs_report: answer.needs_report, failed: answer.remaining };
+    left = answer.remaining;
   }
 }

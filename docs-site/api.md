@@ -69,7 +69,7 @@ How a repository is named, and what a path covers, is under
 | `GET /prs` | `admin` | A page of pull requests. Filters `repo` (part of its name), `state` (`open`, `merged` or `closed`) and `since`; `limit` (50, at most 500) and `offset`. |
 | `GET /prs/summary` | `admin` | The same pull requests summed by model. Same three filters. |
 | `GET /prs/detail?repo=…&number=…` | `admin` | One pull request, with its files, the sessions that wrote its lines, and its reviews and comments. `repo` is its whole name. |
-| `POST /prs/match` | `admin` | Match lines again against the sessions held now, without a report. With `repo` (its whole name) and `number`: one pull request, answered with its figures, or `409` with the code `needs_report` when it was last reported before that could be done. Otherwise the filters of `GET /prs`, for up to 100 at a time: send the answer's `started` back, with the same filters, until `remaining` is 0. |
+| `POST /prs/match` | `admin` | Match lines again against the sessions held now, without a report. With `repo` (its whole name) and `number`: one pull request, answered with its figures, or `409` with the code `needs_report` when it was last reported before that could be done. Otherwise the filters of `GET /prs`, for up to 100 at a time: send the answer's `started` back, with the same filters, until `remaining` is 0. Each pull request is matched and stored on its own; `failed` counts those of a request that could not be, which stay among the remaining. |
 
 ## Tokens and people
 
