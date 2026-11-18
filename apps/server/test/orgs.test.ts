@@ -1316,6 +1316,7 @@ test("removing a person can delete their sessions and nobody else's", async () =
 });
 
 test("a purge removes an organisation deleted 8 days ago, and leaves one deleted 6 days ago", async () => {
+  await newOrg(db, "org-aged", "Aged");
   await newOrg(db, "org-old", "Old");
   await newOrg(db, "org-young", "Young");
   const sessionRow = (org: string) =>
@@ -1324,6 +1325,7 @@ test("a purge removes an organisation deleted 8 days ago, and leaves one deleted
        VALUES ($1, 'm', 'claude-code', 's', 'a@x.example', 'metadata', '{}')`,
       [org],
     );
+  await sessionRow("org-aged");
   await sessionRow("org-old");
   await sessionRow("org-young");
   await db.query(
@@ -1338,12 +1340,13 @@ test("a purge removes an organisation deleted 8 days ago, and leaves one deleted
     `INSERT INTO tokens (id, org_id, token_hash, email, role) VALUES ('tok-old', 'org-old', 'hash-old', 'a@old.example', 'member')`,
   );
   await db.query(
-    `UPDATE orgs SET deleted_at = now() - interval '8 days' WHERE id = 'org-old'`,
+    `UPDATE orgs SET deleted_at = now() - interval '8 days' WHERE id IN ('org-aged', 'org-old')`,
   );
   await db.query(`UPDATE orgs SET deleted_at = now() - interval '6 days' WHERE id = 'org-young'`);
   await db.query(`UPDATE orgs SET deleted_at = now() - interval '8 days' WHERE id = 'default'`);
   await db.query(
     `INSERT INTO rate_counters (key, window_start, n) VALUES
+       ('invites:org-aged', now(), 1),
        ('invites:org-old', now(), 1),
        ('export:org-old', now(), 1),
        ('invites:org-young', now(), 2),
@@ -1351,11 +1354,12 @@ test("a purge removes an organisation deleted 8 days ago, and leaves one deleted
   );
 
   const removed = await purgeDeletedOrgs(db);
-  assert.deepEqual(removed, ["org-old"]);
+  assert.deepEqual(removed, ["org-aged", "org-old"]);
   const left = async (org: string) => {
     const [row] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM orgs WHERE id = $1`, [org]);
     return Number(row?.n);
   };
+  assert.equal(await left("org-aged"), 0);
   assert.equal(await left("org-old"), 0);
   for (const table of ["sessions", "pull_requests", "users", "tokens"]) {
     const [row] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM ${table} WHERE org_id = 'org-old'`);
@@ -1370,7 +1374,7 @@ test("a purge removes an organisation deleted 8 days ago, and leaves one deleted
   const [marked] = await db.query<{ deleted_at: unknown }>(`SELECT deleted_at FROM orgs WHERE id = 'default'`);
   assert.ok(marked?.deleted_at);
   const keys = await db.query<{ key: string }>(
-    `SELECT key FROM rate_counters WHERE key IN ('invites:org-old', 'export:org-old', 'invites:org-young', 'invites:default') ORDER BY key`,
+    `SELECT key FROM rate_counters WHERE key IN ('invites:org-aged', 'invites:org-old', 'export:org-old', 'invites:org-young', 'invites:default') ORDER BY key`,
   );
   assert.deepEqual(
     keys.map((row) => row.key),
