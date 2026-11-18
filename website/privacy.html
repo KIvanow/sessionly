@@ -219,7 +219,8 @@
             dashboard can link to it. The text of reviews and comments is not sent and not
             stored. The email addresses on the pull request's commits are
             sent with each report so that lines are matched only to sessions by the people who
-            committed; they are used for that comparison and are not stored.
+            committed. The addresses are used for that comparison and are not stored; a hash of
+            each is kept, so that the lines can be compared again when sessions arrive later.
           </p>
           <p>
             <strong>What is never uploaded:</strong> full prompts, the agent's replies, file

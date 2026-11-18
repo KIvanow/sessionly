@@ -22,6 +22,8 @@
 //   SESSIONLY_RATE_PER_MINUTE  requests a token may make a minute (hosted default: 600)
 //   SESSIONLY_SIGNUPS_PER_HOUR organisations created an hour, in all (default 100)
 //   SESSIONLY_SIGNUPS_PER_NETWORK  organisations created an hour from one network (default 10)
+//   SESSIONLY_HASH_KEY     32 characters or more, kept secret and kept the same: what is stored of the
+//                          addresses on a pull request's commits is hashed with it (hosted: required)
 //   SESSIONLY_TELEMETRY    "off" for the dashboard not to count which of its pages are opened
 //                          (also off when DO_NOT_TRACK is set)
 import { existsSync } from "node:fs";
@@ -63,6 +65,15 @@ const ON_THIS_MACHINE = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/;
  * self-hosted install has one organisation, "default", and none of this
  * applies to it.
  */
+/** The least a key to hash with may be. */
+const HASH_KEY_LENGTH = 32;
+
+/** The key the committers kept of a pull request are hashed with, if one long enough is set. */
+export function hashKeyOf(env: NodeJS.ProcessEnv): string | undefined {
+  const key = env.SESSIONLY_HASH_KEY?.trim();
+  return key && key.length >= HASH_KEY_LENGTH ? key : undefined;
+}
+
 export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
   const problems: string[] = [];
   if (env.SESSIONLY_ADMIN_TOKEN) {
@@ -81,6 +92,11 @@ export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
     // service is tried before it has a name and a certificate.
     problems.push(
       "SESSIONLY_PUBLIC_URL must begin with https://: a hosted service is not reached over plain HTTP, except on the machine it runs on (http://localhost).",
+    );
+  }
+  if (!hashKeyOf(env)) {
+    problems.push(
+      `SESSIONLY_HASH_KEY is not set, or is shorter than ${HASH_KEY_LENGTH} characters: what is kept of the addresses on a pull request's commits is hashed with it. Any long random text will do (openssl rand -hex 32); keep it, since pull requests kept with another have to be reported again before their lines can be matched again.`,
     );
   }
   if (!PROVIDER_NAMES.some((name) => clientOf(env, name))) {
@@ -169,6 +185,9 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
       "SESSIONLY_PUBLIC_URL is plain HTTP on a host that is not this machine: sign-ins and tokens cross the network in clear. Put it behind HTTPS.",
     );
   }
+  if (env.SESSIONLY_HASH_KEY?.trim() && !hashKeyOf(env)) {
+    notes.push(`SESSIONLY_HASH_KEY is shorter than ${HASH_KEY_LENGTH} characters, and is not used.`);
+  }
   const mail = ["RESEND_API_KEY", "SESSIONLY_EMAIL_FROM", "SMTP_URL"].filter((name) => env[name]);
   if (mail.length) {
     notes.push(
@@ -211,6 +230,7 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   const tidying = setInterval(() => void tidy(db).catch((err) => console.error("tidying failed:", err)), 15 * 60_000);
   tidying.unref();
   const app = createApp(db, {
+    hashKey: hashKeyOf(process.env),
     webRoot,
     accounts,
     telemetry,

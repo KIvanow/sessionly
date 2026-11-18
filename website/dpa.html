@@ -653,7 +653,8 @@
               the file and line it is on, a review's outcome and its address on GitHub, and never
               its text. The email addresses on
               the pull request's commits are received with each report, used to select the
-              sessions to compare with, and not stored.
+              sessions to compare with, and not stored; a hash of each is kept, so that the
+              comparison can be made again when sessions arrive later.
             </li>
             <li>
               <strong>Tokens:</strong> the email address (stored lower-case), optional name and

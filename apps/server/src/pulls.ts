@@ -11,12 +11,15 @@ import type {
   PullFeedback,
   PullFile,
   PullList,
+  PullMatch,
+  PullMatches,
   PullReport,
   PullRow,
   PullSession,
   PullSummary,
   PullsByModel,
 } from "@sessionly/schema";
+import { createHash, createHmac } from "node:crypto";
 import type { OrgDb } from "./db.ts";
 
 export class BadReport extends Error {}
@@ -299,14 +302,72 @@ export function checkReport(body: unknown): PullReport {
   };
 }
 
+/** What of a pull request says which sessions' lines may be its own. */
+type Matched = Pick<PullReport, "repo" | "head_repo" | "aliases" | "commit_emails" | "head_ref" | "created_at"> & {
+  /** It had committers, and none of them has a session here: nobody's lines are its own. */
+  nobody?: boolean;
+};
+
 /**
  * The names a session may know the pull request's repository by: a session
  * names it by its clone's origin, which is the repository itself, a fork the
  * branch is in, or a name it used to have.
  */
-const repoNames = (report: PullReport): string[] => [
+const repoNames = (report: Pick<Matched, "repo" | "head_repo" | "aliases">): string[] => [
   ...new Set([report.repo, report.head_repo ?? report.repo, ...(report.aliases ?? [])]),
 ];
+
+/** Which key a kept committer was made with: the beginning of a hash of it, and nothing the key can be had from. */
+const keyName = (key: string): string => createHash("sha256").update(`sessionly committers\n${key}`).digest("hex").slice(0, 8);
+
+/**
+ * What is kept of an address a pull request's commits were made with: enough
+ * to tell later which of the people with sessions here made them, and not
+ * the address. Another organisation's hash of the same address differs.
+ *
+ * With a `key` (SESSIONLY_HASH_KEY), which the database does not hold, it
+ * cannot be made from a guessed address by someone who has only the
+ * database, and it begins with the key's name. Without one it is a plain hash.
+ */
+const committer = (orgId: string, email: string, key?: string): string =>
+  key
+    ? `${keyName(key)}.${createHmac("sha256", key).update(`${orgId}\n${email}`).digest("hex")}`
+    : createHash("sha256").update(`${orgId}\n${email}`).digest("hex");
+
+/** Whether kept committers were made with this key (or, with none, with none): others cannot be told from addresses. */
+const keptWith = (kept: string[], key?: string): boolean => {
+  const name = key ? keyName(key) : null;
+  return kept.every((one) => (one.includes(".") ? one.split(".")[0] : null) === name);
+};
+
+/** Whose a session is: the address git was set up with where it ran, or failing that its uploader's. */
+const SESSION_EMAIL = `lower(coalesce(nullif(user_email, ''), owner_email))`;
+
+/**
+ * The addresses behind a pull request's kept committers, as far as they can
+ * be known: those of people with sessions in its repository, and the ones
+ * cloud agents commit with. A committer with no session here stays unknown,
+ * and has no lines to match either: `nobody` when that is all of them.
+ */
+async function committersAmong(
+  db: OrgDb,
+  names: string[],
+  kept: string[],
+  key?: string,
+): Promise<{ emails: string[]; nobody: boolean }> {
+  // A report that named no committers has every session in the repository looked at.
+  if (kept.length === 0) return { emails: [], nobody: false };
+  const params: unknown[] = [db.orgId];
+  const rows = await db.query<{ email: string | null }>(
+    `SELECT DISTINCT ${SESSION_EMAIL} AS email FROM sessions
+     WHERE org_id = $1 AND repo IN (${names.map((name) => `$${params.push(name)}`).join(", ")})`,
+    params,
+  );
+  const known = [...rows.map((row) => row.email), ...Object.keys(CLOUD_COMMITTERS)];
+  const theirs = new Set(kept);
+  const emails = known.filter((email): email is string => !!email && theirs.has(committer(db.orgId, email, key)));
+  return { emails, nobody: emails.length === 0 };
+}
 
 /** The identities cloud agents commit with, and the branches they make. */
 const CLOUD_COMMITTERS: Record<string, string> = {
@@ -324,7 +385,7 @@ const CLOUD_BRANCHES: [RegExp, string][] = [
  * commits and what its branch is called, and how many cloud sessions were
  * uploaded for that branch. Null if nothing points to one.
  */
-async function cloudOf(db: OrgDb, report: PullReport): Promise<PullCloud | null> {
+async function cloudOf(db: OrgDb, report: Matched): Promise<PullCloud | null> {
   const agents = new Set<string>();
   for (const email of report.commit_emails ?? []) {
     const agent = CLOUD_COMMITTERS[email];
@@ -352,7 +413,7 @@ async function cloudOf(db: OrgDb, report: PullReport): Promise<PullCloud | null>
 }
 
 /** What agents added in the repository around the time of a pull request. */
-async function claimsFor(db: OrgDb, report: PullReport): Promise<Claim[]> {
+async function claimsFor(db: OrgDb, report: Matched): Promise<Claim[]> {
   const since = new Date(Date.parse(report.created_at) - LOOK_BACK_DAYS * 86_400_000).toISOString();
   const names = repoNames(report);
   // Only this organisation's sessions: another's, in the same repository and
@@ -367,8 +428,8 @@ async function claimsFor(db: OrgDb, report: PullReport): Promise<Claim[]> {
   // A session without a git email is its uploader's. (Nothing is bound for a
   // condition that is left out: a parameter no statement uses is refused.)
   let by = "";
-  if (emails.length) {
-    const people = `lower(coalesce(user_email, owner_email)) IN (${list(emails)})`;
+  if (emails.length || report.nobody) {
+    const people = emails.length ? `${SESSION_EMAIL} IN (${list(emails)})` : "FALSE";
     const onBranch = report.head_ref ? ` OR (runtime = 'cloud' AND branch = $${params.push(report.head_ref)})` : "";
     by = `AND (${people}${onBranch})`;
   }
@@ -392,24 +453,42 @@ async function claimsFor(db: OrgDb, report: PullReport): Promise<Claim[]> {
 }
 
 /**
+ * Which lines of a pull request agents wrote, going by the sessions held
+ * now: the figures, and the page's files and sessions. `first` and `now` are
+ * its lines as first reported and as last.
+ */
+async function match(
+  db: OrgDb,
+  about: Matched,
+  first: FileHashes[],
+  now: FileHashes[],
+  firstEvent: string,
+): Promise<{ attribution: PullAttribution; detail: ReturnType<typeof breakdown> }> {
+  const claims = await claimsFor(db, about);
+  // Worked out once, for the figures and for the page: the two then agree.
+  const lines = writers(now, claims);
+  return {
+    attribution: {
+      ...attribute(first, now, claims, lines),
+      from_open: firstEvent === "opened",
+      cloud: await cloudOf(db, about),
+    },
+    detail: breakdown(now, lines),
+  };
+}
+
+/**
  * Store a report, replacing the last one for the pull request, and work out
  * which of its lines agents wrote. The lines of the first report are kept
  * for good: they are what review started from.
  */
-export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttribution> {
+export async function storePull(db: OrgDb, report: PullReport, key?: string): Promise<PullAttribution> {
   const [existing] = await db.query<{ first_files: unknown; first_event: string }>(
     `SELECT first_files, first_event FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
     [db.orgId, report.repo, report.number],
   );
   const first = existing ? json<FileHashes[]>(existing.first_files) : report.files;
-  const claims = await claimsFor(db, report);
-  // Worked out once, for the figures and for the page: the two then agree.
-  const lines = writers(report.files, claims);
-  const attribution: PullAttribution = {
-    ...attribute(first, report.files, claims, lines),
-    from_open: (existing?.first_event ?? report.event) === "opened",
-    cloud: await cloudOf(db, report),
-  };
+  const { attribution, detail } = await match(db, report, first, report.files, existing?.first_event ?? report.event);
   const columns: Record<string, unknown> = {
     org_id: db.orgId,
     repo: report.repo,
@@ -435,7 +514,10 @@ export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttr
     files_without_diff: report.files_without_diff,
     last_files: JSON.stringify(report.files),
     attribution: JSON.stringify(attribution),
-    detail: JSON.stringify(breakdown(report.files, lines)),
+    detail: JSON.stringify(detail),
+    // Kept to match its lines again later, when more sessions are held.
+    committers: JSON.stringify((report.commit_emails ?? []).map((email) => committer(db.orgId, email, key))),
+    aliases: JSON.stringify(report.aliases ?? []),
     // An Action from before these were sent says nothing of them: what is here stays.
     feedback: report.feedback ? JSON.stringify(report.feedback) : null,
     feedback_total: report.feedback ? (report.feedback_total ?? report.feedback.length) : null,
@@ -450,6 +532,8 @@ export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttr
     attribution: "::jsonb",
     detail: "::jsonb",
     feedback: "::jsonb",
+    committers: "::jsonb",
+    aliases: "::jsonb",
   };
   const kept = ["org_id", "repo", "number", "first_event", "first_files"];
   // Reviews and comments, and how many there are, stay as they are when a report has none.
@@ -465,10 +549,128 @@ export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttr
          .filter((name) => !kept.includes(name))
          .map((name) => `${name} = ${set(name)}`)
          .join(", ")},
-       updated_at = now()`,
+       updated_at = clock_timestamp(), matched_at = clock_timestamp()`,
     Object.values(columns),
   );
   return attribution;
+}
+
+/**
+ * Match a pull request's lines again, as last reported, against the sessions
+ * held now: one uploaded after the last report then counts. Nothing else
+ * about the pull request changes. Null if there is none under that number;
+ * `needs_report` for one last reported before what it is matched by was
+ * kept, or kept with another key, which only a new report from the Action
+ * brings.
+ */
+export async function rematchPull(
+  db: OrgDb,
+  repo: string,
+  number: number,
+  key?: string,
+): Promise<PullMatch | "needs_report" | null> {
+  // The row is held until this is stored, so that a report arriving meanwhile
+  // waits, and its files are not left beside figures made from the ones before.
+  const [r] = await db.query(
+    `SELECT head_repo, head_ref, created_at, first_event, first_files, last_files, committers, aliases
+     FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
+    [db.orgId, repo, number],
+  );
+  if (!r) return null;
+  if (r.committers == null) return "needs_report";
+  const kept = json<string[]>(r.committers);
+  if (!keptWith(kept, key)) {
+    // The key is another now: these say nothing any more, and the page should say so.
+    await db.query(`UPDATE pull_requests SET committers = NULL WHERE org_id = $1 AND repo = $2 AND number = $3`, [db.orgId, repo, number]);
+    return "needs_report";
+  }
+  const names = { repo, head_repo: (r.head_repo as string) ?? null, aliases: json<string[]>(r.aliases) ?? [] };
+  const { emails, nobody } = await committersAmong(db, repoNames(names), kept, key);
+  const about: Matched = {
+    ...names,
+    head_ref: (r.head_ref as string) ?? null,
+    commit_emails: emails,
+    nobody,
+    // A pull request is not stored without it.
+    created_at: iso(r.created_at) ?? new Date().toISOString(),
+  };
+  const { attribution, detail } = await match(
+    db,
+    about,
+    json<FileHashes[]>(r.first_files),
+    json<FileHashes[]>(r.last_files),
+    String(r.first_event),
+  );
+  const [stored] = await db.query<{ matched_at: unknown }>(
+    `UPDATE pull_requests SET attribution = $4::jsonb, detail = $5::jsonb, matched_at = clock_timestamp()
+     WHERE org_id = $1 AND repo = $2 AND number = $3 RETURNING matched_at`,
+    [db.orgId, repo, number, JSON.stringify(attribution), JSON.stringify(detail)],
+  );
+  return { attribution, matched_at: iso(stored?.matched_at) ?? new Date().toISOString() };
+}
+
+/** No more than this many pull requests are matched again in one request. */
+export const MATCH_AT_ONCE = 100;
+/** Nor for longer than this, in milliseconds: whoever asks is answered before a proxy gives up on it. */
+const MATCH_FOR = 10_000;
+
+/**
+ * Match again the pull requests the filters choose, those matched longest
+ * ago first, `MATCH_AT_ONCE` at most: `remaining` are the ones still as they
+ * were before `started`, for the next request with the same `started`. The
+ * first request has none and is given the time it is now.
+ *
+ * `each` runs its function in a transaction of its own. Every pull request
+ * has one: its row is held no longer than it takes to match it, so a report
+ * of it that arrives meanwhile waits for that only, and one that cannot be
+ * matched takes none of the others back with it.
+ */
+export async function rematchPulls(
+  each: <T>(fn: (db: OrgDb) => Promise<T>) => Promise<T>,
+  filters: PullFilters,
+  since?: string,
+  key?: string,
+  log: (err: unknown) => void = () => {},
+): Promise<PullMatches> {
+  const began = Date.now();
+  const due = (sql: string, params: unknown[]) =>
+    `${sql} AND committers IS NOT NULL AND (matched_at IS NULL OR matched_at < $${params.length + 1}::timestamptz)`;
+  const { started, rows } = await each(async (db) => {
+    const { sql, params } = where(db.orgId, filters);
+    // By the database's clock, which is the one `matched_at` is written with.
+    // A time given that is still to come is taken as now: nothing would ever
+    // be matched after it, and the requests would not end.
+    const [clock] = await db.query<{ t: unknown }>(`SELECT clock_timestamp() AS t`);
+    const now = iso(clock?.t) ?? new Date().toISOString();
+    const started = since && since < now ? since : now;
+    const rows = await db.query<{ repo: string; number: unknown }>(
+      `SELECT repo, number FROM pull_requests ${due(sql, params)}
+       ORDER BY matched_at NULLS FIRST, repo, number LIMIT ${MATCH_AT_ONCE}`,
+      [...params, started],
+    );
+    return { started, rows };
+  });
+  let matched = 0;
+  let failed = 0;
+  for (const row of rows) {
+    if (Date.now() - began > MATCH_FOR) break;
+    try {
+      // One kept with another key is left for a report, and counts as that below.
+      if ((await each((db) => rematchPull(db, String(row.repo), num(row.number), key))) !== "needs_report") matched += 1;
+    } catch (err) {
+      failed += 1;
+      log(err);
+    }
+  }
+  return each(async (db) => {
+    const { sql, params } = where(db.orgId, filters);
+    const [left] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM pull_requests ${due(sql, params)}`, [...params, started]);
+    const [waiting] = await db.query<{ n: unknown }>(
+      `SELECT count(*) AS n FROM pull_requests ${sql} AND committers IS NULL`,
+      params,
+    );
+    return { matched, failed, remaining: num(left?.n), needs_report: num(waiting?.n), started };
+  });
 }
 
 export interface PullFilters {
@@ -491,7 +693,7 @@ function where(orgId: string, filters: PullFilters): { sql: string; params: unkn
 
 const ROW_COLUMNS = `repo, number, title, url, author, state, created_at, merged_at, first_event, commits,
   reviews, changes_requested, review_comments, bot_review_comments, review_rounds, files_without_diff,
-  attribution, updated_at`;
+  attribution, updated_at, matched_at, committers IS NOT NULL AS matchable`;
 
 function pullRow(r: Record<string, unknown>): PullRow {
   return {
@@ -513,6 +715,8 @@ function pullRow(r: Record<string, unknown>): PullRow {
     files_without_diff: num(r.files_without_diff),
     attribution: json<PullAttribution>(r.attribution),
     updated_at: iso(r.updated_at) ?? "",
+    matched_at: iso(r.matched_at),
+    matchable: r.matchable === true,
   };
 }
 

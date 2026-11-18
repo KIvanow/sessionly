@@ -93,7 +93,8 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     owner_email: owner.email,
     runtime: s.runtime?.kind ?? null,
     runtime_id: s.runtime?.id ?? null,
-    user_email: s.user?.email ?? null,
+    // An empty one is none: the session is then its uploader's.
+    user_email: s.user?.email || null,
     user_name: s.user?.name ?? null,
     repo: repoName,
     repo_root: place.root,

@@ -1,11 +1,11 @@
-import type { LinesBy, PullList, PullRow, PullSummary } from "@sessionly/schema";
+import type { LinesBy, PullList, PullMatches, PullRow, PullSummary } from "@sessionly/schema";
 import { useEffect, useState } from "react";
-import { query } from "./api.ts";
+import { api, ApiError, query } from "./api.ts";
 import { scopeParams, type Scope } from "./App.tsx";
 import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
-import { pullHref, web } from "./pull.ts";
+import { matchAll, pullHref, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -31,13 +31,39 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
   const list = useApi<PullList>(token, `/prs${query({ ...params, limit: PAGE, offset })}`, onSignOut);
   const everything = useApi<PullList>(token, "/prs?limit=1", onSignOut);
   const total = summary.data?.total;
+  // Matching the listed pull requests again: how many are done, then what came of it.
+  const [matching, setMatching] = useState<number | null>(null);
+  const [matched, setMatched] = useState<string | null>(null);
+  useEffect(() => setMatched(null), [state, scope]);
+  // The filters stay as they are meanwhile: what comes of it is about these.
+  const busy = matching !== null;
+  async function matchAgain() {
+    setMatching(0);
+    setMatched(null);
+    try {
+      const done = await matchAll((body) => api<PullMatches>(token, "/prs/match", { method: "POST", body }), params, setMatching);
+      const waiting = done.needs_report
+        ? ` ${count(done.needs_report)} ${done.needs_report === 1 ? "was" : "were"} last reported before that could be done, and ${done.needs_report === 1 ? "waits" : "wait"} for the Action to report ${done.needs_report === 1 ? "it" : "them"} once more.`
+        : "";
+      const not = done.failed ? ` ${count(done.failed)} could not be matched; the server's log says why.` : "";
+      setMatched(`Matched ${count(done.matched)} ${done.matched === 1 ? "pull request" : "pull requests"} against the sessions held now.${waiting}${not}`);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) onSignOut();
+      setMatched((err as Error).message);
+    } finally {
+      setMatching(null);
+      // Also after a failure: the ones before it were matched.
+      summary.reload();
+      list.reload();
+    }
+  }
 
   return (
     <>
       <form className="filters" aria-label="Filters" onSubmit={(e) => e.preventDefault()}>
         <label>
           Period
-          <select value={scope.period} onChange={(e) => setScope({ ...scope, period: e.target.value, pick: null })}>
+          <select value={scope.period} disabled={busy} onChange={(e) => setScope({ ...scope, period: e.target.value, pick: null })}>
             <option value="7">Last 7 days</option>
             <option value="30">Last 30 days</option>
             <option value="90">Last 90 days</option>
@@ -46,14 +72,14 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
         </label>
         <label>
           Repository
-          <select value={scope.repo} onChange={(e) => setScope({ ...scope, repo: e.target.value })}>
+          <select value={scope.repo} disabled={busy} onChange={(e) => setScope({ ...scope, repo: e.target.value })}>
             <option value="">All repositories</option>
             {repos.map((r) => <option key={r}>{r}</option>)}
           </select>
         </label>
         <label>
           Pull requests
-          <select value={state} onChange={(e) => setState(e.target.value)}>
+          <select value={state} disabled={busy} onChange={(e) => setState(e.target.value)}>
             <option value="merged">Merged</option>
             <option value="open">Open</option>
             <option value="closed">Closed without merging</option>
@@ -94,10 +120,21 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
           <ByModel summary={summary.data!} />
         </>
       )}
+      {/* Apart from the list: one that could not be read again does not take this with it. */}
+      {matched && <p className="muted hint" role="status">{matched}</p>}
       {list.data && list.data.total > 0 && (
         <section className="card" aria-label="Pull requests">
           <div className="card-head">
             <h2>Pull requests</h2>
+            <button
+              type="button"
+              className="quiet"
+              disabled={matching !== null}
+              title="Count sessions that were uploaded after a pull request was last reported"
+              onClick={matchAgain}
+            >
+              {matching === null ? "Match these to sessions again" : `Matching… ${count(matching)} done`}
+            </button>
           </div>
           <div className="scroll">
             <table className="rows">

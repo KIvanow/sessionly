@@ -4,7 +4,7 @@ import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
 import type { Db } from "../src/db.ts";
 import { testDb, tokenFor } from "./helpers.ts";
-import { attribute, breakdown, type Claim, writers } from "../src/pulls.ts";
+import { attribute, breakdown, type Claim, MATCH_AT_ONCE, writers } from "../src/pulls.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
 const h = (n: number) => n.toString(16).padStart(16, "0");
@@ -443,4 +443,161 @@ test("a report that makes no sense is refused with a reason", async () => {
   assert.match(await bad({ commits: -1 }), /commits/);
   assert.match(await bad({ files: [{ path: "a.ts", hashes: ["let x = 1;"] }] }), /hashes/);
   assert.match(await bad({ files: "none" }), /files/);
+});
+
+test("a pull request's lines are matched again when its sessions arrive after its last report", async () => {
+  const repo = "github.com/acme/again";
+  const upload = (id: string, email: string | null, hashes: string[]) => {
+    const s = session(id, "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes }]);
+    s.session.repo.remote = repo;
+    if (email) (s.session as Record<string, unknown>).user = { email };
+    return call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, s);
+  };
+  const about = { repo, commit_emails: ["ann@example.com"], files: [file("a.ts", 800, 801, 802)] };
+  const merged = await call(tokens.ci, "PUT", "/prs", report({
+    ...about, number: 1, state: "merged", event: "closed", reviews: 2,
+    feedback: [{ kind: "review", author: "bob", at: "2026-11-10T13:00:00Z", state: "approved" }],
+  }));
+  assert.equal(merged.body.attribution.now.agent_lines, 0);
+  // matched a while ago, so that matching again is later whatever the clock's step
+  await db.query(`UPDATE pull_requests SET matched_at = matched_at - interval '1 minute' WHERE repo = $1 AND number = 1`, [repo]);
+  const detail = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}&number=${number}`)).body;
+  const before = await detail(1);
+  assert.deepEqual([before.matchable, before.matched_at != null, before.sessions], [true, true, []]);
+
+  // the sessions come after the pull request was closed: no report follows
+  await upload("s-after", null, [h(800), h(801)]);
+  // someone else's, with the same line: not a committer of this pull request
+  await upload("s-else", "eve@example.com", [h(802)]);
+  assert.equal((await detail(1)).attribution.now.agent_lines, 0);
+
+  const again = await call(tokens.admin, "POST", "/prs/match", { repo, number: 1 });
+  assert.equal(again.status, 200);
+  assert.deepEqual(again.body.attribution.now, {
+    lines: 3,
+    agent_lines: 2,
+    by: [{ tool: "claude-code", model: "claude-opus-5-5", lines: 2 }],
+  });
+  const after = await detail(1);
+  assert.equal(after.attribution.now.agent_lines, 2);
+  assert.deepEqual(after.sessions.map((s: any) => [s.session_id, s.lines]), [["s-after", 2]]);
+  assert.equal(after.matched_at, again.body.matched_at);
+  assert.ok(Date.parse(after.matched_at) > Date.parse(before.matched_at));
+  // nothing else about it changed: it is as the Action last reported it
+  assert.deepEqual(
+    [after.updated_at, after.state, after.reviews, after.first_event, after.feedback],
+    [before.updated_at, "merged", 2, "closed", before.feedback],
+  );
+
+  // one last reported before what it is matched by was kept waits for its next report
+  await call(tokens.ci, "PUT", "/prs", report({ ...about, number: 2 }));
+  await db.query(`UPDATE pull_requests SET committers = NULL, aliases = NULL WHERE repo = $1 AND number = 2`, [repo]);
+  const old = await call(tokens.admin, "POST", "/prs/match", { repo, number: 2 });
+  assert.deepEqual([old.status, old.body.code], [409, "needs_report"]);
+  assert.equal((await detail(2)).matchable, false);
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({ ...about, number: 2 }))).status, 200);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 2 })).status, 200);
+
+  // whose sessions count is kept as hashes, never as the addresses the commits carry
+  const [kept] = await db.query<{ committers: unknown }>(`SELECT committers::text AS committers FROM pull_requests WHERE repo = $1 AND number = 1`, [repo]);
+  assert.match(String(kept!.committers), /^\["[0-9a-f]{64}"\]$/);
+  // committers none of whom has a session here: nobody's lines, not everybody's
+  const strangers = report({ ...about, number: 3, commit_emails: ["zed@elsewhere.example"] });
+  assert.equal((await call(tokens.ci, "PUT", "/prs", strangers)).body.attribution.now.agent_lines, 0);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 3 })).body.attribution.now.agent_lines, 0);
+  // nor those of a session whose git address is empty: that one is its uploader's
+  const empty = session("s-empty", "claude-code", "claude-opus-5-5", "2026-11-10T11:30:00Z", [{ path: "a.ts", model: null, hashes: [h(802)] }]);
+  empty.session.repo.remote = repo;
+  (empty.session as Record<string, unknown>).user = { email: "" };
+  assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-empty", empty)).status, 200);
+  await db.query(`UPDATE sessions SET user_email = '' WHERE session_id = 's-empty'`);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 3 })).body.attribution.now.agent_lines, 0);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 1 })).body.attribution.now.agent_lines, 3);
+  await call(tokens.ann, "DELETE", "/sessions/m1/claude-code/s-empty");
+  // a report that named no committers has every session in the repository looked at, then as before
+  const anyone = report({ ...about, number: 4, commit_emails: [] });
+  assert.equal((await call(tokens.ci, "PUT", "/prs", anyone)).body.attribution.now.agent_lines, 3);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 4 })).body.attribution.now.agent_lines, 3);
+  // a cloud agent's commits are still known for what they are
+  const cloud = report({ ...about, number: 5, commit_emails: ["noreply@anthropic.com"], head_ref: "claude/fix" });
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs", cloud)).body.attribution.cloud, { agents: ["claude-code"], sessions: 0 });
+  await db.query(`UPDATE pull_requests SET head_ref = 'fix' WHERE repo = $1 AND number = 5`, [repo]);
+  assert.deepEqual((await call(tokens.admin, "POST", "/prs/match", { repo, number: 5 })).body.attribution.cloud, { agents: ["claude-code"], sessions: 0 });
+
+  // who may, and what is asked for
+  assert.equal((await call(tokens.ci, "POST", "/prs/match", { repo, number: 1 })).status, 403);
+  assert.equal((await call(tokens.ann, "POST", "/prs/match", { repo, number: 1 })).status, 403);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 99 })).status, 404);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { number: 1 })).status, 400);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: "1" })).status, 400);
+  // a number that is there and is none does not make it a request for all of the repository's
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: null })).status, 400);
+
+  // with a key, what is kept cannot be made from an address without it, and says which key it was
+  const keyed = createApp(db, { hashKey: "k".repeat(32) });
+  const ask = async (to: typeof app, method: string, path: string, body: unknown, token = tokens.admin) => {
+    const response = await to.request(`/api/v1${path}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, body: (await response.json()) as any };
+  };
+  assert.equal((await ask(keyed, "PUT", "/prs", report({ ...about, number: 6 }), tokens.ci)).status, 200);
+  const [withKey] = await db.query<{ committers: unknown }>(`SELECT committers::text AS committers FROM pull_requests WHERE repo = $1 AND number = 6`, [repo]);
+  assert.match(String(withKey!.committers), /^\["[0-9a-f]{8}\.[0-9a-f]{64}"\]$/);
+  assert.notEqual(String(withKey!.committers).slice(11), String(kept!.committers).slice(2));
+  assert.equal((await ask(keyed, "POST", "/prs/match", { repo, number: 6 })).body.attribution.now.agent_lines, 2);
+  // kept with another key (here: none), it waits for a report
+  assert.equal((await ask(keyed, "POST", "/prs/match", { repo, number: 1 })).status, 409);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 6 })).status, 409);
+  // and matching the list's says so of each from then on: only the one kept with this key
+  // is matched, and the one that named no committers, of which nothing is kept
+  const mixed = await ask(keyed, "POST", "/prs/match", { repo });
+  assert.deepEqual([mixed.body.matched, mixed.body.failed, mixed.body.remaining, mixed.body.needs_report], [2, 0, 0, 4]);
+  assert.equal((await detail(1)).matchable, false);
+  assert.equal((await detail(6)).matchable, true);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 2147483648 })).status, 400);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 2147483647 })).status, 404);
+});
+
+test("the pull requests the list's filters choose are matched again, some at a time", async () => {
+  const repo = "github.com/acme/many";
+  const count = MATCH_AT_ONCE + 3;
+  for (let number = 1; number <= count; number += 1) {
+    await call(tokens.ci, "PUT", "/prs", report({ repo, number, commit_emails: ["ann@example.com"], files: [file("b.ts", 900)] }));
+  }
+  await db.query(`UPDATE pull_requests SET committers = NULL WHERE repo = $1 AND number = 1`, [repo]);
+  const s = session("s-many", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "b.ts", model: null, hashes: [h(900)] }]);
+  s.session.repo.remote = repo;
+  await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-many", s);
+
+  const first = await call(tokens.admin, "POST", "/prs/match", { repo: "acme/many" });
+  assert.equal(first.status, 200);
+  assert.deepEqual(
+    [first.body.matched, first.body.remaining, first.body.needs_report],
+    [MATCH_AT_ONCE, 2, 1],
+  );
+  const second = await call(tokens.admin, "POST", "/prs/match", { repo: "acme/many", started: first.body.started });
+  assert.deepEqual(
+    [second.body.matched, second.body.remaining, second.body.needs_report, second.body.started],
+    [2, 0, 1, first.body.started],
+  );
+  // all of them have the session's line now, but for the one that waits for a report
+  const summary = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/many")).body.total;
+  assert.deepEqual([summary.pulls, summary.agent_lines], [count, count - 1]);
+  // none of them is merged
+  const third = await call(tokens.admin, "POST", "/prs/match", { repo: "acme/many", state: "merged" });
+  assert.deepEqual([third.body.matched, third.body.remaining], [0, 0]);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { state: "maybe" })).status, 400);
+  // a body that cannot be read is not taken as one that asks for all of them
+  assert.equal((await call(tokens.admin, "POST", "/prs/match")).status, 400);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", [])).status, 400);
+  // nor is a filter that is not text taken as one that was left out
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo: 5 })).status, 400);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo: "acme/many", started: 5 })).status, 400);
+  // a time still to come is taken as now, so the requests end: a new run, the rest left for its next
+  const ahead = await call(tokens.admin, "POST", "/prs/match", { repo: "acme/many", started: "2999-01-01T00:00:00Z" });
+  assert.deepEqual([ahead.status, ahead.body.matched, ahead.body.remaining], [200, MATCH_AT_ONCE, 2]);
+  assert.ok(Date.parse(ahead.body.started) < Date.now() + 60_000);
 });
