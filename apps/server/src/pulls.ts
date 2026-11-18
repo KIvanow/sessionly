@@ -557,7 +557,10 @@ async function match(
  * for good: they are what review started from.
  */
 export async function storePull(db: OrgDb, report: PullReport, key?: string): Promise<PullAttribution> {
-  // Held until this is stored: a report that overlaps another then sees the state the other left.
+  // One report of a pull request at a time, its first too, when there is no
+  // row yet to hold: the later one then sees what the earlier left, the state
+  // and the lines it was first reported with.
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-pull:${db.orgId}:${report.repo}#${report.number}`]);
   const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string }>(
     `SELECT first_files, first_event, state FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
     [db.orgId, report.repo, report.number],
@@ -875,6 +878,11 @@ interface Share {
   /** Its cost leaves requests out: what it cost here is then a floor. */
   partial: boolean;
   /**
+   * Its lines here were kept before which they are was, and it has lines in
+   * other pull requests too: the same ones, perhaps, counted in each.
+   */
+  unshared: boolean;
+  /**
    * How many of the lines the pull request was first reported with are its
    * own, and what those cost: null with no cost figure. `opened_known` is
    * false for one kept before those lines were counted.
@@ -910,12 +918,13 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
   const rows = await db.query(
     `WITH mine AS (
        SELECT p.repo, p.number, p.machine_id, p.source, p.session_id, p.lines, p.weight, p.opened_lines, p.opened_weight,
+              p.matched IS NULL AS unkept,
               r.state = 'closed' AS closed
        FROM (${chosen.sql}) c
        JOIN pull_sessions p ON p.org_id = $1 AND p.repo = c.repo AND p.number = c.number
        JOIN pull_requests r ON r.org_id = p.org_id AND r.repo = p.repo AND r.number = p.number),
      totals AS (
-       SELECT o.machine_id, o.source, o.session_id,
+       SELECT o.machine_id, o.source, o.session_id, count(*) AS pulls,
               sum(o.weight) FILTER (WHERE r.state <> 'closed') AS in_pulls,
               sum(o.weight) FILTER (WHERE r.state = 'closed') AS in_closed,
               sum(coalesce(o.opened_weight, o.opened_lines, 0)) FILTER (WHERE r.state <> 'closed') AS opened_in_pulls,
@@ -924,7 +933,7 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
        WHERE o.org_id = $1
          AND (o.machine_id, o.source, o.session_id) IN (SELECT machine_id, source, session_id FROM mine)
        GROUP BY o.machine_id, o.source, o.session_id)
-     SELECT mine.*, t.in_pulls, t.in_closed, t.opened_in_pulls, t.opened_in_closed, s.session_id IS NOT NULL AS held,
+     SELECT mine.*, t.pulls, t.in_pulls, t.in_closed, t.opened_in_pulls, t.opened_in_closed, s.session_id IS NOT NULL AS held,
             coalesce(s.hashed_lines, ${HASHED_FROM_PAYLOAD}) AS hashed_lines,
             s.cost_usd, s.cost_source, s.unpriced_requests, ${about}
      FROM mine
@@ -970,6 +979,7 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
           : null,
       },
       estimated: row.cost_source !== "recorded",
+      unshared: held && row.unkept === true && num(row.pulls) > 1,
       partial: row.cost_source === "partial_estimate" || num(row.unpriced_requests) > 0,
       opened_lines: num(row.opened_lines),
       opened_usd: cost == null ? null : money(opened > 0 ? (cost * opened) / amongOpened : 0),
@@ -989,12 +999,14 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   let sessions = 0;
   let without = 0;
   let partial = 0;
+  let unshared = 0;
   // The lines that cost is of: a session with no cost figure says nothing of what a line cost.
   let costed = 0;
   // What the lines it was first reported with cost, where every session says
   // how many were its own; a floor when one of those has no cost, or not all of it.
   let opened: number | null = null;
   let openedFloor = false;
+  let openedEstimated = false;
   let openedKnown = true;
   for (const share of shares) {
     if (!share.opened_known) openedKnown = false;
@@ -1003,6 +1015,7 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
       else {
         opened = (opened ?? 0) + share.opened_usd;
         if (share.partial) openedFloor = true;
+        if (share.estimated) openedEstimated = true;
       }
     }
     // One all of whose lines went in review is here for what it was opened with alone.
@@ -1017,29 +1030,53 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
     costed += lines;
     if (share.estimated) estimated = true;
     if (share.partial) partial += 1;
+    if (share.unshared) unshared += 1;
   }
   const a = pull.attribution;
   const each = usd != null && costed > 0 ? usd / costed : null;
   const surviving = a.by.reduce((sum, by) => sum + by.surviving, 0);
-  // From before those were counted: the lines it was opened with, at what a line of it costs now.
-  if (!openedKnown) {
-    opened = each == null ? null : each * a.first.agent_lines;
-    openedFloor = without + partial > 0;
-  }
-  // What review left can only be said of a pull request seen from the start.
-  if (pull.first_event !== "opened" || a.first.agent_lines === 0) opened = null;
+  // What review left can only be said of a pull request seen from the start,
+  // and what it was opened with cost only of one whose sessions then were kept.
+  if (!openedKnown || pull.first_event !== "opened" || a.first.agent_lines === 0) opened = null;
   return {
     usd: usd == null ? null : money(usd),
-    estimated,
+    // A share that may be counted in another pull request too is no more than an estimate.
+    estimated: estimated || unshared > 0,
     sessions,
     sessions_without_cost: without,
     sessions_with_cost_partial: partial,
+    sessions_unshared: unshared,
     per_agent_line_usd: each == null ? null : money(each),
     opened_usd: opened == null ? null : money(opened),
     opened_is_floor: opened != null && openedFloor,
+    opened_estimated: opened != null && openedEstimated,
     per_surviving_line_usd: opened != null && surviving > 0 ? money(opened / surviving) : null,
   };
 }
+
+/**
+ * What `read` reads in several statements, as one moment had it. Each
+ * statement of a request sees what was committed when it began, so a report
+ * stored between two of them would leave figures of before beside sessions
+ * of after. `stamp` says what moment it is; when it has moved, read again.
+ */
+async function steady<T>(stamp: () => Promise<string>, read: () => Promise<T>): Promise<T> {
+  for (let tries = 1; ; tries++) {
+    const before = await stamp();
+    const out = await read();
+    if (tries >= 3 || (await stamp()) === before) return out;
+  }
+}
+
+/** The moment of the pull requests the filters choose: how many, and when one was last matched. */
+const stampOf = (db: OrgDb, chosen: { sql: string; params: unknown[] }) => async (): Promise<string> => {
+  const [row] = await db.query<{ stamp: string }>(
+    `SELECT count(*) || ' ' || coalesce(max(matched_at)::text, '') || ' ' || coalesce(max(updated_at)::text, '') AS stamp
+     FROM pull_requests ${chosen.sql}`,
+    chosen.params,
+  );
+  return row?.stamp ?? "";
+};
 
 /** Rows as the list and the summary have them: each with what its sessions cost. */
 async function costed(db: OrgDb, rows: Record<string, unknown>[], chosen: { sql: string; params: unknown[] }): Promise<PullRow[]> {
@@ -1086,6 +1123,11 @@ function pullRow(r: Record<string, unknown>): PullRow {
  * number.
  */
 export async function getPull(db: OrgDb, repo: string, number: number): Promise<PullDetail | null> {
+  const one = { sql: `WHERE org_id = $1 AND repo = $2 AND number = $3`, params: [db.orgId, repo, number] };
+  return steady(stampOf(db, one), () => readPull(db, repo, number));
+}
+
+async function readPull(db: OrgDb, repo: string, number: number): Promise<PullDetail | null> {
   const [r] = await db.query(
     `SELECT ${ROW_COLUMNS}, draft, head_ref, base_ref, closed_at, detail, feedback, feedback_total
      FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
@@ -1117,7 +1159,11 @@ export async function listPulls(
   filters: PullFilters,
   page: { limit: number; offset: number },
 ): Promise<PullList> {
-  const { sql, params } = where(db.orgId, filters);
+  const chosen = where(db.orgId, filters);
+  return steady(stampOf(db, chosen), () => readPulls(db, chosen, page));
+}
+
+async function readPulls(db: OrgDb, { sql, params }: { sql: string; params: unknown[] }, page: { limit: number; offset: number }): Promise<PullList> {
   const rows = await db.query(
     `SELECT ${ROW_COLUMNS}, detail IS NOT NULL AS detailed FROM pull_requests ${sql}
      ORDER BY created_at DESC NULLS LAST, repo, number DESC
@@ -1135,10 +1181,12 @@ export async function listPulls(
 /** How each agent and model's lines fared in review, over the matching pull requests. */
 export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<PullSummary> {
   const { sql, params } = where(db.orgId, filters);
-  const rows = await costed(
-    db,
-    await db.query(`SELECT ${ROW_COLUMNS}, detail IS NOT NULL AS detailed FROM pull_requests ${sql}`, params),
-    { sql: `SELECT repo, number FROM pull_requests ${sql}`, params },
+  const rows = await steady(stampOf(db, { sql, params }), async () =>
+    costed(
+      db,
+      await db.query(`SELECT ${ROW_COLUMNS}, detail IS NOT NULL AS detailed FROM pull_requests ${sql}`, params),
+      { sql: `SELECT repo, number FROM pull_requests ${sql}`, params },
+    ),
   );
   // Of the pull requests seen from the start that have a cost: what the agent
   // lines they were opened with cost, and how many of those survived review.
@@ -1160,6 +1208,7 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
     pulls_closed_with_cost: 0,
     per_surviving_line_usd: null as number | null,
     per_surviving_line_is_floor: false,
+    per_surviving_line_estimated: false,
   };
   const rowFor = (by: LinesBy) =>
     tally(byModel, by, () => ({
@@ -1197,6 +1246,7 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
         opened.usd += pull.cost.opened_usd;
         opened.surviving += a.by.reduce((sum, by) => sum + by.surviving, 0);
         if (pull.cost.opened_is_floor) total.per_surviving_line_is_floor = true;
+        if (pull.cost.opened_estimated) total.per_surviving_line_estimated = true;
       }
     }
     if (a.cloud) {
@@ -1225,6 +1275,6 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
   }
   if (total.cost_usd != null) total.cost_usd = money(total.cost_usd);
   if (opened.surviving > 0) total.per_surviving_line_usd = money(opened.usd / opened.surviving);
-  else total.per_surviving_line_is_floor = false;
+  else total.per_surviving_line_is_floor = total.per_surviving_line_estimated = false;
   return { by_model: sorted(byModel), total };
 }

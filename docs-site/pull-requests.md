@@ -179,7 +179,9 @@ a server of version 0.5.0 or older has to be reported once more before it can be
   closed without merging takes nothing from the others, and its own cost is left out of the
   figures above the list unless only closed ones are shown; the tile says how many were. Which lines those are is kept from
   a report or a **Match again** made with this version on: until then, a pull request from
-  before counts all its lines as its own. Divided by the lines of the sessions that have a cost figure, it
+  before counts all its lines as its own, its cost is marked as an estimate where a session
+  of it has lines in other pull requests, and what the lines it was opened with cost is not
+  known. Divided by the lines of the sessions that have a cost figure, it
   gives the cost of an agent line. The cost of a line that got through review, where that is
   known, is what the agent's lines the pull request was opened with cost, divided by those
   that survived; a pull request none of whose agent lines survived still says what they

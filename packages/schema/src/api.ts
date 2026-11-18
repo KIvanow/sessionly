@@ -458,16 +458,25 @@ export interface PullCost {
   sessions_without_cost: number;
   /** How many of them have a cost that leaves requests out (to models without a known price): `usd` is then a floor too. */
   sessions_with_cost_partial: number;
+  /**
+   * How many of them had their lines here kept before which lines they are
+   * was, and have lines in other pull requests too: the same ones, perhaps,
+   * counted in each. `usd` is then an estimate, until it is matched again.
+   */
+  sessions_unshared: number;
   /** What an agent line of it cost: `usd` for each line of the sessions that have a cost figure. */
   per_agent_line_usd: number | null;
   /**
    * What the agent lines it was opened with cost: their sessions' cost, for
    * the share of each that those lines are. There when none of them is left
-   * too. Null on one not reported from the moment it was opened.
+   * too. Null on one not reported from the moment it was opened, or last
+   * matched before its sessions of then were kept.
    */
   opened_usd: number | null;
   /** Whether a session with lines among those has no cost figure, or one that leaves requests out: both figures of it are then floors. */
   opened_is_floor: boolean;
+  /** Whether any of that cost is an estimate. */
+  opened_estimated: boolean;
   /** What an agent line that survived review cost: `opened_usd` for each of them still there. Null when none is. */
   per_surviving_line_usd: number | null;
 }
@@ -650,5 +659,7 @@ export interface PullSummary {
     per_surviving_line_usd: number | null;
     /** Whether a session of those lines has no cost figure, or not all of it. */
     per_surviving_line_is_floor: boolean;
+    /** Whether any of what those lines cost is an estimate. */
+    per_surviving_line_estimated: boolean;
   };
 }

@@ -7,10 +7,16 @@ import { count, dateTime, usd, usdEach } from "./format.ts";
 export const costIsFloor = (c: Pick<PullCost, "sessions_without_cost" | "sessions_with_cost_partial">): boolean =>
   c.sessions_without_cost + c.sessions_with_cost_partial > 0;
 
+/** A cost as a headline has it: under a cent, the digits that say something, and never "$0.0000" for one that is not nothing. */
+const usdOf = (n: number): string => (n > 0 && n < 0.01 ? usdEach(n) : usd(n));
+
+/** What is not sure about a figure, before it: "at least " for a floor, "~" for an estimate. */
+const unsure = (floor: boolean, estimated: boolean, word = "at least "): string => `${floor ? word : ""}${estimated ? "~" : ""}`;
+
 /** A cost in a few words: "~" before an estimate, `floor` before one that is a floor, a dash for none. */
-export function costText(cost: number | null, estimated: boolean, floor: boolean, word = "at least "): string {
+export function costText(cost: number | null, estimated: boolean, floor: boolean, word?: string): string {
   if (cost == null) return "–";
-  return `${floor ? word : ""}${estimated ? "~" : ""}${usd(cost)}`;
+  return `${unsure(floor, estimated, word)}${usdOf(cost)}`;
 }
 
 /** What a pull request's sessions cost it. */
@@ -21,25 +27,31 @@ export function pullCost(c: Pick<PullCost, "usd" | "estimated" | "sessions_witho
 /** The small print under a pull request's cost: what a line cost, and what the figure leaves out. */
 export function pullCostNote(c: PullCost | null): string {
   if (!c) return "not known: its sessions were not kept at its last report";
+  const opened = unsure(c.opened_is_floor, c.opened_estimated);
   if (c.sessions === 0) {
     return c.opened_usd != null
-      ? `none of the agent lines it was opened with is left: they cost ${c.opened_is_floor ? "at least " : ""}${usdEach(c.opened_usd)}`
+      ? `none of the agent lines it was opened with is left: they cost ${opened}${usdOf(c.opened_usd)}`
       : "no session was matched to its lines";
   }
   const missing =
     c.sessions_without_cost > 0
       ? `${count(c.sessions_without_cost)} of ${count(c.sessions)} ${c.sessions === 1 ? "session" : "sessions"} ${c.sessions_without_cost === 1 ? "has" : "have"} no cost figure`
       : null;
-  if (c.usd == null) return missing!;
   const partial =
     c.sessions_with_cost_partial > 0
       ? `the cost of ${count(c.sessions_with_cost_partial)} ${c.sessions_with_cost_partial === 1 ? "session leaves" : "sessions leave"} requests out`
       : null;
+  const unshared =
+    c.sessions_unshared > 0
+      ? `${count(c.sessions_unshared)} ${c.sessions_unshared === 1 ? "session has" : "sessions have"} lines in other pull requests, perhaps these: match again to share them out`
+      : null;
   const each = [
-    c.per_agent_line_usd != null ? `${usdEach(c.per_agent_line_usd)} per agent line` : null,
-    c.per_surviving_line_usd != null ? `${c.opened_is_floor ? "at least " : ""}${usdEach(c.per_surviving_line_usd)} per line that survived review` : null,
+    // A cost that leaves requests out, over all of that session's lines, is a floor for each.
+    c.per_agent_line_usd != null ? `${unsure(c.sessions_with_cost_partial > 0, false)}${usdEach(c.per_agent_line_usd)} per agent line` : null,
+    // There when the cost now is not: the lines with a cost went, and ones without stayed.
+    c.per_surviving_line_usd != null ? `${opened}${usdEach(c.per_surviving_line_usd)} per line that survived review` : null,
   ];
-  return [...each, missing, partial].filter(Boolean).join("; ");
+  return [...each, missing, partial, unshared].filter(Boolean).join("; ");
 }
 
 /** The small print under the cost of several pull requests. */
@@ -49,16 +61,20 @@ export function pullsCostNote(total: {
   pulls_closed_with_cost: number;
   per_surviving_line_usd: number | null;
   per_surviving_line_is_floor: boolean;
+  per_surviving_line_estimated: boolean;
 }): string {
   const missing = total.pulls_with_cost_missing;
   const floor = missing > 0 ? `not known in full for ${count(missing)} ${missing === 1 ? "pull request" : "pull requests"}` : null;
   // Those closed without merging have a cost in the list below and none here.
   const closed = total.pulls_closed_with_cost > 0 ? `without the ${count(total.pulls_closed_with_cost)} closed unmerged` : null;
+  const each =
+    total.per_surviving_line_usd != null
+      ? `${unsure(total.per_surviving_line_is_floor, total.per_surviving_line_estimated)}${usdEach(total.per_surviving_line_usd)} per agent line that survived review`
+      : null;
   if (total.cost_usd == null) {
-    if (floor) return [`${floor}: their sessions have no cost figure, or were not kept at their last report`, closed].filter(Boolean).join("; ");
-    return closed ?? "no session was matched to their lines";
+    const why = floor ? `${floor}: their sessions have no cost figure, or were not kept at their last report` : null;
+    return [each, why, closed].filter(Boolean).join("; ") || "no session was matched to their lines";
   }
-  const each = total.per_surviving_line_usd != null ? `${total.per_surviving_line_is_floor ? "at least " : ""}${usdEach(total.per_surviving_line_usd)} per agent line that survived review` : null;
   return [each, floor ?? "what the matched sessions cost, each for its share of lines", closed].filter(Boolean).join("; ");
 }
 
