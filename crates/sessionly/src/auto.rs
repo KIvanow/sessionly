@@ -149,20 +149,23 @@ fn note_release(data_dir: &Path, config: &Config) {
         return;
     }
     let kept = previous.and_then(|check| check.latest);
-    // Remember the attempt before asking. If this cannot be written, or the
-    // process stops during the ask, the next run must not ask again at once.
-    if !write_update_check(&path, kept.as_deref()) {
+    // Remember the attempt before asking, at the time it starts. If this
+    // cannot be written, or the process stops during the ask, the next run
+    // must not ask again at once. The version saved afterwards keeps this
+    // time: a check that took a few seconds must not push the next one on.
+    let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    if !write_update_check(&path, kept.as_deref(), &checked_at) {
         return;
     }
     let Ok(version) = crate::update::latest() else {
         return;
     };
-    let _ = write_update_check(&path, Some(&version));
+    let _ = write_update_check(&path, Some(&version), &checked_at);
 }
 
-fn write_update_check(path: &Path, latest: Option<&str>) -> bool {
+fn write_update_check(path: &Path, latest: Option<&str>, checked_at: &str) -> bool {
     let Ok(text) = serde_json::to_string_pretty(&serde_json::json!({
-        "checked_at": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        "checked_at": checked_at,
         "latest": latest,
     })) else {
         return false;
@@ -322,8 +325,20 @@ mod tests {
         assert!(!asked_within_a_day(&ahead));
         // Written, and not newer than this binary: nothing to say.
         let path = tempfile::tempdir().unwrap();
-        write_update_check(&path.path().join("update-check.json"), Some("0.0.1"));
+        write_update_check(&path.path().join("update-check.json"), Some("0.0.1"), &now);
         assert!(pending_update(path.path()).is_none());
+    }
+
+    #[test]
+    fn a_saved_version_keeps_the_time_the_check_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update-check.json");
+        let at = "2026-11-18T12:00:00Z";
+        assert!(write_update_check(&path, Some("0.4.0"), at));
+        assert!(write_update_check(&path, Some("0.5.0"), at));
+        let saved = read_update_check(&path).unwrap();
+        assert_eq!(saved.checked_at, at);
+        assert_eq!(saved.latest.as_deref(), Some("0.5.0"));
     }
 
     #[test]
