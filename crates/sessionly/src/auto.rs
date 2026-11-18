@@ -233,16 +233,15 @@ pub fn run(after_ms: u64) -> i32 {
         return 0;
     };
     let outcome = match locked(&data_dir) {
-        Ok(Some(_lock)) => {
-            let outcome = once().unwrap_or_else(|err| format!("failed: {err:#}"));
-            // After the upload, and never from a hook: the hooks stay offline.
-            note_release(&data_dir);
-            outcome
-        }
+        Ok(Some(_lock)) => once().unwrap_or_else(|err| format!("failed: {err:#}")),
         Ok(None) => "skipped: another run was still going".to_string(),
         Err(err) => format!("failed: {err:#}"),
     };
+    // The lock is dropped, and the log line is written, before asking GitHub.
+    // A session ending meanwhile waits on the lock, not on that request.
     log(&data_dir, &outcome);
+    // After the upload, and never from a hook: the hooks stay offline.
+    note_release(&data_dir);
     0
 }
 

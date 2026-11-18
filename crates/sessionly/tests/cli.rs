@@ -1600,8 +1600,6 @@ fn a_session_ending_uploads_in_the_background() {
     let home = tempfile::tempdir().unwrap();
     let server = StubServer::start();
     stdout(run(home.path(), &["connect", &server.url, "--token", "t"]));
-    // The release check runs after the upload and can stall the log line.
-    stdout(run(home.path(), &["settings", "--update-check", "off"]));
     let hook = |payload: serde_json::Value| {
         let mut cmd = sessionly(home.path());
         cmd.arg("capture")
