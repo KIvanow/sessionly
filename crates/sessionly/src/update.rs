@@ -76,6 +76,14 @@ fn setting(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// The version a release tag names, without a leading `v`. A tag that is
+/// only `v`, or empty, names none: storing that would wipe a notice that
+/// was still good.
+fn version_of(tag: &str) -> Option<&str> {
+    let version = tag.trim_start_matches('v');
+    (!version.is_empty()).then_some(version)
+}
+
 /// The version a release's page is for: the end of its address, `…/tag/v<version>`.
 fn version_in(address: &str) -> Option<String> {
     let (_, tag) = address.trim_end_matches('/').rsplit_once("/tag/")?;
@@ -106,7 +114,9 @@ pub(crate) fn latest() -> Result<String> {
     let tag = page["tag_name"]
         .as_str()
         .with_context(|| format!("{url} names no release (no \"tag_name\")"))?;
-    Ok(tag.trim_start_matches('v').to_string())
+    version_of(tag)
+        .map(str::to_string)
+        .with_context(|| format!("{url} names no version"))
 }
 
 /// What `sessionly update` did, for its one line of output.
@@ -252,6 +262,14 @@ mod tests {
         assert!(!newer("0.3.9", "0.4.0"));
         assert!(!newer("0.5.0-rc.1", "0.4.0"));
         assert!(!newer("", "0.4.0"));
+    }
+
+    #[test]
+    fn a_tag_that_is_only_v_names_no_version() {
+        assert_eq!(version_of("v0.4.0"), Some("0.4.0"));
+        assert_eq!(version_of("0.4.0"), Some("0.4.0"));
+        assert_eq!(version_of("v"), None);
+        assert_eq!(version_of(""), None);
     }
 
     #[test]
