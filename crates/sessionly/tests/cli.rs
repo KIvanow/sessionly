@@ -2455,3 +2455,64 @@ fn update_replaces_the_binary_with_a_release_that_checks_out() {
     let now = stdout(Command::new(&link).arg("--version").output().unwrap());
     assert_eq!(now.trim(), "sessionly 99.0.0");
 }
+
+/// A background upload asks once a day, and `status` says when a newer
+/// release was recorded. `list` does not, unless its output is a terminal,
+/// and `--json` never does. The setting turns the line off.
+#[test]
+fn a_background_upload_notes_a_newer_release_once_a_day() {
+    let home = tempfile::tempdir().unwrap();
+    let latest = home.path().join("latest.json");
+    fs::write(&latest, r#"{"tag_name":"v99.0.0"}"#).unwrap();
+    let url = format!("file://{}", latest.display());
+    let this = env!("CARGO_PKG_VERSION");
+    let auto = || {
+        sessionly(home.path())
+            .arg("auto")
+            .env("SESSIONLY_RELEASE_LATEST", &url)
+            .output()
+            .unwrap()
+    };
+
+    let first = auto();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let check = home.path().join("data/update-check.json");
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&check).unwrap()).unwrap();
+    assert_eq!(saved["latest"], "99.0.0");
+    let before = fs::read(&check).unwrap();
+
+    // A different answer the same day is not asked for: the file is untouched.
+    fs::write(&latest, r#"{"tag_name":"v99.1.0"}"#).unwrap();
+    let second = auto();
+    assert!(second.status.success());
+    assert_eq!(fs::read(&check).unwrap(), before);
+
+    let line = format!("sessionly 99.0.0 is out (this is {this}). Run `sessionly update`.");
+    let status = stdout(sessionly(home.path()).arg("status").output().unwrap());
+    assert!(status.contains(&line), "{status}");
+    // Piped, so not a terminal: no line. `--json` is the machine-readable output.
+    let listed = stdout(sessionly(home.path()).arg("list").output().unwrap());
+    assert!(!listed.contains("99.0.0"), "{listed}");
+    let json = stdout(
+        sessionly(home.path())
+            .args(["list", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert!(!json.contains("99.0.0"), "{json}");
+
+    stdout(
+        sessionly(home.path())
+            .args(["settings", "--update-check", "off"])
+            .output()
+            .unwrap(),
+    );
+    let quiet = stdout(sessionly(home.path()).arg("status").output().unwrap());
+    assert!(!quiet.contains("99.0.0"), "{quiet}");
+    assert!(quiet.contains("Update:     off"), "{quiet}");
+}

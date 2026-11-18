@@ -661,6 +661,9 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE sessions ADD COLUMN repo_root text`,
   `ALTER TABLE sessions ADD COLUMN cwd text`,
   `UPDATE sessions SET repo_root = payload #>> '{session,repo,root}', cwd = payload #>> '{session,cwd}'`,
+  // Which version of the Action last reported a pull request. Null when the
+  // report named none, which an Action from before it said does.
+  `ALTER TABLE pull_requests ADD COLUMN reporter_version text`,
 ];
 
 /**

@@ -59,3 +59,7 @@ know to `unknown`, and ignores fields it doesn't know.
 
 The agent (`source`) and a tool's name are plain text: `claude-code`, `cursor`, `grok` or
 `codex`, and whatever the tool is called.
+
+A background upload also asks GitHub, at most once a day, for the address of the newest
+release, and sends nothing about the machine. `sessionly settings --update-check off` stops
+that. The capture hooks do not ask.

@@ -1,7 +1,7 @@
 import type { PullDetail, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { query } from "./api.ts";
-import { type By, byOf, countFeedback, feedbackLabel, web } from "./pull.ts";
+import { type By, byOf, countFeedback, feedbackLabel, olderAction, web } from "./pull.ts";
 import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -99,7 +99,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
       <section className="card" aria-label="Sessions">
         <h2>Sessions that wrote it</h2>
         {p.sessions == null ? (
-          <Earlier what="Which sessions wrote its lines" />
+          <Earlier what="Which sessions wrote its lines" reported={p.reporter_version} current={p.reporter_current} />
         ) : p.sessions.length === 0 ? (
           <p className="muted">
             {a.cloud && a.cloud.sessions === 0
@@ -129,7 +129,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
       <section className="card" aria-label="Files">
         <h2>Files</h2>
         {p.files == null ? (
-          <Earlier what="Its lines file by file" />
+          <Earlier what="Its lines file by file" reported={p.reporter_version} current={p.reporter_current} />
         ) : p.files.length === 0 ? (
           <p className="muted">It adds no lines to track.</p>
         ) : (
@@ -182,7 +182,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
           stays on GitHub: Sessionly does not store it.
         </p>
         {p.feedback == null ? (
-          <Earlier what="Its reviews and comments" />
+          <Earlier what="Its reviews and comments" reported={p.reporter_version} current={p.reporter_current} />
         ) : p.feedback.length === 0 ? (
           <p className="muted">Nobody has reviewed it or commented on it.</p>
         ) : (
@@ -286,7 +286,17 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
 }
 
 /** For a pull request last reported before this was kept. */
-function Earlier({ what }: { what: string }) {
+function Earlier({ what, reported, current }: { what: string; reported: string | null; current: string }) {
+  // An old pin sends the same report again, so "the next report" never brings what is missing.
+  if (olderAction(reported, current)) {
+    const which = reported ? `${reported}; current is ${current}` : `current is ${current}`;
+    return (
+      <p className="muted">
+        This repository reports with an older version of the Sessionly Action ({which}). Change the version
+        in <code>.github/workflows/sessionly.yml</code>, then run the workflow for this pull request.
+      </p>
+    );
+  }
   return (
     <p className="muted">
       {what} were not kept when this pull request was last reported. They appear with its next report from

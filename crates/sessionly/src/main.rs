@@ -170,6 +170,10 @@ enum Command {
         /// before and after each command
         #[arg(long, value_enum)]
         shell_edits: Option<config::ShellEdits>,
+        /// Ask once a day whether a newer release is out, and say so in
+        /// status, list and summary. The capture hooks never ask
+        #[arg(long, value_name = "on|off", value_parser = parse_on_off)]
+        update_check: Option<bool>,
     },
     /// Replace this binary with the newest release
     Update {
@@ -570,6 +574,7 @@ fn run(command: Command) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
             } else {
                 print!("{}", report::list(&rows, limit));
+                say_newer_release(true);
             }
         }
         Command::Summary { filter, by, json } => {
@@ -580,6 +585,7 @@ fn run(command: Command) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&groups)?);
             } else {
                 print!("{}", report::summary(&groups, by));
+                say_newer_release(true);
             }
         }
         Command::Transcript { session, json } => {
@@ -739,15 +745,17 @@ fn run(command: Command) -> Result<()> {
             content,
             line_hashes,
             shell_edits,
+            update_check,
         } => {
             let path = paths::config_path()?;
             let mut config = config::Config::load(&path)?;
-            let asked = [auto_sync, line_hashes];
+            let asked = [auto_sync, line_hashes, update_check];
             if content.is_some() || shell_edits.is_some() || asked.iter().any(Option::is_some) {
                 config.auto_sync = auto_sync.unwrap_or(config.auto_sync);
                 config.upload_content = content.unwrap_or(config.upload_content);
                 config.upload_line_hashes = line_hashes.unwrap_or(config.upload_line_hashes);
                 config.shell_edits = shell_edits.unwrap_or(config.shell_edits);
+                config.update_check = update_check.unwrap_or(config.update_check);
                 config.save(&path)?;
             }
             print_settings(&config);
@@ -945,6 +953,14 @@ fn print_settings(config: &config::Config) {
         }
     );
     println!(
+        "Update:     {}",
+        if config.update_check {
+            "on (a background upload asks once a day, and status says when a newer release is out)"
+        } else {
+            "off"
+        }
+    );
+    println!(
         "Shell:      {}",
         match config.shell_edits {
             config::ShellEdits::Sure => {
@@ -1019,6 +1035,7 @@ fn status(target: &Target) -> Result<()> {
                 "not asked in AGENTS.md (run: sessionly install --repo)"
             }
         );
+        say_newer_release(false);
         return Ok(());
     }
     let path = target.settings_path()?;
@@ -1080,5 +1097,21 @@ fn status(target: &Target) -> Result<()> {
             .count();
         println!("Uploaded:   {sent} of {} sessions in the ledger", ids.len());
     }
+    say_newer_release(false);
     Ok(())
+}
+
+/// One line when a newer release was recorded. `status` always says so.
+/// `list` and `summary` say so only in a terminal, and never in `--json`,
+/// which is why those pass `only_terminal`.
+fn say_newer_release(only_terminal: bool) {
+    if only_terminal && !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        return;
+    }
+    let Ok(dir) = paths::data_dir() else {
+        return;
+    };
+    if let Some(line) = auto::pending_update(&dir) {
+        println!("{line}");
+    }
 }

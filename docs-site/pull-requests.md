@@ -48,6 +48,8 @@ What to know about the workflow:
 - `@main` follows this repository's main branch. To decide yourself when the Action changes,
   name a commit instead (`KIvanow/sessionly/action@<commit sha>`), as this repository's own
   [workflow](https://github.com/KIvanow/sessionly/blob/main/.github/workflows/sessionly.yml) does.
+  A pull request's page, and the list, say when the version that last reported is older than
+  the current Action, and which line of the workflow to change.
 - The job needs Node 20 or later on the runner, which GitHub's own runners have. It does not
   check the repository out.
 - A problem (server down, token refused) is a warning on the run, not a failed check, unless

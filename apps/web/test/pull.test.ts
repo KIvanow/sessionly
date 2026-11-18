@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { byOf, countFeedback, feedbackLabel, pullHref, web } from "../src/pull.ts";
+import { byOf, countFeedback, feedbackLabel, nameSome, olderAction, pullHref, web } from "../src/pull.ts";
 
 const one = (kind: PullFeedback["kind"], author: string, more: Partial<PullFeedback> = {}): PullFeedback => ({
   kind,
@@ -10,6 +10,24 @@ const one = (kind: PullFeedback["kind"], author: string, more: Partial<PullFeedb
   bot: /\[bot\]$/.test(author),
   at: "2026-11-10T12:00:00.000Z",
   ...more,
+});
+
+test("an Action is old when it named no version, or an earlier one, number by number", () => {
+  assert.equal(olderAction(null, "0.2.0"), true);
+  assert.equal(olderAction(undefined, "0.2.0"), true);
+  assert.equal(olderAction("0.1.0", "0.2.0"), true);
+  assert.equal(olderAction("0.9.0", "0.10.0"), true);
+  assert.equal(olderAction("0.2.0", "0.2.1"), true);
+  assert.equal(olderAction("0.2.0", "0.2.0"), false);
+  assert.equal(olderAction("0.10.0", "0.9.0"), false);
+  assert.equal(olderAction("0.2.1", "0.2.0"), false);
+  assert.equal(olderAction("1.0.0", "0.9.9"), false);
+  // Not three numbers: treated as a report that did not say.
+  assert.equal(olderAction("0.2", "0.2.0"), true);
+  assert.equal(olderAction("0.2.0", null), false);
+  assert.equal(nameSome(["acme/web"]), "acme/web");
+  assert.equal(nameSome(["a", "b"]), "a and b");
+  assert.equal(nameSome(["a", "b", "c", "d", "e", "f", "g"]), "a, b, c, d, e and 2 more");
 });
 
 test("a pull request's page is addressed by its repository, in one part, and its number", () => {

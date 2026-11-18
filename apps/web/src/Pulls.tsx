@@ -5,7 +5,7 @@ import { scopeParams, type Scope } from "./App.tsx";
 import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
-import { pullHref, web } from "./pull.ts";
+import { nameSome, pullHref, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -99,6 +99,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
           <div className="card-head">
             <h2>Pull requests</h2>
           </div>
+          <OlderActions repos={summary.data?.older_actions ?? []} />
           <div className="scroll">
             <table className="rows">
               <thead>
@@ -211,6 +212,17 @@ function ByModel({ summary }: { summary: PullSummary }) {
         </table>
       </div>
     </section>
+  );
+}
+
+/** One notice when a pull request in the current filter was last reported by an older Action. */
+function OlderActions({ repos }: { repos: string[] }) {
+  if (repos.length === 0) return null;
+  return (
+    <p className="muted hint">
+      {nameSome(repos)} {repos.length === 1 ? "reports" : "report"} with an older version of the Sessionly Action.
+      Change the version in <code>.github/workflows/sessionly.yml</code>, then run the workflow for the pull request.
+    </p>
   );
 }
 

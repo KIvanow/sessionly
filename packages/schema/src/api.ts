@@ -371,6 +371,12 @@ export interface PullReport {
    * pull request with more than the server takes: the latest are then sent.
    */
   feedback_total?: number;
+  /**
+   * Who sent the report. Left out by an Action from before this was sent.
+   * A name longer than 50 characters, or a version that is not three
+   * numbers, is dropped, and the report is still accepted.
+   */
+  reporter?: { name: string; version: string };
 }
 
 /**
@@ -461,6 +467,13 @@ export interface PullRow {
   files_without_diff: number;
   attribution: PullAttribution;
   updated_at: string;
+  /**
+   * The version of the Action that last reported it (`0.2.0`). Null when
+   * that report named none.
+   */
+  reporter_version: string | null;
+  /** The version of the Action this server knows as current. */
+  reporter_current: string;
 }
 
 /** A file of a pull request: the tracked lines it adds, and how many an agent wrote. */
@@ -535,6 +548,11 @@ export interface PullsByModel extends LinesBy {
 export interface PullSummary {
   /** Most lines first. */
   by_model: PullsByModel[];
+  /**
+   * Repositories in the filter whose last report came from an older Action
+   * than this server knows, or from one that named no version.
+   */
+  older_actions: string[];
   total: {
     pulls: number;
     /** Pull requests with at least one agent line. */

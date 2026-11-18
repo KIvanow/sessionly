@@ -49,6 +49,9 @@ pub struct Config {
     /// How much of what changes in the working tree while an agent's shell
     /// command runs is counted as the agent's, on this machine (see `changes`).
     pub shell_edits: ShellEdits,
+    /// Ask once a day, during a background upload, whether a newer release
+    /// is out, and say so in `status`. The capture hooks never ask.
+    pub update_check: bool,
 }
 
 /// How much of what changes in a repository while an agent's shell command
@@ -96,6 +99,7 @@ impl Default for Config {
             auto_sync: true,
             upload_line_hashes: false,
             shell_edits: ShellEdits::default(),
+            update_check: true,
         }
     }
 }

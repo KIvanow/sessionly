@@ -70,6 +70,13 @@ How a repository is named, and what a path covers, is under
 | `GET /prs/summary` | `admin` | The same pull requests summed by model. Same three filters. |
 | `GET /prs/detail?repo=…&number=…` | `admin` | One pull request, with its files, the sessions that wrote its lines, and its reviews and comments. `repo` is its whole name. |
 
+A report may name who sent it: `reporter`, `{ "name": "sessionly-action", "version": "0.2.0" }`.
+The name is at most 50 characters and the version is three numbers (`0.10.0` counts; `v0.2.0`
+does not). Anything else is dropped and the report is still stored. `GET /prs` and
+`GET /prs/detail` give `reporter_version` (null when the report named none) and
+`reporter_current`, the version of the Action this server knows. `GET /prs/summary` gives
+`older_actions`, the repositories in the filter last reported by an older one.
+
 ## Tokens and people
 
 | | Who | |

@@ -21,6 +21,13 @@ import type { OrgDb } from "./db.ts";
 
 export class BadReport extends Error {}
 
+/**
+ * The version of the Action whose reports this server understands. The same
+ * string as `version` in `action/package.json`: a test fails when the two
+ * differ. Bump both with every change to what a report contains.
+ */
+export const CURRENT_ACTION = "0.2.0";
+
 /** Sessions that started longer than this before a pull request was opened are not looked at. */
 const LOOK_BACK_DAYS = 90;
 const MAX_FILES = 5000;
@@ -189,6 +196,33 @@ export function breakdown(now: FileHashes[], lines: (Writer | null)[][]): { file
 
 const FEEDBACK_KINDS = ["review", "inline", "conversation"];
 const REVIEW_STATES = ["approved", "changes_requested", "commented", "dismissed"];
+const ACTION_VERSION = /^\d+\.\d+\.\d+$/;
+
+/** Whether `version` is older than `current`, number by number. None is: it named no version. */
+export function olderAction(version: string | null, current: string): boolean {
+  const numbers = (text: string | null): number[] | null =>
+    text && ACTION_VERSION.test(text) ? text.split(".").map(Number) : null;
+  const now = numbers(current);
+  const then = numbers(version);
+  if (!now) return false;
+  if (!then) return true;
+  for (let i = 0; i < now.length; i++) {
+    if (then[i] !== now[i]) return then[i]! < now[i]!;
+  }
+  return false;
+}
+
+/**
+ * Who sent a report, when they said so in a way that fits. Anything else is
+ * left out, and the report is still taken: an odd client is not refused.
+ */
+function checkReporter(value: unknown): PullReport["reporter"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const r = value as Record<string, unknown>;
+  if (typeof r.name !== "string" || r.name.length < 1 || r.name.length > 50) return undefined;
+  if (typeof r.version !== "string" || !ACTION_VERSION.test(r.version)) return undefined;
+  return { name: r.name, version: r.version };
+}
 
 /** A link that can be followed from the dashboard: a web address, and nothing that runs. */
 function webAddress(value: unknown): string | null {
@@ -296,6 +330,7 @@ export function checkReport(body: unknown): PullReport {
     feedback,
     // Never fewer than were sent, whatever the report says.
     feedback_total: feedback && Math.max(feedback.length, r.feedback_total == null ? 0 : whole("feedback_total")),
+    reporter: checkReporter(r.reporter),
   };
 }
 
@@ -439,6 +474,10 @@ export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttr
     // An Action from before these were sent says nothing of them: what is here stays.
     feedback: report.feedback ? JSON.stringify(report.feedback) : null,
     feedback_total: report.feedback ? (report.feedback_total ?? report.feedback.length) : null,
+    // The version of the Action that sent this report. One that names none
+    // is an older Action, which is what the page then says, so a missing
+    // version replaces one that was stored.
+    reporter_version: report.reporter?.version ?? null,
     // only used when the row is new
     first_event: report.event,
     first_files: JSON.stringify(first),
@@ -491,7 +530,7 @@ function where(orgId: string, filters: PullFilters): { sql: string; params: unkn
 
 const ROW_COLUMNS = `repo, number, title, url, author, state, created_at, merged_at, first_event, commits,
   reviews, changes_requested, review_comments, bot_review_comments, review_rounds, files_without_diff,
-  attribution, updated_at`;
+  attribution, updated_at, reporter_version`;
 
 function pullRow(r: Record<string, unknown>): PullRow {
   return {
@@ -513,6 +552,8 @@ function pullRow(r: Record<string, unknown>): PullRow {
     files_without_diff: num(r.files_without_diff),
     attribution: json<PullAttribution>(r.attribution),
     updated_at: iso(r.updated_at) ?? "",
+    reporter_version: typeof r.reporter_version === "string" ? r.reporter_version : null,
+    reporter_current: CURRENT_ACTION,
   };
 }
 
@@ -600,6 +641,7 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
   const { sql, params } = where(db.orgId, filters);
   const rows = (await db.query(`SELECT ${ROW_COLUMNS} FROM pull_requests ${sql}`, params)).map(pullRow);
   const byModel = new Map<string, PullsByModel>();
+  const older = new Set<string>();
   const total = {
     pulls: rows.length,
     pulls_with_agent_lines: 0,
@@ -625,6 +667,7 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       bot_review_comments: 0,
     }));
   for (const pull of rows) {
+    if (olderAction(pull.reporter_version, pull.reporter_current)) older.add(pull.repo);
     const a = pull.attribution;
     total.lines += a.now.lines;
     total.agent_lines += a.now.agent_lines;
@@ -653,5 +696,5 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       row.surviving += by.surviving;
     }
   }
-  return { by_model: sorted(byModel), total };
+  return { by_model: sorted(byModel), older_actions: [...older].sort(), total };
 }

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
 import type { Db } from "../src/db.ts";
 import { testDb, tokenFor } from "./helpers.ts";
-import { attribute, breakdown, type Claim, writers } from "../src/pulls.ts";
+import { attribute, breakdown, CURRENT_ACTION, type Claim, writers } from "../src/pulls.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
 const h = (n: number) => n.toString(16).padStart(16, "0");
@@ -15,6 +16,11 @@ const claim = (tool: string, model: string | null, path: string, started: number
   path,
   hashes: lines.map(h),
   started,
+});
+
+test("the Action version the server names is the one the Action ships", () => {
+  const action = JSON.parse(readFileSync(new URL("../../../action/package.json", import.meta.url), "utf8")) as { version: string };
+  assert.equal(CURRENT_ACTION, action.version);
 });
 
 test("lines are put down to the agent that added them to that file", () => {
@@ -443,4 +449,61 @@ test("a report that makes no sense is refused with a reason", async () => {
   assert.match(await bad({ commits: -1 }), /commits/);
   assert.match(await bad({ files: [{ path: "a.ts", hashes: ["let x = 1;"] }] }), /hashes/);
   assert.match(await bad({ files: "none" }), /files/);
+});
+
+test("a report's Action version is kept, and one that does not fit is ignored", async () => {
+  const repo = "github.com/acme/pinned";
+  const at = (number: number) => call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(repo)}&number=${number}`);
+  const versionOf = async (number: number) => (await at(number)).body.reporter_version as string | null;
+  const pinned = (overrides: Record<string, unknown> = {}) => report({ repo, ...overrides });
+
+  const sent = await call(tokens.ci, "PUT", "/prs", pinned({ number: 40, reporter: { name: "sessionly-action", version: "0.2.0" } }));
+  assert.equal(sent.status, 200);
+  const page = (await at(40)).body;
+  assert.deepEqual([page.reporter_version, page.reporter_current], ["0.2.0", CURRENT_ACTION]);
+  const listed = (await call(tokens.admin, "GET", "/prs?repo=acme/pinned")).body.pulls.find((p: { number: number }) => p.number === 40);
+  assert.deepEqual([listed.reporter_version, listed.reporter_current], ["0.2.0", CURRENT_ACTION]);
+
+  // A report that names none stays without a version.
+  assert.equal((await call(tokens.ci, "PUT", "/prs", pinned({ number: 41 }))).status, 200);
+  assert.equal(await versionOf(41), null);
+  assert.equal((await at(41)).body.reporter_current, CURRENT_ACTION);
+
+  // A version that does not fit is dropped, not a reason to refuse the report.
+  const name = "n".repeat(50);
+  for (const reporter of [
+    { name: "sessionly-action", version: "v0.2.0" },
+    { name: "sessionly-action", version: "0.2" },
+    { name: "sessionly-action", version: "0.2.0-rc.1" },
+    { name: "x".repeat(51), version: "0.2.0" },
+    { name: "", version: "0.2.0" },
+    { version: "0.2.0" },
+    "sessionly-action 0.2.0",
+    null,
+  ]) {
+    const response = await call(tokens.ci, "PUT", "/prs", pinned({ number: 42, event: "synchronize", reporter }));
+    assert.equal(response.status, 200, JSON.stringify(reporter));
+    assert.equal(await versionOf(42), null, JSON.stringify(reporter));
+  }
+  // A name of 50 characters and a version of three numbers are kept, extra fields and all.
+  const kept = await call(tokens.ci, "PUT", "/prs", pinned({
+    number: 43,
+    reporter: { name, version: "0.10.0", note: "not stored" },
+  }));
+  assert.equal(kept.status, 200);
+  assert.equal(await versionOf(43), "0.10.0");
+  // A later report that names none replaces the version: the page then says the Action is old.
+  assert.equal((await call(tokens.ci, "PUT", "/prs", pinned({ number: 43, event: "synchronize" }))).status, 200);
+  assert.equal(await versionOf(43), null);
+
+  // The list's filter, not one page of it: this repository has a pull request from an older Action.
+  const summary = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/pinned")).body;
+  assert.deepEqual(summary.older_actions, [repo]);
+  // One whose every pull request is from the current Action is not named.
+  await call(tokens.ci, "PUT", "/prs", report({
+    repo: "github.com/acme/current",
+    number: 1,
+    reporter: { name: "sessionly-action", version: CURRENT_ACTION },
+  }));
+  assert.deepEqual((await call(tokens.admin, "GET", "/prs/summary?repo=acme/current")).body.older_actions, []);
 });

@@ -98,7 +98,8 @@ For each review and comment: who made it (their GitHub login, and whether that i
 the file and line it is on, a review's outcome, and its link on GitHub, which is what the
 pull request's page in the dashboard leads to. What a review or comment says is never sent.
 
-Nothing else, and nothing to anyone else.
+The report also says it came from this Action and which version (`reporter`, the version in
+`package.json`). Nothing else, and nothing to anyone else.
 
 ## Develop
 
@@ -106,3 +107,7 @@ Plain JavaScript with no dependencies and no build step: `src/main.mjs` is what 
 `pnpm test` (or `node --test "test/*.test.mjs"`) runs the tests. `test/line-hashes.json` holds
 lines and the hash each must get; the sessionly binary is tested against the same file, since
 the two have to agree.
+
+`version` in `package.json` is what a report names. Bump it with every change to what a report
+contains, and set the same version as `CURRENT_ACTION` in `apps/server/src/pulls.ts`. A server
+test fails when the two differ.

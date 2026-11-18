@@ -10,6 +10,39 @@ export function pullHref(p: { repo: string; number: number }): string {
 /** A link is only followed to a web address. */
 export const web = (url: string | null | undefined): string | undefined => (url && /^https?:\/\//i.test(url) ? url : undefined);
 
+/** Three numbers, or nothing. `0.10.0` and `0.9.0` are not ordered as text. */
+function versionNumbers(text: string | null | undefined): [number, number, number] | null {
+  if (!text || !/^\d+\.\d+\.\d+$/.test(text)) return null;
+  const [major, minor, patch] = text.split(".").map(Number);
+  return [major!, minor!, patch!];
+}
+
+/**
+ * Whether the Action that last reported a pull request is older than the
+ * one the server is current with. A report that named no version is: an
+ * Action from before it said which. With no current version, nothing is
+ * behind.
+ */
+export function olderAction(version: string | null | undefined, current: string | null | undefined): boolean {
+  const now = versionNumbers(current);
+  const then = versionNumbers(version);
+  if (!now) return false;
+  if (!then) return true;
+  for (let i = 0; i < 3; i++) {
+    if (then[i] !== now[i]) return then[i]! < now[i]!;
+  }
+  return false;
+}
+
+/** At most five names, then how many are left: `a, b, c, d, e and 2 more`. */
+export function nameSome(names: string[]): string {
+  const shown = names.slice(0, 5);
+  const more = names.length - shown.length;
+  if (more > 0) return `${shown.join(", ")} and ${more} more`;
+  if (shown.length <= 1) return shown[0] ?? "";
+  return `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
+}
+
 const STATES: Record<string, string> = {
   approved: "approved",
   changes_requested: "asked for changes",

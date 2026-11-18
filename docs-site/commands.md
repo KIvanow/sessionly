@@ -17,7 +17,7 @@ binary itself, and `sessionly --version` the version.
 | `sessionly install --project DIR` | Add them to `DIR/.claude/settings.json` instead. |
 | `sessionly install --repo [DIR]` | Write the script and hook entries a repository carries for [cloud sessions](cloud-sessions.md), in `DIR` or here. `--checksums FILE` reads the release's `SHA256SUMS` from a file. |
 | `sessionly uninstall` | Remove the hooks again. Takes `--project DIR` and `--repo [DIR]` like `install`. |
-| `sessionly status` | Whether the hooks are installed, how much is captured, and what is set. Takes `--project DIR` and `--repo [DIR]`. |
+| `sessionly status` | Whether the hooks are installed, how much is captured, and what is set. When a newer release has been seen, it says so. Takes `--project DIR` and `--repo [DIR]`. |
 | `sessionly update` | Move to the newest release. `--check` only says whether there is one; `--version VERSION` names one. See [Install](install.md#updating). |
 
 ## Looking at sessions
@@ -59,6 +59,7 @@ The filters of `list` and `summary`: `--repo`, `--user`, `--model`, `--tool`, `-
 | `--content metadata\|previews` | `metadata` | What an upload contains. See [What an upload contains](upload-contents.md). |
 | `--line-hashes on\|off` | `off` | Whether an upload has a hash of each line the agent added, which [pull request](pull-requests.md) figures need. |
 | `--shell-edits sure\|all\|off` | `sure` | How much of what shell commands change is counted as the agent's. See [Shell edits](shell-edits.md). |
+| `--update-check on\|off` | `on` | Whether a background upload asks once a day if a newer release is out. `status` says when one is, and so do `list` and `summary` in a terminal. See [Install](install.md#updating). |
 
 ## What the hooks run
 
@@ -81,7 +82,7 @@ These are run by the agents, not by you:
 | `SESSIONLY_LINE_HASHES` | `on` or `off`: whether uploads have line hashes, in place of the saved setting. |
 | `SESSIONLY_NO_AUTO` | Set to anything, the hooks start no automatic sync. |
 | `SESSIONLY_RELEASE_BASE` | Where `update` and `install --repo` download releases from, in place of this project's GitHub releases. |
-| `SESSIONLY_RELEASE_LATEST` | Where `update` asks for the newest version. |
+| `SESSIONLY_RELEASE_LATEST` | Where `update`, and the daily check, ask for the newest version. |
 | `SSL_CERT_FILE` | A file of root certificates (PEM) to trust for the server, in place of the built-in ones. |
 | `CLAUDE_CONFIG_DIR` | Where Claude Code's transcripts are looked for (`projects/` under it), in place of `~/.claude`. The hooks are written to `~/.claude/settings.json` all the same. |
 | `CODEX_HOME` | Codex's folder, in place of `~/.codex`: its sessions and its `hooks.json`. |

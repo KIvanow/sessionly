@@ -32,7 +32,8 @@ sessionly status      # hooks installed? how many sessions captured?
 ```
 
 One install covers Claude Code, Cursor, Grok and Codex. `sessionly update` moves to a newer
-release. More: [Install](docs-site/install.md).
+release. A background upload asks once a day whether one is out, and `sessionly status` says so.
+More: [Install](docs-site/install.md).
 
 ## Use
 
