@@ -199,8 +199,8 @@ export function breakdown(now: FileHashes[], lines: (Writer | null)[][]): { file
 
 const FEEDBACK_KINDS = ["review", "inline", "conversation"];
 const REVIEW_STATES = ["approved", "changes_requested", "commented", "dismissed"];
-/** `X.Y.Z`, or that with a pre-release suffix of at most 50 characters. */
-const ACTION_VERSION = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]{1,50})?$/;
+/** `X.Y.Z`, each number at most 9 digits, or that with a pre-release suffix of at most 50 characters. */
+const ACTION_VERSION = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:-[0-9A-Za-z.-]{1,50})?$/;
 /** Reports from this client are the Action's. Any other name is not judged. */
 const ACTION_REPORTER = "sessionly-action";
 

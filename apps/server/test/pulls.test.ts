@@ -40,6 +40,9 @@ test("an Action is old when it named no version, or an earlier one, number by nu
   assert.equal(olderAction("0.2", "0.2.0"), true);
   assert.equal(olderAction("v0.2.0", "0.2.0"), true);
   assert.equal(olderAction("0.2.0", ""), false);
+  // Nine digits is a version. Ten is not, so it counts as one that did not say.
+  assert.equal(olderAction("999999999.0.0", "0.2.0"), false);
+  assert.equal(olderAction("1000000000.0.0", "0.2.0"), true);
 });
 
 test("lines are put down to the agent that added them to that file", () => {
@@ -509,7 +512,7 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal((await at(42)).body.reporter_older, true);
   // A version the server cannot read is left out. The name is kept, so the
   // report is not an older Action: the server does not know.
-  for (const version of ["v0.2.0", "0.2", "2024.11", `0.2.0-${"a".repeat(51)}`]) {
+  for (const version of ["v0.2.0", "0.2", "2024.11", `0.2.0-${"a".repeat(51)}`, "1.2.1000000000"]) {
     const response = await call(tokens.ci, "PUT", "/prs", pinned({
       number: 42, event: "synchronize", reporter: { name: "sessionly-action", version },
     }));

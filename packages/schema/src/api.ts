@@ -375,8 +375,9 @@ export interface PullReport {
   /**
    * Who sent the report. Left out by an Action from before this was sent.
    * The name is 1 to 50 characters; one that is not is dropped, and the
-   * report is still accepted. The version is `X.Y.Z`, or that with a
-   * pre-release suffix (`-` and up to 50 of `0-9`, `A-Z`, `a-z`, `.` or `-`).
+   * report is still accepted. The version is `X.Y.Z`, each number at most 9
+   * digits, or that with a pre-release suffix (`-` and up to 50 of `0-9`,
+   * `A-Z`, `a-z`, `.` or `-`).
    * A version that is neither is left out and the name is still kept. The
    * version is stored only when the name is `sessionly-action`. Another
    * client is not compared with the Action, and neither is a
