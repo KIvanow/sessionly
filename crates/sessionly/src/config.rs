@@ -357,6 +357,22 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_server_object_is_not_a_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{"machine_id":"m","server":{}}"#).unwrap();
+        assert!(Config::load(&path).is_err());
+        fs::write(&path, r#"{"machine_id":"m","server":null}"#).unwrap();
+        assert!(Config::load(&path).unwrap().server.is_none());
+        fs::write(
+            &path,
+            r#"{"machine_id":"m","server":{"url":"http://127.0.0.1:9","token":"t"}}"#,
+        )
+        .unwrap();
+        assert!(Config::load(&path).unwrap().server.is_some());
+    }
+
+    #[test]
     fn shell_edits_count_what_is_sure_unless_said_otherwise() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
