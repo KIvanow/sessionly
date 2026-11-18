@@ -68,7 +68,7 @@ How a repository is named, and what a path covers, is under
 | `PUT /prs` | `ci`, `admin` | The [Action](pull-requests.md)'s report of one pull request. Answers `{"stored": true, "attribution": {…}}`, the figures the Action then shows. |
 | `GET /prs` | `admin` | A page of pull requests. Filters `repo` (part of its name), `state` (`open`, `merged` or `closed`) and `since`; `limit` (50, at most 500) and `offset`. |
 | `GET /prs/summary` | `admin` | The same pull requests summed by model. Same three filters. |
-| `GET /prs/detail?repo=…&number=…` | `admin` | One pull request, with its files, the sessions that wrote its lines, and its reviews and comments. `repo` is its whole name. |
+| `GET /prs/detail?repo=…&number=…` | `admin` | One pull request, with its files, the sessions that wrote its lines, its reviews and comments, and `history`. `repo` is its whole name. |
 | `POST /prs/match` | `admin` | Match lines again against the sessions held now, without a report. With `repo` (its whole name) and `number`: one pull request, answered with its figures, or `409` with the code `needs_report` when it was last reported before that could be done. Otherwise the filters of `GET /prs`, for up to 100 at a time: send the answer's `started` back, with the same filters, until `remaining` is 0. Each pull request is matched and stored on its own; `failed` counts those of a request that could not be, which stay among the remaining. |
 
 A report may name who sent it: `reporter`, `{ "name": "sessionly-action", "version": "0.2.0" }`.
@@ -97,6 +97,20 @@ report keeps the notice off for 30 days, whichever pull request it was, and a re
 older one in that time does not bring it back.
 `GET /prs/summary` gives `older_actions`, the repositories in the filter that report with an
 older Action by that rule.
+
+`history` on `GET /prs/detail` is the figures each time they moved, newest first, 50 at most.
+A row is kept when the lines, the agent lines, the commits, or the set of sessions and their
+line counts differ from the latest one. Each row has `at`, `event` (`opened`, `synchronize`,
+`review`, `closed`, `manual`, or `match` when the lines were matched again on the server),
+`commits`, `lines`, `agent_lines`, `sessions` (each session's key and its lines, no hashes),
+`reporter_version`, and `change` against the row before it: the lines, agent lines and commits
+before and after, `sessions_added`, `sessions_gone`, `sessions_changed`, and `reason`. The
+reason is, in this order: new commits (`2 new commits`); sessions uploaded since (`1 session
+uploaded since: +17 agent lines`); sessions no longer matched; `a newer Action`; otherwise
+`matched again, nothing new`. The first row's reason is null. A pull request stored before
+this was kept has one row, from the figures it had then. A report that only brings a newer
+Action is written onto the latest row, so the next change is not explained by a version that
+was already current.
 
 ## Tokens and people
 

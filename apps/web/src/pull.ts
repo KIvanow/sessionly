@@ -110,3 +110,41 @@ export async function matchAll(
     left = answer.remaining;
   }
 }
+
+const HISTORY_EVENTS: Record<string, string> = {
+  opened: "Opened",
+  synchronize: "Pushed",
+  reopened: "Reopened",
+  ready_for_review: "Marked ready",
+  closed: "Closed",
+  review: "Reviewed",
+  review_comment: "Commented",
+  manual: "Reported by hand",
+  match: "Matched again",
+};
+
+/** What prompted a report, in the words the history shows. */
+export function historyEvent(event: string): string {
+  return HISTORY_EVENTS[event] ?? event.replaceAll("_", " ");
+}
+
+/** The part of a history reason that sits beside the headline figure. */
+export function figureBecause(reason: string): string {
+  return (reason.split(":")[0] ?? reason).trim();
+}
+
+/**
+ * The sentence beside the agent figure when that figure moved: what it was
+ * until the previous report, and why. Null when there is nothing earlier,
+ * or when the agent lines are the same as then.
+ */
+export function figureShift(
+  history: readonly { at: string; agent_lines: number; change: { reason: string | null } }[],
+  when: (iso: string) => string,
+  amount: (n: number) => string,
+): string | null {
+  const latest = history[0];
+  const previous = history[1];
+  if (!latest?.change.reason || !previous || previous.agent_lines === latest.agent_lines) return null;
+  return `Was ${amount(previous.agent_lines)} until ${when(previous.at)}: ${figureBecause(latest.change.reason)}.`;
+}

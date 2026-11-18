@@ -690,6 +690,42 @@ const MIGRATIONS: string[] = [
   // send this. These rows are not judged. A report that names no one still
   // stores null, and is.
   `UPDATE pull_requests SET reporter_name = '' WHERE reporter_name IS NULL`,
+  // A short history of a pull request's figures: what they were each time
+  // they moved, and which sessions accounted for them. No line hashes. A
+  // pull request already stored gets one row from the figures it has now,
+  // so the next change has something to be compared with.
+  `CREATE TABLE pull_request_reports (
+     id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+     org_id           text NOT NULL,
+     repo             text NOT NULL,
+     number           integer NOT NULL,
+     at               timestamptz NOT NULL DEFAULT clock_timestamp(),
+     event            text NOT NULL,
+     commits          integer NOT NULL,
+     lines            integer NOT NULL,
+     agent_lines      integer NOT NULL,
+     sessions         jsonb NOT NULL,
+     reporter_version text,
+     FOREIGN KEY (org_id, repo, number) REFERENCES pull_requests (org_id, repo, number) ON DELETE CASCADE
+   )`,
+  `CREATE INDEX pull_request_reports_pr ON pull_request_reports (org_id, repo, number, at DESC, id DESC)`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON pull_request_reports`),
+  ...rowLevelSecurity("pull_request_reports"),
+  `INSERT INTO pull_request_reports (org_id, repo, number, at, event, commits, lines, agent_lines, sessions, reporter_version)
+   SELECT p.org_id, p.repo, p.number, coalesce(p.matched_at, p.updated_at), p.last_event, p.commits,
+          coalesce((p.attribution #>> '{now,lines}')::integer, 0),
+          coalesce((p.attribution #>> '{now,agent_lines}')::integer, 0),
+          coalesce((
+            SELECT jsonb_agg(jsonb_build_object(
+              'machine_id', s->>'machine_id',
+              'source', s->>'source',
+              'session_id', s->>'session_id',
+              'lines', coalesce((s->>'lines')::integer, 0)
+            ))
+            FROM jsonb_array_elements(coalesce(p.detail->'sessions', '[]'::jsonb)) AS s
+          ), '[]'::jsonb),
+          p.reporter_version
+   FROM pull_requests p`,
 ];
 
 /**
