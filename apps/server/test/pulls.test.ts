@@ -5,7 +5,7 @@ import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
 import type { Db } from "../src/db.ts";
 import { testDb, tokenFor } from "./helpers.ts";
-import { attribute, breakdown, CURRENT_ACTION, type Claim, writers } from "../src/pulls.ts";
+import { attribute, breakdown, CURRENT_ACTION, type Claim, olderAction, writers } from "../src/pulls.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
 const h = (n: number) => n.toString(16).padStart(16, "0");
@@ -21,6 +21,20 @@ const claim = (tool: string, model: string | null, path: string, started: number
 test("the Action version the server names is the one the Action ships", () => {
   const action = JSON.parse(readFileSync(new URL("../../../action/package.json", import.meta.url), "utf8")) as { version: string };
   assert.equal(CURRENT_ACTION, action.version);
+});
+
+test("an Action is old when it named no version, or an earlier one, number by number", () => {
+  assert.equal(olderAction(null, "0.2.0"), true);
+  assert.equal(olderAction("0.1.0", "0.2.0"), true);
+  assert.equal(olderAction("0.9.0", "0.10.0"), true);
+  assert.equal(olderAction("0.2.0", "0.2.1"), true);
+  assert.equal(olderAction("0.2.0", "0.2.0"), false);
+  assert.equal(olderAction("0.10.0", "0.9.0"), false);
+  assert.equal(olderAction("0.2.1", "0.2.0"), false);
+  assert.equal(olderAction("1.0.0", "0.9.9"), false);
+  // Not three numbers: treated as a report that did not say.
+  assert.equal(olderAction("0.2", "0.2.0"), true);
+  assert.equal(olderAction("0.2.0", ""), false);
 });
 
 test("lines are put down to the agent that added them to that file", () => {
@@ -461,13 +475,18 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.equal(sent.status, 200);
   const page = (await at(40)).body;
   assert.deepEqual([page.reporter_version, page.reporter_current], ["0.2.0", CURRENT_ACTION]);
+  assert.equal(page.reporter_older, false);
   const listed = (await call(tokens.admin, "GET", "/prs?repo=acme/pinned")).body.pulls.find((p: { number: number }) => p.number === 40);
-  assert.deepEqual([listed.reporter_version, listed.reporter_current], ["0.2.0", CURRENT_ACTION]);
+  assert.equal(listed.reporter_version, "0.2.0");
+  assert.equal(listed.reporter_older, false);
+  assert.equal("reporter_current" in listed, false);
 
-  // A report that names none stays without a version.
+  // A report that names none stays without a version, and counts as an older Action.
   assert.equal((await call(tokens.ci, "PUT", "/prs", pinned({ number: 41 }))).status, 200);
   assert.equal(await versionOf(41), null);
-  assert.equal((await at(41)).body.reporter_current, CURRENT_ACTION);
+  const unnamed = (await at(41)).body;
+  assert.equal(unnamed.reporter_older, true);
+  assert.equal(unnamed.reporter_current, CURRENT_ACTION);
 
   // A version that does not fit is dropped, not a reason to refuse the report.
   const name = "n".repeat(50);
@@ -533,9 +552,12 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.deepEqual(mergedOnly.older_actions, []);
   const mergedPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(upgraded)}&number=1`)).body;
   assert.equal(mergedPage.reporter_version, null);
+  assert.equal(mergedPage.reporter_older, true);
   assert.equal(mergedPage.repo_reporter_older, false);
+  assert.equal(mergedPage.reporter_current, CURRENT_ACTION);
   const openPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(upgraded)}&number=2`)).body;
   assert.equal(openPage.reporter_version, CURRENT_ACTION);
+  assert.equal(openPage.reporter_older, false);
   assert.equal(openPage.repo_reporter_older, false);
   // Still on the old Action: the newest report named none, so the page does ask.
   const oldPage = (await at(41)).body;

@@ -74,7 +74,8 @@ A report may name who sent it: `reporter`, `{ "name": "sessionly-action", "versi
 The name is 1 to 50 characters and the version is three numbers (`0.10.0` counts; `v0.2.0`
 does not). Anything else is dropped and the report is still stored. `GET /prs` and
 `GET /prs/detail` give `reporter_version` (null when the report named none) and
-`reporter_current`, the version of the Action this server knows. `GET /prs/detail` also gives
+`reporter_older`, which is true when that version is missing or older than the Action this
+server knows. `GET /prs/detail` also gives `reporter_current`, that version, and
 `repo_reporter_older`: the repository's newest report, of any state, came from an older Action.
 A pull request merged before an upgrade is not that on its own. `GET /prs/summary` gives
 `older_actions`, the repositories in the filter whose newest report of any state came from an

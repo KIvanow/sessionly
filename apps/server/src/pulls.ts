@@ -555,6 +555,7 @@ const ROW_COLUMNS = `repo, number, title, url, author, state, created_at, merged
   attribution, updated_at, reporter_version`;
 
 function pullRow(r: Record<string, unknown>): PullRow {
+  const reporterVersion = typeof r.reporter_version === "string" ? r.reporter_version : null;
   return {
     repo: String(r.repo),
     number: num(r.number),
@@ -574,8 +575,8 @@ function pullRow(r: Record<string, unknown>): PullRow {
     files_without_diff: num(r.files_without_diff),
     attribution: json<PullAttribution>(r.attribution),
     updated_at: iso(r.updated_at) ?? "",
-    reporter_version: typeof r.reporter_version === "string" ? r.reporter_version : null,
-    reporter_current: CURRENT_ACTION,
+    reporter_version: reporterVersion,
+    reporter_older: olderAction(reporterVersion, CURRENT_ACTION),
   };
 }
 
@@ -595,6 +596,7 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
   const olderRepo = await reposOnOlderAction(db, [repo]);
   return {
     ...pullRow(r),
+    reporter_current: CURRENT_ACTION,
     repo_reporter_older: olderRepo.has(repo),
     draft: r.draft === true,
     head_ref: (r.head_ref as string) ?? null,

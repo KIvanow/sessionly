@@ -472,8 +472,11 @@ export interface PullRow {
    * that report named none.
    */
   reporter_version: string | null;
-  /** The version of the Action this server knows as current. */
-  reporter_current: string;
+  /**
+   * This pull request was last reported by an older Action, or by one that
+   * named no version.
+   */
+  reporter_older: boolean;
 }
 
 /** A file of a pull request: the tracked lines it adds, and how many an agent wrote. */
@@ -521,6 +524,8 @@ export interface PullDetail extends PullRow {
    * Action. A pull request merged before an upgrade is not that on its own.
    */
   repo_reporter_older: boolean;
+  /** The version of the Action this server knows as current. */
+  reporter_current: string;
 }
 
 export interface PullList {

@@ -1,7 +1,7 @@
 import type { PullDetail, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { query } from "./api.ts";
-import { type By, byOf, countFeedback, feedbackLabel, olderAction, web } from "./pull.ts";
+import { type By, byOf, countFeedback, feedbackLabel, web } from "./pull.ts";
 import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -41,7 +41,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
           {p.head_ref && <>, from <code>{p.head_ref}</code>{p.base_ref && <> into <code>{p.base_ref}</code></>}</>}
         </p>
       </div>
-      <ReporterNotice reported={p.reporter_version} current={p.reporter_current} repoOlder={p.repo_reporter_older} />
+      <ReporterNotice reported={p.reporter_version} current={p.reporter_current} repoOlder={p.repo_reporter_older} older={p.reporter_older} />
       <section className="tiles" aria-label="Totals">
         <Tile label="Lines added" value={count(a.now.lines)} note={`in ${count(p.commits)} ${p.commits === 1 ? "commit" : "commits"}`} />
         <Tile
@@ -100,7 +100,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
       <section className="card" aria-label="Sessions">
         <h2>Sessions that wrote it</h2>
         {p.sessions == null ? (
-          <Earlier what="Which sessions wrote its lines" reported={p.reporter_version} current={p.reporter_current} />
+          <Earlier what="Which sessions wrote its lines" older={p.reporter_older} />
         ) : p.sessions.length === 0 ? (
           <p className="muted">
             {a.cloud && a.cloud.sessions === 0
@@ -130,7 +130,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
       <section className="card" aria-label="Files">
         <h2>Files</h2>
         {p.files == null ? (
-          <Earlier what="Its lines file by file" reported={p.reporter_version} current={p.reporter_current} />
+          <Earlier what="Its lines file by file" older={p.reporter_older} />
         ) : p.files.length === 0 ? (
           <p className="muted">It adds no lines to track.</p>
         ) : (
@@ -183,7 +183,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
           stays on GitHub: Sessionly does not store it.
         </p>
         {p.feedback == null ? (
-          <Earlier what="Its reviews and comments" reported={p.reporter_version} current={p.reporter_current} />
+          <Earlier what="Its reviews and comments" older={p.reporter_older} />
         ) : p.feedback.length === 0 ? (
           <p className="muted">Nobody has reviewed it or commented on it.</p>
         ) : (
@@ -287,9 +287,18 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
 }
 
 /** What this pull request's report is missing, and why a fresh run is needed when the Action was old. */
-function ReporterNotice({ reported, current, repoOlder }: { reported: string | null; current: string; repoOlder: boolean }) {
-  const mine = olderAction(reported, current);
-  if (!repoOlder && !mine) return null;
+function ReporterNotice({
+  reported,
+  current,
+  repoOlder,
+  older,
+}: {
+  reported: string | null;
+  current: string;
+  repoOlder: boolean;
+  older: boolean;
+}) {
+  if (!repoOlder && !older) return null;
   const which = reported ? `${reported}; current is ${current}` : `current is ${current}`;
   const again =
     "A re-run keeps the old version: push a commit for an open pull request, or start the workflow by hand with this pull request's number if it has been merged.";
@@ -309,8 +318,8 @@ function ReporterNotice({ reported, current, repoOlder }: { reported: string | n
 }
 
 /** For a pull request last reported before this was kept. */
-function Earlier({ what, reported, current }: { what: string; reported: string | null; current: string }) {
-  if (olderAction(reported, current)) {
+function Earlier({ what, older }: { what: string; older: boolean }) {
+  if (older) {
     return (
       <p className="muted">
         {what} were not kept when this pull request was last reported. The notice above says why.
