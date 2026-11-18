@@ -2,10 +2,10 @@ import type { LinesBy, PullList, PullMatches, PullRow, PullSummary } from "@sess
 import { useEffect, useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { scopeParams, type Scope } from "./App.tsx";
-import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
+import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName, usd } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
-import { matchAll, pullHref, web } from "./pull.ts";
+import { matchAll, pullCost, pullHref, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -98,7 +98,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
       )}
       {total && total.pulls > 0 && (
         <>
-          <section className="tiles three" aria-label="Totals">
+          <section className="tiles" aria-label="Totals">
             <Tile
               label="Pull requests"
               value={count(total.pulls)}
@@ -115,6 +115,20 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
               value={shareOf(total.agent_lines_surviving, total.opened_agent_lines)}
               part={share(total.agent_lines_surviving, total.opened_agent_lines)}
               note={`${count(total.agent_lines_surviving)} of ${count(total.opened_agent_lines)}, in ${count(total.pulls_from_open)} pull requests reported since they were opened`}
+            />
+            <Tile
+              label="Agent cost"
+              value={pullCost({ usd: total.cost_usd, estimated: total.cost_estimated, sessions_without_cost: total.pulls_with_cost_missing })}
+              note={
+                total.cost_usd == null
+                  ? "none of the matched sessions has a cost figure"
+                  : [
+                      total.per_surviving_line_usd != null ? `${usd(total.per_surviving_line_usd)} per agent line that survived review` : null,
+                      "what the matched sessions cost, each for its share of lines",
+                    ]
+                      .filter(Boolean)
+                      .join("; ")
+              }
             />
           </section>
           <ByModel summary={summary.data!} />
@@ -147,6 +161,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
                   <th scope="col" className="num">By agents</th>
                   <th scope="col">Written with</th>
                   <th scope="col" className="num">Agent lines that survived review</th>
+                  <th scope="col" className="num">Agent cost</th>
                   <th scope="col" className="num">Review rounds</th>
                   <th scope="col" className="num">Comments by people</th>
                   <th scope="col" className="num">by bots</th>
@@ -292,6 +307,12 @@ function Row({ p }: { p: PullRow }) {
         {p.first_event === "opened" && a.first.agent_lines > 0
           ? `${shareOf(surviving, a.first.agent_lines)} of ${count(a.first.agent_lines)}`
           : "–"}
+      </td>
+      <td
+        className="num nowrap"
+        title={p.cost && p.cost.usd != null && p.cost.sessions_without_cost > 0 ? "At least: a session of it has no cost figure" : undefined}
+      >
+        {pullCost(p.cost, "≥ ")}
       </td>
       <td className="num">{count(p.review_rounds)}</td>
       <td className="num">{count(p.review_comments)}</td>

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { byOf, countFeedback, feedbackLabel, matchAll, matchedLine, pullHref, web } from "../src/pull.ts";
+import { byOf, countFeedback, feedbackLabel, matchAll, matchedLine, pullCost, pullCostNote, pullHref, web } from "../src/pull.ts";
 
 test("a pull request says how current its figures are", () => {
   const when = (iso: string | null) => `<${iso}>`;
@@ -89,4 +89,22 @@ test("reviews and comments are counted apart for people, for bots and for the au
     ["bots", [], 0],
     ["author", [], 0],
   ]);
+});
+
+test("a pull request's cost is said with what is not sure about it", () => {
+  const whole = { usd: 4.1, estimated: false, sessions: 3, sessions_without_cost: 0, per_agent_line_usd: 0.1, per_surviving_line_usd: 0.2 };
+  assert.equal(pullCost(whole), "$4.10");
+  assert.equal(pullCostNote(whole), "$0.10 per agent line; $0.20 per line that survived review");
+  // an estimate, and a floor: a session of it has no cost figure
+  const floor = { ...whole, estimated: true, sessions_without_cost: 1, per_surviving_line_usd: null };
+  assert.equal(pullCost(floor), "at least ~$4.10");
+  assert.equal(pullCost(floor, "≥ "), "≥ ~$4.10");
+  assert.equal(pullCostNote(floor), "$0.10 per agent line; 1 of 3 sessions has no cost figure");
+  // no figure is a dash and never a cost of nothing
+  const none = { usd: null, estimated: false, sessions: 2, sessions_without_cost: 2, per_agent_line_usd: null, per_surviving_line_usd: null };
+  assert.equal(pullCost(none), "–");
+  assert.equal(pullCostNote(none), "2 of 2 sessions have no cost figure");
+  assert.equal(pullCostNote({ ...none, sessions: 0, sessions_without_cost: 0 }), "no session was matched to its lines");
+  assert.equal(pullCost(null), "–");
+  assert.match(pullCostNote(null), /were not kept/);
 });

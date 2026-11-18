@@ -442,6 +442,26 @@ export interface PullCloud {
   sessions: number;
 }
 
+/**
+ * What the sessions matched to a pull request cost, each counted for the
+ * share of its lines that are in the pull request. It is the cost of those
+ * sessions and not of the pull request's whole making: lines that are not
+ * put down to a session carry none.
+ */
+export interface PullCost {
+  /** The sum of the sessions' shares. Null when none of them has a cost figure, or there are none. */
+  usd: number | null;
+  /** Whether any of those shares is of a cost that is estimated, wholly or in part. */
+  estimated: boolean;
+  /** Sessions with lines in it, and how many of those have no cost figure or were deleted: `usd` is then a floor. */
+  sessions: number;
+  sessions_without_cost: number;
+  /** `usd` for each agent line it has now. */
+  per_agent_line_usd: number | null;
+  /** `usd` for each agent line that survived review. Null where that is not known. */
+  per_surviving_line_usd: number | null;
+}
+
 export interface PullRow {
   repo: string;
   number: number;
@@ -461,6 +481,8 @@ export interface PullRow {
   review_rounds: number;
   files_without_diff: number;
   attribution: PullAttribution;
+  /** Null on a pull request last reported before its sessions were kept. */
+  cost: PullCost | null;
   /** When the Action last reported it. */
   updated_at: string;
   /**
@@ -512,6 +534,14 @@ export interface PullSession {
   session_id: string;
   /** Lines of the pull request, as last reported, put down to this session. */
   lines: number;
+  /** Line hashes the session uploaded: the lines of it that could be matched to any pull request. Null once it has been deleted. */
+  hashed_lines: number | null;
+  /**
+   * Its cost in this pull request: the session's cost, in the proportion of
+   * `lines` to `hashed_lines` (the whole at most). Null where the session has
+   * no cost figure, or has been deleted.
+   */
+  cost_share_usd: number | null;
   session: Pick<
     SessionRow,
     "owner_email" | "runtime" | "title" | "started_at" | "active_ms" | "cost_usd" | "cost_source" | "primary_model" | "prompts"
@@ -582,5 +612,18 @@ export interface PullSummary {
     /** Pull requests a cloud agent worked on, and how many of those have no session. */
     cloud_pulls: number;
     cloud_pulls_without_session: number;
+    /**
+     * What the sessions matched to these pull requests cost (see `PullCost`):
+     * the sum of theirs. Null when none has a cost.
+     */
+    cost_usd: number | null;
+    cost_estimated: boolean;
+    /** Pull requests whose cost is a floor: some session of theirs has no cost figure. */
+    pulls_with_cost_missing: number;
+    /**
+     * Over the pull requests reported from the moment they were opened: their
+     * cost for each agent line that survived review. Null when there is none.
+     */
+    per_surviving_line_usd: number | null;
   };
 }

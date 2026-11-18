@@ -242,6 +242,11 @@ test("the Action reports a pull request through review; admins read how the agen
     agent_lines_surviving: 3,
     cloud_pulls: 0,
     cloud_pulls_without_session: 0,
+    // its sessions were uploaded without a cost figure
+    cost_usd: null,
+    cost_estimated: false,
+    pulls_with_cost_missing: 1,
+    per_surviving_line_usd: null,
   });
   assert.deepEqual(summary.by_model.find((m: any) => m.model === "claude-opus-5-5"), {
     tool: "claude-code",
@@ -600,4 +605,60 @@ test("the pull requests the list's filters choose are matched again, some at a t
   const ahead = await call(tokens.admin, "POST", "/prs/match", { repo: "acme/many", started: "2999-01-01T00:00:00Z" });
   assert.deepEqual([ahead.status, ahead.body.matched, ahead.body.remaining], [200, MATCH_AT_ONCE, 2]);
   assert.ok(Date.parse(ahead.body.started) < Date.now() + 60_000);
+});
+
+test("what a pull request's sessions cost it: each for the share of its lines that are there", async () => {
+  const repo = "github.com/acme/cost";
+  const range = (from: number, count: number) => Array.from({ length: count }, (_, i) => from + i);
+  const upload = (id: string, path: string, numbers: number[], cost: unknown) => {
+    const s = session(id, "claude-code", "claude-opus-5-5", "2026-11-10T09:00:00Z", [{ path, model: null, hashes: numbers.map(h) }]);
+    s.session.repo.remote = repo;
+    if (cost) (s.session as Record<string, unknown>).cost = cost;
+    return call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, s);
+  };
+  const detail = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}&number=${number}`)).body;
+
+  // one session of a hundred lines: forty are in one pull request, ten in another, fifty in neither
+  assert.equal((await upload("c-wide", "c.ts", range(1000, 100), { total_usd: 10, source: "recorded" })).status, 200);
+  await call(tokens.ci, "PUT", "/prs", report({ repo, number: 1, files: [file("c.ts", ...range(1000, 40), 5000)] }));
+  await call(tokens.ci, "PUT", "/prs", report({ repo, number: 2, event: "synchronize", files: [file("c.ts", ...range(1040, 10))] }));
+  const a = await detail(1);
+  assert.deepEqual(a.cost, { usd: 4, estimated: false, sessions: 1, sessions_without_cost: 0, per_agent_line_usd: 0.1, per_surviving_line_usd: 0.1 });
+  assert.deepEqual([a.sessions[0].lines, a.sessions[0].hashed_lines, a.sessions[0].cost_share_usd, a.sessions[0].session.cost_usd], [40, 100, 4, 10]);
+  // not seen from the start: what a line that survived cost is not known, what one that is there cost is
+  const b = await detail(2);
+  assert.deepEqual([b.cost.usd, b.cost.per_agent_line_usd, b.cost.per_surviving_line_usd], [1, 0.1, null]);
+  // review takes half of them out: the session's share is of the lines that are left
+  await call(tokens.ci, "PUT", "/prs", report({ repo, number: 1, event: "closed", state: "merged", files: [file("c.ts", ...range(1000, 20), 5000)] }));
+  assert.deepEqual((await detail(1)).cost, { usd: 2, estimated: false, sessions: 1, sessions_without_cost: 0, per_agent_line_usd: 0.1, per_surviving_line_usd: 0.1 });
+
+  // all of a session's lines in one pull request: its cost is the pull request's, estimated as it is
+  await upload("c-whole", "d.ts", range(2000, 5), { total_usd: 2, source: "estimated" });
+  // a session with no cost figure, and one taken back since: the cost is the others', and is said to be a floor
+  await upload("c-none", "e.ts", range(3000, 3), null);
+  await upload("c-gone", "f.ts", range(4000, 2), { total_usd: 50, source: "recorded" });
+  await call(tokens.ci, "PUT", "/prs", report({ repo, number: 3, files: [file("d.ts", ...range(2000, 5)), file("e.ts", ...range(3000, 3)), file("f.ts", ...range(4000, 2))] }));
+  assert.equal((await detail(3)).cost.usd, 52);
+  assert.equal((await call(tokens.ann, "DELETE", "/sessions/m1/claude-code/c-gone")).status, 200);
+  const c = await detail(3);
+  assert.deepEqual(c.cost, { usd: 2, estimated: true, sessions: 3, sessions_without_cost: 2, per_agent_line_usd: 0.2, per_surviving_line_usd: 0.2 });
+  const shares = Object.fromEntries(c.sessions.map((s: any) => [s.session_id, [s.hashed_lines, s.cost_share_usd]]));
+  assert.deepEqual(shares, { "c-whole": [5, 2], "c-none": [3, null], "c-gone": [null, null] });
+
+  // one with no session at all has no cost, which is not a cost of nothing
+  await call(tokens.ci, "PUT", "/prs", report({ repo, number: 4, files: [file("g.ts", 6000)] }));
+  assert.deepEqual((await detail(4)).cost, { usd: null, estimated: false, sessions: 0, sessions_without_cost: 0, per_agent_line_usd: null, per_surviving_line_usd: null });
+
+  // the list says the same of each as its page, and the summary is their sum
+  const list = (await call(tokens.admin, "GET", "/prs?repo=acme/cost")).body.pulls;
+  for (const row of list) assert.deepEqual(row.cost, (await detail(row.number)).cost, `#${row.number}`);
+  const total = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost")).body.total;
+  assert.deepEqual(
+    [total.cost_usd, total.cost_estimated, total.pulls_with_cost_missing],
+    [list.reduce((sum: number, row: any) => sum + (row.cost.usd ?? 0), 0), true, 1],
+  );
+  assert.equal(total.cost_usd, 5);
+  // of those seen from the start (#1, #3 and #4): 4 dollars for the 30 agent lines that survived
+  assert.equal(total.agent_lines_surviving, 30);
+  assert.equal(total.per_surviving_line_usd, 0.133333);
 });

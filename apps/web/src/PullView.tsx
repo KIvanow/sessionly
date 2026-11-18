@@ -1,7 +1,7 @@
 import type { PullDetail, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
-import { type By, byOf, countFeedback, feedbackLabel, matchedLine, web } from "./pull.ts";
+import { type By, byOf, countFeedback, feedbackLabel, matchedLine, pullCost, pullCostNote, web } from "./pull.ts";
 import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -65,7 +65,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
         </p>
         {problem && <p role="alert">{problem}</p>}
       </div>
-      <section className="tiles" aria-label="Totals">
+      <section className="tiles five" aria-label="Totals">
         <Tile label="Lines added" value={count(a.now.lines)} note={`in ${count(p.commits)} ${p.commits === 1 ? "commit" : "commits"}`} />
         <Tile
           label="Written by agents"
@@ -90,6 +90,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
           value={count(p.review_comments + p.bot_review_comments)}
           note={`${count(p.review_comments)} by people, ${count(p.bot_review_comments)} by bots, in ${count(p.review_rounds)} ${p.review_rounds === 1 ? "round" : "rounds"} of review`}
         />
+        <Tile label="Agent cost" value={pullCost(p.cost)} note={pullCostNote(p.cost)} />
       </section>
 
       {a.now.by.length > 0 && (
@@ -122,6 +123,13 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
 
       <section className="card" aria-label="Sessions">
         <h2>Sessions that wrote it</h2>
+        {p.cost?.usd != null && (
+          <p className="muted hint">
+            A session's cost here is its share of what the whole session cost: as many of the lines it
+            uploaded hashes of as are in this pull request. Their sum is the agent cost above: what
+            the matched sessions cost, not what making the pull request did.
+          </p>
+        )}
         {p.sessions == null ? (
           <Earlier what="Which sessions wrote its lines" />
         ) : p.sessions.length === 0 ? (
@@ -140,7 +148,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
                   <th scope="col">Tool</th>
                   <th scope="col">Model</th>
                   <th scope="col">Started</th>
-                  <th scope="col" className="num">Cost</th>
+                  <th scope="col" className="num">Cost in this pull request</th>
                   <th scope="col" className="num">Lines in this pull request</th>
                 </tr>
               </thead>
@@ -301,7 +309,15 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
       <td className="nowrap">{toolName(s.source)}</td>
       <td className="nowrap">{known?.primary_model ? modelName(known.primary_model) : "–"}</td>
       <td className="nowrap">{dateTime(known?.started_at)}</td>
-      <td className="num">{known ? cost(known.cost_usd, known.cost_source) : "–"}</td>
+      <td className="num">
+        {known && s.cost_share_usd != null ? (
+          <>
+            {cost(s.cost_share_usd, known.cost_source)} <span className="muted">of {cost(known.cost_usd, known.cost_source)}</span>
+          </>
+        ) : (
+          "–"
+        )}
+      </td>
       <td className="num">
         {count(s.lines)} <span className="muted">({percent(share(s.lines, lines))})</span>
       </td>

@@ -1,7 +1,33 @@
 // A pull request's page: where it is, how current its figures are, and its
 // reviews and comments counted by whose they are.
-import type { PullFeedback, PullMatches, PullRow } from "@sessionly/schema";
-import { dateTime } from "./format.ts";
+import type { PullCost, PullFeedback, PullMatches, PullRow } from "@sessionly/schema";
+import { count, dateTime, usd } from "./format.ts";
+
+/**
+ * What a pull request's sessions cost it, in a few words: "~" before an
+ * estimate, and "at least" (`floor`) when a session of it has no cost figure.
+ * A dash where there is no figure at all.
+ */
+export function pullCost(c: Pick<PullCost, "usd" | "estimated" | "sessions_without_cost"> | null, floor = "at least "): string {
+  if (!c || c.usd == null) return "–";
+  return `${c.sessions_without_cost > 0 ? floor : ""}${c.estimated ? "~" : ""}${usd(c.usd)}`;
+}
+
+/** The small print under a pull request's cost: what a line cost, and what the figure leaves out. */
+export function pullCostNote(c: PullCost | null): string {
+  if (!c) return "not known: its sessions were not kept at its last report";
+  if (c.sessions === 0) return "no session was matched to its lines";
+  const missing =
+    c.sessions_without_cost > 0
+      ? `${count(c.sessions_without_cost)} of ${count(c.sessions)} ${c.sessions === 1 ? "session" : "sessions"} ${c.sessions_without_cost === 1 ? "has" : "have"} no cost figure`
+      : null;
+  if (c.usd == null) return missing!;
+  const each = [
+    c.per_agent_line_usd != null ? `${usd(c.per_agent_line_usd)} per agent line` : null,
+    c.per_surviving_line_usd != null ? `${usd(c.per_surviving_line_usd)} per line that survived review` : null,
+  ];
+  return [...each, missing].filter(Boolean).join("; ");
+}
 
 /** Where a pull request's page is: the repository's name has slashes, so it goes in as one part. */
 export function pullHref(p: { repo: string; number: number }): string {
