@@ -154,7 +154,7 @@ fn note_release(data_dir: &Path) {
     if !write_update_check(&path, kept.as_deref()) {
         return;
     }
-    let Ok(version) = crate::update::published() else {
+    let Ok(version) = crate::update::latest() else {
         return;
     };
     let _ = write_update_check(&path, Some(&version));

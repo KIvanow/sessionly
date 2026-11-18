@@ -83,11 +83,14 @@ fn version_in(address: &str) -> Option<String> {
     (!version.is_empty() && !version.contains('/')).then(|| version.to_string())
 }
 
-/// The newest release's version, without the `v` of its tag.
+/// The version the newest release's page names, without the `v`, and without
+/// deciding whether it is newer than this binary. `sessionly update` keeps
+/// its own answer for that.
+///
 /// `SESSIONLY_RELEASE_LATEST` names another place to ask, for those who keep
 /// copies of the releases themselves: an address that answers with JSON
 /// that has the tag in `tag_name`, as GitHub's API does.
-fn latest() -> Result<String> {
+pub(crate) fn latest() -> Result<String> {
     let Some(url) = setting("SESSIONLY_RELEASE_LATEST") else {
         let to = crate::upload::redirect_of(LATEST)
             .with_context(|| format!("asking {LATEST} for the newest release"))?;
@@ -104,13 +107,6 @@ fn latest() -> Result<String> {
         .as_str()
         .with_context(|| format!("{url} names no release (no \"tag_name\")"))?;
     Ok(tag.trim_start_matches('v').to_string())
-}
-
-/// The version the newest release's page names, without the `v`, and without
-/// deciding whether it is newer than this binary. `sessionly update` keeps
-/// its own answer for that.
-pub(crate) fn published() -> Result<String> {
-    latest()
 }
 
 /// What `sessionly update` did, for its one line of output.
