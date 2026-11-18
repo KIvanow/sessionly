@@ -28,15 +28,20 @@ export interface OrgDb extends Queryable {
  * list short.
  */
 export interface Db extends Queryable {
-  /** Run `fn` as the app role with row-level security set to `orgId`, in one transaction. */
-  asOrg<T>(orgId: string, fn: (db: OrgDb) => Promise<T>): Promise<T>;
+  /**
+   * Run `fn` as the app role with row-level security set to `orgId`, in one
+   * transaction. With `snapshot`, every statement of it sees the database as
+   * it was when the first one ran: for a request that only reads, and reads
+   * in several statements what has to agree.
+   */
+  asOrg<T>(orgId: string, fn: (db: OrgDb) => Promise<T>, options?: { snapshot?: boolean }): Promise<T>;
   /**
    * Run `fn` in one transaction, as the owner. `patient` is for bringing the
    * database up to date: no limit on how long a statement may take, since a
    * large table takes as long as it takes, and the copies that wait for the
    * one that is doing it wait as long.
    */
-  transaction<T>(fn: (tx: Queryable) => Promise<T>, options?: { patient?: boolean }): Promise<T>;
+  transaction<T>(fn: (tx: Queryable) => Promise<T>, options?: { patient?: boolean; snapshot?: boolean }): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -118,6 +123,9 @@ interface Grant {
 
 /** A name as SQL may spell it, whatever is in it. */
 const quoted = (name: string) => `"${name.replace(/"/g, '""')}"`;
+
+/** A transaction all of whose statements see what the first one saw. */
+const SNAPSHOT = " ISOLATION LEVEL REPEATABLE READ";
 
 /** What turns a transaction into one organisation's view. `SET LOCAL` ends with it. */
 async function enter(tx: Queryable, role: string, orgId: string): Promise<OrgDb> {
@@ -281,7 +289,7 @@ export async function openDb(
     // What the pool says of a connection it dropped while unused, which
     // must be heard as well.
     pool.on("error", (err, client) => lost(client, err));
-    const transaction: Db["transaction"] = async (fn, { patient = false } = {}) => {
+    const transaction: Db["transaction"] = async (fn, { patient = false, snapshot = false } = {}) => {
       const client = await pool.connect();
       // Set if the connection may still be inside the transaction: it is
       // then thrown away, not handed to the next request with a role and an
@@ -312,7 +320,7 @@ export async function openDb(
         // let go, and not kept until the system notices.
         const limit = patient ? 0 : queryMs;
         await run(
-          `BEGIN; SET LOCAL statement_timeout = ${limit}; SET LOCAL idle_in_transaction_session_timeout = ${limit}`,
+          `BEGIN${snapshot ? SNAPSHOT : ""}; SET LOCAL statement_timeout = ${limit}; SET LOCAL idle_in_transaction_session_timeout = ${limit}`,
         );
         const out = await fn({ query: async (text, params) => (await run(text, params)).rows });
         try {
@@ -340,7 +348,7 @@ export async function openDb(
       // failed, whatever the reason.
       query: async (text, params) => (await pool.query(within(text, params, giveUpMs))).rows,
       transaction,
-      asOrg: (orgId, fn) => transaction(async (tx) => fn(await enter(tx, appRole, orgId))),
+      asOrg: (orgId, fn, options) => transaction(async (tx) => fn(await enter(tx, appRole, orgId)), options),
       close: () => pool.end(),
     };
     // A host that takes the connection and says nothing is named, with how
@@ -358,14 +366,15 @@ export async function openDb(
       mkdirSync(dir, { recursive: true });
       lite = new PGlite(dir);
     }
-    const transaction: Db["transaction"] = (fn) =>
-      lite.transaction((tx) =>
-        fn({ query: async (text, params) => (await tx.query(text, params as unknown[])).rows as never[] }),
-      ) as Promise<never>;
+    const transaction: Db["transaction"] = (fn, { snapshot = false } = {}) =>
+      lite.transaction(async (tx) => {
+        if (snapshot) await tx.query(`SET TRANSACTION${SNAPSHOT}`);
+        return fn({ query: async (text, params) => (await tx.query(text, params as unknown[])).rows as never[] });
+      }) as Promise<never>;
     db = {
       query: async (text, params) => (await lite.query(text, params as unknown[])).rows as never[],
       transaction,
-      asOrg: (orgId, fn) => transaction(async (tx) => fn(await enter(tx, appRole, orgId))),
+      asOrg: (orgId, fn, options) => transaction(async (tx) => fn(await enter(tx, appRole, orgId)), options),
       close: () => lite.close(),
     };
   }
@@ -736,24 +745,45 @@ const MIGRATIONS: string[] = [
  * Count the line hashes of the sessions stored before the count was kept,
  * some at a time so that nothing waits on it for long. Run after the server
  * has started; several copies doing it at once pass over each other's rows.
- * Returns how many it counted.
+ * Those with lines in a pull request come first: until they are counted,
+ * reading a pull request's cost opens their payloads. A batch that fails
+ * (payloads can be large) is tried again as a smaller one, down to one
+ * session, and only that failing is an error. Returns how many it counted.
  */
-export async function countHashedLines(db: Db, atOnce = 200): Promise<number> {
+export async function countHashedLines(db: Db, atOnce = 50): Promise<number> {
+  const inPulls = `AND EXISTS (SELECT 1 FROM pull_sessions p WHERE p.org_id = u.org_id AND p.machine_id = u.machine_id
+                               AND p.source = u.source AND p.session_id = u.session_id)`;
   let counted = 0;
-  for (;;) {
-    const rows = await db.query(
-      `UPDATE sessions s SET hashed_lines =
-         (SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
-          FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'lines') = 'array' THEN s.payload->'lines' ELSE '[]'::jsonb END) AS l
-          WHERE jsonb_typeof(l->'hashes') = 'array')
-       WHERE (s.org_id, s.machine_id, s.source, s.session_id) IN
-         (SELECT org_id, machine_id, source, session_id FROM sessions WHERE hashed_lines IS NULL LIMIT $1 FOR UPDATE SKIP LOCKED)
-       RETURNING 1`,
-      [atOnce],
-    );
-    counted += rows.length;
-    if (rows.length === 0) return counted;
+  for (const which of [inPulls, ""]) {
+    let some = atOnce;
+    for (;;) {
+      let rows: unknown[];
+      try {
+        rows = await db.transaction(
+          (tx) =>
+            tx.query(
+              `UPDATE sessions s SET hashed_lines =
+                 (SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
+                  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'lines') = 'array' THEN s.payload->'lines' ELSE '[]'::jsonb END) AS l
+                  WHERE jsonb_typeof(l->'hashes') = 'array')
+               WHERE (s.org_id, s.machine_id, s.source, s.session_id) IN
+                 (SELECT u.org_id, u.machine_id, u.source, u.session_id FROM sessions u
+                  WHERE u.hashed_lines IS NULL ${which} LIMIT $1 FOR UPDATE SKIP LOCKED)
+               RETURNING 1`,
+              [some],
+            ),
+          PATIENT,
+        );
+      } catch (err) {
+        if (some === 1) throw err;
+        some = Math.max(1, Math.floor(some / 2));
+        continue;
+      }
+      counted += rows.length;
+      if (rows.length === 0) break;
+    }
   }
+  return counted;
 }
 
 /**

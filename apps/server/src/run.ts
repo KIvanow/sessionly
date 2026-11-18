@@ -241,7 +241,13 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   });
 
   // Sessions from before their line hashes were counted: counted now, beside the requests.
-  void countHashedLines(db).catch((err) => console.error("counting sessions' line hashes failed:", err));
+  // What could not be counted (a statement that failed, a session another copy held) is tried again later.
+  const counting = () =>
+    void countHashedLines(db).catch((err) => {
+      console.error("counting sessions' line hashes failed, and will be tried again:", err);
+      setTimeout(counting, 10 * 60_000).unref();
+    });
+  counting();
 
   const port = Number(process.env.PORT ?? 8080);
   const hostname = process.env.HOST ?? "127.0.0.1";

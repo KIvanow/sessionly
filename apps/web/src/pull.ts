@@ -43,7 +43,7 @@ export function pullCostNote(c: PullCost | null): string {
       : null;
   const unshared =
     c.sessions_unshared > 0
-      ? `${count(c.sessions_unshared)} ${c.sessions_unshared === 1 ? "session has" : "sessions have"} lines in other pull requests, perhaps these: match again to share them out`
+      ? `${count(c.sessions_unshared)} ${c.sessions_unshared === 1 ? "session has" : "sessions have"} lines in other pull requests, perhaps these: match those again to share them out`
       : null;
   const each = [
     // A cost that leaves requests out, over all of that session's lines, is a floor for each.

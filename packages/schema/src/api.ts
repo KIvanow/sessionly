@@ -459,9 +459,9 @@ export interface PullCost {
   /** How many of them have a cost that leaves requests out (to models without a known price): `usd` is then a floor too. */
   sessions_with_cost_partial: number;
   /**
-   * How many of them had their lines here kept before which lines they are
-   * was, and have lines in other pull requests too: the same ones, perhaps,
-   * counted in each. `usd` is then an estimate, until it is matched again.
+   * How many of them have lines in several pull requests, in one of which
+   * they were kept before which lines they are was: the same ones, perhaps,
+   * counted in each. `usd` is then an estimate, until those are matched again.
    */
   sessions_unshared: number;
   /** What an agent line of it cost: `usd` for each line of the sessions that have a cost figure. */

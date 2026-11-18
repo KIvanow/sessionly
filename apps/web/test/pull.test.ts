@@ -106,7 +106,7 @@ test("a pull request's cost is said with what is not sure about it", () => {
   // and so is what a line of it cost
   assert.equal(pullCostNote(partial), "at least $0.10 per agent line; the cost of 1 session leaves requests out");
   // lines kept before which they are was, of a session with lines elsewhere: an estimate, and how to make it more
-  assert.match(pullCostNote({ ...whole, estimated: true, sessions_unshared: 1 }), /; 1 session has lines in other pull requests, perhaps these: match again to share them out$/);
+  assert.match(pullCostNote({ ...whole, estimated: true, sessions_unshared: 1 }), /; 1 session has lines in other pull requests, perhaps these: match those again to share them out$/);
   // what the lines it was opened with cost can be an estimate when the cost now is not
   assert.match(pullCostNote({ ...whole, opened_estimated: true }), /; ~\$0\.20 per line that survived review$/);
   // the lines with a cost went and ones without stayed: what a surviving line cost is still said

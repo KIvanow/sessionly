@@ -758,6 +758,26 @@ test("what a pull request's sessions cost it: each for the share of its lines th
   assert.deepEqual([await opened(1), await opened(2)], [5, 5]);
   const movedTotal = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost-3")).body.total;
   assert.deepEqual([movedTotal.cost_usd, movedTotal.per_surviving_line_usd], [10, 1]);
+
+  // one not seen from the start (a release of what was merged) takes nothing of what another was opened with
+  const released = `${repo}-4`;
+  await upload("c-released", "o.ts", range(9900, 10), { total_usd: 10, source: "recorded" }, released);
+  await call(tokens.ci, "PUT", "/prs", report({ repo: released, number: 1, files: [file("o.ts", ...range(9900, 10))] }));
+  await call(tokens.ci, "PUT", "/prs", report({ repo: released, number: 2, event: "synchronize", files: [file("o.ts", ...range(9900, 10))] }));
+  const of = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${released}&number=${number}`)).body.cost;
+  assert.deepEqual([(await of(1)).usd, (await of(1)).opened_usd, (await of(1)).per_surviving_line_usd], [5, 10, 1]);
+  assert.deepEqual([(await of(2)).usd, (await of(2)).opened_usd], [5, null]);
+  assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost-4")).body.total.per_surviving_line_usd, 1);
+
+  // a session taken back and sent again: which of its lines the pull request from before had is not known, so
+  // in a new one with the same lines, as in the old, what it cost is an estimate
+  await upload("c-gone", "f.ts", range(4000, 2), { total_usd: 50, source: "recorded" });
+  await call(tokens.ci, "PUT", "/prs", report({ repo, number: 11, files: [file("f.ts", ...range(4000, 2))] }));
+  for (const number of [3, 11]) {
+    const again = (await detail(number)).cost;
+    assert.deepEqual([again.estimated, again.sessions_unshared], [true, 1], `#${number}`);
+  }
+  assert.equal((await detail(11)).cost.usd, 25);
 });
 
 test("a line in several pull requests is shared out between them", () => {

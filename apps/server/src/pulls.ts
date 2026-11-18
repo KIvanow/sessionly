@@ -692,7 +692,8 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   if (touched.size === 0) return;
   const rows = await db.query(
     `SELECT o.repo, o.number, o.machine_id, o.source, o.session_id, o.lines, o.weight, o.matched,
-            o.opened_lines, o.opened_weight, o.opened_matched, r.state <> 'closed' AS live
+            o.opened_lines, o.opened_weight, o.opened_matched, r.state <> 'closed' AS live,
+            r.first_event = 'opened' AS from_open
      FROM jsonb_to_recordset($2::jsonb) AS k(machine_id text, source text, session_id text)
      JOIN pull_sessions o ON o.org_id = $1 AND o.machine_id = k.machine_id AND o.source = k.source AND o.session_id = k.session_id
      JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number`,
@@ -711,10 +712,17 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
     const weights = weigh(its.map((row) => ({ live: row.live === true, lines: num(row.lines), matched: lines(row.matched) })));
     // The lines each was first reported with are shared out likewise: ones that
     // moved from one pull request to another were opened in both, and paid for once.
-    const opened = weigh(its.map((row) => ({ live: row.live === true, lines: num(row.opened_lines), matched: lines(row.opened_matched) })));
+    // Only between those seen from the start: of another, what it was first
+    // reported with says nothing, and it takes nothing from them.
+    const fromOpen = its.filter((row) => row.from_open === true);
+    const opened = new Map(
+      weigh(fromOpen.map((row) => ({ live: row.live === true, lines: num(row.opened_lines), matched: lines(row.opened_matched) }))).map(
+        (weight, i) => [fromOpen[i]!, weight],
+      ),
+    );
     its.forEach((row, i) => {
       // From before the lines it was opened with were counted: nothing to say of them.
-      const then = row.opened_lines == null ? null : opened[i]!;
+      const then = row.opened_lines == null ? null : (opened.get(row) ?? num(row.opened_lines));
       if (same(row.weight, weights[i]!) && (then == null ? row.opened_weight == null : same(row.opened_weight, then))) return;
       changed.push({ repo: row.repo, number: row.number, machine_id: row.machine_id, source: row.source, session_id: row.session_id, weight: weights[i], opened_weight: then });
     });
@@ -878,8 +886,9 @@ interface Share {
   /** Its cost leaves requests out: what it cost here is then a floor. */
   partial: boolean;
   /**
-   * Its lines here were kept before which they are was, and it has lines in
-   * other pull requests too: the same ones, perhaps, counted in each.
+   * It has lines in several pull requests, and in one of them they were kept
+   * before which lines they are was: the same ones, perhaps, counted in
+   * each. What it cost in any of them is then no more than an estimate.
    */
   unshared: boolean;
   /**
@@ -918,7 +927,6 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
   const rows = await db.query(
     `WITH mine AS (
        SELECT p.repo, p.number, p.machine_id, p.source, p.session_id, p.lines, p.weight, p.opened_lines, p.opened_weight,
-              p.matched IS NULL AS unkept,
               r.state = 'closed' AS closed
        FROM (${chosen.sql}) c
        JOIN pull_sessions p ON p.org_id = $1 AND p.repo = c.repo AND p.number = c.number
@@ -927,13 +935,14 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
        SELECT o.machine_id, o.source, o.session_id, count(*) AS pulls,
               sum(o.weight) FILTER (WHERE r.state <> 'closed') AS in_pulls,
               sum(o.weight) FILTER (WHERE r.state = 'closed') AS in_closed,
-              sum(coalesce(o.opened_weight, o.opened_lines, 0)) FILTER (WHERE r.state <> 'closed') AS opened_in_pulls,
-              sum(coalesce(o.opened_weight, o.opened_lines, 0)) FILTER (WHERE r.state = 'closed') AS opened_in_closed
+              bool_or(o.matched IS NULL) AS unkept,
+              sum(coalesce(o.opened_weight, o.opened_lines, 0)) FILTER (WHERE r.state <> 'closed' AND r.first_event = 'opened') AS opened_in_pulls,
+              sum(coalesce(o.opened_weight, o.opened_lines, 0)) FILTER (WHERE r.state = 'closed' AND r.first_event = 'opened') AS opened_in_closed
        FROM pull_sessions o JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number
        WHERE o.org_id = $1
          AND (o.machine_id, o.source, o.session_id) IN (SELECT machine_id, source, session_id FROM mine)
        GROUP BY o.machine_id, o.source, o.session_id)
-     SELECT mine.*, t.pulls, t.in_pulls, t.in_closed, t.opened_in_pulls, t.opened_in_closed, s.session_id IS NOT NULL AS held,
+     SELECT mine.*, t.pulls, t.unkept, t.in_pulls, t.in_closed, t.opened_in_pulls, t.opened_in_closed, s.session_id IS NOT NULL AS held,
             coalesce(s.hashed_lines, ${HASHED_FROM_PAYLOAD}) AS hashed_lines,
             s.cost_usd, s.cost_source, s.unpriced_requests, ${about}
      FROM mine
@@ -1054,30 +1063,6 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   };
 }
 
-/**
- * What `read` reads in several statements, as one moment had it. Each
- * statement of a request sees what was committed when it began, so a report
- * stored between two of them would leave figures of before beside sessions
- * of after. `stamp` says what moment it is; when it has moved, read again.
- */
-async function steady<T>(stamp: () => Promise<string>, read: () => Promise<T>): Promise<T> {
-  for (let tries = 1; ; tries++) {
-    const before = await stamp();
-    const out = await read();
-    if (tries >= 3 || (await stamp()) === before) return out;
-  }
-}
-
-/** The moment of the pull requests the filters choose: how many, and when one was last matched. */
-const stampOf = (db: OrgDb, chosen: { sql: string; params: unknown[] }) => async (): Promise<string> => {
-  const [row] = await db.query<{ stamp: string }>(
-    `SELECT count(*) || ' ' || coalesce(max(matched_at)::text, '') || ' ' || coalesce(max(updated_at)::text, '') AS stamp
-     FROM pull_requests ${chosen.sql}`,
-    chosen.params,
-  );
-  return row?.stamp ?? "";
-};
-
 /** Rows as the list and the summary have them: each with what its sessions cost. */
 async function costed(db: OrgDb, rows: Record<string, unknown>[], chosen: { sql: string; params: unknown[] }): Promise<PullRow[]> {
   const shares = rows.length > 0 ? await sharesIn(db, chosen) : new Map<string, Share[]>();
@@ -1118,16 +1103,15 @@ function pullRow(r: Record<string, unknown>): PullRow {
 }
 
 /**
+ * These three read in several statements what has to agree, the figures
+ * and the sessions: the request they answer runs with a snapshot (see
+ * `readsPulls` in app.ts).
+ *
  * One pull request: its figures, its files, the sessions that wrote its
  * lines, and its reviews and comments. Null if none was reported under that
  * number.
  */
 export async function getPull(db: OrgDb, repo: string, number: number): Promise<PullDetail | null> {
-  const one = { sql: `WHERE org_id = $1 AND repo = $2 AND number = $3`, params: [db.orgId, repo, number] };
-  return steady(stampOf(db, one), () => readPull(db, repo, number));
-}
-
-async function readPull(db: OrgDb, repo: string, number: number): Promise<PullDetail | null> {
   const [r] = await db.query(
     `SELECT ${ROW_COLUMNS}, draft, head_ref, base_ref, closed_at, detail, feedback, feedback_total
      FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
@@ -1159,11 +1143,7 @@ export async function listPulls(
   filters: PullFilters,
   page: { limit: number; offset: number },
 ): Promise<PullList> {
-  const chosen = where(db.orgId, filters);
-  return steady(stampOf(db, chosen), () => readPulls(db, chosen, page));
-}
-
-async function readPulls(db: OrgDb, { sql, params }: { sql: string; params: unknown[] }, page: { limit: number; offset: number }): Promise<PullList> {
+  const { sql, params } = where(db.orgId, filters);
   const rows = await db.query(
     `SELECT ${ROW_COLUMNS}, detail IS NOT NULL AS detailed FROM pull_requests ${sql}
      ORDER BY created_at DESC NULLS LAST, repo, number DESC
@@ -1181,12 +1161,10 @@ async function readPulls(db: OrgDb, { sql, params }: { sql: string; params: unkn
 /** How each agent and model's lines fared in review, over the matching pull requests. */
 export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<PullSummary> {
   const { sql, params } = where(db.orgId, filters);
-  const rows = await steady(stampOf(db, { sql, params }), async () =>
-    costed(
-      db,
-      await db.query(`SELECT ${ROW_COLUMNS}, detail IS NOT NULL AS detailed FROM pull_requests ${sql}`, params),
-      { sql: `SELECT repo, number FROM pull_requests ${sql}`, params },
-    ),
+  const rows = await costed(
+    db,
+    await db.query(`SELECT ${ROW_COLUMNS}, detail IS NOT NULL AS detailed FROM pull_requests ${sql}`, params),
+    { sql: `SELECT repo, number FROM pull_requests ${sql}`, params },
   );
   // Of the pull requests seen from the start that have a cost: what the agent
   // lines they were opened with cost, and how many of those survived review.
