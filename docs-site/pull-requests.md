@@ -51,10 +51,11 @@ What to know about the workflow:
   The list, and a pull request's page, say to change that line when the repository's newest
   report is from an older Action, and the page names that report's version. A pull request
   that was itself last reported by an older one says so, without asking for a change that a
-  later report already shows was made. Re-running
-  the same workflow run keeps the workflow file it started with. Push a commit on an open pull
-  request, or start the workflow by hand with the pull request's number for one that has been
-  merged.
+  later report already shows was made. Re-running the same workflow run keeps the workflow
+  file it started with. Push a commit on an open pull request. For one that has been merged,
+  [start the workflow by hand](#pull-requests-from-before-the-action) with its number. GitHub
+  offers that run only when `workflow_dispatch` is in the workflow on the default branch, and
+  the changed file has to be there before you start it.
 - The job needs Node 20 or later on the runner, which GitHub's own runners have. It does not
   check the repository out.
 - A problem (server down, token refused) is a warning on the run, not a failed check, unless
@@ -173,7 +174,11 @@ when it was opened.
 
 ## Pull requests from before the Action
 
-A manually started workflow can report existing pull requests one at a time:
+GitHub offers a run you start yourself only when the workflow on the default branch has
+`workflow_dispatch`. That is how a merged pull request is reported again after the Action's
+version changes: give its number, and leave `backfill` off, because the server already has its
+first report. The same run, with `backfill`, reports a pull request from before the Action was
+added, as it was when opened:
 
 ```yaml
 on:
