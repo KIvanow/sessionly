@@ -456,13 +456,16 @@ export interface PullCost {
   /** Sessions with lines in it, and how many of those have no cost figure or were deleted: `usd` is then a floor. */
   sessions: number;
   sessions_without_cost: number;
+  /** How many of them have a cost that leaves requests out (to models without a known price): `usd` is then a floor too. */
+  sessions_with_cost_partial: number;
   /** What an agent line of it cost: `usd` for each line of the sessions that have a cost figure. */
   per_agent_line_usd: number | null;
   /**
-   * What an agent line that survived review cost: the agent lines it was
-   * opened with, at `per_agent_line_usd` each, for each of them still there.
-   * Null where what survived is not known, or nothing did.
+   * What the agent lines it was opened with cost, at `per_agent_line_usd`
+   * each. Null on one not reported from the moment it was opened.
    */
+  opened_usd: number | null;
+  /** What an agent line that survived review cost: `opened_usd` for each of them still there. Null when none is. */
   per_surviving_line_usd: number | null;
 }
 
@@ -542,9 +545,10 @@ export interface PullSession {
   hashed_lines: number | null;
   /**
    * Its cost in this pull request: the session's cost, in the proportion of
-   * `lines` to `hashed_lines`, or to its lines in all pull requests when
-   * those are more (the same lines can be in several). Null where the
-   * session has no cost figure, or has been deleted.
+   * `lines` to `hashed_lines`. A line that is also in other pull requests
+   * (but for ones closed without merging) is shared out between them, so
+   * the session is counted once. Null where the session has no cost figure,
+   * or has been deleted.
    */
   cost_share_usd: number | null;
   session: Pick<
@@ -625,14 +629,16 @@ export interface PullSummary {
     cost_estimated: boolean;
     /**
      * Pull requests whose cost is a floor or not known: some session of
-     * theirs has no cost figure, or they have agent lines and were last
-     * reported before their sessions were kept. `cost_usd` is then a floor.
+     * theirs has no cost figure or one that leaves requests out, or they
+     * have agent lines and were last reported before their sessions were
+     * kept. `cost_usd` is then a floor.
      */
     pulls_with_cost_missing: number;
     /**
      * Over the pull requests reported from the moment they were opened that
-     * have a cost: what the agent lines they were opened with cost, for each
-     * of those that survived review. Null when there is none.
+     * have a cost: what the agent lines they were opened with cost
+     * (`opened_usd`), for each of those that survived review. Null when
+     * none did.
      */
     per_surviving_line_usd: number | null;
   };

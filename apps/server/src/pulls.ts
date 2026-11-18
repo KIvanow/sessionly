@@ -168,8 +168,11 @@ export function attribute(
 const sessionKey = (s: { machine_id: unknown; source: unknown; session_id: unknown }): string =>
   `${s.machine_id}\n${s.source}\n${s.session_id}`;
 
-/** A session with lines in a pull request, as the pull request keeps it: which one, and how many. */
-type Wrote = Pick<PullSession, "machine_id" | "source" | "session_id" | "lines">;
+/** A session's lines in a pull request: the hashes, by file, as often as they are there. */
+type Lines = Record<string, string[]>;
+
+/** A session with lines in a pull request, as the pull request keeps it: which one, how many, and which. */
+type Wrote = Pick<PullSession, "machine_id" | "source" | "session_id" | "lines"> & { matched: Lines };
 
 /**
  * A pull request's lines as they are now, file by file and session by
@@ -180,22 +183,65 @@ export function breakdown(now: FileHashes[], lines: (Writer | null)[][]): { file
   const sessions = new Map<string, Wrote>();
   const files = now.map((file, i) => {
     let agent = 0;
-    for (const line of lines[i]!) {
-      if (!line) continue;
+    lines[i]!.forEach((line, at) => {
+      if (!line) return;
       agent += 1;
       const from = line.session;
-      if (!from) continue;
+      if (!from) return;
       const key = sessionKey(from);
-      const row = sessions.get(key);
-      if (row) row.lines += 1;
-      else sessions.set(key, { ...from, lines: 1 });
-    }
+      if (!sessions.has(key)) sessions.set(key, { ...from, lines: 0, matched: {} });
+      const row = sessions.get(key)!;
+      row.lines += 1;
+      (row.matched[file.path] ??= []).push(file.hashes[at]!);
+    });
     return { path: file.path, lines: file.hashes.length, agent_lines: agent };
   });
   return {
     files: files.sort((a, b) => b.lines - a.lines || a.path.localeCompare(b.path)),
     sessions: [...sessions.values()].sort((a, b) => b.lines - a.lines || a.session_id.localeCompare(b.session_id)),
   };
+}
+
+/**
+ * How many lines a session's lines in each of its pull requests count as,
+ * for splitting what it cost. A line that is in several (one stacked on
+ * another, a release of what was merged before) is shared out between
+ * them, so that together they count it once. A pull request closed without
+ * merging takes nothing from the others: its lines are shared out as if it
+ * counted, and those of the others as if it were not there. One whose lines
+ * were not kept (`matched` null) counts all of them.
+ */
+export function weigh(rows: { live: boolean; lines: number; matched: Lines | null }[]): number[] {
+  const counted = rows.map((row) => {
+    if (!row.matched) return null;
+    const counts = new Map<string, number>();
+    for (const [path, hashes] of Object.entries(row.matched)) {
+      for (const hash of hashes) counts.set(`${path}\n${hash}`, (counts.get(`${path}\n${hash}`) ?? 0) + 1);
+    }
+    return counts;
+  });
+  // For each line: how often it is there in all of them together, and in the one that has it most.
+  const among = (which: (row: { live: boolean }) => boolean) => {
+    const all = new Map<string, { sum: number; most: number }>();
+    counted.forEach((counts, i) => {
+      if (!counts || !which(rows[i]!)) return;
+      for (const [line, n] of counts) {
+        const one = all.get(line) ?? { sum: 0, most: 0 };
+        all.set(line, { sum: one.sum + n, most: Math.max(one.most, n) });
+      }
+    });
+    return all;
+  };
+  const live = among((row) => row.live);
+  const every = among(() => true);
+  return rows.map((row, i) => {
+    const counts = counted[i];
+    if (!counts) return row.lines;
+    const all = row.live ? live : every;
+    let weight = 0;
+    for (const [line, n] of counts) weight += (n * all.get(line)!.most) / all.get(line)!.sum;
+    return weight;
+  });
 }
 
 const FEEDBACK_KINDS = ["review", "inline", "conversation"];
@@ -522,7 +568,7 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     files_without_diff: report.files_without_diff,
     last_files: JSON.stringify(report.files),
     attribution: JSON.stringify(attribution),
-    detail: JSON.stringify(detail),
+    detail: JSON.stringify({ files: detail.files }),
     // Kept to match its lines again later, when more sessions are held.
     committers: JSON.stringify((report.commit_emails ?? []).map((email) => committer(db.orgId, email, key))),
     aliases: JSON.stringify(report.aliases ?? []),
@@ -564,15 +610,57 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   return attribution;
 }
 
-/** The sessions with lines in a pull request, as rows beside its `detail`: these replace the ones before. */
+/**
+ * The sessions with lines in a pull request, in place of the ones before.
+ * What their lines count as is worked out again in every pull request those
+ * sessions, and the ones before, have lines in: a line now in two is shared.
+ */
 async function keepSessions(db: OrgDb, repo: string, number: number, sessions: Wrote[]): Promise<void> {
-  await db.query(`DELETE FROM pull_sessions WHERE org_id = $1 AND repo = $2 AND number = $3`, [db.orgId, repo, number]);
-  if (sessions.length === 0) return;
+  // One at a time in an organisation, and held until the transaction ends:
+  // two reports that share a session would each miss the other's lines.
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-pull-sessions:${db.orgId}`]);
+  const before = await db.query(
+    `DELETE FROM pull_sessions WHERE org_id = $1 AND repo = $2 AND number = $3 RETURNING machine_id, source, session_id`,
+    [db.orgId, repo, number],
+  );
+  if (sessions.length > 0) {
+    await db.query(
+      `INSERT INTO pull_sessions (org_id, repo, number, machine_id, source, session_id, lines, weight, matched)
+       SELECT $1, $2, $3, s.machine_id, s.source, s.session_id, s.lines, s.lines, s.matched
+       FROM jsonb_to_recordset($4::jsonb) AS s(machine_id text, source text, session_id text, lines integer, matched jsonb)`,
+      [db.orgId, repo, number, JSON.stringify(sessions)],
+    );
+  }
+  const touched = new Map([...before, ...sessions].map((s) => [sessionKey(s as never), { machine_id: s.machine_id, source: s.source, session_id: s.session_id }]));
+  if (touched.size === 0) return;
+  const rows = await db.query(
+    `SELECT o.repo, o.number, o.machine_id, o.source, o.session_id, o.lines, o.weight, o.matched, r.state <> 'closed' AS live
+     FROM jsonb_to_recordset($2::jsonb) AS k(machine_id text, source text, session_id text)
+     JOIN pull_sessions o ON o.org_id = $1 AND o.machine_id = k.machine_id AND o.source = k.source AND o.session_id = k.session_id
+     JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number`,
+    [db.orgId, JSON.stringify([...touched.values()])],
+  );
+  const bySession = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const key = sessionKey(row as never);
+    if (!bySession.has(key)) bySession.set(key, []);
+    bySession.get(key)!.push(row);
+  }
+  const changed: Record<string, unknown>[] = [];
+  for (const its of bySession.values()) {
+    const weights = weigh(its.map((row) => ({ live: row.live === true, lines: num(row.lines), matched: row.matched == null ? null : json<Lines>(row.matched) })));
+    its.forEach((row, i) => {
+      if (Math.abs(num(row.weight) - weights[i]!) < 1e-9) return;
+      changed.push({ repo: row.repo, number: row.number, machine_id: row.machine_id, source: row.source, session_id: row.session_id, weight: weights[i] });
+    });
+  }
+  if (changed.length === 0) return;
   await db.query(
-    `INSERT INTO pull_sessions (org_id, repo, number, machine_id, source, session_id, lines)
-     SELECT $1, $2, $3, s.machine_id, s.source, s.session_id, s.lines
-     FROM jsonb_to_recordset($4::jsonb) AS s(machine_id text, source text, session_id text, lines integer)`,
-    [db.orgId, repo, number, JSON.stringify(sessions)],
+    `UPDATE pull_sessions o SET weight = c.weight
+     FROM jsonb_to_recordset($2::jsonb) AS c(repo text, number integer, machine_id text, source text, session_id text, weight double precision)
+     WHERE o.org_id = $1 AND o.repo = c.repo AND o.number = c.number AND o.machine_id = c.machine_id
+       AND o.source = c.source AND o.session_id = c.session_id`,
+    [db.orgId, JSON.stringify(changed)],
   );
 }
 
@@ -625,7 +713,7 @@ export async function rematchPull(
   const [stored] = await db.query<{ matched_at: unknown }>(
     `UPDATE pull_requests SET attribution = $4::jsonb, detail = $5::jsonb, matched_at = clock_timestamp()
      WHERE org_id = $1 AND repo = $2 AND number = $3 RETURNING matched_at`,
-    [db.orgId, repo, number, JSON.stringify(attribution), JSON.stringify(detail)],
+    [db.orgId, repo, number, JSON.stringify(attribution), JSON.stringify({ files: detail.files })],
   );
   await keepSessions(db, repo, number, detail.sessions);
   return { attribution, matched_at: iso(stored?.matched_at) ?? new Date().toISOString() };
@@ -716,103 +804,130 @@ function where(orgId: string, filters: PullFilters): { sql: string; params: unkn
 /** To a millionth of a dollar: sums of shares are then the same however they were added up. */
 const money = (usd: number): number => Math.round(usd * 1e6) / 1e6;
 
-/** A session with lines in a pull request, and what it cost there. */
-interface Share {
-  lines: number;
-  /** Null for a session deleted since. */
-  hashed_lines: number | null;
-  /** Null where the session has no cost figure, or is gone. */
-  usd: number | null;
+/** A session with lines in a pull request, what is known of it now, and what it cost there. */
+type Share = PullSession & {
   estimated: boolean;
-}
+  /** Its cost leaves requests out: what it cost here is then a floor. */
+  partial: boolean;
+};
 
 const pullKey = (p: { repo: unknown; number: unknown }): string => `${p.repo}\n${p.number}`;
 
+/** A session's line hashes counted from its payload: for one stored before the count was kept beside it. */
+const HASHED_FROM_PAYLOAD = `(SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
+   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'lines') = 'array' THEN s.payload->'lines' ELSE '[]'::jsonb END) AS l
+   WHERE jsonb_typeof(l->'hashes') = 'array')`;
+
 /**
- * What each session cost in each of the pull requests named: the session's
- * cost, in the proportion of its lines there to all the lines it uploaded
- * hashes of. Where the same lines are in several pull requests (one stacked
- * on another, a release of what was merged before), or the session has been
- * uploaded since with fewer hashes, its lines in all pull requests come to
- * more than that: the proportion is then to those. So a session is split
- * between the pull requests it wrote into and never counted more than once.
- * By pull request, then by session; one query however many there are.
+ * What each session cost in each of the pull requests chosen: the session's
+ * cost, in the proportion of what its lines there count as (see `weigh`) to
+ * all the lines it uploaded hashes of. So a session is split between the
+ * pull requests it wrote into and never counted more than once. Where it
+ * has been uploaded since with fewer hashes than its lines in pull requests
+ * count as, the proportion is to those. `chosen` is a query of the pull
+ * requests' `repo` and `number`, whose first parameter is the organisation.
+ * By pull request, each with its sessions, most lines first; one query
+ * however many there are.
  */
-async function sharesIn(db: OrgDb, pulls: { repo: string; number: number }[]): Promise<Map<string, Map<string, Share>>> {
-  const shares = new Map<string, Map<string, Share>>();
-  if (pulls.length === 0) return shares;
+async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }): Promise<Map<string, Share[]>> {
   const rows = await db.query(
-    `SELECT p.repo, p.number, p.machine_id, p.source, p.session_id, p.lines,
-            s.session_id IS NOT NULL AS held, s.cost_usd, s.cost_source, s.hashed_lines,
-            (SELECT sum(o.lines) FROM pull_sessions o
-             WHERE o.org_id = p.org_id AND o.machine_id = p.machine_id AND o.source = p.source
-               AND o.session_id = p.session_id) AS in_pulls
-     FROM jsonb_to_recordset($2::jsonb) AS k(repo text, number integer)
-     JOIN pull_sessions p ON p.org_id = $1 AND p.repo = k.repo AND p.number = k.number
-     LEFT JOIN sessions s ON s.org_id = p.org_id AND s.machine_id = p.machine_id AND s.source = p.source
-       AND s.session_id = p.session_id`,
-    [db.orgId, JSON.stringify(pulls.map((p) => ({ repo: p.repo, number: p.number })))],
+    `WITH mine AS (
+       SELECT p.repo, p.number, p.machine_id, p.source, p.session_id, p.lines, p.weight
+       FROM (${chosen.sql}) c JOIN pull_sessions p ON p.org_id = $1 AND p.repo = c.repo AND p.number = c.number),
+     totals AS (
+       SELECT o.machine_id, o.source, o.session_id, sum(o.weight) AS in_pulls
+       FROM pull_sessions o JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number
+       WHERE o.org_id = $1 AND r.state <> 'closed'
+         AND (o.machine_id, o.source, o.session_id) IN (SELECT machine_id, source, session_id FROM mine)
+       GROUP BY o.machine_id, o.source, o.session_id)
+     SELECT mine.*, t.in_pulls, s.session_id IS NOT NULL AS held, coalesce(s.hashed_lines, ${HASHED_FROM_PAYLOAD}) AS hashed_lines,
+            s.owner_email, s.runtime, s.title, s.started_at, s.active_ms, s.cost_usd, s.cost_source,
+            s.unpriced_requests, s.primary_model, s.prompts
+     FROM mine
+     LEFT JOIN totals t ON t.machine_id = mine.machine_id AND t.source = mine.source AND t.session_id = mine.session_id
+     LEFT JOIN sessions s ON s.org_id = $1 AND s.machine_id = mine.machine_id AND s.source = mine.source
+       AND s.session_id = mine.session_id
+     ORDER BY mine.lines DESC, mine.session_id`,
+    chosen.params,
   );
+  const shares = new Map<string, Share[]>();
   for (const row of rows) {
-    const lines = num(row.lines);
-    const among = Math.max(num(row.hashed_lines), num(row.in_pulls));
-    const cost = row.held === true && row.cost_usd != null ? Number(row.cost_usd) : null;
+    const held = row.held === true;
+    const weight = num(row.weight);
+    const among = Math.max(num(row.hashed_lines), num(row.in_pulls), weight);
+    const cost = held && row.cost_usd != null ? Number(row.cost_usd) : null;
     const share: Share = {
-      lines,
-      hashed_lines: row.held === true ? num(row.hashed_lines) : null,
-      usd: cost == null ? null : money(among > 0 ? (cost * lines) / among : 0),
+      machine_id: String(row.machine_id),
+      source: String(row.source),
+      session_id: String(row.session_id),
+      lines: num(row.lines),
+      hashed_lines: held ? num(row.hashed_lines) : null,
+      cost_share_usd: cost == null ? null : money(among > 0 ? (cost * weight) / among : 0),
       estimated: row.cost_source !== "recorded",
+      partial: row.cost_source === "partial_estimate" || num(row.unpriced_requests) > 0,
+      session: held
+        ? {
+            owner_email: String(row.owner_email),
+            runtime: (row.runtime as string) ?? null,
+            title: (row.title as string) ?? null,
+            started_at: iso(row.started_at),
+            active_ms: num(row.active_ms),
+            cost_usd: cost,
+            cost_source: (row.cost_source as string) ?? null,
+            primary_model: (row.primary_model as string) ?? null,
+            prompts: num(row.prompts),
+          }
+        : null,
     };
     const key = pullKey(row as never);
-    if (!shares.has(key)) shares.set(key, new Map());
-    shares.get(key)!.set(sessionKey(row as never), share);
+    if (!shares.has(key)) shares.set(key, []);
+    shares.get(key)!.push(share);
   }
   return shares;
 }
 
 /** What a pull request's sessions cost it, from what is known of each now. */
-function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Iterable<Share>): PullCost {
+function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Share[]): PullCost {
   let usd: number | null = null;
   let estimated = false;
-  let sessions = 0;
   let without = 0;
+  let partial = 0;
   // The lines that cost is of: a session with no cost figure says nothing of what a line cost.
   let lines = 0;
   for (const share of shares) {
-    sessions += 1;
-    if (share.usd == null) {
+    if (share.cost_share_usd == null) {
       without += 1;
       continue;
     }
-    usd = (usd ?? 0) + share.usd;
+    usd = (usd ?? 0) + share.cost_share_usd;
     lines += share.lines;
     if (share.estimated) estimated = true;
+    if (share.partial) partial += 1;
   }
   const a = pull.attribution;
   const each = usd != null && lines > 0 ? usd / lines : null;
   const surviving = a.by.reduce((sum, by) => sum + by.surviving, 0);
+  // What review left can only be said of a pull request seen from the start.
+  const opened = each != null && pull.first_event === "opened" && a.first.agent_lines > 0 ? each * a.first.agent_lines : null;
   return {
     usd: usd == null ? null : money(usd),
     estimated,
-    sessions,
+    sessions: shares.length,
     sessions_without_cost: without,
+    sessions_with_cost_partial: partial,
     per_agent_line_usd: each == null ? null : money(each),
-    // What review left can only be said of a pull request seen from the start:
-    // the agent lines it was opened with, at what a line of it costs, for
-    // each of them that is still there.
-    per_surviving_line_usd:
-      each != null && pull.first_event === "opened" && surviving > 0 ? money((each * a.first.agent_lines) / surviving) : null,
+    opened_usd: opened == null ? null : money(opened),
+    per_surviving_line_usd: opened != null && surviving > 0 ? money(opened / surviving) : null,
   };
 }
 
 /** Rows as the list and the summary have them: each with what its sessions cost. */
-async function costed(db: OrgDb, rows: Record<string, unknown>[]): Promise<PullRow[]> {
-  const pulls = rows.map(pullRow);
-  const shares = await sharesIn(db, pulls);
-  return pulls.map((pull, i) => ({
-    ...pull,
-    cost: rows[i]!.detailed === true ? costOf(pull, shares.get(pullKey(pull))?.values() ?? []) : null,
-  }));
+async function costed(db: OrgDb, rows: Record<string, unknown>[], chosen: { sql: string; params: unknown[] }): Promise<PullRow[]> {
+  const shares = rows.length > 0 ? await sharesIn(db, chosen) : new Map<string, Share[]>();
+  return rows.map((r) => {
+    const pull = pullRow(r);
+    return { ...pull, cost: r.detailed === true ? costOf(pull, shares.get(pullKey(pull)) ?? []) : null };
+  });
 }
 
 const ROW_COLUMNS = `repo, number, title, url, author, state, created_at, merged_at, first_event, commits,
@@ -857,59 +972,23 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
     [db.orgId, repo, number],
   );
   if (!r) return null;
-  const detail = r.detail == null ? null : json<{ files: PullFile[]; sessions: Wrote[] }>(r.detail);
+  const detail = r.detail == null ? null : json<{ files: PullFile[] }>(r.detail);
   const row = pullRow(r);
-  const shares = detail ? ((await sharesIn(db, [row])).get(pullKey(row)) ?? new Map<string, Share>()) : null;
+  const shares = detail
+    ? ((await sharesIn(db, { sql: `SELECT $2::text AS repo, $3::integer AS number`, params: [db.orgId, repo, number] })).get(pullKey(row)) ?? [])
+    : null;
   return {
     ...row,
-    cost: shares && costOf(row, shares.values()),
+    cost: shares && costOf(row, shares),
     draft: r.draft === true,
     head_ref: (r.head_ref as string) ?? null,
     base_ref: (r.base_ref as string) ?? null,
     closed_at: iso(r.closed_at),
     files: detail?.files ?? null,
-    sessions: detail && shares ? await withSessions(db, detail.sessions ?? [], shares) : null,
+    sessions: shares && shares.map(({ estimated: _, partial: __, ...session }) => session),
     feedback: r.feedback == null ? null : json<PullFeedback[]>(r.feedback),
     feedback_total: r.feedback == null || r.feedback_total == null ? null : num(r.feedback_total),
   };
-}
-
-/** What is known now of the sessions a pull request's lines came from. */
-async function withSessions(db: OrgDb, wrote: Wrote[], shares: Map<string, Share>): Promise<PullSession[]> {
-  if (wrote.length === 0) return [];
-  const params: unknown[] = [db.orgId];
-  const keys = wrote
-    .map((s) => `($${params.push(s.machine_id)}::text, $${params.push(s.source)}::text, $${params.push(s.session_id)}::text)`)
-    .join(", ");
-  const rows = await db.query(
-    `SELECT machine_id, source, session_id, owner_email, runtime, title, started_at, active_ms, cost_usd,
-            cost_source, primary_model, prompts
-     FROM sessions WHERE org_id = $1 AND (machine_id, source, session_id) IN (${keys})`,
-    params,
-  );
-  const found = new Map(rows.map((row) => [sessionKey(row as never), row]));
-  return wrote.map((s) => {
-    const row = found.get(sessionKey(s));
-    const share = shares.get(sessionKey(s));
-    return {
-      ...s,
-      hashed_lines: row ? (share?.hashed_lines ?? null) : null,
-      cost_share_usd: row ? (share?.usd ?? null) : null,
-      session: row
-        ? {
-            owner_email: String(row.owner_email),
-            runtime: (row.runtime as string) ?? null,
-            title: (row.title as string) ?? null,
-            started_at: iso(row.started_at),
-            active_ms: num(row.active_ms),
-            cost_usd: row.cost_usd == null ? null : Number(row.cost_usd),
-            cost_source: (row.cost_source as string) ?? null,
-            primary_model: (row.primary_model as string) ?? null,
-            prompts: num(row.prompts),
-          }
-        : null,
-    };
-  });
 }
 
 /** Pull requests, most recently created first. */
@@ -926,13 +1005,21 @@ export async function listPulls(
     [...params, page.limit, page.offset],
   );
   const [count] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM pull_requests ${sql}`, params);
-  return { pulls: await costed(db, rows), total: num(count?.n) };
+  const these = {
+    sql: `SELECT repo, number FROM jsonb_to_recordset($2::jsonb) AS k(repo text, number integer)`,
+    params: [db.orgId, JSON.stringify(rows.map((r) => ({ repo: r.repo, number: r.number })))],
+  };
+  return { pulls: await costed(db, rows, these), total: num(count?.n) };
 }
 
 /** How each agent and model's lines fared in review, over the matching pull requests. */
 export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<PullSummary> {
   const { sql, params } = where(db.orgId, filters);
-  const rows = await costed(db, await db.query(`SELECT ${ROW_COLUMNS}, detail IS NOT NULL AS detailed FROM pull_requests ${sql}`, params));
+  const rows = await costed(
+    db,
+    await db.query(`SELECT ${ROW_COLUMNS}, detail IS NOT NULL AS detailed FROM pull_requests ${sql}`, params),
+    { sql: `SELECT repo, number FROM pull_requests ${sql}`, params },
+  );
   // Of the pull requests seen from the start that have a cost: what the agent
   // lines they were opened with cost, and how many of those survived review.
   const opened = { usd: 0, surviving: 0 };
@@ -975,11 +1062,12 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       if (pull.cost.estimated) total.cost_estimated = true;
     }
     // A floor: a session of it has no cost figure, or its sessions were not kept.
-    if (pull.cost ? pull.cost.sessions_without_cost > 0 : a.now.agent_lines > 0) total.pulls_with_cost_missing += 1;
-    if (pull.cost?.per_surviving_line_usd != null) {
-      const surviving = a.by.reduce((sum, by) => sum + by.surviving, 0);
-      opened.usd += pull.cost.per_surviving_line_usd * surviving;
-      opened.surviving += surviving;
+    const floor = pull.cost ? pull.cost.sessions_without_cost + pull.cost.sessions_with_cost_partial > 0 : a.now.agent_lines > 0;
+    if (floor) total.pulls_with_cost_missing += 1;
+    // One where no line survived is in this too: what its lines cost was spent.
+    if (pull.cost?.opened_usd != null) {
+      opened.usd += pull.cost.opened_usd;
+      opened.surviving += a.by.reduce((sum, by) => sum + by.surviving, 0);
     }
     if (a.cloud) {
       total.cloud_pulls += 1;

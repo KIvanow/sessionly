@@ -5,7 +5,7 @@ import { scopeParams, type Scope } from "./App.tsx";
 import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
-import { matchAll, pullCost, pullHref, pullsCostNote, web } from "./pull.ts";
+import { costIsFloor, matchAll, pullCost, pullHref, pullsCostNote, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -118,7 +118,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
             />
             <Tile
               label="Agent cost"
-              value={pullCost({ usd: total.cost_usd, estimated: total.cost_estimated, sessions_without_cost: total.pulls_with_cost_missing })}
+              value={pullCost({ usd: total.cost_usd, estimated: total.cost_estimated, sessions_without_cost: total.pulls_with_cost_missing, sessions_with_cost_partial: 0 })}
               note={pullsCostNote(total)}
             />
           </section>
@@ -301,7 +301,7 @@ function Row({ p }: { p: PullRow }) {
       </td>
       <td
         className="num nowrap"
-        title={p.cost && p.cost.usd != null && p.cost.sessions_without_cost > 0 ? "At least: a session of it has no cost figure" : undefined}
+        title={p.cost && p.cost.usd != null && costIsFloor(p.cost) ? "At least: a session of it has no cost figure, or one that leaves requests out" : undefined}
       >
         {pullCost(p.cost, "≥ ")}
       </td>

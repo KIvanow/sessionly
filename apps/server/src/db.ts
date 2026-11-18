@@ -676,15 +676,22 @@ const MIGRATIONS: string[] = [
   `UPDATE pull_requests SET matched_at = updated_at`,
   // How many line hashes a session uploaded: what its lines in a pull
   // request are a share of, for what it cost there. Kept beside the payload
-  // so that reading it does not open the payload.
-  `ALTER TABLE sessions ADD COLUMN hashed_lines integer NOT NULL DEFAULT 0`,
+  // so that reading it does not open the payload. Null on a session stored
+  // by a server from before this (one still running beside a newer one):
+  // it is then counted from the payload.
+  `ALTER TABLE sessions ADD COLUMN hashed_lines integer DEFAULT 0`,
   `UPDATE sessions SET hashed_lines =
      (SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
-      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(payload->'lines') = 'array' THEN payload->'lines' ELSE '[]'::jsonb END) AS l
-      WHERE jsonb_typeof(l->'hashes') = 'array')`,
-  // The sessions with lines in a pull request, and how many: what its
-  // `detail` says of them, as rows, so that all the pull requests a session
-  // has lines in can be found by the session. Its cost is split between them.
+      FROM jsonb_array_elements(payload->'lines') AS l
+      WHERE jsonb_typeof(l->'hashes') = 'array')
+   WHERE jsonb_typeof(payload->'lines') = 'array'`,
+  `ALTER TABLE sessions ALTER COLUMN hashed_lines DROP DEFAULT`,
+  // The sessions with lines in a pull request, as rows, so that all the pull
+  // requests a session has lines in can be found by the session: its cost is
+  // split between them. `matched` is which lines, as the hashes by file;
+  // `weight` is how many they count as, a line that is in several pull
+  // requests being shared out between them. Null and the number of lines
+  // for one from before these were kept, until it is matched again.
   `CREATE TABLE pull_sessions (
      org_id     text NOT NULL REFERENCES orgs ON DELETE CASCADE,
      repo       text NOT NULL,
@@ -693,14 +700,16 @@ const MIGRATIONS: string[] = [
      source     text NOT NULL,
      session_id text NOT NULL,
      lines      integer NOT NULL,
+     weight     double precision NOT NULL,
+     matched    jsonb,
      PRIMARY KEY (org_id, repo, number, machine_id, source, session_id),
      FOREIGN KEY (org_id, repo, number) REFERENCES pull_requests ON DELETE CASCADE
    )`,
   `CREATE INDEX pull_sessions_session ON pull_sessions (org_id, machine_id, source, session_id)`,
   toApp(`SELECT, INSERT, UPDATE, DELETE ON pull_sessions`),
   ...rowLevelSecurity("pull_sessions"),
-  `INSERT INTO pull_sessions (org_id, repo, number, machine_id, source, session_id, lines)
-   SELECT p.org_id, p.repo, p.number, s.machine_id, s.source, s.session_id, s.lines
+  `INSERT INTO pull_sessions (org_id, repo, number, machine_id, source, session_id, lines, weight)
+   SELECT p.org_id, p.repo, p.number, s.machine_id, s.source, s.session_id, s.lines, s.lines
    FROM pull_requests p,
         jsonb_to_recordset(CASE WHEN jsonb_typeof(p.detail->'sessions') = 'array' THEN p.detail->'sessions' ELSE '[]'::jsonb END)
           AS s(machine_id text, source text, session_id text, lines integer)

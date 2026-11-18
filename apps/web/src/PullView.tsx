@@ -126,8 +126,8 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
         {p.cost?.usd != null && (
           <p className="muted hint">
             A session's cost here is its share of what the whole session cost: as many of the lines it
-            uploaded hashes of as are in this pull request, or of its lines in all pull requests when
-            the same ones are in several. Their sum is the agent cost above: what the matched sessions
+            uploaded hashes of as are in this pull request. A line that is in other pull requests too
+            is shared out between them. Their sum is the agent cost above: what the matched sessions
             cost, not what making the pull request did.
           </p>
         )}

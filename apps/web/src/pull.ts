@@ -3,14 +3,21 @@
 import type { PullCost, PullFeedback, PullMatches, PullRow } from "@sessionly/schema";
 import { count, dateTime, usd } from "./format.ts";
 
+/** Whether a cost is a floor: a session of it has no cost figure, or one that leaves requests out. */
+export const costIsFloor = (c: Pick<PullCost, "sessions_without_cost" | "sessions_with_cost_partial">): boolean =>
+  c.sessions_without_cost + c.sessions_with_cost_partial > 0;
+
 /**
  * What a pull request's sessions cost it, in a few words: "~" before an
- * estimate, and "at least" (`floor`) when a session of it has no cost figure.
- * A dash where there is no figure at all.
+ * estimate, and "at least" (`floor`) when it is a floor. A dash where there
+ * is no figure at all.
  */
-export function pullCost(c: Pick<PullCost, "usd" | "estimated" | "sessions_without_cost"> | null, floor = "at least "): string {
+export function pullCost(
+  c: Pick<PullCost, "usd" | "estimated" | "sessions_without_cost" | "sessions_with_cost_partial"> | null,
+  floor = "at least ",
+): string {
   if (!c || c.usd == null) return "–";
-  return `${c.sessions_without_cost > 0 ? floor : ""}${c.estimated ? "~" : ""}${usd(c.usd)}`;
+  return `${costIsFloor(c) ? floor : ""}${c.estimated ? "~" : ""}${usd(c.usd)}`;
 }
 
 /** The small print under a pull request's cost: what a line cost, and what the figure leaves out. */
@@ -22,11 +29,15 @@ export function pullCostNote(c: PullCost | null): string {
       ? `${count(c.sessions_without_cost)} of ${count(c.sessions)} ${c.sessions === 1 ? "session" : "sessions"} ${c.sessions_without_cost === 1 ? "has" : "have"} no cost figure`
       : null;
   if (c.usd == null) return missing!;
+  const partial =
+    c.sessions_with_cost_partial > 0
+      ? `the cost of ${count(c.sessions_with_cost_partial)} ${c.sessions_with_cost_partial === 1 ? "session leaves" : "sessions leave"} requests out`
+      : null;
   const each = [
     c.per_agent_line_usd != null ? `${usd(c.per_agent_line_usd)} per agent line` : null,
     c.per_surviving_line_usd != null ? `${usd(c.per_surviving_line_usd)} per line that survived review` : null,
   ];
-  return [...each, missing].filter(Boolean).join("; ");
+  return [...each, missing, partial].filter(Boolean).join("; ");
 }
 
 /** The small print under the cost of several pull requests. */
