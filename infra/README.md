@@ -342,8 +342,10 @@ Compose then warns that it did not make that volume itself, and uses it all the 
 ## Not built yet
 
 - **Plans, quotas and billing.** Every organisation is unlimited. Exporting an
-  organisation and deleting it are on the dashboard. `node src/cli.ts org restore <id>`
-  undoes a deletion within 7 days, and `node src/cli.ts org purge` removes what is due.
+  organisation and deleting it are on the dashboard. Within 7 days, the same
+  `docker compose … run -w /app/apps/server` as `person forget-account` undoes a
+  deletion with `node src/cli.ts org restore <id>`, and `node src/cli.ts org purge`
+  removes what is due.
 - **A deploy job.** Updating is the commands above, by hand.
 - **Inviting someone by a link.** A person is added by address, and has to sign in with a
   Google or GitHub account that has that address. Nothing tells them they were added.

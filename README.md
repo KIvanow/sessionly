@@ -87,8 +87,8 @@ The owner of an organisation can download everything it has:
   A token for a machine cannot, even the owner's.
 - `DELETE /api/v1/org` — on a hosted service, the owner deletes the organisation by sending its
   name. Everyone is signed out at once. The rows go after 7 days.
-  `node src/cli.ts org restore <id>` undoes that within the 7 days;
-  `node src/cli.ts org purge` removes what is due.
+  `pnpm org restore <id>` undoes that within the 7 days;
+  `pnpm org purge` removes what is due.
 - `DELETE /api/v1/users/{id}?data=true` — an admin removes a person and deletes their sessions.
   Without `data=true`, the sessions stay. Pull requests stay either way.
 
