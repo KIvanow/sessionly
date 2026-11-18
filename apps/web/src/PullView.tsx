@@ -1,6 +1,7 @@
 import type { PullDetail, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
+import { ActionNotice } from "./ActionNotice.tsx";
 import { type By, byOf, countFeedback, feedbackLabel, matchedLine, web } from "./pull.ts";
 import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
@@ -65,6 +66,13 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
         </p>
         {problem && <p role="alert">{problem}</p>}
       </div>
+      <ReporterNotice
+        reported={p.reporter_version}
+        repoReported={p.repo_reporter_version}
+        current={p.reporter_current}
+        repoOlder={p.repo_reporter_older}
+        older={p.reporter_older}
+      />
       <section className="tiles" aria-label="Totals">
         <Tile label="Lines added" value={count(a.now.lines)} note={`in ${count(p.commits)} ${p.commits === 1 ? "commit" : "commits"}`} />
         <Tile
@@ -123,7 +131,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
       <section className="card" aria-label="Sessions">
         <h2>Sessions that wrote it</h2>
         {p.sessions == null ? (
-          <Earlier what="Which sessions wrote its lines" />
+          <Earlier what="Which sessions wrote its lines" dependsOnAction={false} />
         ) : p.sessions.length === 0 ? (
           <p className="muted">
             {a.cloud && a.cloud.sessions === 0
@@ -153,7 +161,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
       <section className="card" aria-label="Files">
         <h2>Files</h2>
         {p.files == null ? (
-          <Earlier what="Its lines file by file" />
+          <Earlier what="Its lines file by file" dependsOnAction={false} />
         ) : p.files.length === 0 ? (
           <p className="muted">It adds no lines to track.</p>
         ) : (
@@ -206,7 +214,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
           stays on GitHub: Sessionly does not store it.
         </p>
         {p.feedback == null ? (
-          <Earlier what="Its reviews and comments" />
+          <Earlier what="Its reviews and comments" dependsOnAction={p.reporter_older} />
         ) : p.feedback.length === 0 ? (
           <p className="muted">Nobody has reviewed it or commented on it.</p>
         ) : (
@@ -309,8 +317,48 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
   );
 }
 
+/** What this pull request's report is missing, and why a fresh run is needed when the Action was old. */
+function ReporterNotice({
+  reported,
+  repoReported,
+  current,
+  repoOlder,
+  older,
+}: {
+  reported: string | null;
+  /** The version the repository's most recent judged report named. */
+  repoReported: string | null;
+  current: string;
+  repoOlder: boolean;
+  older: boolean;
+}) {
+  if (!repoOlder && !older) return null;
+  const phrase = (version: string | null) => (version ? `${version}; current is ${current}` : `current is ${current}`);
+  if (repoOlder) {
+    return (
+      <p className="muted">
+        This repository reports with an older version of the Sessionly Action ({phrase(repoReported)}).{" "}
+        <ActionNotice pull="this" rerun={older} />
+      </p>
+    );
+  }
+  return (
+    <p className="muted">
+      This pull request was last reported by an older version of the Sessionly Action ({phrase(reported)}).{" "}
+      <ActionNotice pull="this" rerun move={false} />
+    </p>
+  );
+}
+
 /** For a pull request last reported before this was kept. */
-function Earlier({ what }: { what: string }) {
+function Earlier({ what, dependsOnAction }: { what: string; dependsOnAction: boolean }) {
+  if (dependsOnAction) {
+    return (
+      <p className="muted">
+        {what} were not kept when this pull request was last reported. The notice above says why.
+      </p>
+    );
+  }
   return (
     <p className="muted">
       {what} were not kept when this pull request was last reported. They appear with its next report from

@@ -1,11 +1,12 @@
 import type { LinesBy, PullList, PullMatches, PullRow, PullSummary } from "@sessionly/schema";
 import { useEffect, useState } from "react";
-import { api, ApiError, query } from "./api.ts";
+import { api, ApiError, query, samePullFilters } from "./api.ts";
 import { scopeParams, type Scope } from "./App.tsx";
 import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
-import { matchAll, pullHref, web } from "./pull.ts";
+import { ActionNotice } from "./ActionNotice.tsx";
+import { matchAll, nameSome, pullHref, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -27,8 +28,17 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
   const [offset, setOffset] = useState(0);
   useEffect(() => setOffset(0), [state, scope]);
   const params = { since: scopeParams(scope, true).since, repo: scope.repo || undefined, state: state || undefined };
-  const summary = useApi<PullSummary>(token, `/prs/summary${query(params)}`, onSignOut);
+  const filters = query(params);
+  const summaryPath = `/prs/summary${filters}`;
+  const summary = useApi<PullSummary>(token, summaryPath, onSignOut);
   const list = useApi<PullList>(token, `/prs${query({ ...params, limit: PAGE, offset })}`, onSignOut);
+  // The summary can arrive before the list. The notice waits until the rows
+  // on screen are for these filters too, so it does not name one repository
+  // above another's pull requests. Another page of the same list still counts.
+  const older =
+    summary.dataPath === summaryPath && samePullFilters(list.dataPath, filters)
+      ? (summary.data?.older_actions ?? [])
+      : [];
   const everything = useApi<PullList>(token, "/prs?limit=1", onSignOut);
   const total = summary.data?.total;
   // Matching the listed pull requests again: how many are done, then what came of it.
@@ -136,6 +146,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
               {matching === null ? "Match these to sessions again" : `Matching… ${count(matching)} done`}
             </button>
           </div>
+          <OlderActions repos={older} />
           <div className="scroll">
             <table className="rows">
               <thead>
@@ -248,6 +259,17 @@ function ByModel({ summary }: { summary: PullSummary }) {
         </table>
       </div>
     </section>
+  );
+}
+
+/** Repositories in this filter that report with an older Action, and what to change. */
+function OlderActions({ repos }: { repos: string[] }) {
+  if (repos.length === 0) return null;
+  return (
+    <p className="muted hint">
+      {nameSome(repos.map(repoName))} {repos.length === 1 ? "reports" : "report"} with an older version of the Sessionly Action.{" "}
+      <ActionNotice pull="the" rerun />
+    </p>
   );
 }
 

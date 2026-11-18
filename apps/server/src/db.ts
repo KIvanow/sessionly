@@ -674,6 +674,22 @@ const MIGRATIONS: string[] = [
   // When its lines were last matched: by a report, or again since.
   `ALTER TABLE pull_requests ADD COLUMN matched_at timestamptz DEFAULT now()`,
   `UPDATE pull_requests SET matched_at = updated_at`,
+  // Which version of the Action last reported a pull request. Null when the
+  // report named none, which an Action from before it said does.
+  `ALTER TABLE pull_requests ADD COLUMN reporter_version text`,
+  // Who sent the report. The version above is kept only when this is
+  // `sessionly-action` and the version can be read. A name whose version
+  // cannot is kept, and is not read as an older Action. Null, with no
+  // version, is an Action from before this was sent: the report named no
+  // reporter. A reporter that was present but did not fit is stored as
+  // `unknown`, another client, and is not judged. Another client's name
+  // is kept so that report is not read as one.
+  `ALTER TABLE pull_requests ADD COLUMN reporter_name text`,
+  // Rows stored before a report said who sent it. An empty name is not a
+  // client: one has to be at least one character, so a later report cannot
+  // send this. These rows are not judged. A report that names no one still
+  // stores null, and is.
+  `UPDATE pull_requests SET reporter_name = '' WHERE reporter_name IS NULL`,
 ];
 
 /**

@@ -48,6 +48,17 @@ What to know about the workflow:
 - `@main` follows this repository's main branch. To decide yourself when the Action changes,
   name a commit instead (`KIvanow/sessionly/action@<commit sha>`), as this repository's own
   [workflow](https://github.com/KIvanow/sessionly/blob/main/.github/workflows/sessionly.yml) does.
+  The list, and a pull request's page, say when the repository's most recent report from the
+  Action, or that named no reporter, is from an older one, and no report from the last 30 days
+  came from the current Action or a newer one. The page names that most recent report's
+  version. If the workflow pins the Action to a commit or tag, move that pin to a newer one.
+  A re-run of that pin keeps the old version: push a commit on an open pull request, or
+  [start the workflow by hand](#pull-requests-from-before-the-action) with its number if it
+  has been merged. With `@main`, re-run the job: it fetches the Action again. A pull request
+  that was itself last reported by an older one says so, without asking for a change that a
+  later report already shows was made. GitHub offers a run you start by hand only when
+  `workflow_dispatch` is in the workflow on the default branch, and the changed file has to
+  be there before you start it.
 - The job needs Node 20 or later on the runner, which GitHub's own runners have. It does not
   check the repository out.
 - A problem (server down, token refused) is a warning on the run, not a failed check, unless
@@ -177,7 +188,11 @@ a server of version 0.5.0 or older has to be reported once more before it can be
 
 ## Pull requests from before the Action
 
-A manually started workflow can report existing pull requests one at a time:
+GitHub offers a run you start yourself only when the workflow on the default branch has
+`workflow_dispatch`. That is how a merged pull request is reported again after the Action's
+version changes: give its number, and leave `backfill` off, because the server already has its
+first report. The same run, with `backfill`, reports a pull request from before the Action was
+added, as it was when opened:
 
 ```yaml
 on:
