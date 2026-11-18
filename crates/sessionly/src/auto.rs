@@ -130,14 +130,35 @@ pub fn pending_update(data_dir: &Path) -> Option<String> {
         .then(|| format!("sessionly {latest} is out (this is {this}). Run `sessionly update`."))
 }
 
+/// Why nothing will ask whether a newer release is out, or `None` when a
+/// background upload will. The check is off, this is a cloud environment,
+/// auto-sync is off, or no server is set. A server named only in the
+/// environment counts, because that is the config a background run loads.
+/// `SESSIONLY_NO_AUTO` is not one of these: a hook sets it, and `settings`
+/// cannot see that environment.
+pub(crate) fn update_check_blocker(config: &Config) -> Option<&'static str> {
+    if !config.update_check {
+        return Some("off");
+    }
+    if crate::runtime::in_cloud() {
+        return Some("on, but not asked in a cloud environment");
+    }
+    if !config.auto_sync {
+        return Some("on, but nothing asks while auto-sync is off");
+    }
+    if config.clone().with_environment().server.is_none() {
+        return Some("on, but nothing asks until a server is set (`sessionly connect`)");
+    }
+    None
+}
+
 /// Ask, at most once a day, whether a newer release is out, and remember the
 /// version the release page named in `update-check.json`. A failed ask is
 /// silent and is not tried again until the day is up. The request carries no
-/// account or session. `config` is the one this run already loaded: nothing
-/// is asked in a cloud environment, when the check is off, or when it has no
-/// server.
+/// account or session. `config` is the one this run already loaded. Nothing
+/// is asked when `update_check_blocker` says so.
 fn note_release(data_dir: &Path, config: &Config) {
-    if crate::runtime::in_cloud() || !config.update_check || config.server.is_none() {
+    if update_check_blocker(config).is_some() {
         return;
     }
     let path = data_dir.join("update-check.json");
