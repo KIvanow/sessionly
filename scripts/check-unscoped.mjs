@@ -11,7 +11,20 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ALLOWED = {
-  "apps/server/src": ["db.ts", "auth.ts", "cli.ts", "run.ts", "app.ts", "lib.ts", "testing.ts", "signup.ts"],
+  "apps/server/src": [
+    "db.ts",
+    "auth.ts",
+    "cli.ts",
+    "run.ts",
+    "app.ts",
+    "lib.ts",
+    "testing.ts",
+    "signup.ts",
+    // Purging an organisation, and restoring one, run as the operator or the
+    // hourly job. A request's token is already refused, and rate counters
+    // have no organisation to set.
+    "orgs.ts",
+  ],
   "ee/src": ["migrate.ts"],
 };
 // `import … from` and `export … from`: named, `* as`, `*`, or default. No

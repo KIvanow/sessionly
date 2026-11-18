@@ -70,6 +70,10 @@ Each release also has an image, `ghcr.io/kivanow/sessionly-server:<version>`. It
   needs nothing run by hand. If that fails the server says so and stops.
 - **Nothing is deleted by age.** Sessions and pull requests stay until someone
   [stops a repository](uploading.md#stopping-a-repository) or a session is taken back.
+  An organisation its owner deleted is removed after 7 days, and everything of it with
+  that. The server does this once an hour. `pnpm org purge` does that pass now, and
+  `pnpm org restore <id>` clears a deletion that has not been purged. The default
+  organisation is never removed.
 - **There is no request log.** Errors the server did not expect are printed, the first five
   in any ten seconds and then a count of the rest.
 - **A request can be 32 MB at most**, which is far more than a session's upload.

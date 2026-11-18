@@ -8,7 +8,9 @@ import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import pg from "pg";
 import { ApiError, createApp, failureLog, type Env } from "../src/app.ts";
+import { spawnSync } from "node:child_process";
 import { createToken, hash } from "../src/auth.ts";
+import { purgeDeletedOrgs, restoreOrg } from "../src/orgs.ts";
 import { APP_ROLE, appRoleOf, capped, count, DB_COUNTS, FIRST_ORG_MIGRATION, misset, openDb, versionProblem, type Db } from "../src/db.ts";
 import { hostedProblems, reason } from "../src/run.ts";
 import { adminRuns, newOrg, renameTestDb, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
@@ -309,8 +311,9 @@ test("requests are granted exactly the tables they must reach", async () => {
   const can = Object.fromEntries(granted.map((t) => [t.name, t.can]));
   // Everything an organisation owns: all of it, behind row-level security.
   for (const table of ["tokens", "sessions", "pull_requests", "repo_exclusions", "repos_allowed_again"]) assert.equal(can[table], "select,insert,update,delete", table);
-  // Its own row of the organisations, to read.
-  assert.equal(can.orgs, "select");
+  // Its own row: to read, and to mark the organisation deleted. Removing the
+  // row is the purge, which runs as the database's owner.
+  assert.equal(can.orgs, "select,update");
   // And nothing else: not the record of migrations.
   assert.equal(can.migrations, "");
   // A table with an org column that requests cannot reach was forgotten.
@@ -1183,4 +1186,204 @@ test("an owner can export every row of the organisation, and an admin or a membe
   assert.equal(own.lines[0]?.type, "org");
   assert.equal(own.lines[0]?.id, "default");
   assert.doesNotMatch(own.text, /token_hash|out-only-preview|other-org-marker/);
+});
+
+async function raw(
+  token: string,
+  method: string,
+  path: string,
+  body?: unknown,
+  server: ReturnType<typeof createApp> = app,
+) {
+  const response = await server.request(`/api/v1${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await response.text();
+  return { status: response.status, text, body: text ? (JSON.parse(text) as any) : undefined };
+}
+
+test("the owner deletes the organisation by its name, and it drops out of signing in", async () => {
+  await newOrg(db, "org-end", "Ends Here");
+  await newOrg(db, "org-stay", "Stays");
+  await db.query(
+    `INSERT INTO users (id, org_id, email, role, confirmed_at, sign_in_provider, sign_in_account) VALUES
+       ('usr_end', 'org-end', 'own@end.example', 'owner', now(), 'github', 'acct-end'),
+       ('usr_stay', 'org-stay', 'own@end.example', 'member', now(), 'github', 'acct-end')`,
+  );
+  const owner = await db.asOrg("org-end", (scoped) =>
+    createToken(scoped, { email: "own@end.example", role: "admin", userId: "usr_end", signIn: "github" }),
+  );
+  const admin = await tokenFor(db, { email: "admin@end.example", role: "admin" }, "org-end");
+  const hosted = createApp(db, { accounts: { hosted: true, publicUrl: "http://localhost:8080" } });
+  const secret = "owner-sign-in";
+  await db.query(
+    `INSERT INTO sign_in_codes (code_hash, provider, account, emails, expires_at)
+     VALUES ($1, 'github', 'acct-end', ARRAY['own@end.example'], now() + interval '10 minutes')`,
+    [hash(secret)],
+  );
+  const places = async () => {
+    const response = await hosted.request("/api/v1/auth/check", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: `sessionly-arrived=${secret}.in` },
+      body: "{}",
+    });
+    const body = (await response.json()) as { orgs?: { org_id: string }[] };
+    assert.equal(response.status, 200);
+    return (body.orgs ?? []).map((org) => org.org_id).sort();
+  };
+  assert.deepEqual(await places(), ["org-end", "org-stay"]);
+
+  // Not the owner, and not a hosted service.
+  assert.equal((await raw(admin, "DELETE", "/org", { name: "Ends Here" }, hosted)).status, 403);
+  const selfHosted = createApp(db, { bootstrap: { token: "delete-bootstrap", email: "root@example.com" } });
+  const refused = await raw("delete-bootstrap", "DELETE", "/org", { name: "Default" }, selfHosted);
+  assert.equal(refused.status, 403);
+  assert.match(refused.body.error, /drop the database/);
+  const [untouched] = await db.query<{ deleted_at: unknown }>(`SELECT deleted_at FROM orgs WHERE id = 'default'`);
+  assert.equal(untouched?.deleted_at, null);
+
+  assert.equal((await raw(owner.token, "DELETE", "/org", { name: "Wrong" }, hosted)).status, 400);
+  assert.equal((await raw(owner.token, "DELETE", "/org", {}, hosted)).status, 400);
+  const gone = await raw(owner.token, "DELETE", "/org", { name: "  Ends Here  " }, hosted);
+  assert.equal(gone.status, 204);
+  assert.equal(gone.text, "");
+  // The token that asked is refused from then on, and signing in no longer offers the organisation.
+  assert.equal((await raw(owner.token, "GET", "/me", undefined, hosted)).status, 401);
+  assert.deepEqual(await places(), ["org-stay"]);
+
+  assert.equal(await restoreOrg(db, "org-end"), true);
+  assert.equal((await raw(owner.token, "GET", "/me", undefined, hosted)).status, 200);
+  assert.deepEqual(await places(), ["org-end", "org-stay"]);
+});
+
+test("removing a person can delete their sessions and nobody else's", async () => {
+  await newOrg(db, "org-people", "People");
+  await db.query(
+    `INSERT INTO users (id, org_id, email, role) VALUES
+       ('usr_ann', 'org-people', 'ann@people.example', 'member'),
+       ('usr_bob', 'org-people', 'bob@people.example', 'member')`,
+  );
+  const admin = await tokenFor(db, { email: "admin@people.example", role: "admin" }, "org-people");
+  const ann = await tokenFor(db, { email: "ann@people.example", role: "member" }, "org-people");
+  const bob = await tokenFor(db, { email: "bob@people.example", role: "member" }, "org-people");
+  const ci = await tokenFor(db, { email: "ci@people.example", role: "ci" }, "org-people");
+  assert.equal((await put(ann, session("ann-s", { user: { name: null, email: "ann@people.example" } }))).status, 200);
+  assert.equal((await put(bob, session("bob-s", { user: { name: null, email: "bob@people.example" } }))).status, 200);
+  assert.equal((await call(ci, "PUT", "/prs", pull(4, { title: "stays on the pull request" }))).status, 200);
+  assert.equal((await call(ann, "PUT", "/repos/excluded", { repo: "~/Notes" })).status, 200);
+  assert.equal((await call(ann, "DELETE", "/repos/excluded?repo=~/Notes")).status, 200);
+  assert.equal((await call(ann, "PUT", "/repos/excluded", { repo: "~/Code" })).status, 200);
+  assert.equal((await call(bob, "PUT", "/repos/excluded", { repo: "~/Bob" })).status, 200);
+
+  const count = async (table: string, email: string) => {
+    const [row] = await db.query<{ n: unknown }>(
+      `SELECT count(*) AS n FROM ${table} WHERE org_id = 'org-people' AND owner_email = $1`,
+      [email],
+    );
+    return Number(row?.n);
+  };
+  assert.equal((await call(admin, "DELETE", "/users/usr_ann?data=true")).status, 200);
+  assert.equal(await count("sessions", "ann@people.example"), 0);
+  assert.equal(await count("sessions", "bob@people.example"), 1);
+  assert.equal(await count("repo_exclusions", "ann@people.example"), 0);
+  assert.equal(await count("repos_allowed_again", "ann@people.example"), 0);
+  assert.equal(await count("repo_exclusions", "bob@people.example"), 1);
+  assert.equal((await call(admin, "GET", "/prs")).body.pulls[0].title, "stays on the pull request");
+  // Without the flag, the person goes and the sessions stay.
+  assert.equal((await call(admin, "DELETE", "/users/usr_bob")).status, 200);
+  assert.equal(await count("sessions", "bob@people.example"), 1);
+  assert.equal(await count("repo_exclusions", "bob@people.example"), 1);
+});
+
+test("a purge removes an organisation deleted 8 days ago, and leaves one deleted 6 days ago", async () => {
+  await newOrg(db, "org-old", "Old");
+  await newOrg(db, "org-young", "Young");
+  const sessionRow = (org: string) =>
+    db.query(
+      `INSERT INTO sessions (org_id, machine_id, source, session_id, owner_email, content, payload)
+       VALUES ($1, 'm', 'claude-code', 's', 'a@x.example', 'metadata', '{}')`,
+      [org],
+    );
+  await sessionRow("org-old");
+  await sessionRow("org-young");
+  await db.query(
+    `INSERT INTO pull_requests (
+       org_id, repo, number, author, state, first_event, last_event, first_files, last_files, attribution
+     ) VALUES ('org-old', 'github.com/acme/web', 1, 'ann', 'open', 'opened', 'opened', '[]', '[]', '{}')`,
+  );
+  await db.query(
+    `INSERT INTO users (id, org_id, email, role) VALUES ('usr_old', 'org-old', 'a@old.example', 'member')`,
+  );
+  await db.query(
+    `INSERT INTO tokens (id, org_id, token_hash, email, role) VALUES ('tok-old', 'org-old', 'hash-old', 'a@old.example', 'member')`,
+  );
+  await db.query(
+    `UPDATE orgs SET deleted_at = now() - interval '8 days' WHERE id = 'org-old'`,
+  );
+  await db.query(`UPDATE orgs SET deleted_at = now() - interval '6 days' WHERE id = 'org-young'`);
+  await db.query(`UPDATE orgs SET deleted_at = now() - interval '8 days' WHERE id = 'default'`);
+  await db.query(
+    `INSERT INTO rate_counters (key, window_start, n) VALUES
+       ('invites:org-old', now(), 1),
+       ('export:org-old', now(), 1),
+       ('invites:org-young', now(), 2),
+       ('invites:default', now(), 3)`,
+  );
+
+  const removed = await purgeDeletedOrgs(db);
+  assert.deepEqual(removed, ["org-old"]);
+  const left = async (org: string) => {
+    const [row] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM orgs WHERE id = $1`, [org]);
+    return Number(row?.n);
+  };
+  assert.equal(await left("org-old"), 0);
+  for (const table of ["sessions", "pull_requests", "users", "tokens"]) {
+    const [row] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM ${table} WHERE org_id = 'org-old'`);
+    assert.equal(Number(row?.n), 0, table);
+  }
+  assert.equal(await left("org-young"), 1);
+  const [youngSession] = await db.query<{ n: unknown }>(
+    `SELECT count(*) AS n FROM sessions WHERE org_id = 'org-young'`,
+  );
+  assert.equal(Number(youngSession?.n), 1);
+  assert.equal(await left("default"), 1);
+  const [marked] = await db.query<{ deleted_at: unknown }>(`SELECT deleted_at FROM orgs WHERE id = 'default'`);
+  assert.ok(marked?.deleted_at);
+  const keys = await db.query<{ key: string }>(
+    `SELECT key FROM rate_counters WHERE key IN ('invites:org-old', 'export:org-old', 'invites:org-young', 'invites:default') ORDER BY key`,
+  );
+  assert.deepEqual(
+    keys.map((row) => row.key),
+    ["invites:default", "invites:org-young"],
+  );
+  // Put the default organisation back: nothing else in this file should see it as deleted.
+  await db.query(`UPDATE orgs SET deleted_at = NULL WHERE id = 'default'`);
+});
+
+test("org purge and org restore say what they did", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sessionly-org-"));
+  const run = (args: string[]) =>
+    spawnSync(process.execPath, ["src/cli.ts", ...args], {
+      cwd: join(import.meta.dirname, ".."),
+      env: { ...process.env, DATABASE_URL: `file:${dir}` },
+      encoding: "utf8",
+    });
+  try {
+    const purge = run(["org", "purge"]);
+    assert.equal(purge.status, 0, purge.stderr);
+    assert.match(purge.stdout, /Nothing was due to be removed/);
+    const missing = run(["org", "restore", "no-such"]);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /waiting to be deleted/);
+    const usage = run(["org"]);
+    assert.equal(usage.status, 2);
+    assert.match(usage.stderr, /org restore/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

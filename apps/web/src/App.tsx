@@ -363,6 +363,7 @@ function Shell({
           people={people}
           address={address}
           myEmail={me.email}
+          orgName={me.org_name ?? me.org}
           owner={me.owner}
           hosted={hosted}
           onSignOut={onSignOut}

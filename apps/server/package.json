@@ -8,6 +8,7 @@
     "start": "node --env-file-if-exists=../../.env src/index.ts",
     "token": "node src/cli.ts token",
     "person": "node src/cli.ts person",
+    "org": "node src/cli.ts org",
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-global-setup=test/global.ts \"test/*.test.ts\""
   },

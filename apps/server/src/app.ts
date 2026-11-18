@@ -447,6 +447,28 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   });
 
   const whoami = (p: Principal) => ({ ok: true, org: p.orgId, email: p.email, name: p.name, role: p.role });
+  // The owner asks for the organisation to be deleted. The name in the body
+  // is them saying so on purpose. From the next request, every token of it
+  // is refused. The rows go after 7 days. A server of one team has no such
+  // request: whoever runs it drops the database.
+  api.delete("/org", async (c) => {
+    if (!c.get("principal").owner) return c.json({ error: "only the owner of an organisation can do this" }, 403);
+    if (options.accounts?.hosted !== true) {
+      return c.json(
+        { error: "deleting an organisation is for the hosted service; on a server of your own, drop the database" },
+        403,
+      );
+    }
+    const body = (await c.req.json().catch(() => null)) as { name?: unknown } | null;
+    const name = typeof body?.name === "string" ? body.name.trim() : "";
+    if (!name) throw new BadRequest("type the organisation's name");
+    const db = c.get("db");
+    const [org] = await db.query<{ name: string }>(`SELECT name FROM orgs WHERE id = $1`, [db.orgId]);
+    if (org?.name !== name) throw new BadRequest("that is not this organisation's name");
+    await db.query(`UPDATE orgs SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL`, [db.orgId]);
+    return c.body(null, 204);
+  });
+
   api.get("/ping", (c) => c.json(whoami(c.get("principal"))));
   api.get("/me", async (c) => {
     const p = c.get("principal");
@@ -708,7 +730,9 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     return c.json(user, 201);
   });
   users.delete("/:id", async (c) => {
-    await removeUser(c.get("db"), c.req.param("id"), c.get("principal"));
+    // data=true also deletes their sessions and the repositories they stopped.
+    // Anything else is the removal alone, as it always was.
+    await removeUser(c.get("db"), c.req.param("id"), c.get("principal"), { data: c.req.query("data") === "true" });
     return c.json({ removed: true });
   });
   // Let someone in with another account than the one they signed in with:

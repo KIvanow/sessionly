@@ -340,8 +340,10 @@
             rectification, erasure, restriction, portability, objection). Some of this you can do
             yourself: an engineer can see exactly what their machine uploads with
             <code>sessionly export</code>, an admin can read any session and pull request report
-            through the dashboard and the API, as JSON, and can revoke tokens. The Hosted Service
-            does not yet let you delete a single session yourself; email me and I will delete it.
+            through the dashboard and the API, as JSON, and can revoke tokens. A person can
+            delete a session they submitted, and an admin can erase one person's sessions from
+            the dashboard. Deleting one session of someone else's is not on the dashboard; email
+            me and I will delete it.
             For that and anything else the tools do not cover, I will help within a reasonable
             time, normally within 10 business days. If a data subject contacts me directly about
             Customer Data, I will not respond beyond acknowledging the request and pointing them to
@@ -399,8 +401,10 @@
               org can see who had access.
             </li>
             <li>
-              <strong>Deletion on request.</strong> I will delete particular sessions, a person's
-              sessions or a repository's reports when an admin of your org asks me to by email.
+              <strong>Deletion on request.</strong> An admin can remove a person, and can delete
+              that person's sessions, from the dashboard. A person can delete the sessions they
+              submitted. Pull request reports are kept. Deleting one session of someone else's
+              is not on the dashboard; email me and I will delete it.
             </li>
             <li>
               <strong>Export.</strong> At any time the owner can download everything the org
@@ -412,15 +416,15 @@
           </ul>
           <h3>9.2 At the end</h3>
           <p>
-            When the Terms end for your org, or earlier if you ask me in writing to delete the org,
-            I will delete all Customer Data within a reasonable time, normally within 30 days,
-            including sessions, pull request reports and tokens, and I will confirm the deletion by
-            email on request. Two exceptions: data I must keep under EU or Member State law is kept
-            only as long as that law requires and remains protected by this DPA; and copies in
-            database backups persist until the backups rotate, seven days later, during which
-            they are used only to
-            recover the service. Export what you need before closing your account, because after
-            deletion I cannot return it. The data on your engineers' machines is not affected.
+            When the owner deletes the org from the dashboard, everyone is signed out at once
+            and I delete all Customer Data 7 days later, including sessions, pull request reports
+            and tokens. The same applies when the Terms end and I mark the org deleted. I will
+            confirm the deletion by email on request. Two exceptions: data I must keep under EU
+            or Member State law is kept only as long as that law requires and remains protected
+            by this DPA; and copies in database backups persist until the backups rotate, seven
+            days after the deletion, during which they are used only to recover the service.
+            Export what you need before closing the org, because after deletion I cannot return
+            it. The data on your engineers' machines is not affected.
           </p>
 
           <h2 id="s10">10. Audits and information</h2>

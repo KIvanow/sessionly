@@ -690,6 +690,9 @@ const MIGRATIONS: string[] = [
   // send this. These rows are not judged. A report that names no one still
   // stores null, and is.
   `UPDATE pull_requests SET reporter_name = '' WHERE reporter_name IS NULL`,
+  // The owner can mark the organisation deleted. The row stays until the
+  // purge, which runs as the database's owner and is what removes it.
+  toApp(`UPDATE ON orgs`),
 ];
 
 /**
