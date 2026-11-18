@@ -37,10 +37,11 @@ export function wanted(input) {
   const range = /^(\d+)\s*-\s*(\d+)$/.exec(text);
   if (range) {
     const [from, to] = [Number(range[1]), Number(range[2])];
-    return from >= 1 && from <= to ? { from, to } : null;
+    // Beyond what a number holds exactly, one less is the same number again.
+    return from >= 1 && from <= to && Number.isSafeInteger(to) ? { from, to } : null;
   }
   const number = Number(text);
-  return text !== "" && Number.isInteger(number) && number >= 1 ? { number } : null;
+  return text !== "" && Number.isSafeInteger(number) && number >= 1 ? { number } : null;
 }
 
 /**

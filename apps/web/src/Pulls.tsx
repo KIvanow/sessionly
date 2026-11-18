@@ -35,6 +35,8 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
   const [matching, setMatching] = useState<number | null>(null);
   const [matched, setMatched] = useState<string | null>(null);
   useEffect(() => setMatched(null), [state, scope]);
+  // The filters stay as they are meanwhile: what comes of it is about these.
+  const busy = matching !== null;
   async function matchAgain() {
     setMatching(0);
     setMatched(null);
@@ -44,13 +46,14 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
         ? ` ${count(done.needs_report)} ${done.needs_report === 1 ? "was" : "were"} last reported before that could be done, and ${done.needs_report === 1 ? "waits" : "wait"} for the Action to report ${done.needs_report === 1 ? "it" : "them"} once more.`
         : "";
       setMatched(`Matched ${count(done.matched)} ${done.matched === 1 ? "pull request" : "pull requests"} against the sessions held now.${waiting}`);
-      summary.reload();
-      list.reload();
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) onSignOut();
       setMatched((err as Error).message);
     } finally {
       setMatching(null);
+      // Also after a failure: the ones before it were matched.
+      summary.reload();
+      list.reload();
     }
   }
 
@@ -59,7 +62,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
       <form className="filters" aria-label="Filters" onSubmit={(e) => e.preventDefault()}>
         <label>
           Period
-          <select value={scope.period} onChange={(e) => setScope({ ...scope, period: e.target.value, pick: null })}>
+          <select value={scope.period} disabled={busy} onChange={(e) => setScope({ ...scope, period: e.target.value, pick: null })}>
             <option value="7">Last 7 days</option>
             <option value="30">Last 30 days</option>
             <option value="90">Last 90 days</option>
@@ -68,14 +71,14 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
         </label>
         <label>
           Repository
-          <select value={scope.repo} onChange={(e) => setScope({ ...scope, repo: e.target.value })}>
+          <select value={scope.repo} disabled={busy} onChange={(e) => setScope({ ...scope, repo: e.target.value })}>
             <option value="">All repositories</option>
             {repos.map((r) => <option key={r}>{r}</option>)}
           </select>
         </label>
         <label>
           Pull requests
-          <select value={state} onChange={(e) => setState(e.target.value)}>
+          <select value={state} disabled={busy} onChange={(e) => setState(e.target.value)}>
             <option value="merged">Merged</option>
             <option value="open">Open</option>
             <option value="closed">Closed without merging</option>

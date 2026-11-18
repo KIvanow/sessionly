@@ -544,9 +544,11 @@ export async function rematchPull(
   repo: string,
   number: number,
 ): Promise<PullMatch | "needs_report" | null> {
+  // The row is held until this is stored, so that a report arriving meanwhile
+  // waits, and its files are not left beside figures made from the ones before.
   const [r] = await db.query(
     `SELECT head_repo, head_ref, created_at, first_event, first_files, last_files, committers, aliases
-     FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
+     FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
     [db.orgId, repo, number],
   );
   if (!r) return null;

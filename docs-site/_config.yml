@@ -1,0 +1,62 @@
+title: Sessionly Docs
+description: Documentation for Sessionly, a searchable ledger of AI coding agent sessions
+theme: just-the-docs
+
+# The Docs workflow overrides these two with what GitHub Pages reports, so the
+# site also works at the address Pages gives it before the domain is set up.
+url: https://docs.sessionly.dev
+baseurl: ""
+
+plugins:
+  - jekyll-relative-links
+
+# Articles link to each other by file name (install.md), which also works when
+# they are read on GitHub. This turns those links into the pages' addresses.
+relative_links:
+  enabled: true
+  collections: false
+
+# Every page gets the theme's layout without asking for it.
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+search_enabled: true
+search.heading_level: 3
+
+color_scheme: sessionly
+
+# Header links
+aux_links:
+  "← sessionly.dev":
+    - "https://sessionly.dev"
+  "GitHub":
+    - "https://github.com/KIvanow/sessionly"
+  "Report Issue":
+    - "https://github.com/KIvanow/sessionly/issues/new"
+
+aux_links_new_tab: false
+
+# Footer
+footer_content: "Sessionly is open source under Apache-2.0. <a href=\"https://sessionly.dev\">sessionly.dev</a>"
+
+gh_edit_link: true
+gh_edit_link_text: "Edit this page on GitHub"
+gh_edit_repository: "https://github.com/KIvanow/sessionly"
+gh_edit_branch: "main"
+gh_edit_source: docs-site
+gh_edit_view_mode: "tree"
+
+back_to_top: true
+back_to_top_text: "Back to top"
+enable_copy_code_button: true
+heading_anchors: true
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor
+  - README.md
+  - _config.pages.yml

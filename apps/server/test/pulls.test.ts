@@ -550,4 +550,7 @@ test("the pull requests the list's filters choose are matched again, some at a t
   const third = await call(tokens.admin, "POST", "/prs/match", { repo: "acme/many", state: "merged" });
   assert.deepEqual([third.body.matched, third.body.remaining], [0, 0]);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { state: "maybe" })).status, 400);
+  // a body that cannot be read is not taken as one that asks for all of them
+  assert.equal((await call(tokens.admin, "POST", "/prs/match")).status, 400);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", [])).status, 400);
 });

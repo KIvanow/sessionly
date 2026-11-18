@@ -557,7 +557,11 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   // and `number`), or those the list's filters choose, some at a time.
   api.post("/prs/match", async (c) => {
     adminsOnly(c.get("principal"));
-    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    // A body that cannot be read is refused: taken as an empty one, it would
+    // ask for every pull request to be matched again.
+    const sent: unknown = await c.req.json().catch(() => null);
+    if (typeof sent !== "object" || sent === null || Array.isArray(sent)) throw new BadRequest("the body is not a JSON object");
+    const body = sent as Record<string, unknown>;
     const said = (key: string) => (typeof body[key] === "string" && body[key] !== "" ? (body[key] as string) : undefined);
     if (body.number !== undefined) {
       const repo = said("repo");

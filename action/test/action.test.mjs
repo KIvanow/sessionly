@@ -449,7 +449,7 @@ test("the pr-number input names one pull request, several, or the latest", () =>
   assert.deepEqual(wanted(" ALL "), { all: true });
   assert.deepEqual(wanted("20-60"), { from: 20, to: 60 });
   assert.deepEqual(wanted("20 - 20"), { from: 20, to: 20 });
-  for (const not of ["", undefined, "0", "-3", "1.5", "60-20", "0-5", "some", "7,8"]) assert.equal(wanted(not), null, String(not));
+  for (const not of ["", undefined, "0", "-3", "1.5", "60-20", "0-5", "some", "7,8", "1-18014398509481984", "18014398509481984"]) assert.equal(wanted(not), null, String(not));
 });
 
 /**
