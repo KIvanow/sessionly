@@ -21,6 +21,12 @@ export interface Me {
   org_name?: string;
   /** Whether the token is a person's own: they signed in, or it is for their machines. */
   signed_in?: boolean;
+  /**
+   * The owner of the organisation. True when this person signed in and is
+   * the owner, and for the bootstrap admin token of a server that is not
+   * hosted. A token for a machine is not, even the owner's.
+   */
+  owner: boolean;
 }
 
 /** A service people sign in with. */

@@ -102,7 +102,7 @@ older Action by that rule.
 
 | | Who | |
 |---|---|---|
-| `GET /me` | person | Who the token is, and in which organisation. |
+| `GET /me` | person | Who the token is, and in which organisation. `owner` is true when they signed in as the organisation's owner. A token for a machine is not an owner, even the owner's own. On a server that is not hosted, the admin token from the environment is the owner and nobody else is. |
 | `GET /me/tokens` | person | Their own tokens. |
 | `POST /me/tokens` | person | A new `member` token for a machine of theirs: `{"name": "…"}`, optional. The token is in the answer, once. |
 | `DELETE /me/tokens/{id}` | person | Revokes one of them. |

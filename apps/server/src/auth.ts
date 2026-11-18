@@ -27,6 +27,14 @@ export interface Principal {
    * theirs. Any other token's address is what whoever made the token typed.
    */
   signedIn: boolean;
+  /**
+   * The owner of the organisation. They signed in, and that person is the
+   * owner: a token for a machine is not, even one made for the owner. On a
+   * server that is not hosted there is no such person, and the admin token
+   * set in the environment is the owner. It can export; deleting the
+   * organisation is not offered there.
+   */
+  owner: boolean;
 }
 
 /** The one organisation of a self-hosted install. */
@@ -128,6 +136,7 @@ export async function authenticate(
   db: Db,
   header: string | undefined,
   bootstrap?: Bootstrap,
+  options?: { hosted?: boolean },
 ): Promise<Principal | null> {
   const token = /^Bearer\s+(\S+)$/i.exec(header ?? "")?.[1];
   if (!token) return null;
@@ -135,7 +144,18 @@ export async function authenticate(
   if (bootstrap?.token) {
     const expected = Buffer.from(hash(bootstrap.token));
     if (timingSafeEqual(Buffer.from(digest), expected)) {
-      return { orgId: DEFAULT_ORG, email: bootstrap.email, name: null, role: "admin", tokenId: null, userId: null, signedIn: false };
+      return {
+        orgId: DEFAULT_ORG,
+        email: bootstrap.email,
+        name: null,
+        role: "admin",
+        tokenId: null,
+        userId: null,
+        signedIn: false,
+        // A server of one team has no owner. This token is that, for export.
+        // A hosted service has owners of its own, and this token is not one.
+        owner: options?.hosted !== true,
+      };
     }
   }
   // The one question asked before an organisation is known, so as the
@@ -149,6 +169,7 @@ export async function authenticate(
     role: Role;
     user_id: string | null;
     sign_in: string | null;
+    user_role: string | null;
   }>(
     `UPDATE tokens SET last_used_at = now()
      WHERE token_hash = $1 AND revoked_at IS NULL
@@ -158,7 +179,8 @@ export async function authenticate(
        -- was being issued at that very moment
        AND (tokens.user_id IS NULL OR EXISTS (
          SELECT 1 FROM users WHERE users.id = tokens.user_id AND users.removed_at IS NULL))
-     RETURNING id, org_id, email, name, role, user_id, sign_in`,
+     RETURNING id, org_id, email, name, role, user_id, sign_in,
+       (SELECT users.role FROM users WHERE users.id = tokens.user_id) AS user_role`,
     [digest],
   );
   const row = rows[0];
@@ -171,6 +193,9 @@ export async function authenticate(
         tokenId: row.id,
         userId: row.user_id,
         signedIn: row.sign_in !== null,
+        // Signed in as the owner. A token for their laptop says the same
+        // person and is not: it must not be able to delete the organisation.
+        owner: row.sign_in !== null && row.user_role === "owner",
       }
     : null;
 }

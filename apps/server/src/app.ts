@@ -274,7 +274,9 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const accounts = options.accounts ?? {};
 
   api.use("*", async (c, next) => {
-    const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap);
+    const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap, {
+      hosted: options.accounts?.hosted === true,
+    });
     if (!principal) return c.json({ error: "missing or unknown token" }, 401);
     if (accounts.ratePerMinute) {
       const within = await allowed(ownerDb, `token:${principal.tokenId ?? "environment"}`, 60, accounts.ratePerMinute);
@@ -414,7 +416,12 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   api.get("/ping", (c) => c.json(whoami(c.get("principal"))));
   api.get("/me", async (c) => {
     const p = c.get("principal");
-    return c.json({ ...whoami(p), org_name: await orgName(c.get("db")), signed_in: p.userId !== null });
+    return c.json({
+      ...whoami(p),
+      org_name: await orgName(c.get("db")),
+      signed_in: p.userId !== null,
+      owner: p.owner,
+    });
   });
 
   // Sign out: the token someone got by signing in stops working.

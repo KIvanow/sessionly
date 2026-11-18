@@ -1036,3 +1036,45 @@ test("a hosted service refuses what only a single install may have", () => {
   assert.match(hostedProblems({}).join(), /postgres:\/\//);
   assert.match(hostedProblems({ ...set, DATABASE_URL: "file:/data" }).join(), /postgres:\/\//);
 });
+
+test("a person who signed in as the owner is the owner, and a token for their machine is not", async () => {
+  await db.query(
+    `INSERT INTO users (id, org_id, email, role) VALUES
+       ('usr_ownera', 'org-a', 'own@a.example', 'owner'),
+       ('usr_admina', 'org-a', 'adm@a.example', 'admin')`,
+  );
+  const signedIn = await db.asOrg("org-a", (scoped) =>
+    createToken(scoped, { email: "own@a.example", role: "admin", userId: "usr_ownera", signIn: "github" }),
+  );
+  const laptop = await db.asOrg("org-a", (scoped) =>
+    createToken(scoped, { email: "own@a.example", role: "admin", userId: "usr_ownera" }),
+  );
+  const admin = await db.asOrg("org-a", (scoped) =>
+    createToken(scoped, { email: "adm@a.example", role: "admin", userId: "usr_admina", signIn: "github" }),
+  );
+  assert.equal((await call(signedIn.token, "GET", "/me")).body.owner, true);
+  // Same person, and an admin's token, which is what an owner signs in with.
+  // It was not a sign-in, so it cannot export or delete the organisation.
+  assert.equal((await call(laptop.token, "GET", "/me")).body.owner, false);
+  assert.equal((await call(laptop.token, "GET", "/me")).body.role, "admin");
+  assert.equal((await call(admin.token, "GET", "/me")).body.owner, false);
+  assert.equal((await call(a.admin, "GET", "/me")).body.owner, false);
+  assert.equal((await call(a.member, "GET", "/me")).body.owner, false);
+
+  const ask = async (server: ReturnType<typeof createApp>) => {
+    const response = await server.request("/api/v1/me", { headers: { authorization: "Bearer bootstrap-secret" } });
+    return { status: response.status, body: (await response.json()) as { owner: boolean; role: string } };
+  };
+  // A server of one team has no owner. Its admin token from the environment is.
+  const selfHosted = createApp(db, { bootstrap: { token: "bootstrap-secret", email: "root@example.com" } });
+  assert.equal((await ask(selfHosted)).status, 200);
+  assert.equal((await ask(selfHosted)).body.owner, true);
+  // A hosted service has owners of its own. That token is an admin of the
+  // default organisation and not an owner.
+  const hosted = createApp(db, {
+    bootstrap: { token: "bootstrap-secret", email: "root@example.com" },
+    accounts: { hosted: true },
+  });
+  assert.equal((await ask(hosted)).body.owner, false);
+  assert.equal((await ask(hosted)).body.role, "admin");
+});

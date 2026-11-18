@@ -295,6 +295,7 @@ test("storing a session and stopping its repository at the same moment: the sess
     tokenId: null,
     userId: null,
     signedIn: false,
+    owner: false,
   });
   const left = async (email: string) => {
     const [row] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM sessions WHERE owner_email = $1`, [email]);
