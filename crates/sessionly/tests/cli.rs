@@ -12,6 +12,13 @@ fn sessionly(home: &Path) -> Command {
         .env_remove("CODEX_HOME")
         // no background runs unless a test asks for them
         .env("SESSIONLY_NO_AUTO", "1")
+        // A release check that is not pointed elsewhere asks GitHub. A file
+        // that is not there fails at once, and a failed check is silent. A
+        // test that wants an answer sets this itself.
+        .env(
+            "SESSIONLY_RELEASE_LATEST",
+            format!("file://{}", home.join("no-such-release.json").display()),
+        )
         .env_remove("SESSIONLY_TOKEN")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("USERPROFILE");
