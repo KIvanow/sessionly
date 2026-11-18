@@ -13,7 +13,7 @@ import {
   type Role,
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
-import { writeExport } from "./export.ts";
+import { exportLines } from "./export.ts";
 import { allowed, giveBack, take } from "./limits.ts";
 import { PROVIDER_NAMES } from "./oauth.ts";
 import { emailFrom, newUserId, offers, openRoutes, type Accounts } from "./signup.ts";
@@ -387,7 +387,9 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   // The organisation's data, as a file. Read a page at a time, each in its
   // own transaction, and before the one transaction the rest of a request
   // runs in: the embedded database has a single connection, and holding it
-  // for the whole download would stop every other request.
+  // for the whole download would stop every other request. The next page is
+  // read when the client takes another line, so a slow download does not
+  // queue the rest of the organisation.
   api.get("/export", async (c) => {
     const p = c.get("principal");
     if (!p.owner) return c.json({ error: "only the owner of an organisation can do this" }, 403);
@@ -403,15 +405,23 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     c.header("content-type", "application/x-ndjson; charset=utf-8");
     c.header("content-disposition", `attachment; filename="${filename}"`);
     const each = <T>(fn: (db: OrgDb) => Promise<T>) => ownerDb.asOrg(c.get("principal").orgId, fn);
+    const encoder = new TextEncoder();
+    const lines = exportLines(each, exportedAt);
     const body = new ReadableStream({
-      async start(controller) {
-        const encoder = new TextEncoder();
+      async pull(controller) {
         try {
-          await writeExport((row) => controller.enqueue(encoder.encode(`${JSON.stringify(row)}\n`)), each, exportedAt);
-          controller.close();
+          const next = await lines.next();
+          if (next.done) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(encoder.encode(`${JSON.stringify(next.value)}\n`));
         } catch (err) {
           controller.error(err);
         }
+      },
+      async cancel() {
+        await lines.return(undefined);
       },
     });
     return c.body(body);

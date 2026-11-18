@@ -112,17 +112,16 @@ export function exclusionPage(db: OrgDb, after: ExclusionKey | null): Promise<Re
   );
 }
 
-async function pages<C>(
-  write: (row: Record<string, unknown>) => void,
+async function* pages<C>(
   each: <T>(fn: (db: OrgDb) => Promise<T>) => Promise<T>,
   type: string,
   load: (db: OrgDb, after: C | null) => Promise<Record<string, unknown>[]>,
   cursorOf: (row: Record<string, unknown>) => C,
-): Promise<void> {
+): AsyncGenerator<Record<string, unknown>> {
   let after: C | null = null;
   for (;;) {
     const rows = await each((db) => load(db, after));
-    for (const row of rows) write(line(type, row));
+    for (const row of rows) yield line(type, row);
     const last = rows.at(-1);
     if (rows.length < PAGE || !last) return;
     const next = cursorOf(last);
@@ -133,31 +132,30 @@ async function pages<C>(
 }
 
 /**
- * Write every line of the export. `each` runs one page in its own
+ * Every line of the export, one page at a time. The next page is read only
+ * when the caller asks for the line after this one, so a slow reader does
+ * not queue the rest of the organisation. `each` runs one page in its own
  * transaction and must not keep it afterwards.
  */
-export async function writeExport(
-  write: (row: Record<string, unknown>) => void,
+export async function* exportLines(
   each: <T>(fn: (db: OrgDb) => Promise<T>) => Promise<T>,
   exportedAt: string,
-): Promise<void> {
+): AsyncGenerator<Record<string, unknown>> {
   const version = serverVersion();
-  await each(async (db) => {
-    write(await orgLine(db, version, exportedAt));
-  });
-  await pages(write, each, "user", userPage, (row) => String(row.id));
-  await pages(write, each, "session", sessionPage, (row) => ({
+  yield await each(async (db) => orgLine(db, version, exportedAt));
+  yield* pages(each, "user", userPage, (row) => String(row.id));
+  yield* pages(each, "session", sessionPage, (row) => ({
     machine_id: String(row.machine_id),
     source: String(row.source),
     session_id: String(row.session_id),
   }));
-  await pages(write, each, "pull_request", pullPage, (row) => ({
+  yield* pages(each, "pull_request", pullPage, (row) => ({
     repo: String(row.repo),
     number: Number(row.number),
   }));
-  await pages(write, each, "repo_exclusion", exclusionPage, (row) => ({
+  yield* pages(each, "repo_exclusion", exclusionPage, (row) => ({
     owner_email: String(row.owner_email),
     repo: String(row.repo),
   }));
-  await pages(write, each, "token", tokenPage, (row) => String(row.id));
+  yield* pages(each, "token", tokenPage, (row) => String(row.id));
 }

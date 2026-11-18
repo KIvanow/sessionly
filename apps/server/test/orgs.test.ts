@@ -10,6 +10,7 @@ import pg from "pg";
 import { ApiError, createApp, failureLog, type Env } from "../src/app.ts";
 import { spawnSync } from "node:child_process";
 import { createToken, hash } from "../src/auth.ts";
+import { exportLines } from "../src/export.ts";
 import { purgeDeletedOrgs, restoreOrg } from "../src/orgs.ts";
 import { APP_ROLE, appRoleOf, capped, count, DB_COUNTS, FIRST_ORG_MIGRATION, misset, openDb, versionProblem, type Db } from "../src/db.ts";
 import { hostedProblems, reason } from "../src/run.ts";
@@ -1186,6 +1187,20 @@ test("an owner can export every row of the organisation, and an admin or a membe
   assert.equal(own.lines[0]?.type, "org");
   assert.equal(own.lines[0]?.id, "default");
   assert.doesNotMatch(own.text, /token_hash|out-only-preview|other-org-marker/);
+});
+
+test("an export reads the next page only after its line was asked for", async () => {
+  let calls = 0;
+  const lines = exportLines(async (fn) => {
+    calls += 1;
+    return db.asOrg("default", fn);
+  }, "2026-11-18T00:00:00.000Z");
+  const first = await lines.next();
+  assert.equal(first.value?.type, "org");
+  // The organisation line is one transaction. Nothing after it has been read.
+  assert.equal(calls, 1);
+  await lines.return(undefined);
+  assert.equal(calls, 1);
 });
 
 async function raw(
