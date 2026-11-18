@@ -182,13 +182,20 @@ a server of version 0.5.0 or older has to be reported once more before it can be
   before counts all its lines as its own, its cost is marked as an estimate where a session
   of it has lines in other pull requests, and what the lines it was opened with cost is not
   known. For a while after the upgrade the server is still counting the line hashes of the
-  sessions it held, and a pull request of one not counted yet says so in place of a cost. Divided by the lines of the sessions that have a cost figure, it
-  gives the cost of an agent line. The cost of a line that got through review, where that is
-  known, is what the agent's lines the pull request was opened with cost, divided by those
-  that survived; a pull request none of whose agent lines survived still says what they
+  sessions it held, and a pull request of one not counted yet says so in place of a cost.
+  Divided by what the lines of the sessions that have a cost figure count as, it gives the
+  cost of an agent line: a line that is in two pull requests is half a line in each, at a
+  whole line's price. Sessions with no cost figure are left out of it, so it reads "at least"
+  only when a session's cost leaves out requests. The cost of a line that got through
+  review, where that is known, is what the agent's lines the pull request was opened with
+  cost, divided by those that survived. Which lines of each session survived is not kept,
+  so those are taken to be shared with other pull requests as the lines it was opened with
+  were on the whole. A pull request none of whose agent lines survived still says what they
   cost, and lines that moved from one pull request to another are paid for once between
-  the two. Both read "at least" when a session of those lines has no cost figure, or not all
-  of it. A session that is deleted takes its lines with it: the pull request keeps how many
+  the two. This one reads "at least" when a session of those lines has no cost figure, or
+  not all of it. Both are marked `~` when the cost they come from is an estimate. A
+  session's own share is marked `~` too when it may be counted in another pull request. A
+  session that is deleted takes its lines with it: the pull request keeps how many
   it had, not which. Three things to read with it. It is **the cost of the matched
   sessions, not of making the pull request**: lines that are not an agent's carry none. It
   is **a floor** when a session has no cost figure, has one that leaves out requests to

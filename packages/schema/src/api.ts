@@ -477,7 +477,12 @@ export interface PullCost {
    * be said. Counted among `sessions_without_cost`.
    */
   sessions_uncounted: number;
-  /** What an agent line of it cost: `usd` for each line of the sessions that have a cost figure. */
+  /**
+   * What an agent line of it cost: `usd` for what the lines of the sessions
+   * that have a cost figure count as, a line that is in several pull
+   * requests being shared out between them. A floor when one of those has
+   * a cost that leaves requests out.
+   */
   per_agent_line_usd: number | null;
   /**
    * What the agent lines it was opened with cost: their sessions' cost, for
@@ -488,9 +493,13 @@ export interface PullCost {
   opened_usd: number | null;
   /** Whether a session with lines among those has no cost figure, or one that leaves requests out: both figures of it are then floors. */
   opened_is_floor: boolean;
-  /** Whether any of that cost is an estimate. */
+  /** Whether any of that cost is an estimate, or of a session that is unshared (see `sessions_unshared`). */
   opened_estimated: boolean;
-  /** What an agent line that survived review cost: `opened_usd` for each of them still there. Null when none is. */
+  /**
+   * What an agent line that survived review cost: `opened_usd` for each of
+   * them still there, those being shared out with other pull requests as the
+   * lines it was opened with were on the whole. Null when none is.
+   */
   per_surviving_line_usd: number | null;
 }
 
@@ -573,9 +582,21 @@ export interface PullSession {
    * `lines` to `hashed_lines`. A line that is also in other pull requests
    * (but for ones closed without merging) is shared out between them, so
    * the session is counted once. Null where the session has no cost figure,
-   * or has been deleted.
+   * or has been deleted, or is `uncounted`.
    */
   cost_share_usd: number | null;
+  /**
+   * It has a cost, and what share of it is here is not known yet: after an
+   * upgrade the server counts the line hashes of the sessions it held, and
+   * this one's are still to be counted.
+   */
+  uncounted: boolean;
+  /**
+   * It has lines in other pull requests too, and in one of them which lines
+   * they are was not kept: the same ones, perhaps, counted in each. Its
+   * share here is then an estimate (see `PullCost.sessions_unshared`).
+   */
+  unshared: boolean;
   session: Pick<
     SessionRow,
     "owner_email" | "runtime" | "title" | "started_at" | "active_ms" | "cost_usd" | "cost_source" | "primary_model" | "prompts"

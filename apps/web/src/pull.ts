@@ -1,6 +1,6 @@
 // A pull request's page: where it is, how current its figures are, and its
 // reviews and comments counted by whose they are.
-import type { PullCost, PullFeedback, PullMatches, PullRow } from "@sessionly/schema";
+import type { PullCost, PullFeedback, PullMatches, PullRow, PullSession } from "@sessionly/schema";
 import { count, dateTime, usd, usdEach } from "./format.ts";
 
 /** Whether a cost is a floor: a session of it has no cost figure, or one that leaves requests out. */
@@ -62,11 +62,26 @@ export function pullCostNote(c: PullCost | null): string {
       : null;
   const each = [
     // A cost that leaves requests out, over all of that session's lines, is a floor for each.
-    c.per_agent_line_usd != null ? `${unsure(c.sessions_with_cost_partial > 0, false)}${usdEach(c.per_agent_line_usd)} per agent line` : null,
+    c.per_agent_line_usd != null ? `${unsure(c.sessions_with_cost_partial > 0, c.estimated)}${usdEach(c.per_agent_line_usd)} per agent line` : null,
     // There when the cost now is not: the lines with a cost went, and ones without stayed.
     c.per_surviving_line_usd != null ? `${opened}${usdEach(c.per_surviving_line_usd)} per line that survived review` : null,
   ];
   return [...each, gone, missing, partial, unshared].filter(Boolean).join("; ");
+}
+
+/**
+ * A session's cost in a pull request, as its row has it: "~" before an
+ * estimate, null where there is none, and why, where the figure alone does
+ * not say.
+ */
+export function sessionShare(s: Pick<PullSession, "cost_share_usd" | "uncounted" | "unshared" | "session">): { text: string | null; why: string | null } {
+  if (s.uncounted) return { text: null, why: "its share is still being worked out since the upgrade" };
+  if (!s.session || s.cost_share_usd == null) return { text: null, why: null };
+  const estimated = s.session.cost_source !== "recorded" || s.unshared;
+  return {
+    text: `${estimated ? "~" : ""}${usdEach(s.cost_share_usd)}`,
+    why: s.unshared ? "it has lines in other pull requests, perhaps these: an estimate until they are shared out" : null,
+  };
 }
 
 /** The small print under the cost of several pull requests. */

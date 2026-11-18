@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { byOf, countFeedback, feedbackLabel, matchAll, matchedLine, pullCost, pullCostNote, pullHref, pullsCostNote, web } from "../src/pull.ts";
+import { byOf, countFeedback, feedbackLabel, matchAll, matchedLine, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web } from "../src/pull.ts";
 
 test("a pull request says how current its figures are", () => {
   const when = (iso: string | null) => `<${iso}>`;
@@ -99,14 +99,17 @@ test("a pull request's cost is said with what is not sure about it", () => {
   const floor = { ...whole, estimated: true, sessions_without_cost: 1, opened_usd: null, per_surviving_line_usd: null };
   assert.equal(pullCost(floor), "at least ~$4.10");
   assert.equal(pullCost(floor, "≥ "), "≥ ~$4.10");
-  assert.equal(pullCostNote(floor), "$0.10 per agent line; 1 of 3 sessions has no cost figure");
+  // what a line cost is of the same estimate
+  assert.equal(pullCostNote(floor), "~$0.10 per agent line; 1 of 3 sessions has no cost figure");
   // so is one a session of which has a cost that leaves requests out
   const partial = { ...whole, sessions_with_cost_partial: 1, opened_usd: null, per_surviving_line_usd: null };
   assert.equal(pullCost(partial), "at least $4.10");
   // and so is what a line of it cost
   assert.equal(pullCostNote(partial), "at least $0.10 per agent line; the cost of 1 session leaves requests out");
   // lines kept before which they are was, of a session with lines elsewhere: an estimate, and how to make it more
-  assert.match(pullCostNote({ ...whole, estimated: true, sessions_unshared: 1 }), /; 1 session has lines in other pull requests, perhaps these: match those again to share them out$/);
+  assert.match(pullCostNote({ ...whole, estimated: true, sessions_unshared: 1 }), /^~\$0\.10 per agent line; .*; 1 session has lines in other pull requests, perhaps these: match those again to share them out$/);
+  // a floor and an estimate both
+  assert.match(pullCostNote({ ...partial, estimated: true }), /^at least ~\$0\.10 per agent line; /);
   // where one of those pull requests cannot be matched again, the advice is not to match it again
   assert.match(pullCostNote({ ...whole, estimated: true, sessions_unshared: 1, sessions_unshared_for_good: 1 }), /perhaps these: one of those has to be reported again by the Action before they can be shared out$/);
   // what the lines it was opened with cost can be an estimate when the cost now is not
@@ -140,6 +143,26 @@ test("a pull request's cost is said with what is not sure about it", () => {
   assert.match(pullCostNote(null), /were not kept/);
   // what a line cost is small, and is not shown as nothing
   assert.equal(pullCostNote({ ...whole, per_agent_line_usd: 0.00004, opened_usd: null, per_surviving_line_usd: null }), "$0.000040 per agent line");
+});
+
+test("a session's share of what it cost says what is not sure about it", () => {
+  const known = { cost_usd: 6, cost_source: "recorded" } as any;
+  const s = { cost_share_usd: 3, uncounted: false, unshared: false, session: known };
+  assert.deepEqual(sessionShare(s), { text: "$3.00", why: null });
+  // of a cost that is an estimate
+  assert.deepEqual(sessionShare({ ...s, session: { ...known, cost_source: "estimated" } }), { text: "~$3.00", why: null });
+  // its lines may be counted in another pull request too
+  assert.deepEqual(sessionShare({ ...s, unshared: true }), {
+    text: "~$3.00",
+    why: "it has lines in other pull requests, perhaps these: an estimate until they are shared out",
+  });
+  // it has a cost, and its share is not known yet: that is said, not left as a bare dash
+  assert.deepEqual(sessionShare({ ...s, cost_share_usd: null, uncounted: true }), { text: null, why: "its share is still being worked out since the upgrade" });
+  // no cost figure, or deleted since
+  assert.deepEqual(sessionShare({ ...s, cost_share_usd: null }), { text: null, why: null });
+  assert.deepEqual(sessionShare({ ...s, session: null }), { text: null, why: null });
+  // what a share of a line is, is not shown as nothing
+  assert.deepEqual(sessionShare({ ...s, cost_share_usd: 0.00004 }), { text: "$0.000040", why: null });
 });
 
 test("the cost of several pull requests says what it leaves out", () => {

@@ -750,6 +750,11 @@ const MIGRATIONS: string[] = [
  * A batch that fails (payloads can be large) is tried again as a smaller
  * one, down to one session; a session that fails alone is passed over, and
  * is among the `failed`, to be tried the next time.
+ *
+ * It waits for no session another transaction holds: that one may be
+ * deleting several sessions, in an order of its own (stopping a
+ * repository), and the two could each wait for the other. A session held is
+ * passed over and is among the `failed` too.
  */
 export async function countHashedLines(db: Db, atOnce = 50): Promise<{ counted: number; failed: number }> {
   const inPulls = `AND EXISTS (SELECT 1 FROM pull_sessions p WHERE p.org_id = u.org_id AND p.machine_id = u.machine_id
@@ -772,22 +777,32 @@ export async function countHashedLines(db: Db, atOnce = 50): Promise<{ counted: 
       );
       if (keys.length === 0) break;
       try {
-        const rows = await db.transaction(
-          (tx) =>
-            tx.query(
-              `UPDATE sessions s SET hashed_lines =
-                 (SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
-                  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'lines') = 'array' THEN s.payload->'lines' ELSE '[]'::jsonb END) AS l
-                  WHERE jsonb_typeof(l->'hashes') = 'array')
-               FROM jsonb_to_recordset($1::jsonb) AS k(org_id text, machine_id text, source text, session_id text)
-               WHERE s.org_id = k.org_id AND s.machine_id = k.machine_id AND s.source = k.source
-                 AND s.session_id = k.session_id AND s.hashed_lines IS NULL
-               RETURNING 1`,
-              [JSON.stringify(keys)],
-            ),
-          PATIENT,
-        );
+        const { rows, held } = await db.transaction(async (tx) => {
+          // The ones no other transaction holds, held now, in the order they were chosen in.
+          const free = await tx.query(
+            `SELECT s.org_id, s.machine_id, s.source, s.session_id FROM sessions s
+             JOIN jsonb_to_recordset($1::jsonb) AS k(org_id text, machine_id text, source text, session_id text)
+               ON s.org_id = k.org_id AND s.machine_id = k.machine_id AND s.source = k.source AND s.session_id = k.session_id
+             ORDER BY s.org_id, s.machine_id, s.source, s.session_id
+             FOR UPDATE OF s SKIP LOCKED`,
+            [JSON.stringify(keys)],
+          );
+          const rows = await tx.query(
+            `UPDATE sessions s SET hashed_lines =
+               (SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
+                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'lines') = 'array' THEN s.payload->'lines' ELSE '[]'::jsonb END) AS l
+                WHERE jsonb_typeof(l->'hashes') = 'array')
+             FROM jsonb_to_recordset($1::jsonb) AS k(org_id text, machine_id text, source text, session_id text)
+             WHERE s.org_id = k.org_id AND s.machine_id = k.machine_id AND s.source = k.source
+               AND s.session_id = k.session_id AND s.hashed_lines IS NULL
+             RETURNING 1`,
+            [JSON.stringify(free)],
+          );
+          // One deleted meanwhile is counted with them: the next time, it is not there to try.
+          return { rows, held: keys.length - free.length };
+        }, PATIENT);
         counted += rows.length;
+        failed += held;
         last = keys[keys.length - 1];
         some = Math.min(atOnce, some * 2);
       } catch (err) {

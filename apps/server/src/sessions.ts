@@ -182,13 +182,18 @@ async function dropOwn(db: OrgDb, key: unknown[], email: string, refiled: string
  * A deleted session's lines go from the pull requests that kept which ones
  * they were. That it had lines there, and how many, stays: the pull request
  * then says a session of it was deleted since.
+ *
+ * Without them its lines in each count whole, as `weigh` counts those of a
+ * pull request whose lines were not kept. They go from all its pull requests
+ * at once, so none is left with lines shared out with them, and what the
+ * other sessions' lines count as is their own affair.
  */
 async function forgetLines(db: OrgDb, sessions: Record<string, unknown>[]): Promise<void> {
   if (sessions.length === 0) return;
   // After any report that is storing these now: it then finds the session gone, or this finds what it stored.
   await holdPullSessions(db);
   await db.query(
-    `UPDATE pull_sessions p SET matched = NULL, opened_matched = NULL
+    `UPDATE pull_sessions p SET matched = NULL, opened_matched = NULL, weight = p.lines, opened_weight = p.opened_lines
      FROM jsonb_to_recordset($2::jsonb) AS gone(machine_id text, source text, session_id text)
      WHERE p.org_id = $1 AND p.machine_id = gone.machine_id AND p.source = gone.source
        AND p.session_id = gone.session_id AND (p.matched IS NOT NULL OR p.opened_matched IS NOT NULL)`,

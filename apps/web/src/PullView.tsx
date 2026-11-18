@@ -1,8 +1,8 @@
 import type { PullDetail, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
-import { type By, byOf, countFeedback, feedbackLabel, matchedLine, pullCost, pullCostNote, web } from "./pull.ts";
-import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName, usdEach } from "./format.ts";
+import { type By, byOf, countFeedback, feedbackLabel, matchedLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
+import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
 import { sessionHref } from "./Sessions.tsx";
@@ -300,6 +300,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
 function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
   const known = s.session;
   const name = known?.title || `Session ${s.session_id.slice(0, 8)}`;
+  const its = sessionShare(s);
   return (
     <tr>
       <td className="title">
@@ -310,11 +311,13 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
       <td className="nowrap">{toolName(s.source)}</td>
       <td className="nowrap">{known?.primary_model ? modelName(known.primary_model) : "–"}</td>
       <td className="nowrap">{dateTime(known?.started_at)}</td>
-      <td className="num">
-        {known && s.cost_share_usd != null ? (
+      <td className="num" title={its.why ?? undefined}>
+        {its.text != null ? (
           <>
-            {cost(s.cost_share_usd, known.cost_source, usdEach)} <span className="muted">of {cost(known.cost_usd, known.cost_source)}</span>
+            {its.text} <span className="muted">of {cost(known?.cost_usd ?? null, known?.cost_source ?? null)}</span>
           </>
+        ) : s.uncounted ? (
+          <span className="muted">not known yet</span>
         ) : (
           "–"
         )}
