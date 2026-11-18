@@ -56,7 +56,8 @@ shows a warning that the token is missing.
 | `ignore` | lock files, `*.min.js`, `*.snap`, `*.map` | Files to leave out, separated by commas or new lines: a file name, a path, or a pattern with `*`. Add generated files here. |
 | `other-names` | | Names clones of the repository may still have as their origin, as `owner/name`: for example from before it was renamed or moved to another owner. |
 | `backfill` | `false` | For a pull request from before the Action was added: first report it as it was when opened, worked out from its commits, so what review changed can still be measured. Not possible after a rebase or squash of the branch. |
-| `pr-number` | | The pull request to report, when the workflow was not started by one. |
+| `pr-number` | | The pull request to report, when the workflow was not started by one. Also `all` for the repository's latest, or `20-60` for those numbered from one to the other (see below). |
+| `since` | 90 days ago | With `pr-number: all`, the date from which pull requests are reported, by when they were created. |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 Outputs: `lines` (tracked lines the pull request adds) and `agent-lines` (how many a coding
@@ -64,7 +65,8 @@ agent wrote).
 
 ## Pull requests from before the Action
 
-A manually started workflow can report existing pull requests one at a time:
+A manually started workflow can report existing pull requests: one by its number, the latest
+with `all`, or those numbered from one to another with `20-60`.
 
 ```yaml
 on:
@@ -87,11 +89,28 @@ jobs:
           backfill: true
 ```
 
+Reporting several is for bringing a repository up to date: after adding the Action, or after
+updating it to a version that reports more than the one before. It differs from reporting one:
+
+- **At most 100 in one run.** Each takes six requests to GitHub (eight with `backfill`), and a
+  workflow's token is allowed a thousand an hour. `all` takes the latest 100 created since
+  `since`; when there are more, the run's warning names the range to start it with next
+  (`1-412`, say).
+- **Nothing is written on the pull requests.** No comment is posted or changed, whatever
+  `comment` says. The run's summary page has one row for each.
+- **One that cannot be reported does not stop the rest.** It is named in a warning, and the
+  run fails at the end only with `fail-on-error`.
+- In a range, numbers that belong to issues are passed over.
+
+Sessions that were uploaded after a pull request's last report need none of this: the Pull
+requests page of the dashboard matches them without asking GitHub ("Match again").
+
 ## What is sent
 
 To the Sessionly server, for the pull request: repository, number, title, link, who opened it,
-state and dates, the email addresses on its commits (used to pick whose sessions count, not
-stored), counts of commits, reviews and review comments, and per changed file its path and a
+state and dates, the email addresses on its commits (used to pick whose sessions count; the
+server stores a hash of each, not the address, so that the lines can be matched again when
+sessions arrive later), counts of commits, reviews and review comments, and per changed file its path and a
 hash of each added line that has a letter or digit.
 
 For each review and comment: who made it (their GitHub login, and whether that is a bot), when,

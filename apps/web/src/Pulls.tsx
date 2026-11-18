@@ -1,11 +1,11 @@
-import type { LinesBy, PullList, PullRow, PullSummary } from "@sessionly/schema";
+import type { LinesBy, PullList, PullMatches, PullRow, PullSummary } from "@sessionly/schema";
 import { useEffect, useState } from "react";
-import { query } from "./api.ts";
+import { api, ApiError, query } from "./api.ts";
 import { scopeParams, type Scope } from "./App.tsx";
 import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
-import { pullHref, web } from "./pull.ts";
+import { matchAll, pullHref, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -31,6 +31,28 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
   const list = useApi<PullList>(token, `/prs${query({ ...params, limit: PAGE, offset })}`, onSignOut);
   const everything = useApi<PullList>(token, "/prs?limit=1", onSignOut);
   const total = summary.data?.total;
+  // Matching the listed pull requests again: how many are done, then what came of it.
+  const [matching, setMatching] = useState<number | null>(null);
+  const [matched, setMatched] = useState<string | null>(null);
+  useEffect(() => setMatched(null), [state, scope]);
+  async function matchAgain() {
+    setMatching(0);
+    setMatched(null);
+    try {
+      const done = await matchAll((body) => api<PullMatches>(token, "/prs/match", { method: "POST", body }), params, setMatching);
+      const waiting = done.needs_report
+        ? ` ${count(done.needs_report)} ${done.needs_report === 1 ? "was" : "were"} last reported before that could be done, and ${done.needs_report === 1 ? "waits" : "wait"} for the Action to report ${done.needs_report === 1 ? "it" : "them"} once more.`
+        : "";
+      setMatched(`Matched ${count(done.matched)} ${done.matched === 1 ? "pull request" : "pull requests"} against the sessions held now.${waiting}`);
+      summary.reload();
+      list.reload();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) onSignOut();
+      setMatched((err as Error).message);
+    } finally {
+      setMatching(null);
+    }
+  }
 
   return (
     <>
@@ -98,7 +120,17 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
         <section className="card" aria-label="Pull requests">
           <div className="card-head">
             <h2>Pull requests</h2>
+            <button
+              type="button"
+              className="quiet"
+              disabled={matching !== null}
+              title="Count sessions that were uploaded after a pull request was last reported"
+              onClick={matchAgain}
+            >
+              {matching === null ? "Match these to sessions again" : `Matching… ${count(matching)} done`}
+            </button>
           </div>
+          {matched && <p className="muted hint" role="status">{matched}</p>}
           <div className="scroll">
             <table className="rows">
               <thead>

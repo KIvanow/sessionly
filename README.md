@@ -1039,11 +1039,24 @@ yours to switch off: `comment: false`. Other inputs:
 `ignore` (files to leave out; lock files by default), `other-names` (names the repository's
 clones may still have as their origin after a rename or transfer), `backfill` (for a pull
 request from before the Action was added, first report it as it was when opened, worked out
-from its commits) and `pr-number` (to report one from a manually started workflow). See
-[action/README.md](action/README.md).
+from its commits), `pr-number` (to report one from a manually started workflow, or several:
+`all` for the latest, `20-60` for a range, at most 100 in one run and without comments) and
+`since` (how far back `all` goes; 90 days by default). See [action/README.md](action/README.md).
+
+**Figures that are behind.** A pull request's lines are matched to sessions when the Action
+reports it, and the last report is usually the one for its merge. A session uploaded after that
+(the machine was offline, the session was still going) is not in the figures. **Match again** on
+a pull request's page, or **Match these to sessions again** above the list, matches the lines as
+last reported against the sessions the server holds now, without asking GitHub; the page says
+when that was last done. What only GitHub knows (reviews, comments, the title, new commits)
+comes with a report: run the workflow by hand for those. A pull request last reported to
+a server of version 0.5.0 or older has to be reported once more before it can be matched again.
 
 **API behind it:** `PUT /api/v1/prs` (the Action's report; `ci` or `admin`), `GET /api/v1/prs`
-and `GET /api/v1/prs/summary` (admins; filters `repo`, `state`, `since`). For sessions:
+and `GET /api/v1/prs/summary` (admins; filters `repo`, `state`, `since`),
+`POST /api/v1/prs/match` (admins; `repo` and `number` for one pull request, or the list's
+filters for up to 100 at a time: send the answer's `started` back until `remaining` is 0). For
+sessions:
 `GET /api/v1/summary?by=user|repo|model|tool|day|runtime`, `GET /api/v1/sessions`
 (filters `user`, `repo`, `model`, `model_is`, `tool`, `runtime` (`local` or `cloud`), `q`,
 `since`, `until`, paging `limit`, `offset`),

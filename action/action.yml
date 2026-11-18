@@ -45,7 +45,16 @@ inputs:
       request the server already knows.
     default: "false"
   pr-number:
-    description: The pull request to report. Only needed when the workflow was not started by a pull request.
+    description: >-
+      The pull request to report. Only needed when the workflow was not
+      started by a pull request. Also "all", for the repository's latest
+      (see since), or two numbers such as "20-60" for those numbered from one
+      to the other: at most 100 in one run, and no comment is posted on them.
+    default: ""
+  since:
+    description: >-
+      With pr-number "all": report the pull requests created on or after this
+      date (2026-08-01). The last 90 days when not set.
     default: ""
   fail-on-error:
     description: Fail the job if the report cannot be made or sent. By default a problem is only a warning.
@@ -75,4 +84,5 @@ runs:
         SESSIONLY_OTHER_NAMES: ${{ inputs.other-names }}
         SESSIONLY_BACKFILL: ${{ inputs.backfill }}
         SESSIONLY_PR_NUMBER: ${{ inputs.pr-number }}
+        SESSIONLY_SINCE: ${{ inputs.since }}
         SESSIONLY_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}

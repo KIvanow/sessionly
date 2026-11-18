@@ -35,7 +35,17 @@ import {
   type GroupBy,
 } from "./sessions.ts";
 import type { PullReport, Telemetry } from "@sessionly/schema";
-import { BadReport, checkReport, getPull, listPulls, storePull, summarizePulls, type PullFilters } from "./pulls.ts";
+import {
+  BadReport,
+  checkReport,
+  getPull,
+  listPulls,
+  rematchPull,
+  rematchPulls,
+  storePull,
+  summarizePulls,
+  type PullFilters,
+} from "./pulls.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
 /** A record lists every tool call, so a long session is several megabytes. */
@@ -542,6 +552,30 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const number = wholeNumber(query.number, 0, 2 ** 31 - 1, "number");
     const pull = await getPull(c.get("db"), query.repo, number);
     return pull ? c.json(pull) : c.json({ error: "no such pull request" }, 404);
+  });
+  // Match lines again against the sessions held now: one pull request (`repo`
+  // and `number`), or those the list's filters choose, some at a time.
+  api.post("/prs/match", async (c) => {
+    adminsOnly(c.get("principal"));
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const said = (key: string) => (typeof body[key] === "string" && body[key] !== "" ? (body[key] as string) : undefined);
+    if (body.number !== undefined) {
+      const repo = said("repo");
+      if (!repo) throw new BadRequest("repo is required");
+      if (!Number.isInteger(body.number) || (body.number as number) < 1) throw new BadRequest("number must be a pull request number");
+      const matched = await rematchPull(c.get("db"), repo, body.number as number);
+      if (!matched) return c.json({ error: "no such pull request" }, 404);
+      if (matched === "needs_report") {
+        throw new ApiError(
+          409,
+          "needs_report",
+          "this pull request was last reported before what it is matched by was kept; the Action has to report it once more",
+        );
+      }
+      return c.json(matched);
+    }
+    const filters = pullFilters({ repo: said("repo") ?? "", state: said("state") ?? "", since: said("since") ?? "" });
+    return c.json(await rematchPulls(c.get("db"), filters, time(said("started"), "started")));
   });
   api.get("/prs", async (c) => {
     adminsOnly(c.get("principal"));

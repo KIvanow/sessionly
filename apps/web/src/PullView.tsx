@@ -1,7 +1,7 @@
 import type { PullDetail, PullSession } from "@sessionly/schema";
 import { useState } from "react";
-import { query } from "./api.ts";
-import { type By, byOf, countFeedback, feedbackLabel, web } from "./pull.ts";
+import { api, ApiError, query } from "./api.ts";
+import { type By, byOf, countFeedback, feedbackLabel, matchedLine, web } from "./pull.ts";
 import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -13,7 +13,22 @@ const BY: Record<By, string> = { people: "People", bots: "Bots", author: "The au
 /** One pull request: what agents wrote of it, in which sessions, and how review went. */
 export function PullView({ token, repo, number, onSignOut }: { token: string; repo: string; number: number; onSignOut: () => void }) {
   const [show, setShow] = useState<"all" | By>("all");
+  const [matching, setMatching] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
   const found = useApi<PullDetail>(token, `/prs/detail${query({ repo, number })}`, onSignOut);
+  async function matchAgain() {
+    setMatching(true);
+    setProblem(null);
+    try {
+      await api(token, "/prs/match", { method: "POST", body: { repo, number } });
+      found.reload();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) onSignOut();
+      setProblem((err as Error).message);
+    } finally {
+      setMatching(false);
+    }
+  }
   if (found.error) return <p role="alert">{found.error}</p>;
   if (!found.data) return <Loader label="Loading the pull request" />;
   const p = found.data;
@@ -40,6 +55,15 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
           , opened by {p.author} {dateTime(p.created_at)}, {state}
           {p.head_ref && <>, from <code>{p.head_ref}</code>{p.base_ref && <> into <code>{p.base_ref}</code></>}</>}
         </p>
+        <p>
+          {matchedLine(p)}{" "}
+          {p.matchable && (
+            <button type="button" className="quiet" disabled={matching} onClick={matchAgain}>
+              {matching ? "Matching…" : "Match again"}
+            </button>
+          )}
+        </p>
+        {problem && <p role="alert">{problem}</p>}
       </div>
       <section className="tiles" aria-label="Totals">
         <Tile label="Lines added" value={count(a.now.lines)} note={`in ${count(p.commits)} ${p.commits === 1 ? "commit" : "commits"}`} />

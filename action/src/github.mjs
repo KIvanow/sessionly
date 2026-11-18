@@ -34,6 +34,28 @@ export async function all(api, path, limit = 5000) {
   return items;
 }
 
+/**
+ * The numbers of a repository's pull requests created at or after `since`
+ * (a time in milliseconds), the latest first, `most` at most. `more` is how
+ * many others there are from then on, which were left out.
+ */
+export async function listPulls(api, repo, since, most) {
+  const numbers = [];
+  let more = 0;
+  for (let page = 1; ; page += 1) {
+    const batch = await api.request(
+      "GET",
+      `/repos/${repo}/pulls?state=all&sort=created&direction=desc&per_page=100&page=${page}`,
+    );
+    for (const pull of batch) {
+      if (Date.parse(pull.created_at) < since) return { numbers, more };
+      if (numbers.length < most) numbers.push(pull.number);
+      else more += 1;
+    }
+    if (batch.length < 100) return { numbers, more };
+  }
+}
+
 /** Everything about a pull request that goes into a report. */
 export async function readPull(api, repo, number) {
   const base = `/repos/${repo}/pulls/${number}`;

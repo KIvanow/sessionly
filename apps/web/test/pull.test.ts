@@ -1,7 +1,41 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { byOf, countFeedback, feedbackLabel, pullHref, web } from "../src/pull.ts";
+import { byOf, countFeedback, feedbackLabel, matchAll, matchedLine, pullHref, web } from "../src/pull.ts";
+
+test("a pull request says how current its figures are", () => {
+  const when = (iso: string | null) => `<${iso}>`;
+  const reported = "2026-11-17T19:13:00.000Z";
+  assert.equal(
+    matchedLine({ updated_at: reported, matched_at: reported, matchable: true }, when),
+    `Last reported by the Action <${reported}>. Sessions uploaded since then are not counted yet.`,
+  );
+  assert.equal(
+    matchedLine({ updated_at: reported, matched_at: "2026-11-17T21:00:00.000Z", matchable: true }, when),
+    `Last reported by the Action <${reported}>; its lines were matched to sessions again <2026-11-17T21:00:00.000Z>.`,
+  );
+  assert.match(matchedLine({ updated_at: reported, matched_at: reported, matchable: false }, when), /count with its next report\.$/);
+});
+
+test("the listed pull requests are matched again until none remain", async () => {
+  const asked: Record<string, string | undefined>[] = [];
+  const answers = [
+    { matched: 100, remaining: 3, needs_report: 2, started: "t0" },
+    { matched: 3, remaining: 0, needs_report: 2, started: "t0" },
+  ];
+  const heard: number[] = [];
+  const done = await matchAll(async (body) => (asked.push(body), answers[asked.length - 1]!), { repo: "acme/web", state: "merged" }, (n) => heard.push(n));
+  assert.deepEqual(done, { matched: 103, needs_report: 2 });
+  assert.deepEqual(asked, [
+    { repo: "acme/web", state: "merged", started: undefined },
+    { repo: "acme/web", state: "merged", started: "t0" },
+  ]);
+  assert.deepEqual(heard, [100, 103]);
+  // a server that matches none of what remains is not asked forever
+  let times = 0;
+  await matchAll(async () => ((times += 1), { matched: 0, remaining: 5, needs_report: 0, started: "t0" }), {});
+  assert.equal(times, 1);
+});
 
 const one = (kind: PullFeedback["kind"], author: string, more: Partial<PullFeedback> = {}): PullFeedback => ({
   kind,

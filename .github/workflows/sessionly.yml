@@ -7,11 +7,12 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, closed]
   pull_request_review:
     types: [submitted]
-  # A pull request from before this workflow was added, one at a time.
+  # Pull requests from before this workflow was added, or from before the
+  # Action reported what it does now.
   workflow_dispatch:
     inputs:
       number:
-        description: The pull request to report
+        description: The pull request to report; "all" for the latest, or a range such as 20-60
         required: true
 
 permissions: {}

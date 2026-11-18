@@ -661,6 +661,19 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE sessions ADD COLUMN repo_root text`,
   `ALTER TABLE sessions ADD COLUMN cwd text`,
   `UPDATE sessions SET repo_root = payload #>> '{session,repo,root}', cwd = payload #>> '{session,cwd}'`,
+  // What a pull request's lines are matched by, beside what was kept
+  // already: whose sessions count, and the other names of its repository.
+  // With them its lines can be matched again without a new report, when
+  // sessions arrive after the last one. Whose sessions count is kept as a
+  // hash of each address its commits were made with, never the address: it
+  // only has to be told which of the people with sessions here they are.
+  // Null on a pull request last reported before they were kept: that one
+  // waits for its next report.
+  `ALTER TABLE pull_requests ADD COLUMN committers jsonb`,
+  `ALTER TABLE pull_requests ADD COLUMN aliases jsonb`,
+  // When its lines were last matched: by a report, or again since.
+  `ALTER TABLE pull_requests ADD COLUMN matched_at timestamptz DEFAULT now()`,
+  `UPDATE pull_requests SET matched_at = updated_at`,
 ];
 
 /**
