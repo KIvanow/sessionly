@@ -203,6 +203,12 @@ const REVIEW_STATES = ["approved", "changes_requested", "commented", "dismissed"
 const ACTION_VERSION = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:-[0-9A-Za-z.-]{1,50})?$/;
 /** Reports from this client are the Action's. Any other name is not judged. */
 const ACTION_REPORTER = "sessionly-action";
+/**
+ * A reporter that was present but did not fit. Not `''`, which marks rows
+ * stored before a report said who sent it, and not the Action: another
+ * client, so it is not judged.
+ */
+export const UNKNOWN_REPORTER = "unknown";
 
 /** The three numbers of an Action version, ignoring a pre-release suffix. */
 function actionNumbers(text: string | null): number[] | null {
@@ -229,9 +235,11 @@ export function olderAction(version: string | null, current: string): boolean {
 
 /**
  * Whether a stored report counts as an older Action. One that named no
- * reporter does. Another client's does not, and neither does a row marked
- * `''` from before reports said who sent them. A `sessionly-action` version
- * this server cannot read does not either: it is not known to be old.
+ * reporter does. Another client's does not, including one stored as
+ * `unknown` because its reporter was present but did not fit, and neither
+ * does a row marked `''` from before reports said who sent them. A
+ * `sessionly-action` version this server cannot read does not either: it
+ * is not known to be old.
  */
 function reportIsOlder(name: string | null, version: string | null): boolean {
   if (name != null && name !== ACTION_REPORTER) return false;
@@ -308,13 +316,16 @@ async function repoReporters(db: OrgDb, repos: string[]): Promise<Map<string, Re
 }
 
 /**
- * Who sent a report, when the name fits. A version that does not is left
- * out and the name is still kept. The report is still taken either way.
+ * Who sent a report. No `reporter`, or `null`, is an Action from before
+ * this was sent. One that is present but does not fit is kept as
+ * `UNKNOWN_REPORTER`, so it is not read as that older Action. A version
+ * that does not fit is left out and the name is still kept.
  */
 function checkReporter(value: unknown): PullReport["reporter"] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (value == null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) return { name: UNKNOWN_REPORTER };
   const r = value as Record<string, unknown>;
-  if (typeof r.name !== "string" || r.name.length < 1 || r.name.length > 50) return undefined;
+  if (typeof r.name !== "string" || r.name.length < 1 || r.name.length > 50) return { name: UNKNOWN_REPORTER };
   if (typeof r.version === "string" && ACTION_VERSION.test(r.version)) return { name: r.name, version: r.version };
   return { name: r.name };
 }

@@ -5,7 +5,7 @@ import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
 import type { Db } from "../src/db.ts";
 import { testDb, tokenFor } from "./helpers.ts";
-import { attribute, breakdown, CURRENT_ACTION, type Claim, MATCH_AT_ONCE, olderAction, writers } from "../src/pulls.ts";
+import { attribute, breakdown, CURRENT_ACTION, type Claim, MATCH_AT_ONCE, olderAction, UNKNOWN_REPORTER, writers } from "../src/pulls.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
 const h = (n: number) => n.toString(16).padStart(16, "0");
@@ -522,20 +522,51 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
     assert.equal(await versionOf(42), null, version);
     assert.equal((await at(42)).body.reporter_older, false, version);
   }
-  // A name that does not fit is the same as none: an older Action.
+  // A reporter that is present but does not fit is another client, stored
+  // under a fixed name. It is not an older Action. No reporter at all still is.
   const name = "n".repeat(50);
   for (const reporter of [
     { name: "x".repeat(51), version: "0.2.0" },
     { name: "", version: "0.2.0" },
     { version: "0.2.0" },
+    "acme",
     "sessionly-action 0.2.0",
-    null,
   ]) {
     const response = await call(tokens.ci, "PUT", "/prs", pinned({ number: 42, event: "synchronize", reporter }));
     assert.equal(response.status, 200, JSON.stringify(reporter));
     assert.equal(await versionOf(42), null, JSON.stringify(reporter));
-    assert.equal((await at(42)).body.reporter_older, true, JSON.stringify(reporter));
+    assert.equal((await at(42)).body.reporter_older, false, JSON.stringify(reporter));
   }
+  const [keptName] = await db.query<{ reporter_name: string | null }>(
+    `SELECT reporter_name FROM pull_requests WHERE repo = $1 AND number = 42`,
+    [repo],
+  );
+  assert.equal(keptName?.reporter_name, UNKNOWN_REPORTER);
+  const absent = await call(tokens.ci, "PUT", "/prs", pinned({ number: 42, event: "synchronize", reporter: null }));
+  assert.equal(absent.status, 200);
+  assert.equal(await versionOf(42), null);
+  assert.equal((await at(42)).body.reporter_older, true);
+  const [noName] = await db.query<{ reporter_name: string | null }>(
+    `SELECT reporter_name FROM pull_requests WHERE repo = $1 AND number = 42`,
+    [repo],
+  );
+  assert.equal(noName?.reporter_name, null);
+
+  // A repository whose only report is that kind of client is not named.
+  // One that names no reporter still is.
+  const garbled = "github.com/acme/garbled";
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({ repo: garbled, number: 1, reporter: "acme" }))).status, 200);
+  const garbledPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(garbled)}&number=1`)).body;
+  assert.equal(garbledPage.reporter_version, null);
+  assert.equal(garbledPage.reporter_older, false);
+  assert.equal(garbledPage.repo_reporter_older, false);
+  assert.deepEqual((await call(tokens.admin, "GET", "/prs/summary?repo=acme/garbled")).body.older_actions, []);
+  const missing = "github.com/acme/no-reporter";
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({ repo: missing, number: 1 }))).status, 200);
+  const missingPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(missing)}&number=1`)).body;
+  assert.equal(missingPage.reporter_older, true);
+  assert.equal(missingPage.repo_reporter_older, true);
+  assert.deepEqual((await call(tokens.admin, "GET", "/prs/summary?repo=acme/no-reporter")).body.older_actions, [missing]);
   // A name of 50 characters is accepted, extra fields and all. It is not the
   // Action, so its version is not kept and the report is not an older Action.
   const kept = await call(tokens.ci, "PUT", "/prs", pinned({

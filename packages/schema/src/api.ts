@@ -373,15 +373,18 @@ export interface PullReport {
    */
   feedback_total?: number;
   /**
-   * Who sent the report. Left out by an Action from before this was sent.
-   * The name is 1 to 50 characters; one that is not is dropped, and the
-   * report is still accepted. The version is `X.Y.Z`, each number at most 9
-   * digits, or that with a pre-release suffix (`-` and up to 50 of `0-9`,
-   * `A-Z`, `a-z`, `.` or `-`).
-   * A version that is neither is left out and the name is still kept. The
-   * version is stored only when the name is `sessionly-action`. Another
-   * client is not compared with the Action, and neither is a
-   * `sessionly-action` version this server cannot read.
+   * Who sent the report. Left out, or null, by an Action from before this
+   * was sent, and that report is stored with no name. A reporter that is
+   * present but does not fit (not an object, or a name that is missing,
+   * empty or longer than 50 characters) is stored as `unknown`, another
+   * client, and is not read as that older Action. The name of one that
+   * does fit is 1 to 50 characters. The version is `X.Y.Z`, each number at
+   * most 9 digits, or that with a pre-release suffix (`-` and up to 50 of
+   * `0-9`, `A-Z`, `a-z`, `.` or `-`). A version that is neither is left
+   * out and the name is still kept. The version is stored only when the
+   * name is `sessionly-action`. Another client is not compared with the
+   * Action, and neither is a `sessionly-action` version this server cannot
+   * read.
    */
   reporter?: { name: string; version?: string };
 }
@@ -493,8 +496,9 @@ export interface PullRow {
   reporter_version: string | null;
   /**
    * This pull request was last reported by an older Action. A report from
-   * another client is not, and neither is a `sessionly-action` version this
-   * server cannot read. A report that named no one still is.
+   * another client is not, and neither is one whose reporter was present
+   * but did not fit, nor a `sessionly-action` version this server cannot
+   * read. A report that named no one still is.
    */
   reporter_older: boolean;
 }
@@ -563,8 +567,9 @@ export interface PullDetail extends PullRow {
    * The repository's most recent report from the Action, or that named no
    * reporter, is from an older Action, and none from the last 30 days came
    * from the current Action or a newer one. A pull request another client
-   * reported is skipped, and so is one stored before a report said who sent
-   * it. A repository with no such report is not old.
+   * reported is skipped, including one whose reporter did not fit, and so
+   * is one stored before a report said who sent it. A repository with no
+   * such report is not old.
    */
   repo_reporter_older: boolean;
   /**

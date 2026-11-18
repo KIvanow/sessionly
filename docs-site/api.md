@@ -75,11 +75,13 @@ A report may name who sent it: `reporter`, `{ "name": "sessionly-action", "versi
 The name is 1 to 50 characters. The version is three numbers of at most 9 digits each, or
 those with a pre-release suffix such as `0.3.0-rc.1` (`0.10.0` counts; `v0.2.0`, `2024.11`
 and `1.2.1000000000` do not). A version that does not fit is left out and the name is still
-kept; a name that does not fit is left out altogether. The report is stored either way. The
-version is kept only when the name is `sessionly-action`. The three numbers are compared, and
-when they are equal a pre-release is older than the release. A pre-release of a higher version
-is not an older Action. A `sessionly-action` version the server cannot read is not one either.
-Another client's report is stored under its own name, and is not treated as an older Action.
+kept. A reporter that is present but does not fit is stored as `unknown`, which is not the
+Action and is not treated as an older one. Only a report that leaves `reporter` out, or sends
+null, is stored with no name. The report is stored either way. The version is kept only when
+the name is `sessionly-action`. The three numbers are compared, and when they are equal a
+pre-release is older than the release. A pre-release of a higher version is not an older
+Action. A `sessionly-action` version the server cannot read is not one either. Another
+client's report is stored under its own name, and is not treated as an older Action.
 A report that names no reporter still is: an Action from before this was sent. A row stored
 before a report said who sent it is marked with an empty name, which a client cannot send,
 and is not judged.
@@ -88,8 +90,9 @@ and is not judged.
 this server knows, and `repo_reporter_older`: the repository's most recent report from the
 Action, or that named no reporter, is from an older Action, and none from the last 30 days
 came from the current Action or a newer one. A pull request another client reported is
-skipped, and a repository with no such report is not old. `repo_reporter_version` is the
-version that most recent report named, which is what the repository notice quotes. A current
+skipped, including one whose reporter did not fit, and a repository with no such report
+is not old. `repo_reporter_version` is the version that most recent report named, which
+is what the repository notice quotes. A current
 report keeps the notice off for 30 days, whichever pull request it was, and a re-run of an
 older one in that time does not bring it back.
 `GET /prs/summary` gives `older_actions`, the repositories in the filter that report with an
