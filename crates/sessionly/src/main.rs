@@ -957,13 +957,16 @@ fn print_settings(config: &config::Config) {
         if !config.update_check {
             "off"
         } else if crate::runtime::in_cloud() {
-            // The same order `note_release` uses: a cloud run never asks,
-            // then a machine that will not start a background run, then one
-            // with no server. A server named only in the environment counts,
-            // because that is the config the run loads.
+            // A cloud run never asks. Then a machine that will not start a
+            // background run: auto-sync is off, or SESSIONLY_NO_AUTO is set,
+            // which is the check `maybe_spawn` makes. Then one with no server.
+            // A server named only in the environment counts, because that is
+            // the config the run loads.
             "on, but not asked in a cloud environment"
         } else if !config.auto_sync {
             "on, but nothing asks while auto-sync is off"
+        } else if std::env::var_os("SESSIONLY_NO_AUTO").is_some() {
+            "on, but nothing asks while SESSIONLY_NO_AUTO is set"
         } else if config.clone().with_environment().server.is_none() {
             "on, but nothing asks until a server is set (`sessionly connect`)"
         } else {

@@ -2485,7 +2485,14 @@ fn a_background_upload_notes_a_newer_release_once_a_day() {
     assert!(!check.exists(), "a local ledger asked for a release");
 
     // The check is on, and auto-sync is on, but there is no server to upload to.
-    let alone = stdout(sessionly(home.path()).arg("status").output().unwrap());
+    // SESSIONLY_NO_AUTO is set on the helper, and would be said first.
+    let alone = stdout(
+        sessionly(home.path())
+            .arg("status")
+            .env_remove("SESSIONLY_NO_AUTO")
+            .output()
+            .unwrap(),
+    );
     assert!(
         alone.contains(
             "Update:     on, but nothing asks until a server is set (`sessionly connect`)"
@@ -2516,6 +2523,10 @@ fn a_background_upload_notes_a_newer_release_once_a_day() {
     let line = format!("sessionly 99.0.0 is out (this is {this}). Run `sessionly update`.");
     let status = stdout(sessionly(home.path()).arg("status").output().unwrap());
     assert!(status.contains(&line), "{status}");
+    assert!(
+        status.contains("Update:     on, but nothing asks while SESSIONLY_NO_AUTO is set"),
+        "{status}"
+    );
     // Piped, so not a terminal: no line. `--json` is the machine-readable output.
     let listed = stdout(sessionly(home.path()).arg("list").output().unwrap());
     assert!(!listed.contains("99.0.0"), "{listed}");
