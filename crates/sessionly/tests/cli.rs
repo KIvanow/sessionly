@@ -2518,6 +2518,20 @@ fn a_background_upload_notes_a_newer_release_once_a_day() {
     );
     assert!(!json.contains("99.0.0"), "{json}");
 
+    // The check is on, but a background run is what asks, and auto-sync is what starts one.
+    stdout(
+        sessionly(home.path())
+            .args(["settings", "--auto-sync", "off"])
+            .output()
+            .unwrap(),
+    );
+    let held = stdout(sessionly(home.path()).arg("status").output().unwrap());
+    assert!(
+        held.contains("Update:     on, but nothing asks while auto-sync is off"),
+        "{held}"
+    );
+    assert!(held.contains("Auto sync:  off"), "{held}");
+
     stdout(
         sessionly(home.path())
             .args(["settings", "--update-check", "off"])

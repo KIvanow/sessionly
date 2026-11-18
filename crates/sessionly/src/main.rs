@@ -954,10 +954,12 @@ fn print_settings(config: &config::Config) {
     );
     println!(
         "Update:     {}",
-        if config.update_check {
-            "on (a background upload asks once a day, and status says when a newer release is out)"
-        } else {
+        if !config.update_check {
             "off"
+        } else if !config.auto_sync {
+            "on, but nothing asks while auto-sync is off"
+        } else {
+            "on (a background upload asks once a day, and status says when a newer release is out)"
         }
     );
     println!(
