@@ -114,6 +114,7 @@ older Action by that rule.
 | `POST /users` | `admin` | Adds one: `{"email": "…", "role": "member"}`, the role `admin` or `member`. `409` where neither Google nor GitHub is set up, or for someone already there; 30 an hour at most. |
 | `DELETE /users/{id}` | `admin` | Removes one. |
 | `POST /users/{id}/forget-account` | `admin` | Lets a person in with another Google or GitHub account than the one they have used. |
+| `GET /export` | owner | The organisation as JSON lines (`application/x-ndjson`), a download named `sessionly-<org>-<date>.jsonl`. One line each for the organisation (with the time and the server's version), each person (no sign-in account ids), each session (its columns and the payload as uploaded), each pull request (every column), each stopped repository, and each token (never the hash). Once every ten minutes per organisation (`429`, code `rate_limited`). An admin or a member is `403`. A token for a machine is not an owner, even the owner's. On a server that is not hosted, the admin token from the environment is. |
 
 ## Without a token
 

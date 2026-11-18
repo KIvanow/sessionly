@@ -245,12 +245,64 @@ function People({
   );
 }
 
+/** Download the organisation. Shown to its owner; a machine token is not one. */
+function OrganisationData({ token, onSignOut }: { token: string; onSignOut: () => void }) {
+  const [problem, setProblem] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function download() {
+    setProblem(null);
+    setBusy(true);
+    try {
+      const response = await fetch("/api/v1/export", { headers: { authorization: `Bearer ${token}` } });
+      if (response.status === 401) {
+        onSignOut();
+        return;
+      }
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error ?? `The download failed (HTTP ${response.status}).`);
+      }
+      const blob = await response.blob();
+      const named =
+        /filename="([^"]+)"/.exec(response.headers.get("content-disposition") ?? "")?.[1] ?? "sessionly.jsonl";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = named;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setProblem((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card">
+      <h2>Organisation data</h2>
+      <p className="muted">
+        One file with the organisation, its people, sessions, pull requests, stopped repositories and tokens. A
+        token's secret is not in it.
+      </p>
+      <button type="button" onClick={download} disabled={busy}>
+        {busy ? "Preparing the file…" : "Download everything (JSONL)"}
+      </button>
+      {problem && <p role="alert">{problem}</p>}
+    </section>
+  );
+}
+
 /** People and access tokens (admins only). */
 export function Team({
   token,
   people,
   address,
   myEmail,
+  owner,
   hosted,
   onSignOut,
 }: {
@@ -261,6 +313,8 @@ export function Team({
   address: string;
   /** The address of whoever is looking. */
   myEmail: string;
+  /** The person signed in is the owner. The card below is theirs. */
+  owner: boolean;
   /** A hosted service: its organisations have no license files to install. */
   hosted: boolean;
   onSignOut: () => void;
@@ -387,6 +441,7 @@ export function Team({
           </div>
         )}
       </section>
+      {owner && <OrganisationData token={token} onSignOut={onSignOut} />}
       {!hosted && <License token={token} onSignOut={onSignOut} />}
     </>
   );

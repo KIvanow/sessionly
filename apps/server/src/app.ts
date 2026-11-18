@@ -13,6 +13,7 @@ import {
   type Role,
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
+import { writeExport } from "./export.ts";
 import { allowed, giveBack, take } from "./limits.ts";
 import { PROVIDER_NAMES } from "./oauth.ts";
 import { emailFrom, newUserId, offers, openRoutes, type Accounts } from "./signup.ts";
@@ -380,6 +381,39 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     if (!perOrg) return limited(`an organisation can add ${INVITES_PER_HOUR} people an hour; try again later`);
     await next();
     if (c.res.status !== 201) await giveBack(ownerDb, perOrg);
+  });
+
+  // The organisation's data, as a file. Read a page at a time, each in its
+  // own transaction, and before the one transaction the rest of a request
+  // runs in: the embedded database has a single connection, and holding it
+  // for the whole download would stop every other request.
+  api.get("/export", async (c) => {
+    const p = c.get("principal");
+    if (!p.owner) return c.json({ error: "only the owner of an organisation can do this" }, 403);
+    // Counted once it is allowed. A refusal above takes none of the ten minutes.
+    if (!(await allowed(ownerDb, `export:${p.orgId}`, 600, 1))) {
+      return c.json(
+        { error: "an organisation can be exported once every ten minutes; try again later", code: "rate_limited" },
+        429,
+      );
+    }
+    const exportedAt = new Date().toISOString();
+    const filename = `sessionly-${p.orgId}-${exportedAt.slice(0, 10)}.jsonl`;
+    c.header("content-type", "application/x-ndjson; charset=utf-8");
+    c.header("content-disposition", `attachment; filename="${filename}"`);
+    const each = <T>(fn: (db: OrgDb) => Promise<T>) => ownerDb.asOrg(c.get("principal").orgId, fn);
+    const body = new ReadableStream({
+      async start(controller) {
+        const encoder = new TextEncoder();
+        try {
+          await writeExport((row) => controller.enqueue(encoder.encode(`${JSON.stringify(row)}\n`)), each, exportedAt);
+          controller.close();
+        } catch (err) {
+          controller.error(err);
+        }
+      },
+    });
+    return c.body(body);
   });
 
   // The rest of the request runs in one transaction, as the organisation of

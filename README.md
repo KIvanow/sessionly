@@ -81,6 +81,13 @@ Nothing is uploaded unless you connect a server, and by default an upload has no
 prompts or commands. More: [Server](docs-site/server.md), [Uploading](docs-site/uploading.md),
 and [Data and privacy](docs-site/data.md) for what is kept and what is sent.
 
+The owner of an organisation can download everything it has:
+
+- `GET /api/v1/export` — the organisation as JSONL (one object a line). Once every ten minutes.
+  A token for a machine cannot, even the owner's.
+
+The full list is the [API reference](docs-site/api.md).
+
 ## Pull requests
 
 A [GitHub Action](action/) reports each pull request to the server, which works out how much

@@ -357,7 +357,17 @@ function Shell({
       return <SessionView token={token} address={rest.join("/")} onSignOut={onSignOut} />;
     }
     if (page === "team" && isAdmin) {
-      return <Team token={token} people={people} address={address} myEmail={me.email} hosted={hosted} onSignOut={onSignOut} />;
+      return (
+        <Team
+          token={token}
+          people={people}
+          address={address}
+          myEmail={me.email}
+          owner={me.owner}
+          hosted={hosted}
+          onSignOut={onSignOut}
+        />
+      );
     }
     if (page === "connect") return <Connect token={token} me={me} onSignOut={onSignOut} />;
     if (page === "pull" && isAdmin && rest.length === 2 && /^[1-9]\d*$/.test(rest[1]!)) {

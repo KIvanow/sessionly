@@ -8,7 +8,7 @@ import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import pg from "pg";
 import { ApiError, createApp, failureLog, type Env } from "../src/app.ts";
-import { createToken } from "../src/auth.ts";
+import { createToken, hash } from "../src/auth.ts";
 import { APP_ROLE, appRoleOf, capped, count, DB_COUNTS, FIRST_ORG_MIGRATION, misset, openDb, versionProblem, type Db } from "../src/db.ts";
 import { hostedProblems, reason } from "../src/run.ts";
 import { adminRuns, newOrg, renameTestDb, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
@@ -1077,4 +1077,110 @@ test("a person who signed in as the owner is the owner, and a token for their ma
   });
   assert.equal((await ask(hosted)).body.owner, false);
   assert.equal((await ask(hosted)).body.role, "admin");
+});
+
+async function exported(token: string, server: ReturnType<typeof createApp> = app) {
+  const response = await server.request("/api/v1/export", { headers: { authorization: `Bearer ${token}` } });
+  const text = await response.text();
+  const lines =
+    response.status === 200
+      ? text
+          .split("\n")
+          .filter((line) => line !== "")
+          .map((line) => JSON.parse(line) as Record<string, unknown>)
+      : [];
+  return {
+    status: response.status,
+    text,
+    lines,
+    type: response.headers.get("content-type"),
+    disposition: response.headers.get("content-disposition"),
+    body: response.status === 200 ? undefined : (JSON.parse(text) as { error?: string; code?: string }),
+  };
+}
+
+test("an owner can export every row of the organisation, and an admin or a member cannot", async () => {
+  await newOrg(db, "org-out", "Out");
+  await newOrg(db, "org-other", "Other");
+  await db.query(
+    `INSERT INTO users (id, org_id, email, role, invited_at) VALUES
+       ('usr_out', 'org-out', 'own@out.example', 'owner', now())`,
+  );
+  const owner = await db.asOrg("org-out", (scoped) =>
+    createToken(scoped, { email: "own@out.example", role: "admin", userId: "usr_out", signIn: "github", name: "Owner" }),
+  );
+  const admin = await tokenFor(db, { email: "admin@out.example", role: "admin" }, "org-out");
+  const member = await tokenFor(db, { email: "mem@out.example", role: "member" }, "org-out");
+  const other = await tokenFor(db, { email: "eve@other.example", role: "member" }, "org-other");
+
+  // A refusal is not one of the ten minutes.
+  assert.equal((await exported(admin)).status, 403);
+  assert.equal((await exported(member)).status, 403);
+
+  const uploaded = session("out-s", {
+    user: { name: null, email: "mem@out.example" },
+    prompts: [{ text: { preview: "out-only-preview", chars: 16, sha256: "ab".repeat(32) } }],
+  });
+  assert.equal((await put(member, uploaded)).status, 200);
+  assert.equal((await call(admin, "PUT", "/prs", pull(7, { title: "out-only-pull" }))).status, 200);
+  assert.equal((await call(member, "PUT", "/repos/excluded", { repo: "github.com/out/secret" })).status, 200);
+  const marker = session("other-s", {
+    user: { name: null, email: "eve@other.example" },
+    prompts: [{ text: { preview: "other-org-marker", chars: 16, sha256: "cd".repeat(32) } }],
+  });
+  assert.equal((await put(other, marker)).status, 200);
+
+  const file = await exported(owner.token);
+  assert.equal(file.status, 200);
+  assert.match(file.type ?? "", /^application\/x-ndjson/);
+  assert.match(file.disposition ?? "", /attachment; filename="sessionly-org-out-\d{4}-\d{2}-\d{2}\.jsonl"/);
+  assert.equal(file.lines[0]?.type, "org");
+  assert.equal(file.lines[0]?.id, "org-out");
+  assert.equal(file.lines[0]?.name, "Out");
+  assert.equal(file.lines[0]?.version, "0.1.0");
+  assert.equal(typeof file.lines[0]?.created_at, "string");
+  assert.equal(typeof file.lines[0]?.exported_at, "string");
+
+  const of = (type: string) => file.lines.filter((row) => row.type === type);
+  const count = async (table: string, org = "org-out") => {
+    const [row] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM ${table} WHERE org_id = $1`, [org]);
+    return Number(row?.n);
+  };
+  assert.equal(of("user").length, await count("users"));
+  assert.ok(of("user").some((row) => row.email === "own@out.example" && row.role === "owner"));
+  assert.equal(of("user").some((row) => "sign_in_account" in row || "sign_in_provider" in row), false);
+  assert.equal(of("session").length, await count("sessions"));
+  assert.ok(of("session").some((row) => row.session_id === "out-s" && JSON.stringify(row.payload).includes("out-only-preview")));
+  assert.equal(of("pull_request").length, await count("pull_requests"));
+  const pullRow = of("pull_request").find((row) => row.title === "out-only-pull");
+  assert.ok(pullRow);
+  for (const column of ["first_files", "last_files", "attribution", "detail", "feedback"]) {
+    assert.ok(column in pullRow!, column);
+  }
+  assert.equal(of("repo_exclusion").length, await count("repo_exclusions"));
+  assert.ok(of("repo_exclusion").some((row) => row.repo === "github.com/out/secret" && row.owner_email === "mem@out.example"));
+  assert.equal(of("token").length, await count("tokens"));
+  assert.ok(of("token").some((row) => row.email === "own@out.example" && row.name === "Owner" && row.role === "admin"));
+  assert.doesNotMatch(file.text, /token_hash/);
+  assert.doesNotMatch(file.text, new RegExp(hash(owner.token)));
+  assert.doesNotMatch(file.text, new RegExp(owner.token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(file.text, /other-org-marker/);
+  assert.equal(of("session").some((row) => row.session_id === "other-s"), false);
+
+  const again = await exported(owner.token);
+  assert.equal(again.status, 429);
+  assert.equal(again.body?.code, "rate_limited");
+
+  // The bootstrap token of a server that is not hosted can export. A hosted one cannot.
+  const hosted = createApp(db, {
+    bootstrap: { token: "export-bootstrap", email: "root@example.com" },
+    accounts: { hosted: true },
+  });
+  const selfHosted = createApp(db, { bootstrap: { token: "export-bootstrap", email: "root@example.com" } });
+  assert.equal((await exported("export-bootstrap", hosted)).status, 403);
+  const own = await exported("export-bootstrap", selfHosted);
+  assert.equal(own.status, 200);
+  assert.equal(own.lines[0]?.type, "org");
+  assert.equal(own.lines[0]?.id, "default");
+  assert.doesNotMatch(own.text, /token_hash|out-only-preview|other-org-marker/);
 });
