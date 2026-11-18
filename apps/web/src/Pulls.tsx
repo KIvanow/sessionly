@@ -1,6 +1,6 @@
 import type { LinesBy, PullList, PullRow, PullSummary } from "@sessionly/schema";
 import { useEffect, useState } from "react";
-import { query } from "./api.ts";
+import { query, samePullFilters } from "./api.ts";
 import { scopeParams, type Scope } from "./App.tsx";
 import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
@@ -27,9 +27,17 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
   const [offset, setOffset] = useState(0);
   useEffect(() => setOffset(0), [state, scope]);
   const params = { since: scopeParams(scope, true).since, repo: scope.repo || undefined, state: state || undefined };
-  const summaryPath = `/prs/summary${query(params)}`;
+  const filters = query(params);
+  const summaryPath = `/prs/summary${filters}`;
   const summary = useApi<PullSummary>(token, summaryPath, onSignOut);
   const list = useApi<PullList>(token, `/prs${query({ ...params, limit: PAGE, offset })}`, onSignOut);
+  // The summary can arrive before the list. The notice waits until the rows
+  // on screen are for these filters too, so it does not name one repository
+  // above another's pull requests. Another page of the same list still counts.
+  const older =
+    summary.dataPath === summaryPath && samePullFilters(list.dataPath, filters)
+      ? (summary.data?.older_actions ?? [])
+      : [];
   const everything = useApi<PullList>(token, "/prs?limit=1", onSignOut);
   const total = summary.data?.total;
 
@@ -100,7 +108,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
           <div className="card-head">
             <h2>Pull requests</h2>
           </div>
-          <OlderActions repos={summary.dataPath === summaryPath ? (summary.data?.older_actions ?? []) : []} />
+          <OlderActions repos={older} />
           <div className="scroll">
             <table className="rows">
               <thead>
