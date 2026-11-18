@@ -11,3 +11,4 @@ apps/server/data
 **/.env
 .env.*
 **/.env.*
+docs-site

@@ -4,8 +4,7 @@
 #
 # For people to sign in with Google or GitHub, also set SESSIONLY_PUBLIC_URL
 # (where they reach the dashboard) and the id and secret of either, here in
-# the environment or in a .env file beside this one. See "Server" in
-# README.md.
+# the environment or in a .env file beside this one. See docs-site/server.md.
 services:
   server:
     build: .
@@ -21,7 +20,7 @@ services:
       SESSIONLY_GOOGLE_CLIENT_SECRET: ${SESSIONLY_GOOGLE_CLIENT_SECRET:-}
       SESSIONLY_GITHUB_CLIENT_ID: ${SESSIONLY_GITHUB_CLIENT_ID:-}
       SESSIONLY_GITHUB_CLIENT_SECRET: ${SESSIONLY_GITHUB_CLIENT_SECRET:-}
-      # The dashboard counts which of its pages are opened (README, "Dashboard"); "off" stops it.
+      # The dashboard counts which of its pages are opened (docs-site/dashboard.md); "off" stops it.
       SESSIONLY_TELEMETRY: ${SESSIONLY_TELEMETRY:-}
       DO_NOT_TRACK: ${DO_NOT_TRACK:-}
     depends_on:

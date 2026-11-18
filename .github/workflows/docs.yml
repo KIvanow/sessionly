@@ -1,0 +1,82 @@
+# Builds the documentation in docs-site/ with Jekyll and publishes it to GitHub
+# Pages. Pages has to be set to take its site from GitHub Actions (Settings,
+# Pages, Source), which is also where the domain docs.sessionly.dev is given.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs-site/**
+      - scripts/check-docs-links.mjs
+      - .github/workflows/docs.yml
+  # A pull request builds the site, to see that it still builds, and publishes nothing.
+  pull_request:
+    paths:
+      - docs-site/**
+      - scripts/check-docs-links.mjs
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions: {}
+
+# One publication at a time, and one that has started is let finish.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: false
+
+# Actions are named by the commit they were at when this was written, not by a
+# tag that can be moved, as in the other workflows.
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ruby/setup-ruby@20eb24b0d509e2b9ed9b6d42ddfeb992915e0564 # v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          working-directory: docs-site
+      - name: Build
+        working-directory: docs-site
+        run: bundle exec jekyll build --strict_front_matter
+        env:
+          JEKYLL_ENV: production
+      - name: Every link between pages leads somewhere
+        run: node scripts/check-docs-links.mjs docs-site/_site
+      - name: Where Pages serves it
+        id: pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      # The address Pages gives the site until the domain is set up has the
+      # repository's name in it: the pages' links have to carry that.
+      - name: Build for that address
+        if: github.event_name != 'pull_request'
+        working-directory: docs-site
+        run: |
+          printf 'url: "%s"\nbaseurl: "%s"\n' "$ORIGIN" "$BASE_PATH" > _config.pages.yml
+          bundle exec jekyll build --strict_front_matter --config _config.yml,_config.pages.yml
+        env:
+          JEKYLL_ENV: production
+          ORIGIN: ${{ steps.pages.outputs.origin }}
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: docs-site/_site
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

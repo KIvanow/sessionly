@@ -5,7 +5,7 @@ something happens to it. The server works out how much of it coding agents wrote
 tools and models, and how many of those lines made it through review.
 
 It sends hashes of the lines the pull request adds, never the lines. See
-[Pull requests](../README.md#pull-requests) for how the figures are worked out and how to read
+[Pull requests](../docs-site/pull-requests.md) for how the figures are worked out and how to read
 them.
 
 ## Use
@@ -53,7 +53,7 @@ shows a warning that the token is missing.
 | `github-token` | the workflow's token | Used to read the pull request, and to comment if that is on. |
 | `summary` | `true` | Write the figures to the run's summary page. |
 | `comment` | `true` | Post the figures as one comment on the pull request and keep it up to date, as other bots do. Needs `pull-requests: write`; without it the run warns and nothing else changes. `false` for no comment. |
-| `ignore` | lock files, `*.min.js`, `*.snap`, `*.map` | Files to leave out, separated by commas or new lines: a file name, a path, or a pattern with `*`. Add generated files here. |
+| `ignore` | lock files, `*.min.js`, `*.min.css`, `*.snap`, `*.map` | Files to leave out, separated by commas or new lines: a file name, a path, or a pattern with `*`. A list of your own replaces the default one, so to add generated files, repeat the defaults you want to keep (they are in `action.yml`). |
 | `other-names` | | Names clones of the repository may still have as their origin, as `owner/name`: for example from before it was renamed or moved to another owner. |
 | `backfill` | `false` | For a pull request from before the Action was added: first report it as it was when opened, worked out from its commits, so what review changed can still be measured. Not possible after a rebase or squash of the branch. |
 | `pr-number` | | The pull request to report, when the workflow was not started by one. |

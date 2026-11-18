@@ -34,6 +34,13 @@ pnpm install
 pnpm typecheck && pnpm test && pnpm build
 ```
 
+## Documentation
+
+The documentation is the pages in `docs-site/`, published at
+[docs.sessionly.dev](https://docs.sessionly.dev). A change to what a command, a setting or an
+endpoint does comes with the change to its page. `docs-site/README.md` says how to preview the
+site; `README.md` stays short and points there.
+
 ## Releases
 
 A release is made by pushing a tag: set `version` in `crates/sessionly/Cargo.toml`, commit

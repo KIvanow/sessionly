@@ -1,0 +1,9 @@
+// Output of commands is wide: let a table or a block scroll instead of wrapping.
+.main-content pre,
+.main-content .highlight {
+  border-radius: 6px;
+}
+
+.site-header {
+  border-bottom: 2px solid $link-color;
+}
