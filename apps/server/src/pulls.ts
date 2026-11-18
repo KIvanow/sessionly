@@ -213,6 +213,28 @@ export function olderAction(version: string | null, current: string): boolean {
 }
 
 /**
+ * Of `repos`, those whose newest report — any state, any date — came from an
+ * older Action. An exact name, not the list's partial match: a closed pull
+ * request must not keep the notice once a later one was reported by the
+ * current Action.
+ */
+async function reposOnOlderAction(db: OrgDb, repos: string[]): Promise<Set<string>> {
+  if (repos.length === 0) return new Set();
+  const rows = await db.query<{ repo: string; reporter_version: unknown }>(
+    `SELECT DISTINCT ON (repo) repo, reporter_version
+     FROM pull_requests
+     WHERE org_id = $1 AND repo = ANY($2::text[])
+     ORDER BY repo, updated_at DESC`,
+    [db.orgId, repos],
+  );
+  return new Set(
+    rows
+      .filter((row) => olderAction(typeof row.reporter_version === "string" ? row.reporter_version : null, CURRENT_ACTION))
+      .map((row) => String(row.repo)),
+  );
+}
+
+/**
  * Who sent a report, when they said so in a way that fits. Anything else is
  * left out, and the report is still taken: an odd client is not refused.
  */
@@ -570,8 +592,10 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
   );
   if (!r) return null;
   const detail = r.detail == null ? null : json<{ files: PullFile[]; sessions: Omit<PullSession, "session">[] }>(r.detail);
+  const olderRepo = await reposOnOlderAction(db, [repo]);
   return {
     ...pullRow(r),
+    repo_reporter_older: olderRepo.has(repo),
     draft: r.draft === true,
     head_ref: (r.head_ref as string) ?? null,
     base_ref: (r.base_ref as string) ?? null,
@@ -641,9 +665,6 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
   const { sql, params } = where(db.orgId, filters);
   const rows = (await db.query(`SELECT ${ROW_COLUMNS} FROM pull_requests ${sql}`, params)).map(pullRow);
   const byModel = new Map<string, PullsByModel>();
-  // The newest report of each repository in the filter. An older pull request
-  // does not mean the repository still reports with an old Action.
-  const latest = new Map<string, { at: string; version: string | null }>();
   const total = {
     pulls: rows.length,
     pulls_with_agent_lines: 0,
@@ -669,10 +690,6 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       bot_review_comments: 0,
     }));
   for (const pull of rows) {
-    const known = latest.get(pull.repo);
-    if (!known || pull.updated_at > known.at) {
-      latest.set(pull.repo, { at: pull.updated_at, version: pull.reporter_version });
-    }
     const a = pull.attribution;
     total.lines += a.now.lines;
     total.agent_lines += a.now.agent_lines;
@@ -701,8 +718,8 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       row.surviving += by.surviving;
     }
   }
-  const older = [...latest.entries()]
-    .filter(([, row]) => olderAction(row.version, CURRENT_ACTION))
-    .map(([repo]) => repo);
-  return { by_model: sorted(byModel), older_actions: older.sort(), total };
+  // Which repositories the filter contains. Whether each still reports with
+  // an older Action is its newest report, merged or not.
+  const older = await reposOnOlderAction(db, [...new Set(rows.map((pull) => pull.repo))]);
+  return { by_model: sorted(byModel), older_actions: [...older].sort(), total };
 }

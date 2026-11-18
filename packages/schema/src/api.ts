@@ -516,6 +516,11 @@ export interface PullDetail extends PullRow {
   feedback: PullFeedback[] | null;
   /** How many there are on GitHub: more than `feedback` has when only the latest were kept. */
   feedback_total: number | null;
+  /**
+   * The repository's newest report, of any state and date, came from an older
+   * Action. A pull request merged before an upgrade is not that on its own.
+   */
+  repo_reporter_older: boolean;
 }
 
 export interface PullList {
@@ -549,8 +554,9 @@ export interface PullSummary {
   /** Most lines first. */
   by_model: PullsByModel[];
   /**
-   * Repositories whose newest report in the filter came from an older Action
-   * than this server knows, or from one that named no version.
+   * Repositories that have a pull request in the filter, and whose newest
+   * report of any state came from an older Action, or from one that named
+   * no version.
    */
   older_actions: string[];
   total: {

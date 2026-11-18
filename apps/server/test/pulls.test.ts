@@ -518,4 +518,26 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   const currentSummary = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/current")).body;
   assert.equal(currentSummary.total.pulls, 3);
   assert.deepEqual(currentSummary.older_actions, []);
+
+  // Upgraded since: the merged pull request is old, the open one is current.
+  // The merged list, and that pull request's page, do not ask for a workflow edit.
+  const upgraded = "github.com/acme/upgraded";
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: upgraded, number: 1, state: "merged", merged_at: "2026-11-01T00:00:00Z",
+  }))).status, 200);
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: upgraded, number: 2, state: "open", reporter: { name: "sessionly-action", version: CURRENT_ACTION },
+  }))).status, 200);
+  const mergedOnly = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/upgraded&state=merged")).body;
+  assert.equal(mergedOnly.total.pulls, 1);
+  assert.deepEqual(mergedOnly.older_actions, []);
+  const mergedPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(upgraded)}&number=1`)).body;
+  assert.equal(mergedPage.reporter_version, null);
+  assert.equal(mergedPage.repo_reporter_older, false);
+  const openPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(upgraded)}&number=2`)).body;
+  assert.equal(openPage.reporter_version, CURRENT_ACTION);
+  assert.equal(openPage.repo_reporter_older, false);
+  // Still on the old Action: the newest report named none, so the page does ask.
+  const oldPage = (await at(41)).body;
+  assert.equal(oldPage.repo_reporter_older, true);
 });
