@@ -142,20 +142,32 @@ function People({
 
   const [removing, setRemoving] = useState<{ user: UserInfo; sessions: number | null } | null>(null);
   const [also, setAlso] = useState(false);
+  const [counting, setCounting] = useState(false);
+  const removeAsk = useRef<AbortController | null>(null);
 
   async function askRemove(user: UserInfo) {
+    removeAsk.current?.abort();
+    const controller = new AbortController();
+    removeAsk.current = controller;
     setProblem(null);
     setAlso(false);
+    setCounting(true);
     let sessions: number | null = null;
     try {
-      const page = await api<{ total: number }>(token, `/sessions?user_is=${encodeURIComponent(user.email)}&limit=1`);
+      const page = await api<{ total: number }>(token, `/sessions?user_is=${encodeURIComponent(user.email)}&limit=1`, {
+        signal: controller.signal,
+      });
       sessions = page.total;
     } catch (err) {
+      if (controller.signal.aborted) return;
       if (err instanceof ApiError && err.status === 401) {
         onSignOut();
         return;
       }
+    } finally {
+      if (removeAsk.current === controller) setCounting(false);
     }
+    if (removeAsk.current !== controller) return;
     setRemoving({ user, sessions });
   }
 
@@ -248,7 +260,7 @@ function People({
                       </button>
                     )}{" "}
                     {u.role !== "owner" && (
-                      <button className="quiet" onClick={() => askRemove(u)}>
+                      <button className="quiet" onClick={() => askRemove(u)} disabled={counting}>
                         Remove
                       </button>
                     )}
