@@ -130,7 +130,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
       <section className="card" aria-label="Sessions">
         <h2>Sessions that wrote it</h2>
         {p.sessions == null ? (
-          <Earlier what="Which sessions wrote its lines" older={p.reporter_older} />
+          <Earlier what="Which sessions wrote its lines" dependsOnAction={false} />
         ) : p.sessions.length === 0 ? (
           <p className="muted">
             {a.cloud && a.cloud.sessions === 0
@@ -160,7 +160,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
       <section className="card" aria-label="Files">
         <h2>Files</h2>
         {p.files == null ? (
-          <Earlier what="Its lines file by file" older={p.reporter_older} />
+          <Earlier what="Its lines file by file" dependsOnAction={false} />
         ) : p.files.length === 0 ? (
           <p className="muted">It adds no lines to track.</p>
         ) : (
@@ -213,7 +213,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
           stays on GitHub: Sessionly does not store it.
         </p>
         {p.feedback == null ? (
-          <Earlier what="Its reviews and comments" older={p.reporter_older} />
+          <Earlier what="Its reviews and comments" dependsOnAction={p.reporter_older} />
         ) : p.feedback.length === 0 ? (
           <p className="muted">Nobody has reviewed it or commented on it.</p>
         ) : (
@@ -352,8 +352,8 @@ function ReporterNotice({
 }
 
 /** For a pull request last reported before this was kept. */
-function Earlier({ what, older }: { what: string; older: boolean }) {
-  if (older) {
+function Earlier({ what, dependsOnAction }: { what: string; dependsOnAction: boolean }) {
+  if (dependsOnAction) {
     return (
       <p className="muted">
         {what} were not kept when this pull request was last reported. The notice above says why.
