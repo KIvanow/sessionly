@@ -692,6 +692,9 @@ const MIGRATIONS: string[] = [
   // `weight` is how many they count as, a line that is in several pull
   // requests being shared out between them. Null and the number of lines
   // for one from before these were kept, until it is matched again.
+  // `opened_lines` is how many of the lines the pull request was first
+  // reported with are the session's: a session all of whose lines went in
+  // review stays here by them, with no lines. Null from before, likewise.
   `CREATE TABLE pull_sessions (
      org_id     text NOT NULL REFERENCES orgs ON DELETE CASCADE,
      repo       text NOT NULL,
@@ -702,6 +705,7 @@ const MIGRATIONS: string[] = [
      lines      integer NOT NULL,
      weight     double precision NOT NULL,
      matched    jsonb,
+     opened_lines integer,
      PRIMARY KEY (org_id, repo, number, machine_id, source, session_id),
      FOREIGN KEY (org_id, repo, number) REFERENCES pull_requests ON DELETE CASCADE
    )`,

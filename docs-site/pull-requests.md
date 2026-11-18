@@ -176,12 +176,14 @@ a server of version 0.5.0 or older has to be reported once more before it can be
   them and counted once, and what it spent on work that reached no pull request is in none.
   A line that is in several pull requests (one stacked on another, a release of what was
   merged before) is shared out between them, so it is still counted once; a pull request
-  closed without merging takes nothing from the others. Which lines those are is kept from
+  closed without merging takes nothing from the others, and its own cost is left out of the
+  total above the list unless only closed ones are shown. Which lines those are is kept from
   a report or a **Match again** made with this version on: until then, a pull request from
   before counts all its lines as its own. Divided by the lines of the sessions that have a cost figure, it
   gives the cost of an agent line. The cost of a line that got through review, where that is
-  known, is the agent's lines the pull request was opened with at that cost each, divided by
-  those that survived. Three things to read with it. It is **the cost of the matched
+  known, is what the agent's lines the pull request was opened with cost, divided by those
+  that survived; a pull request none of whose agent lines survived still says what they
+  cost. Three things to read with it. It is **the cost of the matched
   sessions, not of making the pull request**: lines that are not an agent's carry none. It
   is **a floor** when a session has no cost figure, has one that leaves out requests to
   models without a known price, or was deleted since, and then reads "at least"; the total

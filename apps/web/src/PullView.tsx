@@ -2,7 +2,7 @@ import type { PullDetail, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { type By, byOf, countFeedback, feedbackLabel, matchedLine, pullCost, pullCostNote, web } from "./pull.ts";
-import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
+import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName, usdEach } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
 import { sessionHref } from "./Sessions.tsx";
@@ -313,7 +313,7 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
       <td className="num">
         {known && s.cost_share_usd != null ? (
           <>
-            {cost(s.cost_share_usd, known.cost_source)} <span className="muted">of {cost(known.cost_usd, known.cost_source)}</span>
+            {known.cost_source === "recorded" ? "" : "~"}{usdEach(s.cost_share_usd)} <span className="muted">of {cost(known.cost_usd, known.cost_source)}</span>
           </>
         ) : (
           "–"

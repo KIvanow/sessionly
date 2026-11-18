@@ -114,14 +114,15 @@ const sorted = <T extends LinesBy>(rows: Map<string, T>): T[] =>
 /**
  * Which lines of a pull request agents wrote: as it was first reported
  * (`first`), as it is now (`now`), and how many of the agents' first lines
- * are still in it. `lines` are the writers of `now`, where they were worked
- * out already.
+ * are still in it. `lines` are the writers of `now`, and `firstWriters`
+ * those of `first`, where they were worked out already.
  */
 export function attribute(
   first: FileHashes[],
   now: FileHashes[],
   claims: Claim[],
   lines: (Writer | null)[][] = writers(now, claims),
+  firstWriters: (Writer | null)[][] = writers(first, claims),
 ): Omit<PullAttribution, "from_open" | "cloud"> {
   const count = (files: FileHashes[]) => files.reduce((sum, f) => sum + f.hashes.length, 0);
 
@@ -142,7 +143,6 @@ export function attribute(
   }
   const firstBy = new Map<string, LinesBy & { surviving: number }>();
   let agentFirst = 0;
-  const firstWriters = writers(first, claims);
   first.forEach((file, i) => {
     const counts = left.get(file.path);
     file.hashes.forEach((hash, j) => {
@@ -174,13 +174,17 @@ type Lines = Record<string, string[]>;
 /** A session with lines in a pull request, as the pull request keeps it: which one, how many, and which. */
 type Wrote = Pick<PullSession, "machine_id" | "source" | "session_id" | "lines"> & { matched: Lines };
 
+/** And how many of the lines the pull request was first reported with are its own. */
+type Kept = Wrote & { opened_lines: number };
+
 /**
  * A pull request's lines as they are now, file by file and session by
  * session: where its agent lines are, and which sessions they came from.
  * `lines` are its writers, the same ones `attribute` counts.
  */
 export function breakdown(now: FileHashes[], lines: (Writer | null)[][]): { files: PullFile[]; sessions: Wrote[] } {
-  const sessions = new Map<string, Wrote>();
+  // By file in a map: a file may be called `constructor`, which every object has already.
+  const sessions = new Map<string, Omit<Wrote, "matched"> & { matched: Map<string, string[]> }>();
   const files = now.map((file, i) => {
     let agent = 0;
     lines[i]!.forEach((line, at) => {
@@ -189,16 +193,19 @@ export function breakdown(now: FileHashes[], lines: (Writer | null)[][]): { file
       const from = line.session;
       if (!from) return;
       const key = sessionKey(from);
-      if (!sessions.has(key)) sessions.set(key, { ...from, lines: 0, matched: {} });
+      if (!sessions.has(key)) sessions.set(key, { ...from, lines: 0, matched: new Map() });
       const row = sessions.get(key)!;
       row.lines += 1;
-      (row.matched[file.path] ??= []).push(file.hashes[at]!);
+      if (!row.matched.has(file.path)) row.matched.set(file.path, []);
+      row.matched.get(file.path)!.push(file.hashes[at]!);
     });
     return { path: file.path, lines: file.hashes.length, agent_lines: agent };
   });
   return {
     files: files.sort((a, b) => b.lines - a.lines || a.path.localeCompare(b.path)),
-    sessions: [...sessions.values()].sort((a, b) => b.lines - a.lines || a.session_id.localeCompare(b.session_id)),
+    sessions: [...sessions.values()]
+      .map((row) => ({ ...row, matched: Object.fromEntries(row.matched) }))
+      .sort((a, b) => b.lines - a.lines || a.session_id.localeCompare(b.session_id)),
   };
 }
 
@@ -517,17 +524,27 @@ async function match(
   first: FileHashes[],
   now: FileHashes[],
   firstEvent: string,
-): Promise<{ attribution: PullAttribution; detail: ReturnType<typeof breakdown> }> {
+): Promise<{ attribution: PullAttribution; files: PullFile[]; sessions: Kept[] }> {
   const claims = await claimsFor(db, about);
   // Worked out once, for the figures and for the page: the two then agree.
   const lines = writers(now, claims);
+  const firstLines = writers(first, claims);
+  const { files, sessions: wrote } = breakdown(now, lines);
+  // The sessions it was opened with, beside the ones it has now: one whose lines all went in review is kept by them.
+  const opened = new Map(breakdown(first, firstLines).sessions.map((s) => [sessionKey(s), s]));
+  const sessions: Kept[] = wrote.map((s) => ({ ...s, opened_lines: opened.get(sessionKey(s))?.lines ?? 0 }));
+  const there = new Set(wrote.map(sessionKey));
+  for (const [key, s] of opened) {
+    if (!there.has(key)) sessions.push({ machine_id: s.machine_id, source: s.source, session_id: s.session_id, lines: 0, matched: {}, opened_lines: s.lines });
+  }
   return {
     attribution: {
-      ...attribute(first, now, claims, lines),
+      ...attribute(first, now, claims, lines, firstLines),
       from_open: firstEvent === "opened",
       cloud: await cloudOf(db, about),
     },
-    detail: breakdown(now, lines),
+    files,
+    sessions,
   };
 }
 
@@ -537,12 +554,12 @@ async function match(
  * for good: they are what review started from.
  */
 export async function storePull(db: OrgDb, report: PullReport, key?: string): Promise<PullAttribution> {
-  const [existing] = await db.query<{ first_files: unknown; first_event: string }>(
-    `SELECT first_files, first_event FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
+  const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string }>(
+    `SELECT first_files, first_event, state FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
     [db.orgId, report.repo, report.number],
   );
   const first = existing ? json<FileHashes[]>(existing.first_files) : report.files;
-  const { attribution, detail } = await match(db, report, first, report.files, existing?.first_event ?? report.event);
+  const { attribution, files, sessions } = await match(db, report, first, report.files, existing?.first_event ?? report.event);
   const columns: Record<string, unknown> = {
     org_id: db.orgId,
     repo: report.repo,
@@ -568,7 +585,7 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     files_without_diff: report.files_without_diff,
     last_files: JSON.stringify(report.files),
     attribution: JSON.stringify(attribution),
-    detail: JSON.stringify({ files: detail.files }),
+    detail: JSON.stringify({ files }),
     // Kept to match its lines again later, when more sessions are held.
     committers: JSON.stringify((report.commit_emails ?? []).map((email) => committer(db.orgId, email, key))),
     aliases: JSON.stringify(report.aliases ?? []),
@@ -606,7 +623,9 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
        updated_at = clock_timestamp(), matched_at = clock_timestamp()`,
     Object.values(columns),
   );
-  await keepSessions(db, report.repo, report.number, detail.sessions);
+  // Closing without merging, or opening again, changes what its lines take from other pull requests.
+  const turned = existing != null && (existing.state === "closed") !== (report.state === "closed");
+  await keepSessions(db, report.repo, report.number, sessions, turned);
   return attribution;
 }
 
@@ -615,7 +634,22 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
  * What their lines count as is worked out again in every pull request those
  * sessions, and the ones before, have lines in: a line now in two is shared.
  */
-async function keepSessions(db: OrgDb, repo: string, number: number, sessions: Wrote[]): Promise<void> {
+async function keepSessions(db: OrgDb, repo: string, number: number, sessions: Kept[], turned: boolean): Promise<void> {
+  // Most reports change none of this (a review, a comment, a push of other
+  // lines): then nothing is written, and nobody waits. The pull request's
+  // own row is held by whoever got here, so these are not changing under it.
+  const had = await db.query(
+    `SELECT machine_id, source, session_id, lines, opened_lines, matched FROM pull_sessions
+     WHERE org_id = $1 AND repo = $2 AND number = $3`,
+    [db.orgId, repo, number],
+  );
+  const said = (s: { lines: unknown; opened_lines: unknown; matched: unknown }) => {
+    const matched = s.matched == null ? null : json<Lines>(s.matched);
+    const files = matched && Object.keys(matched).sort().map((path) => [path, matched[path]]);
+    return JSON.stringify([s.lines == null ? null : num(s.lines), s.opened_lines == null ? null : num(s.opened_lines), files]);
+  };
+  const was = new Map(had.map((row) => [sessionKey(row as never), said(row as never)]));
+  if (!turned && was.size === sessions.length && sessions.every((s) => was.get(sessionKey(s)) === said(s))) return;
   // One at a time in an organisation, and held until the transaction ends:
   // two reports that share a session would each miss the other's lines.
   await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-pull-sessions:${db.orgId}`]);
@@ -625,9 +659,10 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: W
   );
   if (sessions.length > 0) {
     await db.query(
-      `INSERT INTO pull_sessions (org_id, repo, number, machine_id, source, session_id, lines, weight, matched)
-       SELECT $1, $2, $3, s.machine_id, s.source, s.session_id, s.lines, s.lines, s.matched
-       FROM jsonb_to_recordset($4::jsonb) AS s(machine_id text, source text, session_id text, lines integer, matched jsonb)`,
+      `INSERT INTO pull_sessions (org_id, repo, number, machine_id, source, session_id, lines, weight, matched, opened_lines)
+       SELECT $1, $2, $3, s.machine_id, s.source, s.session_id, s.lines, s.lines, s.matched, s.opened_lines
+       FROM jsonb_to_recordset($4::jsonb)
+         AS s(machine_id text, source text, session_id text, lines integer, matched jsonb, opened_lines integer)`,
       [db.orgId, repo, number, JSON.stringify(sessions)],
     );
   }
@@ -703,7 +738,7 @@ export async function rematchPull(
     // A pull request is not stored without it.
     created_at: iso(r.created_at) ?? new Date().toISOString(),
   };
-  const { attribution, detail } = await match(
+  const { attribution, files, sessions } = await match(
     db,
     about,
     json<FileHashes[]>(r.first_files),
@@ -713,9 +748,9 @@ export async function rematchPull(
   const [stored] = await db.query<{ matched_at: unknown }>(
     `UPDATE pull_requests SET attribution = $4::jsonb, detail = $5::jsonb, matched_at = clock_timestamp()
      WHERE org_id = $1 AND repo = $2 AND number = $3 RETURNING matched_at`,
-    [db.orgId, repo, number, JSON.stringify(attribution), JSON.stringify({ files: detail.files })],
+    [db.orgId, repo, number, JSON.stringify(attribution), JSON.stringify({ files })],
   );
-  await keepSessions(db, repo, number, detail.sessions);
+  await keepSessions(db, repo, number, sessions, false);
   return { attribution, matched_at: iso(stored?.matched_at) ?? new Date().toISOString() };
 }
 
@@ -809,6 +844,14 @@ type Share = PullSession & {
   estimated: boolean;
   /** Its cost leaves requests out: what it cost here is then a floor. */
   partial: boolean;
+  /**
+   * What its lines among those the pull request was first reported with
+   * cost: null with no cost figure. `opened_known` is false for one kept
+   * before those lines were counted.
+   */
+  opened_usd: number | null;
+  opened_lines: number;
+  opened_known: boolean;
 };
 
 const pullKey = (p: { repo: unknown; number: unknown }): string => `${p.repo}\n${p.number}`;
@@ -832,7 +875,7 @@ const HASHED_FROM_PAYLOAD = `(SELECT coalesce(sum(jsonb_array_length(l->'hashes'
 async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }): Promise<Map<string, Share[]>> {
   const rows = await db.query(
     `WITH mine AS (
-       SELECT p.repo, p.number, p.machine_id, p.source, p.session_id, p.lines, p.weight
+       SELECT p.repo, p.number, p.machine_id, p.source, p.session_id, p.lines, p.weight, p.opened_lines
        FROM (${chosen.sql}) c JOIN pull_sessions p ON p.org_id = $1 AND p.repo = c.repo AND p.number = c.number),
      totals AS (
        SELECT o.machine_id, o.source, o.session_id, sum(o.weight) AS in_pulls
@@ -856,6 +899,9 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }): 
     const weight = num(row.weight);
     const among = Math.max(num(row.hashed_lines), num(row.in_pulls), weight);
     const cost = held && row.cost_usd != null ? Number(row.cost_usd) : null;
+    const lines = num(row.lines);
+    // Its lines at the start count as its lines now do: shared with other pull requests where those are.
+    const opened = num(row.opened_lines) * (lines > 0 ? weight / lines : 1);
     const share: Share = {
       machine_id: String(row.machine_id),
       source: String(row.source),
@@ -865,6 +911,9 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }): 
       cost_share_usd: cost == null ? null : money(among > 0 ? (cost * weight) / among : 0),
       estimated: row.cost_source !== "recorded",
       partial: row.cost_source === "partial_estimate" || num(row.unpriced_requests) > 0,
+      opened_usd: cost == null ? null : money(opened > 0 ? (cost * opened) / Math.max(among, opened) : 0),
+      opened_lines: num(row.opened_lines),
+      opened_known: row.opened_lines != null,
       session: held
         ? {
             owner_email: String(row.owner_email),
@@ -890,11 +939,24 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }): 
 function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Share[]): PullCost {
   let usd: number | null = null;
   let estimated = false;
+  let sessions = 0;
   let without = 0;
   let partial = 0;
   // The lines that cost is of: a session with no cost figure says nothing of what a line cost.
   let lines = 0;
+  // What the lines it was first reported with cost, where every session says how many were its own.
+  let opened: number | null = null;
+  let openedLines = 0;
+  let openedKnown = true;
   for (const share of shares) {
+    if (!share.opened_known) openedKnown = false;
+    else if (share.opened_usd != null && share.opened_lines > 0) {
+      opened = (opened ?? 0) + share.opened_usd;
+      openedLines += share.opened_lines;
+    }
+    // One all of whose lines went in review is here for what it was opened with alone.
+    if (share.lines === 0) continue;
+    sessions += 1;
     if (share.cost_share_usd == null) {
       without += 1;
       continue;
@@ -907,12 +969,16 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   const a = pull.attribution;
   const each = usd != null && lines > 0 ? usd / lines : null;
   const surviving = a.by.reduce((sum, by) => sum + by.surviving, 0);
+  // From before those were counted: the lines it was opened with, at what a line of it costs now.
+  if (!openedKnown) opened = each == null ? null : each * a.first.agent_lines;
+  // As with what a line costs now: the sessions with a cost figure say it for all of them.
+  else if (opened != null) opened = (opened / openedLines) * a.first.agent_lines;
   // What review left can only be said of a pull request seen from the start.
-  const opened = each != null && pull.first_event === "opened" && a.first.agent_lines > 0 ? each * a.first.agent_lines : null;
+  if (pull.first_event !== "opened" || a.first.agent_lines === 0) opened = null;
   return {
     usd: usd == null ? null : money(usd),
     estimated,
-    sessions: shares.length,
+    sessions,
     sessions_without_cost: without,
     sessions_with_cost_partial: partial,
     per_agent_line_usd: each == null ? null : money(each),
@@ -985,7 +1051,9 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
     base_ref: (r.base_ref as string) ?? null,
     closed_at: iso(r.closed_at),
     files: detail?.files ?? null,
-    sessions: shares && shares.map(({ estimated: _, partial: __, ...session }) => session),
+    sessions:
+      shares &&
+      shares.filter((s) => s.lines > 0).map(({ estimated: _, partial: __, opened_usd: ___, opened_lines: ____, opened_known: _____, ...session }) => session),
     feedback: r.feedback == null ? null : json<PullFeedback[]>(r.feedback),
     feedback_total: r.feedback == null || r.feedback_total == null ? null : num(r.feedback_total),
   };
@@ -1057,7 +1125,9 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
     total.lines += a.now.lines;
     total.agent_lines += a.now.agent_lines;
     if (a.now.agent_lines > 0) total.pulls_with_agent_lines += 1;
-    if (pull.cost?.usd != null) {
+    // One closed without merging has a cost of its own that the others' lines
+    // are not shared with: among them it would count a session twice.
+    if (pull.cost?.usd != null && (pull.state !== "closed" || filters.state === "closed")) {
       total.cost_usd = (total.cost_usd ?? 0) + pull.cost.usd;
       if (pull.cost.estimated) total.cost_estimated = true;
     }

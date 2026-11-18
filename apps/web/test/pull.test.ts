@@ -109,6 +109,8 @@ test("a pull request's cost is said with what is not sure about it", () => {
   assert.equal(pullCost(none), "–");
   assert.equal(pullCostNote(none), "2 of 2 sessions have no cost figure");
   assert.equal(pullCostNote({ ...none, sessions: 0, sessions_without_cost: 0 }), "no session was matched to its lines");
+  // review took every agent line out: what they cost is still said
+  assert.equal(pullCostNote({ ...none, sessions: 0, sessions_without_cost: 0, opened_usd: 4 }), "none of the agent lines it was opened with is left: they cost $4.00");
   assert.equal(pullCost(null), "–");
   assert.match(pullCostNote(null), /were not kept/);
   // what a line cost is small, and is not shown as nothing
@@ -121,5 +123,5 @@ test("the cost of several pull requests says what it leaves out", () => {
   assert.equal(pullsCostNote({ ...total, pulls_with_cost_missing: 2, per_surviving_line_usd: null }), "not known in full for 2 pull requests");
   // no figure: because nothing was matched, or because what was matched has none
   assert.equal(pullsCostNote({ cost_usd: null, pulls_with_cost_missing: 0, per_surviving_line_usd: null }), "no session was matched to their lines");
-  assert.equal(pullsCostNote({ cost_usd: null, pulls_with_cost_missing: 1, per_surviving_line_usd: null }), "not known in full for 1 pull request: no cost figure for the sessions matched");
+  assert.equal(pullsCostNote({ cost_usd: null, pulls_with_cost_missing: 1, per_surviving_line_usd: null }), "not known in full for 1 pull request: their sessions have no cost figure, or were not kept at their last report");
 });

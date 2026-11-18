@@ -1,29 +1,31 @@
 // A pull request's page: where it is, how current its figures are, and its
 // reviews and comments counted by whose they are.
 import type { PullCost, PullFeedback, PullMatches, PullRow } from "@sessionly/schema";
-import { count, dateTime, usd } from "./format.ts";
+import { count, dateTime, usd, usdEach } from "./format.ts";
 
 /** Whether a cost is a floor: a session of it has no cost figure, or one that leaves requests out. */
 export const costIsFloor = (c: Pick<PullCost, "sessions_without_cost" | "sessions_with_cost_partial">): boolean =>
   c.sessions_without_cost + c.sessions_with_cost_partial > 0;
 
-/**
- * What a pull request's sessions cost it, in a few words: "~" before an
- * estimate, and "at least" (`floor`) when it is a floor. A dash where there
- * is no figure at all.
- */
-export function pullCost(
-  c: Pick<PullCost, "usd" | "estimated" | "sessions_without_cost" | "sessions_with_cost_partial"> | null,
-  floor = "at least ",
-): string {
-  if (!c || c.usd == null) return "–";
-  return `${costIsFloor(c) ? floor : ""}${c.estimated ? "~" : ""}${usd(c.usd)}`;
+/** A cost in a few words: "~" before an estimate, `floor` before one that is a floor, a dash for none. */
+export function costText(cost: number | null, estimated: boolean, floor: boolean, word = "at least "): string {
+  if (cost == null) return "–";
+  return `${floor ? word : ""}${estimated ? "~" : ""}${usd(cost)}`;
+}
+
+/** What a pull request's sessions cost it. */
+export function pullCost(c: Pick<PullCost, "usd" | "estimated" | "sessions_without_cost" | "sessions_with_cost_partial"> | null, word?: string): string {
+  return c ? costText(c.usd, c.estimated, costIsFloor(c), word) : "–";
 }
 
 /** The small print under a pull request's cost: what a line cost, and what the figure leaves out. */
 export function pullCostNote(c: PullCost | null): string {
   if (!c) return "not known: its sessions were not kept at its last report";
-  if (c.sessions === 0) return "no session was matched to its lines";
+  if (c.sessions === 0) {
+    return c.opened_usd != null
+      ? `none of the agent lines it was opened with is left: they cost ${usdEach(c.opened_usd)}`
+      : "no session was matched to its lines";
+  }
   const missing =
     c.sessions_without_cost > 0
       ? `${count(c.sessions_without_cost)} of ${count(c.sessions)} ${c.sessions === 1 ? "session" : "sessions"} ${c.sessions_without_cost === 1 ? "has" : "have"} no cost figure`
@@ -34,8 +36,8 @@ export function pullCostNote(c: PullCost | null): string {
       ? `the cost of ${count(c.sessions_with_cost_partial)} ${c.sessions_with_cost_partial === 1 ? "session leaves" : "sessions leave"} requests out`
       : null;
   const each = [
-    c.per_agent_line_usd != null ? `${usd(c.per_agent_line_usd)} per agent line` : null,
-    c.per_surviving_line_usd != null ? `${usd(c.per_surviving_line_usd)} per line that survived review` : null,
+    c.per_agent_line_usd != null ? `${usdEach(c.per_agent_line_usd)} per agent line` : null,
+    c.per_surviving_line_usd != null ? `${usdEach(c.per_surviving_line_usd)} per line that survived review` : null,
   ];
   return [...each, missing, partial].filter(Boolean).join("; ");
 }
@@ -44,8 +46,12 @@ export function pullCostNote(c: PullCost | null): string {
 export function pullsCostNote(total: { cost_usd: number | null; pulls_with_cost_missing: number; per_surviving_line_usd: number | null }): string {
   const missing = total.pulls_with_cost_missing;
   const floor = missing > 0 ? `not known in full for ${count(missing)} ${missing === 1 ? "pull request" : "pull requests"}` : null;
-  if (total.cost_usd == null) return floor ? `${floor}: no cost figure for the sessions matched` : "no session was matched to their lines";
-  const each = total.per_surviving_line_usd != null ? `${usd(total.per_surviving_line_usd)} per agent line that survived review` : null;
+  if (total.cost_usd == null) {
+    return floor
+      ? `${floor}: their sessions have no cost figure, or were not kept at their last report`
+      : "no session was matched to their lines";
+  }
+  const each = total.per_surviving_line_usd != null ? `${usdEach(total.per_surviving_line_usd)} per agent line that survived review` : null;
   return [each, floor ?? "what the matched sessions cost, each for its share of lines"].filter(Boolean).join("; ");
 }
 

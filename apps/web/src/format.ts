@@ -22,9 +22,14 @@ function trim(n: number): string {
 
 /** Dollars: "$0.0042" below a cent, otherwise "$1,234.56". */
 export function usd(n: number): string {
-  // Under a cent, as many places as say something: what one line cost is often a hundredth of one.
-  if (n > 0 && n < 0.01) return `$${n.toFixed(Math.min(8, Math.max(4, 1 - Math.floor(Math.log10(n)))))}`;
+  if (n > 0 && n < 0.01) return `$${n.toFixed(4)}`;
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** What one line cost, or a small share: under a cent, as many places as say something. "$0.000042". */
+export function usdEach(n: number): string {
+  if (n >= 0.01 || n <= 0) return usd(n);
+  return `$${n.toFixed(Math.min(8, Math.max(4, 1 - Math.floor(Math.log10(n)))))}`;
 }
 
 /** Dollars for a headline or an axis: "$4.20", "$1,284", "$12.9K". */

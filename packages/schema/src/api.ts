@@ -461,8 +461,9 @@ export interface PullCost {
   /** What an agent line of it cost: `usd` for each line of the sessions that have a cost figure. */
   per_agent_line_usd: number | null;
   /**
-   * What the agent lines it was opened with cost, at `per_agent_line_usd`
-   * each. Null on one not reported from the moment it was opened.
+   * What the agent lines it was opened with cost: their sessions' cost, for
+   * the share of each that those lines are. There when none of them is left
+   * too. Null on one not reported from the moment it was opened.
    */
   opened_usd: number | null;
   /** What an agent line that survived review cost: `opened_usd` for each of them still there. Null when none is. */
@@ -623,7 +624,8 @@ export interface PullSummary {
     cloud_pulls_without_session: number;
     /**
      * What the sessions matched to these pull requests cost (see `PullCost`):
-     * the sum of theirs. Null when none has a cost.
+     * the sum of theirs. Null when none has a cost. Without those closed
+     * unmerged, whose lines may be in another too, unless only they are asked for.
      */
     cost_usd: number | null;
     cost_estimated: boolean;

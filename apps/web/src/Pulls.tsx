@@ -5,7 +5,7 @@ import { scopeParams, type Scope } from "./App.tsx";
 import { average, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
-import { costIsFloor, matchAll, pullCost, pullHref, pullsCostNote, web } from "./pull.ts";
+import { costIsFloor, costText, matchAll, pullCost, pullHref, pullsCostNote, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -118,7 +118,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
             />
             <Tile
               label="Agent cost"
-              value={pullCost({ usd: total.cost_usd, estimated: total.cost_estimated, sessions_without_cost: total.pulls_with_cost_missing, sessions_with_cost_partial: 0 })}
+              value={costText(total.cost_usd, total.cost_estimated, total.pulls_with_cost_missing > 0)}
               note={pullsCostNote(total)}
             />
           </section>

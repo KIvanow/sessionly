@@ -10,7 +10,11 @@ test("numbers and money", () => {
   assert.equal(f.compact(250_000), "250K");
   assert.equal(f.compact(4_200_000), "4.2M");
   assert.equal(f.usd(0.0042), "$0.0042");
-  assert.equal(f.usd(0.00004), "$0.000040");
+  // what one line cost is shown to the places that say something; other costs as they were
+  assert.equal(f.usdEach(0.00004), "$0.000040");
+  assert.equal(f.usdEach(0.0042), "$0.0042");
+  assert.equal(f.usdEach(1.5), "$1.50");
+  assert.equal(f.usd(0.00004), "$0.0000");
   assert.equal(f.usd(0), "$0.00");
   assert.equal(f.usd(5099.957), "$5,099.96");
   assert.equal(f.usdCompact(4.2), "$4.20");
