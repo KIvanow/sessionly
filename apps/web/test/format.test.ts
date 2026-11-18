@@ -14,6 +14,9 @@ test("numbers and money", () => {
   assert.equal(f.usdEach(0.00004), "$0.000040");
   assert.equal(f.usdEach(0.0042), "$0.0042");
   assert.equal(f.usdEach(1.5), "$1.50");
+  assert.equal(f.usdEach(0.0149), "$0.015");
+  assert.equal(f.usdEach(0.1), "$0.10");
+  assert.equal(f.usdEach(0.00999), "$0.010");
   assert.equal(f.usd(0.00004), "$0.0000");
   assert.equal(f.usd(0), "$0.00");
   assert.equal(f.usd(5099.957), "$5,099.96");

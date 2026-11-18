@@ -639,6 +639,8 @@ export interface PullSummary {
      * kept. `cost_usd` is then a floor.
      */
     pulls_with_cost_missing: number;
+    /** Pull requests closed without merging that have a cost, and are left out of the figures here. */
+    pulls_closed_with_cost: number;
     /**
      * Over the pull requests reported from the moment they were opened that
      * have a cost: what the agent lines they were opened with cost

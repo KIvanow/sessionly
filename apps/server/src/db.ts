@@ -676,16 +676,23 @@ const MIGRATIONS: string[] = [
   `UPDATE pull_requests SET matched_at = updated_at`,
   // How many line hashes a session uploaded: what its lines in a pull
   // request are a share of, for what it cost there. Kept beside the payload
-  // so that reading it does not open the payload. Null on a session stored
-  // by a server from before this (one still running beside a newer one):
-  // it is then counted from the payload.
-  `ALTER TABLE sessions ADD COLUMN hashed_lines integer DEFAULT 0`,
-  `UPDATE sessions SET hashed_lines =
-     (SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
-      FROM jsonb_array_elements(payload->'lines') AS l
-      WHERE jsonb_typeof(l->'hashes') = 'array')
-   WHERE jsonb_typeof(payload->'lines') = 'array'`,
-  `ALTER TABLE sessions ALTER COLUMN hashed_lines DROP DEFAULT`,
+  // so that reading it does not open the payload, and by the database
+  // itself whenever a payload is stored, so that a server from before this,
+  // still running beside a newer one, keeps it too. Sessions already here
+  // are counted after the server has started, some at a time
+  // (`countHashedLines`): null until then, and counted from the payload.
+  `ALTER TABLE sessions ADD COLUMN hashed_lines integer`,
+  `CREATE INDEX sessions_uncounted ON sessions (org_id) WHERE hashed_lines IS NULL`,
+  `CREATE FUNCTION sessions_hashed_lines() RETURNS trigger LANGUAGE plpgsql AS $f$
+   BEGIN
+     NEW.hashed_lines := (
+       SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
+       FROM jsonb_array_elements(CASE WHEN jsonb_typeof(NEW.payload->'lines') = 'array' THEN NEW.payload->'lines' ELSE '[]'::jsonb END) AS l
+       WHERE jsonb_typeof(l->'hashes') = 'array');
+     RETURN NEW;
+   END $f$`,
+  `CREATE TRIGGER sessions_hashed_lines BEFORE INSERT OR UPDATE OF payload ON sessions
+   FOR EACH ROW EXECUTE FUNCTION sessions_hashed_lines()`,
   // The sessions with lines in a pull request, as rows, so that all the pull
   // requests a session has lines in can be found by the session: its cost is
   // split between them. `matched` is which lines, as the hashes by file;
@@ -693,9 +700,10 @@ const MIGRATIONS: string[] = [
   // requests being shared out between them. Null and the number of lines
   // for one from before these were kept, until it is matched again, and
   // for a session deleted since: its lines are not kept past it.
-  // `opened_lines` is how many of the lines the pull request was first
-  // reported with are the session's: a session all of whose lines went in
-  // review stays here by them, with no lines. Null from before, likewise.
+  // `opened_lines`, `opened_matched` and `opened_weight` are the same of the
+  // lines the pull request was first reported with: a session all of whose
+  // lines went in review stays here by them, with no lines. Null from
+  // before, likewise.
   `CREATE TABLE pull_sessions (
      org_id     text NOT NULL REFERENCES orgs ON DELETE CASCADE,
      repo       text NOT NULL,
@@ -707,6 +715,8 @@ const MIGRATIONS: string[] = [
      weight     double precision NOT NULL,
      matched    jsonb,
      opened_lines integer,
+     opened_weight double precision,
+     opened_matched jsonb,
      PRIMARY KEY (org_id, repo, number, machine_id, source, session_id),
      FOREIGN KEY (org_id, repo, number) REFERENCES pull_requests ON DELETE CASCADE
    )`,
@@ -721,6 +731,30 @@ const MIGRATIONS: string[] = [
    WHERE s.machine_id IS NOT NULL AND s.source IS NOT NULL AND s.session_id IS NOT NULL AND s.lines IS NOT NULL
    ON CONFLICT DO NOTHING`,
 ];
+
+/**
+ * Count the line hashes of the sessions stored before the count was kept,
+ * some at a time so that nothing waits on it for long. Run after the server
+ * has started; several copies doing it at once pass over each other's rows.
+ * Returns how many it counted.
+ */
+export async function countHashedLines(db: Db, atOnce = 200): Promise<number> {
+  let counted = 0;
+  for (;;) {
+    const rows = await db.query(
+      `UPDATE sessions s SET hashed_lines =
+         (SELECT coalesce(sum(jsonb_array_length(l->'hashes')), 0)
+          FROM jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'lines') = 'array' THEN s.payload->'lines' ELSE '[]'::jsonb END) AS l
+          WHERE jsonb_typeof(l->'hashes') = 'array')
+       WHERE (s.org_id, s.machine_id, s.source, s.session_id) IN
+         (SELECT org_id, machine_id, source, session_id FROM sessions WHERE hashed_lines IS NULL LIMIT $1 FOR UPDATE SKIP LOCKED)
+       RETURNING 1`,
+      [atOnce],
+    );
+    counted += rows.length;
+    if (rows.length === 0) return counted;
+  }
+}
 
 /**
  * A statement granting `privileges` (as `SELECT, INSERT ON a, b`, or

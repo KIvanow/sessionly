@@ -26,10 +26,11 @@ export function usd(n: number): string {
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** What one line cost, or a small share: under a cent, as many places as say something. "$0.000042". */
+/** What one line cost, or a small share: under a dollar, the two digits that say something. "$0.015", "$0.000042". */
 export function usdEach(n: number): string {
-  if (n >= 0.01 || n <= 0) return usd(n);
-  return `$${n.toFixed(Math.min(8, Math.max(4, 1 - Math.floor(Math.log10(n)))))}`;
+  if (n >= 1 || n <= 0) return usd(n);
+  const two = Number(n.toPrecision(2));
+  return `$${two.toFixed(Math.min(8, Math.max(2, 1 - Math.floor(Math.log10(two)))))}`;
 }
 
 /** Dollars for a headline or an axis: "$4.20", "$1,284", "$12.9K". */
@@ -39,9 +40,9 @@ export function usdCompact(n: number): string {
 }
 
 /** A cost that may be missing, or an estimate (marked with ~). */
-export function cost(value: number | null, source: string | null): string {
+export function cost(value: number | null, source: string | null, show: (n: number) => string = usd): string {
   if (value == null) return "–";
-  return source === "recorded" ? usd(value) : `~${usd(value)}`;
+  return source === "recorded" ? show(value) : `~${show(value)}`;
 }
 
 /** 7000 -> "7s", 843000 -> "14m 3s", 203760000 -> "56h 36m" */

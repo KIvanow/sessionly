@@ -119,11 +119,14 @@ test("a pull request's cost is said with what is not sure about it", () => {
 });
 
 test("the cost of several pull requests says what it leaves out", () => {
-  const total = { cost_usd: 42, pulls_with_cost_missing: 0, per_surviving_line_usd: 0.25, per_surviving_line_is_floor: false };
+  const total = { cost_usd: 42, pulls_with_cost_missing: 0, pulls_closed_with_cost: 0, per_surviving_line_usd: 0.25, per_surviving_line_is_floor: false };
   assert.equal(pullsCostNote(total), "$0.25 per agent line that survived review; what the matched sessions cost, each for its share of lines");
   assert.equal(pullsCostNote({ ...total, pulls_with_cost_missing: 2, per_surviving_line_usd: null }), "not known in full for 2 pull requests");
   // a session of the lines they were opened with has no cost: what a surviving line cost is a floor
   assert.match(pullsCostNote({ ...total, per_surviving_line_is_floor: true }), /^at least \$0\.25 per agent line that survived review; /);
+  // the ones closed without merging have a cost below and none here, which is said
+  assert.match(pullsCostNote({ ...total, pulls_closed_with_cost: 2 }), /; without the 2 closed unmerged$/);
+  assert.equal(pullsCostNote({ ...total, cost_usd: null, per_surviving_line_usd: null, pulls_closed_with_cost: 1 }), "without the 1 closed unmerged");
   // no figure: because nothing was matched, or because what was matched has none
   assert.equal(pullsCostNote({ ...total, cost_usd: null, per_surviving_line_usd: null }), "no session was matched to their lines");
   assert.equal(pullsCostNote({ ...total, cost_usd: null, pulls_with_cost_missing: 1, per_surviving_line_usd: null }), "not known in full for 1 pull request: their sessions have no cost figure, or were not kept at their last report");

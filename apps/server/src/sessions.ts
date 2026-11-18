@@ -14,6 +14,7 @@ import {
 } from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
 import type { OrgDb } from "./db.ts";
+import { holdPullSessions } from "./pulls.ts";
 
 const UNKNOWN = "(unknown)";
 
@@ -128,7 +129,6 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     rw_lines_added: rewrite?.lines_added ?? null,
     rw_lines_surviving: rewrite?.lines_surviving ?? null,
     rw_measured_at: rewrite?.measured_at ?? null,
-    hashed_lines: (upload.lines ?? []).reduce((sum, file) => sum + (file.hashes?.length ?? 0), 0),
     payload: JSON.stringify(upload),
   };
   const names = Object.keys(columns);
@@ -185,11 +185,13 @@ async function dropOwn(db: OrgDb, key: unknown[], email: string, refiled: string
  */
 async function forgetLines(db: OrgDb, sessions: Record<string, unknown>[]): Promise<void> {
   if (sessions.length === 0) return;
+  // After any report that is storing these now: it then finds the session gone, or this finds what it stored.
+  await holdPullSessions(db);
   await db.query(
-    `UPDATE pull_sessions p SET matched = NULL
+    `UPDATE pull_sessions p SET matched = NULL, opened_matched = NULL
      FROM jsonb_to_recordset($2::jsonb) AS gone(machine_id text, source text, session_id text)
      WHERE p.org_id = $1 AND p.machine_id = gone.machine_id AND p.source = gone.source
-       AND p.session_id = gone.session_id AND p.matched IS NOT NULL`,
+       AND p.session_id = gone.session_id AND (p.matched IS NOT NULL OR p.opened_matched IS NOT NULL)`,
     [db.orgId, JSON.stringify(sessions.map((s) => ({ machine_id: s.machine_id, source: s.source, session_id: s.session_id })))],
   );
 }

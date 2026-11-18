@@ -174,8 +174,8 @@ type Lines = Record<string, string[]>;
 /** A session with lines in a pull request, as the pull request keeps it: which one, how many, and which. */
 type Wrote = Pick<PullSession, "machine_id" | "source" | "session_id" | "lines"> & { matched: Lines };
 
-/** And how many of the lines the pull request was first reported with are its own. */
-type Kept = Wrote & { opened_lines: number };
+/** And which of the lines the pull request was first reported with are its own. */
+type Kept = Wrote & { opened_lines: number; opened_matched: Lines };
 
 /**
  * A pull request's lines as they are now, file by file and session by
@@ -532,10 +532,13 @@ async function match(
   const { files, sessions: wrote } = breakdown(now, lines);
   // The sessions it was opened with, beside the ones it has now: one whose lines all went in review is kept by them.
   const opened = new Map(breakdown(first, firstLines).sessions.map((s) => [sessionKey(s), s]));
-  const sessions: Kept[] = wrote.map((s) => ({ ...s, opened_lines: opened.get(sessionKey(s))?.lines ?? 0 }));
+  const sessions: Kept[] = wrote.map((s) => {
+    const then = opened.get(sessionKey(s));
+    return { ...s, opened_lines: then?.lines ?? 0, opened_matched: then?.matched ?? {} };
+  });
   const there = new Set(wrote.map(sessionKey));
   for (const [key, s] of opened) {
-    if (!there.has(key)) sessions.push({ machine_id: s.machine_id, source: s.source, session_id: s.session_id, lines: 0, matched: {}, opened_lines: s.lines });
+    if (!there.has(key)) sessions.push({ machine_id: s.machine_id, source: s.source, session_id: s.session_id, lines: 0, matched: {}, opened_lines: s.lines, opened_matched: s.matched });
   }
   return {
     attribution: {
@@ -631,6 +634,16 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
 }
 
 /**
+ * Held until the transaction ends by whoever writes which lines of which
+ * sessions a pull request has, one at a time in an organisation: two reports
+ * that share a session would each miss the other's lines, and a report and
+ * the deleting of a session would each miss the other.
+ */
+export async function holdPullSessions(db: OrgDb): Promise<void> {
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-pull-sessions:${db.orgId}`]);
+}
+
+/**
  * The sessions with lines in a pull request, in place of the ones before.
  * What their lines count as is worked out again in every pull request those
  * sessions, and the ones before, have lines in: a line now in two is shared.
@@ -640,37 +653,43 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   // lines): then nothing is written, and nobody waits. The pull request's
   // own row is held by whoever got here, so these are not changing under it.
   const had = await db.query(
-    `SELECT machine_id, source, session_id, lines, opened_lines, matched FROM pull_sessions
+    `SELECT machine_id, source, session_id, lines, opened_lines, matched, opened_matched FROM pull_sessions
      WHERE org_id = $1 AND repo = $2 AND number = $3`,
     [db.orgId, repo, number],
   );
-  const said = (s: { lines: unknown; opened_lines: unknown; matched: unknown }) => {
-    const matched = s.matched == null ? null : json<Lines>(s.matched);
-    const files = matched && Object.keys(matched).sort().map((path) => [path, matched[path]]);
-    return JSON.stringify([s.lines == null ? null : num(s.lines), s.opened_lines == null ? null : num(s.opened_lines), files]);
+  const files = (kept: unknown) => {
+    const lines = kept == null ? null : json<Lines>(kept);
+    return lines && Object.keys(lines).sort().map((path) => [path, lines[path]]);
   };
+  const said = (s: { lines: unknown; opened_lines: unknown; matched: unknown; opened_matched: unknown }) =>
+    JSON.stringify([s.lines == null ? null : num(s.lines), s.opened_lines == null ? null : num(s.opened_lines), files(s.matched), files(s.opened_matched)]);
   const was = new Map(had.map((row) => [sessionKey(row as never), said(row as never)]));
   if (!turned && was.size === sessions.length && sessions.every((s) => was.get(sessionKey(s)) === said(s))) return;
-  // One at a time in an organisation, and held until the transaction ends:
-  // two reports that share a session would each miss the other's lines.
-  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-pull-sessions:${db.orgId}`]);
+  await holdPullSessions(db);
   const before = await db.query(
     `DELETE FROM pull_sessions WHERE org_id = $1 AND repo = $2 AND number = $3 RETURNING machine_id, source, session_id`,
     [db.orgId, repo, number],
   );
   if (sessions.length > 0) {
+    // Which lines are kept only of a session that is still here: one deleted
+    // since its lines were matched, a moment ago, takes them with it.
     await db.query(
-      `INSERT INTO pull_sessions (org_id, repo, number, machine_id, source, session_id, lines, weight, matched, opened_lines)
-       SELECT $1, $2, $3, s.machine_id, s.source, s.session_id, s.lines, s.lines, s.matched, s.opened_lines
+      `INSERT INTO pull_sessions
+         (org_id, repo, number, machine_id, source, session_id, lines, weight, matched, opened_lines, opened_weight, opened_matched)
+       SELECT $1, $2, $3, s.machine_id, s.source, s.session_id, s.lines, s.lines, CASE WHEN here.is THEN s.matched END,
+              s.opened_lines, s.opened_lines, CASE WHEN here.is THEN s.opened_matched END
        FROM jsonb_to_recordset($4::jsonb)
-         AS s(machine_id text, source text, session_id text, lines integer, matched jsonb, opened_lines integer)`,
+         AS s(machine_id text, source text, session_id text, lines integer, matched jsonb, opened_lines integer, opened_matched jsonb),
+       LATERAL (SELECT EXISTS (SELECT 1 FROM sessions x WHERE x.org_id = $1 AND x.machine_id = s.machine_id
+                               AND x.source = s.source AND x.session_id = s.session_id) AS is) here`,
       [db.orgId, repo, number, JSON.stringify(sessions)],
     );
   }
   const touched = new Map([...before, ...sessions].map((s) => [sessionKey(s as never), { machine_id: s.machine_id, source: s.source, session_id: s.session_id }]));
   if (touched.size === 0) return;
   const rows = await db.query(
-    `SELECT o.repo, o.number, o.machine_id, o.source, o.session_id, o.lines, o.weight, o.matched, r.state <> 'closed' AS live
+    `SELECT o.repo, o.number, o.machine_id, o.source, o.session_id, o.lines, o.weight, o.matched,
+            o.opened_lines, o.opened_weight, o.opened_matched, r.state <> 'closed' AS live
      FROM jsonb_to_recordset($2::jsonb) AS k(machine_id text, source text, session_id text)
      JOIN pull_sessions o ON o.org_id = $1 AND o.machine_id = k.machine_id AND o.source = k.source AND o.session_id = k.session_id
      JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number`,
@@ -682,18 +701,26 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
     if (!bySession.has(key)) bySession.set(key, []);
     bySession.get(key)!.push(row);
   }
+  const lines = (kept: unknown) => (kept == null ? null : json<Lines>(kept));
+  const same = (stored: unknown, now: number) => stored != null && Math.abs(num(stored) - now) < 1e-9;
   const changed: Record<string, unknown>[] = [];
   for (const its of bySession.values()) {
-    const weights = weigh(its.map((row) => ({ live: row.live === true, lines: num(row.lines), matched: row.matched == null ? null : json<Lines>(row.matched) })));
+    const weights = weigh(its.map((row) => ({ live: row.live === true, lines: num(row.lines), matched: lines(row.matched) })));
+    // The lines each was first reported with are shared out likewise: ones that
+    // moved from one pull request to another were opened in both, and paid for once.
+    const opened = weigh(its.map((row) => ({ live: row.live === true, lines: num(row.opened_lines), matched: lines(row.opened_matched) })));
     its.forEach((row, i) => {
-      if (Math.abs(num(row.weight) - weights[i]!) < 1e-9) return;
-      changed.push({ repo: row.repo, number: row.number, machine_id: row.machine_id, source: row.source, session_id: row.session_id, weight: weights[i] });
+      // From before the lines it was opened with were counted: nothing to say of them.
+      const then = row.opened_lines == null ? null : opened[i]!;
+      if (same(row.weight, weights[i]!) && (then == null ? row.opened_weight == null : same(row.opened_weight, then))) return;
+      changed.push({ repo: row.repo, number: row.number, machine_id: row.machine_id, source: row.source, session_id: row.session_id, weight: weights[i], opened_weight: then });
     });
   }
   if (changed.length === 0) return;
   await db.query(
-    `UPDATE pull_sessions o SET weight = c.weight
-     FROM jsonb_to_recordset($2::jsonb) AS c(repo text, number integer, machine_id text, source text, session_id text, weight double precision)
+    `UPDATE pull_sessions o SET weight = c.weight, opened_weight = c.opened_weight
+     FROM jsonb_to_recordset($2::jsonb)
+       AS c(repo text, number integer, machine_id text, source text, session_id text, weight double precision, opened_weight double precision)
      WHERE o.org_id = $1 AND o.repo = c.repo AND o.number = c.number AND o.machine_id = c.machine_id
        AND o.source = c.source AND o.session_id = c.session_id`,
     [db.orgId, JSON.stringify(changed)],
@@ -875,20 +902,31 @@ const HASHED_FROM_PAYLOAD = `(SELECT coalesce(sum(jsonb_array_length(l->'hashes'
  * By pull request, each with its sessions, most lines first; one query
  * however many there are.
  */
-async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }): Promise<Map<string, Share[]>> {
+async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, full = false): Promise<Map<string, Share[]>> {
+  // What a pull request's page says of each session; a list or a sum has no use for it.
+  const about = ["owner_email", "runtime", "title", "started_at", "active_ms", "primary_model", "prompts"]
+    .map((column) => (full ? `s.${column}` : `NULL AS ${column}`))
+    .join(", ");
   const rows = await db.query(
     `WITH mine AS (
-       SELECT p.repo, p.number, p.machine_id, p.source, p.session_id, p.lines, p.weight, p.opened_lines
-       FROM (${chosen.sql}) c JOIN pull_sessions p ON p.org_id = $1 AND p.repo = c.repo AND p.number = c.number),
+       SELECT p.repo, p.number, p.machine_id, p.source, p.session_id, p.lines, p.weight, p.opened_lines, p.opened_weight,
+              r.state = 'closed' AS closed
+       FROM (${chosen.sql}) c
+       JOIN pull_sessions p ON p.org_id = $1 AND p.repo = c.repo AND p.number = c.number
+       JOIN pull_requests r ON r.org_id = p.org_id AND r.repo = p.repo AND r.number = p.number),
      totals AS (
-       SELECT o.machine_id, o.source, o.session_id, sum(o.weight) AS in_pulls
+       SELECT o.machine_id, o.source, o.session_id,
+              sum(o.weight) FILTER (WHERE r.state <> 'closed') AS in_pulls,
+              sum(o.weight) FILTER (WHERE r.state = 'closed') AS in_closed,
+              sum(coalesce(o.opened_weight, o.opened_lines, 0)) FILTER (WHERE r.state <> 'closed') AS opened_in_pulls,
+              sum(coalesce(o.opened_weight, o.opened_lines, 0)) FILTER (WHERE r.state = 'closed') AS opened_in_closed
        FROM pull_sessions o JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number
-       WHERE o.org_id = $1 AND r.state <> 'closed'
+       WHERE o.org_id = $1
          AND (o.machine_id, o.source, o.session_id) IN (SELECT machine_id, source, session_id FROM mine)
        GROUP BY o.machine_id, o.source, o.session_id)
-     SELECT mine.*, t.in_pulls, s.session_id IS NOT NULL AS held, coalesce(s.hashed_lines, ${HASHED_FROM_PAYLOAD}) AS hashed_lines,
-            s.owner_email, s.runtime, s.title, s.started_at, s.active_ms, s.cost_usd, s.cost_source,
-            s.unpriced_requests, s.primary_model, s.prompts
+     SELECT mine.*, t.in_pulls, t.in_closed, t.opened_in_pulls, t.opened_in_closed, s.session_id IS NOT NULL AS held,
+            coalesce(s.hashed_lines, ${HASHED_FROM_PAYLOAD}) AS hashed_lines,
+            s.cost_usd, s.cost_source, s.unpriced_requests, ${about}
      FROM mine
      LEFT JOIN totals t ON t.machine_id = mine.machine_id AND t.source = mine.source AND t.session_id = mine.session_id
      LEFT JOIN sessions s ON s.org_id = $1 AND s.machine_id = mine.machine_id AND s.source = mine.source
@@ -900,11 +938,15 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }): 
   for (const row of rows) {
     const held = row.held === true;
     const weight = num(row.weight);
-    const among = Math.max(num(row.hashed_lines), num(row.in_pulls), weight);
+    // One closed without merging is a share of what the closed ones have
+    // between them, as the others are of theirs: neither is counted twice.
+    const closed = row.closed === true;
+    const among = Math.max(num(row.hashed_lines), num(closed ? row.in_closed : row.in_pulls), weight);
     const cost = held && row.cost_usd != null ? Number(row.cost_usd) : null;
     const lines = num(row.lines);
-    // Its lines at the start count as its lines now do: shared with other pull requests where those are.
-    const opened = num(row.opened_lines) * (lines > 0 ? weight / lines : 1);
+    // The lines it was first reported with, shared likewise with the others that were opened with them.
+    const opened = row.opened_weight == null ? num(row.opened_lines) : num(row.opened_weight);
+    const amongOpened = Math.max(num(row.hashed_lines), num(closed ? row.opened_in_closed : row.opened_in_pulls), opened);
     const share: Share = {
       wrote: {
         machine_id: String(row.machine_id),
@@ -930,7 +972,7 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }): 
       estimated: row.cost_source !== "recorded",
       partial: row.cost_source === "partial_estimate" || num(row.unpriced_requests) > 0,
       opened_lines: num(row.opened_lines),
-      opened_usd: cost == null ? null : money(opened > 0 ? (cost * opened) / Math.max(among, opened) : 0),
+      opened_usd: cost == null ? null : money(opened > 0 ? (cost * opened) / amongOpened : 0),
       opened_known: row.opened_lines != null,
     };
     const key = pullKey(row as never);
@@ -1053,7 +1095,7 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
   const detail = r.detail == null ? null : json<{ files: PullFile[] }>(r.detail);
   const row = pullRow(r);
   const shares = detail
-    ? ((await sharesIn(db, { sql: `SELECT $2::text AS repo, $3::integer AS number`, params: [db.orgId, repo, number] })).get(pullKey(row)) ?? [])
+    ? ((await sharesIn(db, { sql: `SELECT $2::text AS repo, $3::integer AS number`, params: [db.orgId, repo, number] }, true)).get(pullKey(row)) ?? [])
     : null;
   return {
     ...row,
@@ -1115,6 +1157,7 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
     cost_usd: null as number | null,
     cost_estimated: false,
     pulls_with_cost_missing: 0,
+    pulls_closed_with_cost: 0,
     per_surviving_line_usd: null as number | null,
     per_surviving_line_is_floor: false,
   };
@@ -1139,7 +1182,9 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
     // One closed without merging has a cost of its own that the others' lines
     // are not shared with: among them it would count a session twice. So it
     // is in no figure of cost here, unless only such are asked for.
-    if (pull.state !== "closed" || filters.state === "closed") {
+    if (pull.state === "closed" && filters.state !== "closed") {
+      if (pull.cost?.usd != null) total.pulls_closed_with_cost += 1;
+    } else {
       if (pull.cost?.usd != null) {
         total.cost_usd = (total.cost_usd ?? 0) + pull.cost.usd;
         if (pull.cost.estimated) total.cost_estimated = true;

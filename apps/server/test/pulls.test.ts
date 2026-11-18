@@ -5,7 +5,7 @@ import { createApp, type Env } from "../src/app.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { migrationAt, openDb, type Db } from "../src/db.ts";
+import { countHashedLines, migrationAt, openDb, type Db } from "../src/db.ts";
 import { testDb, testDbUrl, tokenFor } from "./helpers.ts";
 import { attribute, breakdown, type Claim, MATCH_AT_ONCE, weigh, writers } from "../src/pulls.ts";
 
@@ -255,6 +255,7 @@ test("the Action reports a pull request through review; admins read how the agen
     cost_usd: null,
     cost_estimated: false,
     pulls_with_cost_missing: 1,
+    pulls_closed_with_cost: 0,
     per_surviving_line_usd: null,
     per_surviving_line_is_floor: false,
   });
@@ -714,6 +715,10 @@ test("what a pull request's sessions cost it: each for the share of its lines th
   assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost")).body.total.cost_usd, sum(all.filter((row: any) => row.state !== "closed")));
   assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost&state=closed")).body.total.cost_usd, sum(all.filter((row: any) => row.state === "closed")));
 
+  // one whose only pull request with a cost is closed unmerged: the summary says that one is left out
+  const leftOut = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost")).body.total.pulls_closed_with_cost;
+  assert.equal(leftOut, 2);
+
   // a cost that leaves requests out is a floor, and the summary counts its pull request as one
   const before = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost")).body.total.pulls_with_cost_missing;
   await upload("c-partial", "j.ts", range(9000, 4), { total_usd: 1, source: "partial_estimate", unpriced_requests: 3 });
@@ -741,6 +746,17 @@ test("what a pull request's sessions cost it: each for the share of its lines th
   await call(tokens.ci, "PUT", "/prs", report({ repo: `${repo}-2`, number: 2, files: [file("m.ts", ...range(9700, 4))] }));
   // four dollars of lines that are gone and two of lines that stayed, for the four that stayed
   assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost-2")).body.total.per_surviving_line_usd, 1.5);
+
+  // lines that moved from one pull request to another were opened in both, and are paid for once
+  const moved = `${repo}-3`;
+  await upload("c-moved", "n.ts", range(9800, 10), { total_usd: 10, source: "recorded" }, moved);
+  await call(tokens.ci, "PUT", "/prs", report({ repo: moved, number: 1, files: [file("n.ts", ...range(9800, 10))] }));
+  await call(tokens.ci, "PUT", "/prs", report({ repo: moved, number: 1, event: "synchronize", files: [file("z.ts", 1)] }));
+  await call(tokens.ci, "PUT", "/prs", report({ repo: moved, number: 2, files: [file("n.ts", ...range(9800, 10))] }));
+  const opened = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${moved}&number=${number}`)).body.cost.opened_usd;
+  assert.deepEqual([await opened(1), await opened(2)], [5, 5]);
+  const movedTotal = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost-3")).body.total;
+  assert.deepEqual([movedTotal.cost_usd, movedTotal.per_surviving_line_usd], [10, 1]);
 });
 
 test("a line in several pull requests is shared out between them", () => {
@@ -780,9 +796,19 @@ test("pull requests and sessions from before the cost was shown have one after t
 
   const upgraded = await openDb(url);
   try {
-    const hashed = await upgraded.query(`SELECT session_id, hashed_lines FROM sessions WHERE org_id = 'old-cost' ORDER BY session_id`);
-    assert.deepEqual(hashed.map((row) => [row.session_id, Number(row.hashed_lines)]), [["s1", 4], ["s2", 0]]);
-    // one stored since by a server from before the count was kept has none: it is counted from the payload
+    const hashed = () =>
+      upgraded
+        .query(`SELECT session_id, hashed_lines FROM sessions WHERE org_id = 'old-cost' ORDER BY session_id`)
+        .then((rows) => rows.map((row) => [row.session_id, row.hashed_lines == null ? null : Number(row.hashed_lines)]));
+    // not counted by the upgrade itself, which would hold every session meanwhile, but once the server is up
+    assert.deepEqual(await hashed(), [["s1", null], ["s2", null]]);
+    assert.equal(await countHashedLines(upgraded, 1), 2);
+    assert.deepEqual(await hashed(), [["s1", 4], ["s2", 0]]);
+    assert.equal(await countHashedLines(upgraded), 0);
+    // the database counts them itself when a payload is stored, whoever stores it: a server from before this too
+    await upgraded.query(`UPDATE sessions SET payload = '{"session":{},"lines":[{"path":"a.ts","hashes":["0000000000000001"]}]}' WHERE org_id = 'old-cost' AND session_id = 's2'`);
+    assert.deepEqual(await hashed(), [["s1", 4], ["s2", 1]]);
+    // one not counted yet is counted from the payload
     await upgraded.query(`UPDATE sessions SET hashed_lines = NULL WHERE org_id = 'old-cost' AND session_id = 's1'`);
     const upgradedApp = createApp(upgraded);
     const admin = await tokenFor(upgraded, { email: "boss@example.com", role: "admin" }, "old-cost");

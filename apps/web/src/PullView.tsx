@@ -313,7 +313,7 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
       <td className="num">
         {known && s.cost_share_usd != null ? (
           <>
-            {known.cost_source === "recorded" ? "" : "~"}{usdEach(s.cost_share_usd)} <span className="muted">of {cost(known.cost_usd, known.cost_source)}</span>
+            {cost(s.cost_share_usd, known.cost_source, usdEach)} <span className="muted">of {cost(known.cost_usd, known.cost_source)}</span>
           </>
         ) : (
           "–"

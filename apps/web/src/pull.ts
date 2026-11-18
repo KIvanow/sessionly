@@ -46,18 +46,20 @@ export function pullCostNote(c: PullCost | null): string {
 export function pullsCostNote(total: {
   cost_usd: number | null;
   pulls_with_cost_missing: number;
+  pulls_closed_with_cost: number;
   per_surviving_line_usd: number | null;
   per_surviving_line_is_floor: boolean;
 }): string {
   const missing = total.pulls_with_cost_missing;
   const floor = missing > 0 ? `not known in full for ${count(missing)} ${missing === 1 ? "pull request" : "pull requests"}` : null;
+  // Those closed without merging have a cost in the list below and none here.
+  const closed = total.pulls_closed_with_cost > 0 ? `without the ${count(total.pulls_closed_with_cost)} closed unmerged` : null;
   if (total.cost_usd == null) {
-    return floor
-      ? `${floor}: their sessions have no cost figure, or were not kept at their last report`
-      : "no session was matched to their lines";
+    if (floor) return [`${floor}: their sessions have no cost figure, or were not kept at their last report`, closed].filter(Boolean).join("; ");
+    return closed ?? "no session was matched to their lines";
   }
   const each = total.per_surviving_line_usd != null ? `${total.per_surviving_line_is_floor ? "at least " : ""}${usdEach(total.per_surviving_line_usd)} per agent line that survived review` : null;
-  return [each, floor ?? "what the matched sessions cost, each for its share of lines"].filter(Boolean).join("; ");
+  return [each, floor ?? "what the matched sessions cost, each for its share of lines", closed].filter(Boolean).join("; ");
 }
 
 /** Where a pull request's page is: the repository's name has slashes, so it goes in as one part. */

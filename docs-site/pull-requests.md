@@ -177,13 +177,14 @@ a server of version 0.5.0 or older has to be reported once more before it can be
   A line that is in several pull requests (one stacked on another, a release of what was
   merged before) is shared out between them, so it is still counted once; a pull request
   closed without merging takes nothing from the others, and its own cost is left out of the
-  figures above the list unless only closed ones are shown. Which lines those are is kept from
+  figures above the list unless only closed ones are shown; the tile says how many were. Which lines those are is kept from
   a report or a **Match again** made with this version on: until then, a pull request from
   before counts all its lines as its own. Divided by the lines of the sessions that have a cost figure, it
   gives the cost of an agent line. The cost of a line that got through review, where that is
   known, is what the agent's lines the pull request was opened with cost, divided by those
   that survived; a pull request none of whose agent lines survived still says what they
-  cost. Both read "at least" when a session of those lines has no cost figure, or not all
+  cost, and lines that moved from one pull request to another are paid for once between
+  the two. Both read "at least" when a session of those lines has no cost figure, or not all
   of it. A session that is deleted takes its lines with it: the pull request keeps how many
   it had, not which. Three things to read with it. It is **the cost of the matched
   sessions, not of making the pull request**: lines that are not an agent's carry none. It
