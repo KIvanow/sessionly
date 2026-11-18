@@ -116,6 +116,15 @@ export function pullHref(p: { repo: string; number: number }): string {
 /** A link is only followed to a web address. */
 export const web = (url: string | null | undefined): string | undefined => (url && /^https?:\/\//i.test(url) ? url : undefined);
 
+/** At most five names, then how many are left: `a, b, c, d, e and 2 more`. */
+export function nameSome(names: string[]): string {
+  const shown = names.slice(0, 5);
+  const more = names.length - shown.length;
+  if (more > 0) return `${shown.join(", ")} and ${more} more`;
+  if (shown.length <= 1) return shown[0] ?? "";
+  return `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
+}
+
 const STATES: Record<string, string> = {
   approved: "approved",
   changes_requested: "asked for changes",

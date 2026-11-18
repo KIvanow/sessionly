@@ -49,6 +49,9 @@ pub struct Config {
     /// How much of what changes in the working tree while an agent's shell
     /// command runs is counted as the agent's, on this machine (see `changes`).
     pub shell_edits: ShellEdits,
+    /// Ask once a day, during a background upload, whether a newer release
+    /// is out, and say so in `status`. The capture hooks never ask.
+    pub update_check: bool,
 }
 
 /// How much of what changes in a repository while an agent's shell command
@@ -96,6 +99,7 @@ impl Default for Config {
             auto_sync: true,
             upload_line_hashes: false,
             shell_edits: ShellEdits::default(),
+            update_check: true,
         }
     }
 }
@@ -350,6 +354,22 @@ mod tests {
         );
         fs::write(&path, "{ broken").unwrap();
         assert!(Config::load(&path).is_err());
+    }
+
+    #[test]
+    fn an_empty_server_object_is_not_a_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{"machine_id":"m","server":{}}"#).unwrap();
+        assert!(Config::load(&path).is_err());
+        fs::write(&path, r#"{"machine_id":"m","server":null}"#).unwrap();
+        assert!(Config::load(&path).unwrap().server.is_none());
+        fs::write(
+            &path,
+            r#"{"machine_id":"m","server":{"url":"http://127.0.0.1:9","token":"t"}}"#,
+        )
+        .unwrap();
+        assert!(Config::load(&path).unwrap().server.is_some());
     }
 
     #[test]

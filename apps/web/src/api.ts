@@ -123,3 +123,19 @@ export function query(params: Record<string, string | number | undefined>): stri
   const text = search.toString();
   return text ? `?${text}` : "";
 }
+
+/**
+ * Whether a stored pull-request list is this filter. `limit` and `offset`
+ * are which page, not which filter, so a notice can stay while the next
+ * page of the same list loads.
+ */
+export function samePullFilters(dataPath: string | null, filters: string): boolean {
+  if (dataPath == null || !dataPath.startsWith("/prs?")) return false;
+  const got = new URLSearchParams(dataPath.slice(dataPath.indexOf("?") + 1));
+  got.delete("limit");
+  got.delete("offset");
+  const want = new URLSearchParams(filters.startsWith("?") ? filters.slice(1) : filters);
+  if ([...got.keys()].length !== [...want.keys()].length) return false;
+  for (const [key, value] of want) if (got.get(key) !== value) return false;
+  return true;
+}

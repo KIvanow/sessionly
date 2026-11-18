@@ -1,5 +1,13 @@
 // From what GitHub says about a pull request to what Sessionly is told.
+import { readFileSync } from "node:fs";
 import { addedHashes } from "./lines.mjs";
+
+/**
+ * This Action's version, from its package.json. Bump it with every change
+ * to what a report contains, and the same string on the server
+ * (`CURRENT_ACTION` in apps/server/src/pulls.ts).
+ */
+const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 const isBot = (user) => user?.type === "Bot" || /\[bot\]$/.test(user?.login ?? "");
 
@@ -134,6 +142,7 @@ export function buildReport({ pull, files, reviews, comments, conversation = [],
     // with how many there are: what is counted from them is then not all of it.
     feedback: feedback.slice(-MAX_FEEDBACK),
     feedback_total: feedback.length,
+    reporter: { name: "sessionly-action", version: VERSION },
   };
 }
 

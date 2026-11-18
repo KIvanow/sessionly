@@ -12,6 +12,13 @@ fn sessionly(home: &Path) -> Command {
         .env_remove("CODEX_HOME")
         // no background runs unless a test asks for them
         .env("SESSIONLY_NO_AUTO", "1")
+        // A release check that is not pointed elsewhere asks GitHub. A file
+        // that is not there fails at once, and a failed check is silent. A
+        // test that wants an answer sets this itself.
+        .env(
+            "SESSIONLY_RELEASE_LATEST",
+            format!("file://{}", home.join("no-such-release.json").display()),
+        )
         .env_remove("SESSIONLY_TOKEN")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("USERPROFILE");
@@ -2454,4 +2461,106 @@ fn update_replaces_the_binary_with_a_release_that_checks_out() {
         .is_symlink());
     let now = stdout(Command::new(&link).arg("--version").output().unwrap());
     assert_eq!(now.trim(), "sessionly 99.0.0");
+}
+
+/// A background upload asks once a day, and `status` says when a newer
+/// release was recorded. `list` does not, unless its output is a terminal,
+/// and `--json` never does. The setting turns the line off.
+#[test]
+fn a_background_upload_notes_a_newer_release_once_a_day() {
+    let home = tempfile::tempdir().unwrap();
+    let latest = home.path().join("latest.json");
+    fs::write(&latest, r#"{"tag_name":"v99.0.0"}"#).unwrap();
+    let url = format!("file://{}", latest.display());
+    let this = env!("CARGO_PKG_VERSION");
+    let auto = || {
+        sessionly(home.path())
+            .arg("auto")
+            .env("SESSIONLY_RELEASE_LATEST", &url)
+            .output()
+            .unwrap()
+    };
+
+    // Not connected: nothing is uploaded, so nothing is asked.
+    let disconnected = auto();
+    assert!(
+        disconnected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&disconnected.stderr)
+    );
+    let check = home.path().join("data/update-check.json");
+    assert!(!check.exists(), "a local ledger asked for a release");
+
+    // The check is on, and auto-sync is on, but there is no server to upload to.
+    let alone = stdout(sessionly(home.path()).arg("status").output().unwrap());
+    assert!(
+        alone.contains(
+            "Update:     on, but nothing asks until a server is set (`sessionly connect`)"
+        ),
+        "{alone}"
+    );
+
+    let server = StubServer::start();
+    stdout(run(home.path(), &["connect", &server.url, "--token", "t"]));
+
+    let first = auto();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&check).unwrap()).unwrap();
+    assert_eq!(saved["latest"], "99.0.0");
+    let before = fs::read(&check).unwrap();
+
+    // A different answer the same day is not asked for: the file is untouched.
+    fs::write(&latest, r#"{"tag_name":"v99.1.0"}"#).unwrap();
+    let second = auto();
+    assert!(second.status.success());
+    assert_eq!(fs::read(&check).unwrap(), before);
+
+    let line = format!("sessionly 99.0.0 is out (this is {this}). Run `sessionly update`.");
+    let status = stdout(sessionly(home.path()).arg("status").output().unwrap());
+    assert!(status.contains(&line), "{status}");
+    assert!(
+        status.contains(
+            "Update:     on (a background upload asks once a day, and status says when a newer release is out)"
+        ),
+        "{status}"
+    );
+    // Piped, so not a terminal: no line. `--json` is the machine-readable output.
+    let listed = stdout(sessionly(home.path()).arg("list").output().unwrap());
+    assert!(!listed.contains("99.0.0"), "{listed}");
+    let json = stdout(
+        sessionly(home.path())
+            .args(["list", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert!(!json.contains("99.0.0"), "{json}");
+
+    // The check is on, but a background run is what asks, and auto-sync is what starts one.
+    stdout(
+        sessionly(home.path())
+            .args(["settings", "--auto-sync", "off"])
+            .output()
+            .unwrap(),
+    );
+    let held = stdout(sessionly(home.path()).arg("status").output().unwrap());
+    assert!(
+        held.contains("Update:     on, but nothing asks while auto-sync is off"),
+        "{held}"
+    );
+    assert!(held.contains("Auto sync:  off"), "{held}");
+
+    stdout(
+        sessionly(home.path())
+            .args(["settings", "--update-check", "off"])
+            .output()
+            .unwrap(),
+    );
+    let quiet = stdout(sessionly(home.path()).arg("status").output().unwrap());
+    assert!(!quiet.contains("99.0.0"), "{quiet}");
+    assert!(quiet.contains("Update:     off"), "{quiet}");
 }

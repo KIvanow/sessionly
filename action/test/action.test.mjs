@@ -9,6 +9,8 @@ import { addedHashes, ignoring, lineHash } from "../src/lines.mjs";
 import { eventName, MOST_AT_ONCE, run, send, wanted, whenOpened } from "../src/main.mjs";
 import { buildReport, feedbackOf, MARKER, render, reviewRounds } from "../src/report.mjs";
 
+const ACTION_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+
 test("lines hash exactly as in the sessionly binary", () => {
   const { cases } = JSON.parse(readFileSync(new URL("./line-hashes.json", import.meta.url), "utf8"));
   assert.ok(cases.length > 20);
@@ -104,6 +106,10 @@ const GITHUB = {
 const build = (overrides = {}) =>
   buildReport({ ...GITHUB, event: "synchronize", host: "github.com", ignored: ignoring("pnpm-lock.yaml"), ...overrides });
 
+test("a report names this Action and the version in package.json", () => {
+  assert.deepEqual(build().reporter, { name: "sessionly-action", version: ACTION_VERSION });
+});
+
 test("a report says where the pull request stands and what it adds", () => {
   assert.deepEqual(build(), {
     repo: "github.com/acme/web",
@@ -139,6 +145,7 @@ test("a report says where the pull request stands and what it adds", () => {
       { kind: "inline", url: null, author: "ann", bot: false, at: at(7), path: null, line: null, reply: false },
     ],
     feedback_total: 7,
+    reporter: { name: "sessionly-action", version: ACTION_VERSION },
   });
   const merged = build({ pull: { ...PULL, state: "closed", merged: true, merged_at: at(40), closed_at: at(40) } });
   assert.deepEqual([merged.state, merged.merged_at], ["merged", at(40)]);

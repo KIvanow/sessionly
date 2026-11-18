@@ -20,6 +20,7 @@ Files and folders there are created readable only by you (0600 and 0700).
 | `snapshots/<session>/` | The comparison of the working tree around shell commands, while a session runs. See [Shell edits](shell-edits.md). |
 | `auto.log`, `auto.log.old` | A line for each [automatic sync](cli.md#automatic-sync). |
 | `auto.stamp`, `auto.lock` | When the last automatic sync started, and that one is running. |
+| `update-check.json` | When a newer release was last asked for, and which version it was. See [Install](install.md#updating). |
 | `turns/` | In a Codex cloud task: the turn that is open. |
 | `bin/`, `bootstrap.log` | In a cloud sandbox: the binary the repository's script downloaded, and what it noted. See [Cloud sessions](cloud-sessions.md). |
 

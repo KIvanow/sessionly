@@ -52,6 +52,10 @@ same archives without publishing, which is a way to try the build.
 A published archive is never replaced: the script that `sessionly install --repo` writes into
 other people's repositories carries its checksum. A fix is a new version.
 
+The GitHub Action has its own version, `version` in `action/package.json`. Bump it, and
+`CURRENT_ACTION` in `apps/server/src/pulls.ts` to the same value, with every change to what a
+report contains. A test fails when the two differ.
+
 ## Prices
 
 Model prices live in `crates/sessionly/src/pricing.rs`. Never guess one: a model without a

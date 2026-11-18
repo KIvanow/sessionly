@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { byOf, countFeedback, feedbackLabel, matchAll, matchedLine, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web } from "../src/pull.ts";
+import { byOf, countFeedback, feedbackLabel, matchAll, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web } from "../src/pull.ts";
 
 test("a pull request says how current its figures are", () => {
   const when = (iso: string | null) => `<${iso}>`;
@@ -44,6 +44,12 @@ const one = (kind: PullFeedback["kind"], author: string, more: Partial<PullFeedb
   bot: /\[bot\]$/.test(author),
   at: "2026-11-10T12:00:00.000Z",
   ...more,
+});
+
+test("a long list of names stops after five", () => {
+  assert.equal(nameSome(["acme/web"]), "acme/web");
+  assert.equal(nameSome(["a", "b"]), "a and b");
+  assert.equal(nameSome(["a", "b", "c", "d", "e", "f", "g"]), "a, b, c, d, e and 2 more");
 });
 
 test("a pull request's page is addressed by its repository, in one part, and its number", () => {
