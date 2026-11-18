@@ -106,9 +106,10 @@ export async function run(env, { api, deliver = send, log = console.log } = {}) 
     if (on(env.SESSIONLY_BACKFILL)) {
       const then = await whenOpened(api, repo, data);
       if (then) {
-        // As it was before any review: the server keeps the first report it gets.
-        // It says nothing of reviews and comments, so that those the server
-        // has stay until the report that follows brings them up to date.
+        // As it was before any review: the server keeps the lines of the first
+        // report it gets, and takes the rest from the latest, which is the one
+        // that follows. It says nothing of reviews and comments, so that those
+        // the server has stay.
         const { feedback, feedback_total, ...opened } = buildReport({ ...data, ...then, reviews: [], comments: [], conversation: [], event: "opened", host, ignored });
         await deliver(url, token, named({ ...opened, state: "open", merged_at: null, closed_at: null }));
       }
@@ -157,12 +158,17 @@ export async function run(env, { api, deliver = send, log = console.log } = {}) 
 async function runMany(env, which, { api, repo, reportOne, log, url }) {
   let numbers;
   let more = 0;
+  // Where the ones left for another run begin.
+  let from = which.from;
   if (which.all) {
     const since = env.SESSIONLY_SINCE ? Date.parse(env.SESSIONLY_SINCE) : Date.now() - SINCE_DAYS * 86_400_000;
     if (Number.isNaN(since)) throw new Error(`the since input is not a date: ${env.SESSIONLY_SINCE}`);
     const found = await listPulls(api, repo, since, MOST_AT_ONCE);
     numbers = found.numbers;
     more = found.more;
+    // Numbers go by when a pull request was created: none before this one is
+    // from `since` on, so the range to go on with keeps to it.
+    from = found.lowest;
   } else {
     // The latest first, as `all` has them. A number in between may be an
     // issue's: those are passed over below.
@@ -173,6 +179,8 @@ async function runMany(env, which, { api, repo, reportOne, log, url }) {
 
   const reported = [];
   const failed = [];
+  // The first one not tried, when GitHub stopped answering for now.
+  let stopped;
   for (const number of numbers) {
     try {
       const { report, attribution } = await reportOne(number, "manual");
@@ -180,21 +188,33 @@ async function runMany(env, which, { api, repo, reportOne, log, url }) {
     } catch (err) {
       const why = String(err.message ?? err).replace(/\r?\n/g, " ");
       // Issues and pull requests are numbered together.
-      if (!which.all && /answered 404 to GET \/repos\/[^ ]+\/pulls\/\d+:/.test(why)) continue;
+      if (!which.all && new RegExp(`answered 404 to GET /repos/[^ ]+/pulls/${number}[/:?]`).test(why)) continue;
+      // The ones after it would get the same answer: they are left for a later run.
+      if (/GitHub answered (403|429) to .*rate limit/i.test(why)) {
+        stopped = number;
+        log(
+          `::warning title=Sessionly::GitHub allows this run no more requests for now (${why}). ` +
+            `Run again later with pr-number ${from ?? numbers.at(-1)}-${number} for #${number} and the ones before it.`,
+        );
+        break;
+      }
       failed.push(number);
       log(`::warning title=Sessionly::#${number} could not be reported (${why}).`);
     }
   }
   const oldest = numbers.at(-1);
-  if (more > 0) {
+  if (more > 0 && stopped === undefined) {
     log(
       `::warning title=Sessionly::${more} more ${more === 1 ? "was" : "were"} left for another run: at most ${MOST_AT_ONCE} are reported at once. ` +
-        `Run again with pr-number ${which.all ? `1-${oldest - 1}` : `${which.from}-${oldest - 1}`} for the ones before these.`,
+        `Run again with pr-number ${from}-${oldest - 1} for the ones before these.`,
     );
   }
   log(`Reported ${reported.length} pull ${reported.length === 1 ? "request" : "requests"} of ${repo}.`);
   if (on(env.SESSIONLY_SUMMARY ?? "true") && env.GITHUB_STEP_SUMMARY) {
-    appendFileSync(env.GITHUB_STEP_SUMMARY, `${renderMany(reported, url)}\n`);
+    appendFileSync(env.GITHUB_STEP_SUMMARY, `${renderMany(reported, url, failed)}\n`);
+  }
+  if (stopped !== undefined) {
+    throw new Error(`GitHub allowed no more requests: #${stopped} and the ones before it were not reported`);
   }
   if (failed.length > 0) {
     throw new Error(`${failed.length} of ${numbers.length} pull requests could not be reported: ${failed.map((n) => `#${n}`).join(", ")}`);

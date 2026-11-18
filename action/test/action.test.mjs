@@ -457,7 +457,7 @@ test("the pr-number input names one pull request, several, or the latest", () =>
  * latest first). Numbers in `issues` are not pull requests, and those in
  * `broken` cannot be read.
  */
-function fakeRepository(pulls, { issues = [], broken = [] } = {}) {
+function fakeRepository(pulls, { issues = [], broken = [], limited = [] } = {}) {
   const calls = [];
   const request = async (method, path) => {
     calls.push([method, path.replace(/[?&]per_page=.*$/, "")]);
@@ -471,6 +471,7 @@ function fakeRepository(pulls, { issues = [], broken = [] } = {}) {
     if (path.includes("/commits")) return GITHUB.commits;
     const number = Number(/\/pulls\/(\d+)$/.exec(path)[1]);
     if (issues.includes(number)) throw new Error(`GitHub answered 404 to GET ${path}: {"message":"Not Found"}`);
+    if (limited.includes(number)) throw new Error(`GitHub answered 403 to GET ${path}: {"message":"API rate limit exceeded for installation"}`);
     if (broken.includes(number)) throw new Error(`GitHub answered 502 to GET ${path}: Bad Gateway`);
     return { ...PULL, number, title: `Change | number ${number}` };
   };
@@ -514,7 +515,12 @@ test("no more are reported at once than GitHub allows for, and the run says how 
   const latest = await run(environment({ SESSIONLY_PR_NUMBER: "all", SESSIONLY_SINCE: "2026-01-01" }), { api: fakeRepository(many), ...quiet });
   assert.deepEqual([latest.reported.length, latest.more], [MOST_AT_ONCE, 30]);
   assert.equal(latest.reported.at(-1).report.number, 501 - MOST_AT_ONCE);
-  assert.ok(logged.some((line) => line.includes(`30 more were left for another run`) && line.includes(`pr-number 1-${500 - MOST_AT_ONCE}`)), logged.join("\n"));
+  assert.ok(logged.some((line) => line.includes(`30 more were left for another run`) && line.includes(`pr-number 371-${500 - MOST_AT_ONCE} `)), logged.join("\n"));
+  // the ones before `since` are not among those to go on with
+  logged.length = 0;
+  const old = [...many, { number: 300, created_at: "2025-06-01T10:00:00Z" }];
+  await run(environment({ SESSIONLY_PR_NUMBER: "all", SESSIONLY_SINCE: "2026-01-01" }), { api: fakeRepository(old), ...quiet });
+  assert.ok(logged.some((line) => line.includes(`pr-number 371-${500 - MOST_AT_ONCE} `)), logged.join("\n"));
 
   // by number: the latest first, issues in between passed over without a word
   logged.length = 0;
@@ -526,6 +532,18 @@ test("no more are reported at once than GitHub allows for, and the run says how 
   const wide = await run(environment({ SESSIONLY_PR_NUMBER: `1-${MOST_AT_ONCE + 5}` }), { api: fakeRepository([]), ...quiet });
   assert.deepEqual([wide.reported.length, wide.more, wide.reported.at(-1).report.number], [MOST_AT_ONCE, 5, 6]);
   assert.ok(logged.some((line) => line.includes("pr-number 1-5")), logged.join("\n"));
+
+  // one that cannot be read is named on the summary page, and the rest go on
+  logged.length = 0;
+  const partly = environment({ SESSIONLY_PR_NUMBER: "10-12" });
+  await assert.rejects(run(partly, { api: fakeRepository([], { broken: [11] }), ...quiet }), /1 of 3 pull requests could not be reported: #11/);
+  assert.match(readFileSync(partly.GITHUB_STEP_SUMMARY, "utf8"), /Reported 2 pull requests\.[\s\S]*Could not be reported: #11\./);
+  // when GitHub allows no more requests, the ones left are not asked for
+  logged.length = 0;
+  const limited = fakeRepository([], { limited: [18, 17, 16] });
+  await assert.rejects(run(environment({ SESSIONLY_PR_NUMBER: "15-20" }), { api: limited, ...quiet }), /#18 and the ones before it were not reported/);
+  assert.ok(logged.some((line) => line.includes("pr-number 15-18 ")), logged.join("\n"));
+  assert.ok(!limited.calls.some(([, path]) => /\/pulls\/1[5-7]$/.test(path)), "asked on after the limit");
 });
 
 test("over the network: pages from GitHub, and the server's answer or refusal", async () => {

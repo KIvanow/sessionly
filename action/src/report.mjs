@@ -228,10 +228,12 @@ export function render(report, attribution, server) {
  * The figures of several pull requests reported in one run, as Markdown for
  * the run summary: one row each, the latest first as they were reported.
  */
-export function renderMany(reported, server) {
+export function renderMany(reported, server, failed = []) {
   const home = server ? `${String(server).replace(/\/+$/, "")}/#/pulls` : null;
   const out = [`### ${home ? `[Sessionly](${home})` : "Sessionly"}`, ""];
-  if (reported.length === 0) return [...out, "No pull requests were reported."].join("\n");
+  // The run's warnings say why.
+  const not = failed.length > 0 ? ["", `Could not be reported: ${failed.map((n) => `#${n}`).join(", ")}.`] : [];
+  if (reported.length === 0) return [...out, "No pull requests were reported.", ...not].join("\n");
   out.push(
     `Reported ${count(reported.length)} pull ${reported.length === 1 ? "request" : "requests"}.`,
     "",
@@ -243,6 +245,7 @@ export function renderMany(reported, server) {
       const name = `#${report.number}${title ? ` ${title}` : ""}`;
       return `| ${name} | ${count(now.lines)} | ${count(now.agent_lines)} | ${percent(now.agent_lines, now.lines)} |`;
     }),
+    ...not,
   );
   return out.join("\n");
 }

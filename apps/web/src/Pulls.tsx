@@ -119,6 +119,8 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
           <ByModel summary={summary.data!} />
         </>
       )}
+      {/* Apart from the list: one that could not be read again does not take this with it. */}
+      {matched && <p className="muted hint" role="status">{matched}</p>}
       {list.data && list.data.total > 0 && (
         <section className="card" aria-label="Pull requests">
           <div className="card-head">
@@ -133,7 +135,6 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
               {matching === null ? "Match these to sessions again" : `Matching… ${count(matching)} done`}
             </button>
           </div>
-          {matched && <p className="muted hint" role="status">{matched}</p>}
           <div className="scroll">
             <table className="rows">
               <thead>

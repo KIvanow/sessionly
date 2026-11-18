@@ -459,6 +459,8 @@ test("a pull request's lines are matched again when its sessions arrive after it
     feedback: [{ kind: "review", author: "bob", at: "2026-11-10T13:00:00Z", state: "approved" }],
   }));
   assert.equal(merged.body.attribution.now.agent_lines, 0);
+  // matched a while ago, so that matching again is later whatever the clock's step
+  await db.query(`UPDATE pull_requests SET matched_at = matched_at - interval '1 minute' WHERE repo = $1 AND number = 1`, [repo]);
   const detail = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}&number=${number}`)).body;
   const before = await detail(1);
   assert.deepEqual([before.matchable, before.matched_at != null, before.sessions], [true, true, []]);
@@ -519,6 +521,8 @@ test("a pull request's lines are matched again when its sessions arrive after it
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 99 })).status, 404);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { number: 1 })).status, 400);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: "1" })).status, 400);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 2147483648 })).status, 400);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 2147483647 })).status, 404);
 });
 
 test("the pull requests the list's filters choose are matched again, some at a time", async () => {
@@ -553,4 +557,11 @@ test("the pull requests the list's filters choose are matched again, some at a t
   // a body that cannot be read is not taken as one that asks for all of them
   assert.equal((await call(tokens.admin, "POST", "/prs/match")).status, 400);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", [])).status, 400);
+  // nor is a filter that is not text taken as one that was left out
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo: 5 })).status, 400);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo: "acme/many", started: 5 })).status, 400);
+  // a time still to come is taken as now, so the requests end: a new run, the rest left for its next
+  const ahead = await call(tokens.admin, "POST", "/prs/match", { repo: "acme/many", started: "2999-01-01T00:00:00Z" });
+  assert.deepEqual([ahead.status, ahead.body.matched, ahead.body.remaining], [200, MATCH_AT_ONCE, 2]);
+  assert.ok(Date.parse(ahead.body.started) < Date.now() + 60_000);
 });

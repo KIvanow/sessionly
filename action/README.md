@@ -61,7 +61,8 @@ shows a warning that the token is missing.
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 Outputs: `lines` (tracked lines the pull request adds) and `agent-lines` (how many a coding
-agent wrote).
+agent wrote). A run that reports several (`all` or a range) sets neither: its figures, one
+row for each pull request, are on the run's summary page.
 
 ## Pull requests from before the Action
 
@@ -95,15 +96,19 @@ updating it to a version that reports more than the one before. It differs from 
 - **At most 100 in one run.** Each takes six requests to GitHub (eight with `backfill`), and a
   workflow's token is allowed a thousand an hour. `all` takes the latest 100 created since
   `since`; when there are more, the run's warning names the range to start it with next
-  (`1-412`, say).
+  (`371-412`, say), which holds the rest of them and none from before `since`. A range you
+  write yourself takes no notice of `since`.
 - **Nothing is written on the pull requests.** No comment is posted or changed, whatever
   `comment` says. The run's summary page has one row for each.
-- **One that cannot be reported does not stop the rest.** It is named in a warning, and the
-  run fails at the end only with `fail-on-error`.
+- **One that cannot be reported does not stop the rest.** It is named in a warning and on the
+  summary page, and the run fails at the end only with `fail-on-error`. When GitHub allows the
+  run no more requests, it stops there and names the range to start it with later.
 - In a range, numbers that belong to issues are passed over.
 
 Sessions that were uploaded after a pull request's last report need none of this: the Pull
-requests page of the dashboard matches them without asking GitHub ("Match again").
+requests page of the dashboard matches them without asking GitHub ("Match again"). The one
+exception is a pull request last reported to a server of version 0.5.0 or older: it has to be
+reported once more, and can be matched again from the dashboard from then on.
 
 ## What is sent
 

@@ -526,7 +526,7 @@ export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttr
          .filter((name) => !kept.includes(name))
          .map((name) => `${name} = ${set(name)}`)
          .join(", ")},
-       updated_at = now(), matched_at = now()`,
+       updated_at = now(), matched_at = clock_timestamp()`,
     Object.values(columns),
   );
   return attribution;
@@ -590,15 +590,23 @@ export const MATCH_AT_ONCE = 100;
 export async function rematchPulls(db: OrgDb, filters: PullFilters, since?: string): Promise<PullMatches> {
   const { sql, params } = where(db.orgId, filters);
   // By the database's clock, which is the one `matched_at` is written with.
-  const [clock] = since ? [] : await db.query<{ t: unknown }>(`SELECT clock_timestamp() AS t`);
-  const started = since ?? iso(clock?.t) ?? new Date().toISOString();
+  // A time given that is still to come is taken as now: nothing would ever
+  // be matched after it, and the requests would not end.
+  const [clock] = await db.query<{ t: unknown }>(`SELECT clock_timestamp() AS t`);
+  const now = iso(clock?.t) ?? new Date().toISOString();
+  const started = since && since < now ? since : now;
   const due = `${sql} AND committers IS NOT NULL AND (matched_at IS NULL OR matched_at < $${params.length + 1}::timestamptz)`;
   const rows = await db.query<{ repo: string; number: unknown }>(
     `SELECT repo, number FROM pull_requests ${due}
      ORDER BY matched_at NULLS FIRST, repo, number LIMIT ${MATCH_AT_ONCE}`,
     [...params, started],
   );
-  for (const row of rows) await rematchPull(db, String(row.repo), num(row.number));
+  // Each is held until the request ends. Taken in one order whatever the
+  // filters, two requests with some in common wait for each other, not on each other.
+  const inOrder = rows
+    .map((row) => ({ repo: String(row.repo), number: num(row.number) }))
+    .sort((a, b) => (a.repo < b.repo ? -1 : a.repo > b.repo ? 1 : a.number - b.number));
+  for (const row of inOrder) await rematchPull(db, row.repo, row.number);
   const [left] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM pull_requests ${due}`, [...params, started]);
   const [waiting] = await db.query<{ n: unknown }>(
     `SELECT count(*) AS n FROM pull_requests ${sql} AND committers IS NULL`,

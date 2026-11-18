@@ -562,11 +562,20 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const sent: unknown = await c.req.json().catch(() => null);
     if (typeof sent !== "object" || sent === null || Array.isArray(sent)) throw new BadRequest("the body is not a JSON object");
     const body = sent as Record<string, unknown>;
-    const said = (key: string) => (typeof body[key] === "string" && body[key] !== "" ? (body[key] as string) : undefined);
+    // One that is there and is not text is refused too: left out, it would choose more.
+    const said = (key: string) => {
+      const value = body[key];
+      if (value === undefined || value === null || value === "") return undefined;
+      if (typeof value !== "string") throw new BadRequest(`${key} must be text`);
+      return value;
+    };
     if (body.number !== undefined) {
       const repo = said("repo");
       if (!repo) throw new BadRequest("repo is required");
-      if (!Number.isInteger(body.number) || (body.number as number) < 1) throw new BadRequest("number must be a pull request number");
+      // No higher than the column holds.
+      if (!Number.isInteger(body.number) || (body.number as number) < 1 || (body.number as number) > 2147483647) {
+        throw new BadRequest("number must be a pull request number");
+      }
       const matched = await rematchPull(c.get("db"), repo, body.number as number);
       if (!matched) return c.json({ error: "no such pull request" }, 404);
       if (matched === "needs_report") {

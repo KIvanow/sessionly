@@ -77,7 +77,8 @@ An input that is on or off takes `true`, `yes`, `on` or `1` for on, in any case;
 is off.
 
 Outputs: `lines` (tracked lines the pull request adds) and `agent-lines` (how many a coding
-agent wrote).
+agent wrote). A run that reports several (`all` or a range) sets neither: its figures, one
+row for each pull request, are on the run's summary page.
 
 **`ignore`.** By default: `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`,
 `Cargo.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `composer.lock`, `Gemfile.lock`, `*.min.js`,
@@ -213,7 +214,10 @@ does not work:
 
 **Several in one run.** `pr-number` also takes `all`, for the pull requests created since
 `since` (90 days ago unless given), the latest first, or a range such as `20-60`. One run
-reports at most 100; when there are more, its warning names the range to give next.
+reports at most 100; when there are more, its warning names the range to give next, which
+holds the rest of them and none from before `since`. A range you write yourself takes no notice
+of `since`. When GitHub allows the run no more requests, it stops and names the range to give
+later.
 Such a run posts no comments, and a number in a range that is an issue is passed over.
 
 ## What is sent
