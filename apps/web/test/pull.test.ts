@@ -137,7 +137,7 @@ test("a pull request's cost is said with what is not sure about it", () => {
   assert.equal(pullCost(null), "–");
   assert.match(pullCostNote(null), /were not kept/);
   // what a line cost is small, and is not shown as nothing
-  assert.equal(pullCostNote({ ...whole, per_agent_line_usd: 0.00004, per_surviving_line_usd: null }), "$0.000040 per agent line");
+  assert.equal(pullCostNote({ ...whole, per_agent_line_usd: 0.00004, opened_usd: null, per_surviving_line_usd: null }), "$0.000040 per agent line");
 });
 
 test("the cost of several pull requests says what it leaves out", () => {
