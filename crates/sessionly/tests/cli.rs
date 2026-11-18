@@ -2484,6 +2484,15 @@ fn a_background_upload_notes_a_newer_release_once_a_day() {
     let check = home.path().join("data/update-check.json");
     assert!(!check.exists(), "a local ledger asked for a release");
 
+    // The check is on, and auto-sync is on, but there is no server to upload to.
+    let alone = stdout(sessionly(home.path()).arg("status").output().unwrap());
+    assert!(
+        alone.contains(
+            "Update:     on, but nothing asks until a server is set (`sessionly connect`)"
+        ),
+        "{alone}"
+    );
+
     let server = StubServer::start();
     stdout(run(home.path(), &["connect", &server.url, "--token", "t"]));
 

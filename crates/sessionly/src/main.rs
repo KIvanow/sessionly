@@ -956,8 +956,16 @@ fn print_settings(config: &config::Config) {
         "Update:     {}",
         if !config.update_check {
             "off"
+        } else if crate::runtime::in_cloud() {
+            // The same order `note_release` uses: a cloud run never asks,
+            // then a machine that will not start a background run, then one
+            // with no server. A server named only in the environment counts,
+            // because that is the config the run loads.
+            "on, but not asked in a cloud environment"
         } else if !config.auto_sync {
             "on, but nothing asks while auto-sync is off"
+        } else if config.clone().with_environment().server.is_none() {
+            "on, but nothing asks until a server is set (`sessionly connect`)"
         } else {
             "on (a background upload asks once a day, and status says when a newer release is out)"
         }
