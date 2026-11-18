@@ -197,6 +197,8 @@ export function breakdown(now: FileHashes[], lines: (Writer | null)[][]): { file
 const FEEDBACK_KINDS = ["review", "inline", "conversation"];
 const REVIEW_STATES = ["approved", "changes_requested", "commented", "dismissed"];
 const ACTION_VERSION = /^\d+\.\d+\.\d+$/;
+/** Reports from this client are the Action's. Any other name is not judged. */
+const ACTION_REPORTER = "sessionly-action";
 
 /** Whether `version` is older than `current`, number by number. None is: it named no version. */
 export function olderAction(version: string | null, current: string): boolean {
@@ -213,6 +215,15 @@ export function olderAction(version: string | null, current: string): boolean {
 }
 
 /**
+ * Whether a stored report counts as an older Action. One that named no
+ * reporter does. Another client's does not: its version is not the Action's.
+ */
+function reportIsOlder(name: string | null, version: string | null): boolean {
+  if (name != null && name !== ACTION_REPORTER) return false;
+  return olderAction(version, CURRENT_ACTION);
+}
+
+/**
  * Of `repos`, those whose newest report — any state, any date — came from an
  * older Action. An exact name, not the list's partial match: a closed pull
  * request must not keep the notice once a later one was reported by the
@@ -220,8 +231,8 @@ export function olderAction(version: string | null, current: string): boolean {
  */
 async function reposOnOlderAction(db: OrgDb, repos: string[]): Promise<Set<string>> {
   if (repos.length === 0) return new Set();
-  const rows = await db.query<{ repo: string; reporter_version: unknown }>(
-    `SELECT DISTINCT ON (repo) repo, reporter_version
+  const rows = await db.query<{ repo: string; reporter_name: unknown; reporter_version: unknown }>(
+    `SELECT DISTINCT ON (repo) repo, reporter_name, reporter_version
      FROM pull_requests
      WHERE org_id = $1 AND repo = ANY($2::text[])
      ORDER BY repo, updated_at DESC`,
@@ -229,7 +240,12 @@ async function reposOnOlderAction(db: OrgDb, repos: string[]): Promise<Set<strin
   );
   return new Set(
     rows
-      .filter((row) => olderAction(typeof row.reporter_version === "string" ? row.reporter_version : null, CURRENT_ACTION))
+      .filter((row) =>
+        reportIsOlder(
+          typeof row.reporter_name === "string" ? row.reporter_name : null,
+          typeof row.reporter_version === "string" ? row.reporter_version : null,
+        ),
+      )
       .map((row) => String(row.repo)),
   );
 }
@@ -496,10 +512,11 @@ export async function storePull(db: OrgDb, report: PullReport): Promise<PullAttr
     // An Action from before these were sent says nothing of them: what is here stays.
     feedback: report.feedback ? JSON.stringify(report.feedback) : null,
     feedback_total: report.feedback ? (report.feedback_total ?? report.feedback.length) : null,
-    // The version of the Action that sent this report. One that names none
-    // is an older Action, which is what the page then says, so a missing
-    // version replaces one that was stored.
-    reporter_version: report.reporter?.version ?? null,
+    // Who sent this report. The version is the Action's, and only then: another
+    // client's is not an older Action. A report that names no reporter still
+    // is, so a missing one replaces a version that was stored.
+    reporter_name: report.reporter?.name ?? null,
+    reporter_version: report.reporter?.name === ACTION_REPORTER ? report.reporter.version : null,
     // only used when the row is new
     first_event: report.event,
     first_files: JSON.stringify(first),
@@ -552,9 +569,10 @@ function where(orgId: string, filters: PullFilters): { sql: string; params: unkn
 
 const ROW_COLUMNS = `repo, number, title, url, author, state, created_at, merged_at, first_event, commits,
   reviews, changes_requested, review_comments, bot_review_comments, review_rounds, files_without_diff,
-  attribution, updated_at, reporter_version`;
+  attribution, updated_at, reporter_name, reporter_version`;
 
 function pullRow(r: Record<string, unknown>): PullRow {
+  const reporterName = typeof r.reporter_name === "string" ? r.reporter_name : null;
   const reporterVersion = typeof r.reporter_version === "string" ? r.reporter_version : null;
   return {
     repo: String(r.repo),
@@ -576,7 +594,7 @@ function pullRow(r: Record<string, unknown>): PullRow {
     attribution: json<PullAttribution>(r.attribution),
     updated_at: iso(r.updated_at) ?? "",
     reporter_version: reporterVersion,
-    reporter_older: olderAction(reporterVersion, CURRENT_ACTION),
+    reporter_older: reportIsOlder(reporterName, reporterVersion),
   };
 }
 

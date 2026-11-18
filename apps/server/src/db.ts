@@ -664,6 +664,11 @@ const MIGRATIONS: string[] = [
   // Which version of the Action last reported a pull request. Null when the
   // report named none, which an Action from before it said does.
   `ALTER TABLE pull_requests ADD COLUMN reporter_version text`,
+  // Who sent the report. The version above is kept only when this is
+  // `sessionly-action`. Null, with no version, is an Action from before this
+  // was sent, or a reporter that did not fit. Another client's name is kept
+  // so that report is not read as one.
+  `ALTER TABLE pull_requests ADD COLUMN reporter_name text`,
 ];
 
 /**

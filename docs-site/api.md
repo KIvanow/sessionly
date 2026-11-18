@@ -72,14 +72,16 @@ How a repository is named, and what a path covers, is under
 
 A report may name who sent it: `reporter`, `{ "name": "sessionly-action", "version": "0.2.0" }`.
 The name is 1 to 50 characters and the version is three numbers (`0.10.0` counts; `v0.2.0`
-does not). Anything else is dropped and the report is still stored. `GET /prs` and
-`GET /prs/detail` give `reporter_version` (null when the report named none) and
-`reporter_older`, which is true when that version is missing or older than the Action this
-server knows. `GET /prs/detail` also gives `reporter_current`, that version, and
-`repo_reporter_older`: the repository's newest report, of any state, came from an older Action.
-A pull request merged before an upgrade is not that on its own. `GET /prs/summary` gives
-`older_actions`, the repositories in the filter whose newest report of any state came from an
-older Action, or from one that named no version.
+does not). Anything else is dropped and the report is still stored. The version is kept only
+when the name is `sessionly-action`. Another client's report is stored, and is not treated as
+an older Action. A report that names no reporter still is: an Action from before this was
+sent. `GET /prs` and `GET /prs/detail` give `reporter_version` (null when none was kept) and
+`reporter_older`. `GET /prs/detail` also gives `reporter_current`, the version of the Action
+this server knows, and `repo_reporter_older`: the repository's newest report, of any state,
+came from an older Action. A pull request merged before an upgrade is not that on its own.
+`GET /prs/summary` gives `older_actions`, the repositories in the filter whose newest report
+of any state came from an older Action, or from one that named no version. A newest report
+from another client does not put the repository on that list.
 
 ## Tokens and people
 

@@ -374,7 +374,9 @@ export interface PullReport {
   /**
    * Who sent the report. Left out by an Action from before this was sent.
    * A name longer than 50 characters, or a version that is not three
-   * numbers, is dropped, and the report is still accepted.
+   * numbers, is dropped, and the report is still accepted. The version is
+   * stored only when the name is `sessionly-action`. Another client is not
+   * compared with the Action.
    */
   reporter?: { name: string; version: string };
 }
@@ -468,13 +470,13 @@ export interface PullRow {
   attribution: PullAttribution;
   updated_at: string;
   /**
-   * The version of the Action that last reported it (`0.2.0`). Null when
-   * that report named none.
+   * The version of the Sessionly Action that last reported it (`0.2.0`).
+   * Null when that report named none, or was not from the Action.
    */
   reporter_version: string | null;
   /**
    * This pull request was last reported by an older Action, or by one that
-   * named no version.
+   * named no version. A report from another client is not.
    */
   reporter_older: boolean;
 }
@@ -561,7 +563,7 @@ export interface PullSummary {
   /**
    * Repositories that have a pull request in the filter, and whose newest
    * report of any state came from an older Action, or from one that named
-   * no version.
+   * no version. A newest report from another client does not count.
    */
   older_actions: string[];
   total: {

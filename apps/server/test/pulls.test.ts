@@ -503,17 +503,24 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
     const response = await call(tokens.ci, "PUT", "/prs", pinned({ number: 42, event: "synchronize", reporter }));
     assert.equal(response.status, 200, JSON.stringify(reporter));
     assert.equal(await versionOf(42), null, JSON.stringify(reporter));
+    // A reporter that does not fit is the same as none: an older Action.
+    assert.equal((await at(42)).body.reporter_older, true, JSON.stringify(reporter));
   }
-  // A name of 50 characters and a version of three numbers are kept, extra fields and all.
+  // A name of 50 characters is accepted, extra fields and all. It is not the
+  // Action, so its version is not kept and the report is not an older Action.
   const kept = await call(tokens.ci, "PUT", "/prs", pinned({
     number: 43,
     reporter: { name, version: "0.10.0", note: "not stored" },
   }));
   assert.equal(kept.status, 200);
-  assert.equal(await versionOf(43), "0.10.0");
-  // A later report that names none replaces the version: the page then says the Action is old.
+  const foreign = (await at(43)).body;
+  assert.equal(foreign.reporter_version, null);
+  assert.equal(foreign.reporter_older, false);
+  assert.equal(foreign.repo_reporter_older, false);
+  // A later report that names none replaces it: the page then says the Action is old.
   assert.equal((await call(tokens.ci, "PUT", "/prs", pinned({ number: 43, event: "synchronize" }))).status, 200);
   assert.equal(await versionOf(43), null);
+  assert.equal((await at(43)).body.reporter_older, true);
 
   // The list's filter, not one page of it. The newest report here named no version.
   const summary = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/pinned")).body;
@@ -562,4 +569,32 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   // Still on the old Action: the newest report named none, so the page does ask.
   const oldPage = (await at(41)).body;
   assert.equal(oldPage.repo_reporter_older, true);
+
+  // Another client over an old Action. The repository is not asked to change
+  // its workflow, and that client's own report is not an older Action. The
+  // merged pull request still was.
+  const other = "github.com/acme/other-client";
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: other,
+    number: 1,
+    state: "merged",
+    merged_at: "2026-11-01T00:00:00Z",
+    reporter: { name: "sessionly-action", version: "0.1.0" },
+  }))).status, 200);
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({
+    repo: other,
+    number: 2,
+    reporter: { name: "custom-reporter", version: "0.0.1" },
+  }))).status, 200);
+  const otherMerged = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/other-client&state=merged")).body;
+  assert.equal(otherMerged.total.pulls, 1);
+  assert.deepEqual(otherMerged.older_actions, []);
+  const otherOld = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(other)}&number=1`)).body;
+  assert.equal(otherOld.reporter_version, "0.1.0");
+  assert.equal(otherOld.reporter_older, true);
+  assert.equal(otherOld.repo_reporter_older, false);
+  const otherNew = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(other)}&number=2`)).body;
+  assert.equal(otherNew.reporter_version, null);
+  assert.equal(otherNew.reporter_older, false);
+  assert.equal(otherNew.repo_reporter_older, false);
 });
