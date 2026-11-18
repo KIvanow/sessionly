@@ -298,6 +298,8 @@ export type { GroupBy };
 export interface Filters {
   /** Substring of the uploader's email. */
   user?: string;
+  /** The uploader's address exactly. `user` is a substring, so it counts other people too. */
+  user_is?: string;
   /** Substring of the repository. */
   repo?: string;
   /** The repository exactly, as a summary by repository names it. */
@@ -328,6 +330,7 @@ function where(viewer: Principal, filters: Filters): { sql: string; params: unkn
   const conditions: string[] = [`org_id = ${bind(viewer.orgId)}`];
   if (viewer.role !== "admin") conditions.push(`owner_email = ${bind(viewer.email)}`);
   if (filters.user) conditions.push(`owner_email ILIKE ${like(filters.user)}`);
+  if (filters.user_is) conditions.push(`owner_email = ${bind(filters.user_is)}`);
   if (filters.repo) conditions.push(`repo ILIKE ${like(filters.repo)}`);
   if (filters.repo_is === UNKNOWN) conditions.push(`repo IS NULL`);
   else if (filters.repo_is) conditions.push(`repo = ${bind(filters.repo_is)}`);

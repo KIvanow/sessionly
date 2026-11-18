@@ -148,7 +148,7 @@ function People({
     setAlso(false);
     let sessions: number | null = null;
     try {
-      const page = await api<{ total: number }>(token, `/sessions?user=${encodeURIComponent(user.email)}&limit=1`);
+      const page = await api<{ total: number }>(token, `/sessions?user_is=${encodeURIComponent(user.email)}&limit=1`);
       sessions = page.total;
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {

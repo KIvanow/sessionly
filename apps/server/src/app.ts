@@ -130,6 +130,7 @@ function matchAsked(sent: unknown): { repo?: string; state?: string; since?: str
 function filtersFrom(query: Record<string, string>): Filters {
   return {
     user: query.user || undefined,
+    user_is: query.user_is || undefined,
     repo: query.repo || undefined,
     repo_is: query.repo_is || undefined,
     model: query.model || undefined,
