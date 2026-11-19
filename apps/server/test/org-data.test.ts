@@ -397,7 +397,8 @@ test("removing a person can delete their sessions and nobody else's", async () =
   assert.equal(await count("sessions", "ann@people.example"), 0);
   assert.equal(await count("sessions", "bob@people.example"), 1);
   assert.equal(await count("repo_exclusions", "ann@people.example"), 0);
-  assert.equal(await count("repos_allowed_again", "ann@people.example"), 0);
+  // One allowance, and the number stays so the next one is not 1 again.
+  assert.equal(await count("repos_allowed_again", "ann@people.example"), 1);
   assert.equal(await count("repo_exclusions", "bob@people.example"), 1);
   assert.equal((await call(admin, "GET", "/prs")).body.pulls[0].title, "stays on the pull request");
   // A token that was already accepted can still ask to stop a repository.
@@ -412,7 +413,7 @@ test("removing a person can delete their sessions and nobody else's", async () =
   assert.equal(unstopped.status, 403);
   assert.equal(unstopped.body.code, "person_removed");
   assert.equal(await count("repo_exclusions", "ann@people.example"), 0);
-  assert.equal(await count("repos_allowed_again", "ann@people.example"), 0);
+  assert.equal(await count("repos_allowed_again", "ann@people.example"), 1);
   const kept = async (id: string) => {
     const [row] = await db.query<{ matched: unknown; opened_matched: unknown; weight: unknown; opened_weight: unknown }>(
       `SELECT matched, opened_matched, weight, opened_weight FROM pull_sessions
@@ -463,6 +464,46 @@ test("removing a person can delete their sessions and nobody else's", async () =
   );
   assert.equal((await call(bobLingering.token, "PUT", "/repos/excluded", { repo: "~/Later" })).status, 403);
   assert.equal(await count("repo_exclusions", "bob@people.example"), 1);
+});
+
+test("erasing sessions keeps the allowance number a machine already saw", async () => {
+  await newOrg(db, "org-allow", "Allow");
+  await db.query(
+    `INSERT INTO users (id, org_id, email, role) VALUES
+       ('usr_ada', 'org-allow', 'ada@allow.example', 'member')`,
+  );
+  const admin = await tokenFor(db, { email: "admin@allow.example", role: "admin" }, "org-allow");
+  const ada = await tokenFor(db, { email: "ada@allow.example", role: "member" }, "org-allow");
+  const uploaded = session("ada-s", { user: { name: null, email: "ada@allow.example" } });
+  assert.equal((await put(ada, uploaded)).status, 200);
+  // One allowance. A machine that was here stores 1, then goes offline.
+  assert.equal((await call(ada, "PUT", "/repos/excluded", { repo: "~/Notes" })).status, 200);
+  assert.equal((await call(ada, "DELETE", "/repos/excluded?repo=~/Notes")).status, 200);
+  assert.deepEqual((await call(ada, "GET", "/repos/excluded")).body, { repos: [], allowed_again: 1 });
+
+  assert.equal((await call(admin, "DELETE", "/users/usr_ada?data=true")).status, 200);
+  const [kept] = await db.query<{ times: unknown }>(
+    `SELECT times FROM repos_allowed_again WHERE org_id = 'org-allow' AND owner_email = 'ada@allow.example'`,
+  );
+  assert.equal(Number(kept?.times), 1);
+
+  // Brought back without a sign-in provider: the same clearing a re-add does.
+  await db.query(`UPDATE users SET removed_at = NULL WHERE org_id = 'org-allow' AND id = 'usr_ada'`);
+  const back = await tokenFor(db, { email: "ada@allow.example", role: "member" }, "org-allow");
+  assert.equal((await call(back, "GET", "/repos/excluded")).body.allowed_again, 1);
+  // The session the erasure removed is not here. The machine still has it,
+  // and still has 1, so it does not ask while the number stays 1.
+  assert.deepEqual((await call(back, "GET", "/sessions/held?machine=m1")).body.sessions, []);
+
+  // The next allowance is 2, which that machine has not seen. It asks, finds
+  // the session gone, and sends it again. The server stores it.
+  assert.equal((await call(back, "PUT", "/repos/excluded", { repo: "~/Notes" })).status, 200);
+  assert.equal((await call(back, "DELETE", "/repos/excluded?repo=~/Notes")).status, 200);
+  assert.equal((await call(back, "GET", "/repos/excluded")).body.allowed_again, 2);
+  assert.equal((await put(back, uploaded)).status, 200);
+  assert.deepEqual((await call(back, "GET", "/sessions/held?machine=m1")).body.sessions, [
+    { source: "claude-code", session_id: "ada-s" },
+  ]);
 });
 
 test("a purge removes an organisation deleted 8 days ago, and leaves one deleted 6 days ago", async () => {
