@@ -1505,6 +1505,41 @@ fn a_server_that_cannot_say_what_is_stopped_is_sent_nothing() {
 }
 
 #[test]
+fn a_removed_person_refuses_one_session_and_the_run_goes_on() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    // Oldest first, so the refusal is met before the session that should go.
+    capture_editing_session(home.path(), "removed-1", &repo);
+    capture_editing_session(home.path(), "kept-1", &repo);
+    stdout(run(home.path(), &["connect", &server.url, "--token", "t"]));
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.path().join("data/config.json")).unwrap())
+            .unwrap();
+    let machine = config["machine_id"].as_str().unwrap();
+    server.answer_route(
+        "PUT",
+        &format!("/api/v1/sessions/{machine}/claude-code/removed-1"),
+        403,
+        r#"{"error":"this person has been removed","stored":false,"code":"person_removed"}"#,
+    );
+    let out = run(home.path(), &["upload"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("removed-1 was not uploaded")
+            && err.contains("this person has been removed")
+            && !err.contains("did not accept the token")
+            && !err.contains("stopped early"),
+        "{err}"
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("Uploaded 1 sessions"), "{text}");
+    assert_eq!(session_puts(&server).len(), 2);
+}
+
+#[test]
 fn upload_failures_are_reported_and_retried_later() {
     let home = tempfile::tempdir().unwrap();
     let server = StubServer::start();

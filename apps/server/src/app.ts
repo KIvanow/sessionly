@@ -560,7 +560,10 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       throw err;
     }
     // Removed: the address this session is filed under belongs to someone who was removed.
-    if (result.removed) return c.json({ error: "this person has been removed", stored: false }, 403);
+    // The code says so. A 403 with none is the token, and an uploader then stops the run.
+    if (result.removed) {
+      return c.json({ error: "this person has been removed", stored: false, code: "person_removed" }, 403);
+    }
     // Not stored, and not excluded: the server already has more of this cloud session.
     // Excluded: the person stopped the repository, so the session was not kept.
     return c.json(result);

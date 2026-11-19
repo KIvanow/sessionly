@@ -1335,6 +1335,7 @@ test("removing a person can delete their sessions and nobody else's", async () =
   const refused = await put(env, cloud("ann-cloud", "ann@people.example"));
   assert.equal(refused.status, 403);
   assert.equal(refused.body.stored, false);
+  assert.equal(refused.body.code, "person_removed");
   assert.match(refused.body.error, /removed/);
   assert.equal(await count("sessions", "ann@people.example"), 0);
   assert.equal((await put(env, cloud("bob-cloud", "bob@people.example"))).status, 200);
@@ -1347,6 +1348,7 @@ test("removing a person can delete their sessions and nobody else's", async () =
   assert.equal(await count("repo_exclusions", "bob@people.example"), 1);
   const later = await put(env, cloud("bob-later", "bob@people.example"));
   assert.equal(later.status, 403);
+  assert.equal(later.body.code, "person_removed");
   assert.equal(await count("sessions", "bob@people.example"), 2);
 });
 
