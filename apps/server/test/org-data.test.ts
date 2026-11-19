@@ -184,6 +184,20 @@ test("an owner can export every row of the organisation, and an admin or a membe
      VALUES ('org-out', 'github.com/acme/web', 7, 'm1', 'claude-code', 'out-s', 3, 3)
      ON CONFLICT DO NOTHING`,
   );
+  // Another organisation's pull history. The file must not contain it.
+  await db.query(
+    `INSERT INTO pull_requests (
+       org_id, repo, number, author, state, first_event, last_event, first_files, last_files, attribution
+     ) VALUES ('org-other', 'github.com/acme/other', 9, 'eve', 'open', 'opened', 'opened', '[]', '[]', '{}')`,
+  );
+  await db.query(
+    `INSERT INTO pull_sessions (org_id, repo, number, machine_id, source, session_id, lines, weight)
+     VALUES ('org-other', 'github.com/acme/other', 9, 'm1', 'claude-code', 'other-lines', 9, 9)`,
+  );
+  await db.query(
+    `INSERT INTO pull_request_reports (org_id, repo, number, event, commits, lines, agent_lines, sessions)
+     VALUES ('org-other', 'github.com/acme/other', 9, 'opened', 1, 9, 0, '[{"session_id":"other-org-report"}]')`,
+  );
 
   const file = await exported(owner.token);
   assert.equal(file.status, 200);
@@ -208,9 +222,17 @@ test("an owner can export every row of the organisation, and an admin or a membe
   assert.ok(of("session").some((row) => row.session_id === "out-s" && JSON.stringify(row.payload).includes("out-only-preview")));
   assert.equal(of("pull_request").length, await count("pull_requests"));
   assert.equal(of("pull_session").length, await count("pull_sessions"));
-  assert.ok(of("pull_session").length > 0);
+  const association = of("pull_session").find((row) => row.session_id === "out-s");
+  assert.ok(association);
+  assert.equal(association.org_id, "org-out");
+  assert.equal(association.repo, "github.com/acme/web");
+  assert.equal(Number(association.number), 7);
+  assert.equal(Number(association.lines), 3);
   assert.equal(of("pull_request_report").length, await count("pull_request_reports"));
-  assert.ok(of("pull_request_report").length > 0);
+  const history = of("pull_request_report").find((row) => row.repo === "github.com/acme/web" && Number(row.number) === 7);
+  assert.ok(history);
+  assert.equal(history.org_id, "org-out");
+  assert.equal(history.event, "opened");
   const pullRow = of("pull_request").find((row) => row.title === "out-only-pull");
   assert.ok(pullRow);
   for (const column of ["first_files", "last_files", "attribution", "detail", "feedback"]) {
@@ -224,7 +246,11 @@ test("an owner can export every row of the organisation, and an admin or a membe
   assert.doesNotMatch(file.text, new RegExp(hash(owner.token)));
   assert.doesNotMatch(file.text, new RegExp(owner.token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.doesNotMatch(file.text, /other-org-marker/);
+  assert.doesNotMatch(file.text, /other-lines/);
+  assert.doesNotMatch(file.text, /other-org-report/);
   assert.equal(of("session").some((row) => row.session_id === "other-s"), false);
+  assert.equal(of("pull_session").some((row) => row.org_id !== "org-out"), false);
+  assert.equal(of("pull_request_report").some((row) => row.org_id !== "org-out"), false);
 
   const again = await exported(owner.token);
   assert.equal(again.status, 429);
