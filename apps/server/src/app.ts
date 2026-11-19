@@ -14,7 +14,7 @@ import {
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
 import { exportLines } from "./export.ts";
-import { allowed, giveBack, take } from "./limits.ts";
+import { allowed, giveBack, onceEvery, take } from "./limits.ts";
 import { PROVIDER_NAMES } from "./oauth.ts";
 import { emailFrom, newUserId, offers, openRoutes, type Accounts } from "./signup.ts";
 import { addUser, forgetAccount, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
@@ -400,8 +400,10 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   api.get("/export", async (c) => {
     const p = c.get("principal");
     if (!p.owner) return c.json({ error: "only the owner of an organisation can do this" }, 403);
-    // Counted once it is allowed. A refusal above takes none of the ten minutes.
-    if (!(await allowed(ownerDb, `export:${p.orgId}`, 600, 1))) {
+    // Counted from the last export that was allowed, inside one transaction so
+    // two at once cannot both pass. A refusal above takes none of the ten minutes.
+    const within = await ownerDb.transaction((tx) => onceEvery(tx, `export:${p.orgId}`, 600));
+    if (!within) {
       return c.json(
         { error: "an organisation can be exported once every ten minutes; try again later", code: "rate_limited" },
         429,

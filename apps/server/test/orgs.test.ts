@@ -1174,6 +1174,20 @@ test("an owner can export every row of the organisation, and an admin or a membe
   const again = await exported(owner.token);
   assert.equal(again.status, 429);
   assert.equal(again.body?.code, "rate_limited");
+  // Ten minutes from the last one, not from the start of a clock window.
+  // One second short is still too soon. Exactly ten minutes is allowed.
+  await db.query(
+    `UPDATE rate_counters SET window_start = clock_timestamp() - interval '599 seconds' WHERE key = 'export:org-out'`,
+  );
+  const early = await exported(owner.token);
+  assert.equal(early.status, 429);
+  assert.equal(early.body?.code, "rate_limited");
+  await db.query(
+    `UPDATE rate_counters SET window_start = clock_timestamp() - interval '600 seconds' WHERE key = 'export:org-out'`,
+  );
+  const later = await exported(owner.token);
+  assert.equal(later.status, 200);
+  assert.equal(later.lines[0]?.id, "org-out");
 
   // The bootstrap token of a server that is not hosted can export. A hosted one cannot.
   const hosted = createApp(db, {

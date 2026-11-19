@@ -33,6 +33,28 @@ export async function allowed(db: Queryable, key: string, seconds: number, max: 
 }
 
 /**
+ * Let `key` through once every `seconds`, counted from the last time it was
+ * let through. A window that starts on the clock would let two through, one
+ * at each end of it. Call this inside a transaction: the wait and the record
+ * are one lock, so two at once cannot both pass. Exactly `seconds` since the
+ * last one is enough. What is refused is not recorded, and an older record of
+ * the same key is replaced by this one.
+ */
+export async function onceEvery(db: Queryable, key: string, seconds: number): Promise<boolean> {
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`rate:${key}`]);
+  const [recent] = await db.query<{ recent: boolean }>(
+    `SELECT true AS recent FROM rate_counters
+     WHERE key = $1 AND window_start > clock_timestamp() - make_interval(secs => $2::int)
+     LIMIT 1`,
+    [key, seconds],
+  );
+  if (recent) return false;
+  await db.query(`DELETE FROM rate_counters WHERE key = $1`, [key]);
+  await db.query(`INSERT INTO rate_counters (key, window_start, n) VALUES ($1, clock_timestamp(), 1)`, [key]);
+  return true;
+}
+
+/**
  * Give back one that was taken for something that then did not happen: a
  * message that was not sent after all is not one of the messages counted.
  * It goes back to the window it came from. By the time a message has
