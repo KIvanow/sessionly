@@ -277,6 +277,9 @@ export async function excludeRepo(
   if (!parsed.ok) throw new RepoNameError(parsed.error);
   const { repo, coversFolders } = parsed.name;
   await oneAtATime(db, email, "stopping");
+  // After the lock, so a removal that is deleting what they stopped has
+  // either finished or is waiting. A preference must not land after it.
+  if (await personRemoved(db, email)) throw new RemovedPerson();
   await db.query(
     `INSERT INTO repo_exclusions (org_id, owner_email, repo) VALUES ($1, $2, $3)
      ON CONFLICT (org_id, owner_email, repo) DO NOTHING`,
@@ -308,6 +311,8 @@ export async function excludeRepo(
 export async function includeRepo(db: OrgDb, email: string, raw: unknown): Promise<string | null> {
   const parsed = parseRepo(raw);
   if (!parsed.ok) throw new RepoNameError(parsed.error);
+  await oneAtATime(db, email, "stopping");
+  if (await personRemoved(db, email)) throw new RemovedPerson();
   const rows = await db.query<{ repo: string }>(
     `DELETE FROM repo_exclusions WHERE org_id = $1 AND owner_email = $2 AND repo = $3 RETURNING repo`,
     [db.orgId, email, parsed.name.repo],
@@ -325,6 +330,13 @@ export async function includeRepo(db: OrgDb, email: string, raw: unknown): Promi
 
 /** `parseRepo` refused the name. The route says so as a 400. */
 export class RepoNameError extends Error {}
+
+/** This address belongs to someone who was removed. A change for them is refused. */
+export class RemovedPerson extends Error {
+  constructor() {
+    super("this person has been removed");
+  }
+}
 
 /**
  * Take back one session its uploader no longer has: what it held is now part

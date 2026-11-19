@@ -28,6 +28,7 @@ import {
   listExcluded,
   listFiles,
   listSessions,
+  RemovedPerson,
   RepoNameError,
   removeUpload,
   storeUpload,
@@ -459,6 +460,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const failed = failureLog();
   api.onError((err, c) => {
     if (err instanceof BadRequest || err instanceof RepoNameError) return c.json({ error: err.message }, 400);
+    if (err instanceof RemovedPerson) return c.json({ error: err.message, code: "person_removed" }, 403);
     if (err instanceof BadReport) return c.json({ error: err.message }, 422);
     if (err instanceof ApiError) return c.json({ error: err.message, code: err.code }, err.status);
     if (err instanceof UserProblem) return c.json({ error: err.message, code: err.code }, err.status);

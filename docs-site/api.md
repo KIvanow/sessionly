@@ -56,8 +56,8 @@ curl -H "Authorization: Bearer $SESSIONLY_TOKEN" https://sessionly.example.com/a
 | | Who | |
 |---|---|---|
 | `GET /repos/excluded` | person | The repositories the token's person stopped. |
-| `PUT /repos/excluded` | person | Stops one: the body is `{"repo": "…"}`. Deletes the sessions that person already submitted from it, and says how many. |
-| `DELETE /repos/excluded?repo=…` | person | Allows one again. |
+| `PUT /repos/excluded` | person | Stops one: the body is `{"repo": "…"}`. Deletes the sessions that person already submitted from it, and says how many. A person who was removed is `403` (`person_removed`). |
+| `DELETE /repos/excluded?repo=…` | person | Allows one again. A person who was removed is `403` (`person_removed`). |
 
 How a repository is named, and what a path covers, is under
 [Uploading](uploading.md#stopping-a-repository).

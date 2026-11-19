@@ -1333,6 +1333,19 @@ test("removing a person can delete their sessions and nobody else's", async () =
   assert.equal(await count("repos_allowed_again", "ann@people.example"), 0);
   assert.equal(await count("repo_exclusions", "bob@people.example"), 1);
   assert.equal((await call(admin, "GET", "/prs")).body.pulls[0].title, "stays on the pull request");
+  // A token that was already accepted can still ask to stop a repository.
+  // The person is removed, so nothing is written.
+  const lingering = await db.asOrg("org-people", (scoped) =>
+    createToken(scoped, { email: "ann@people.example", role: "member", userId: null }),
+  );
+  const stopped = await call(lingering.token, "PUT", "/repos/excluded", { repo: "~/Later" });
+  assert.equal(stopped.status, 403);
+  assert.equal(stopped.body.code, "person_removed");
+  const unstopped = await call(lingering.token, "DELETE", "/repos/excluded?repo=~/Code");
+  assert.equal(unstopped.status, 403);
+  assert.equal(unstopped.body.code, "person_removed");
+  assert.equal(await count("repo_exclusions", "ann@people.example"), 0);
+  assert.equal(await count("repos_allowed_again", "ann@people.example"), 0);
   const kept = async (id: string) => {
     const [row] = await db.query<{ matched: unknown; opened_matched: unknown; weight: unknown; opened_weight: unknown }>(
       `SELECT matched, opened_matched, weight, opened_weight FROM pull_sessions
@@ -1378,6 +1391,11 @@ test("removing a person can delete their sessions and nobody else's", async () =
   assert.equal(later.status, 403);
   assert.equal(later.body.code, "person_removed");
   assert.equal(await count("sessions", "bob@people.example"), 2);
+  const bobLingering = await db.asOrg("org-people", (scoped) =>
+    createToken(scoped, { email: "bob@people.example", role: "member", userId: null }),
+  );
+  assert.equal((await call(bobLingering.token, "PUT", "/repos/excluded", { repo: "~/Later" })).status, 403);
+  assert.equal(await count("repo_exclusions", "bob@people.example"), 1);
 });
 
 test("a purge removes an organisation deleted 8 days ago, and leaves one deleted 6 days ago", async () => {
