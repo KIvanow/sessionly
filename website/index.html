@@ -6,7 +6,7 @@
     <title>Sessionly: a ledger of AI coding agent sessions</title>
     <meta
       name="description"
-      content="What your coding agents were asked, which tools ran, which files changed, what it cost and how much of it survived. For Claude Code, Cursor and Grok, side by side. Open source; runs on your machine."
+      content="What your coding agents were asked, which tools ran, which files changed, what it cost and how much of it survived. For Claude Code, Codex, Cursor and Grok, side by side. Open source; runs on your machine."
     />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#14161a" media="(prefers-color-scheme: light)" />
@@ -24,7 +24,7 @@
     <meta property="og:title" content="Sessionly: a ledger of AI coding agent sessions" />
     <meta
       property="og:description"
-      content="What your coding agents did, what it cost, and how much of it survived. Claude Code, Cursor and Grok in one ledger, on your machine first."
+      content="What your coding agents did, what it cost, and how much of it survived. Claude Code, Codex, Cursor and Grok in one ledger, on your machine first."
     />
     <meta property="og:url" content="https://sessionly.dev/" />
     <meta property="og:type" content="website" />
@@ -34,13 +34,13 @@
     <meta property="og:image:height" content="630" />
     <meta
       property="og:image:alt"
-      content="Sessionly: what your agents did, what it cost, what survived. A ledger for Claude Code, Cursor and Grok sessions."
+      content="Sessionly: what your agents did, what it cost, what survived. A ledger for Claude Code, Codex, Cursor and Grok sessions."
     />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Sessionly: a ledger of AI coding agent sessions" />
     <meta
       name="twitter:description"
-      content="What your coding agents did, what it cost, and how much of it survived. Claude Code, Cursor and Grok in one ledger, on your machine first."
+      content="What your coding agents did, what it cost, and how much of it survived. Claude Code, Codex, Cursor and Grok in one ledger, on your machine first."
     />
     <meta name="twitter:image" content="https://sessionly.dev/og.png" />
     <script defer src="/_vercel/insights/script.js"></script>
@@ -103,18 +103,22 @@
               <span>What <em>survived.</em></span>
             </h1>
             <p class="lede">
-              Sessionly records every Claude Code, Cursor and Grok session: what was asked, which
-              tools ran, which files changed and what it cost. Then it counts how many of the
+              Sessionly records every Claude Code, Codex, Cursor and Grok session: what was asked,
+              which tools ran, which files changed and what it cost. Then it counts how many of the
               agent's lines are still in the file later, and still in the pull request after
               review.
             </p>
             <div class="actions">
-              <a class="btn primary lg" href="#start">Get started</a>
-              <a class="btn link lg" href="#how">See how it works</a>
+              <a class="btn primary lg" href="https://app.sessionly.dev/#/demo">Try the live demo</a>
+              <a class="btn second lg" href="#start">Install on your machine</a>
+              <a class="btn link lg star" href="https://github.com/KIvanow/sessionly"
+                ><span aria-hidden="true">★</span> Star on GitHub</a
+              >
             </div>
             <p class="fine">
-              Open source under Apache-2.0. Nothing leaves a machine until you connect it to a
-              server, and the default upload contains no text from prompts, commands or files.
+              The demo is Sessionly's own repository, built with the agents it measures. Sign in
+              with Google or GitHub to open it; it is read-only. Open source under Apache-2.0, and
+              nothing leaves a machine until you connect it to a server.
             </p>
           </div>
 
@@ -146,8 +150,8 @@
         <div class="wrap">
           <div class="sheet blue">
             <div class="sheet-head">
-              <b>$ sessionly summary --by tool --since 30d</b>
-              <span>Example figures</span>
+              <b>KIvanow/sessionly · by tool · last 30 days</b>
+              <span>The live demo, as of 19 Nov 2026</span>
             </div>
             <div class="scroll">
               <table>
@@ -156,66 +160,76 @@
                     <th scope="col">Agent</th>
                     <th scope="col" class="num">Sessions</th>
                     <th scope="col" class="num">Cost</th>
-                    <th scope="col" class="num">Active</th>
-                    <th scope="col" class="num">Lines added</th>
                     <th scope="col">Lines still there</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr>
                     <th scope="row">Claude Code</th>
-                    <td class="num">64</td>
-                    <td class="num">$412.80</td>
-                    <td class="num">38h 12m</td>
-                    <td class="num">+21,480</td>
+                    <td class="num">12</td>
+                    <td class="num">$555.02</td>
                     <td>
                       <div class="share">
-                        <div class="track"><i class="w67"></i></div>
-                        <b>67%</b>
-                      </div>
-                    </td>
-                  </tr>
-                  <tr>
-                    <th scope="row">Cursor</th>
-                    <td class="num">41</td>
-                    <td class="num">$96.40</td>
-                    <td class="num">11h 05m</td>
-                    <td class="num">+7,498</td>
-                    <td>
-                      <div class="share">
-                        <div class="track"><i class="w91"></i></div>
-                        <b>91%</b>
+                        <div class="track"><i class="w68"></i></div>
+                        <b>68%</b>
                       </div>
                     </td>
                   </tr>
                   <tr>
                     <th scope="row">Grok</th>
-                    <td class="num">9</td>
-                    <td class="num">$18.75</td>
-                    <td class="num">4h 31m</td>
-                    <td class="num">+3,120</td>
+                    <td class="num">6</td>
+                    <td class="num">$39.07</td>
                     <td>
                       <div class="share">
-                        <div class="track"><i class="w58"></i></div>
-                        <b>58%</b>
+                        <div class="track"><i class="w12"></i></div>
+                        <b>12%</b>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr>
+                    <th scope="row">Codex</th>
+                    <td class="num">2</td>
+                    <td class="num"><span class="none">no cost</span></td>
+                    <td>
+                      <div class="share">
+                        <div class="track"><i class="w89"></i></div>
+                        <b>89%</b>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr>
+                    <th scope="row">Cursor</th>
+                    <td class="num">1</td>
+                    <td class="num"><span class="none">no cost</span></td>
+                    <td>
+                      <div class="share">
+                        <div class="track"><i class="w100"></i></div>
+                        <b>100%</b>
                       </div>
                     </td>
                   </tr>
                   <tr class="total">
                     <th scope="row">Total</th>
-                    <td class="num">114</td>
-                    <td class="num">$527.95</td>
-                    <td class="num">53h 48m</td>
-                    <td class="num">+32,098</td>
+                    <td class="num">21</td>
+                    <td class="num">$594.09</td>
                     <td>
                       <div class="share">
-                        <div class="track"><i class="all w72"></i></div>
-                        <b>72%</b>
+                        <div class="track"><i class="all w56"></i></div>
+                        <b>56%</b>
                       </div>
                     </td>
                   </tr>
                 </tbody>
               </table>
+            </div>
+            <div class="sheet-foot">
+              <p>
+                21 sessions, 29h 50m active, 480 files changed. 5 of the 21 costs are estimates and
+                3 sessions have no cost figure: Codex records none, and neither did the Cursor
+                session. One repository and one developer over one week: a record of this work, not
+                a benchmark of the agents.
+              </p>
+              <a href="https://app.sessionly.dev/#/demo">Open these figures in the demo →</a>
             </div>
           </div>
 
@@ -228,10 +242,10 @@
               </p>
             </div>
             <div>
-              <h3>Three agents, one record</h3>
+              <h3>Four agents, one record</h3>
               <p>
-                Claude Code, Cursor and Grok sessions sit in the same ledger, so a row means the
-                same thing whichever agent produced it.
+                Claude Code, Codex, Cursor and Grok sessions sit in the same ledger, so a row means
+                the same thing whichever agent produced it.
               </p>
             </div>
             <div>
@@ -239,6 +253,40 @@
               <p>
                 Counts how many of an agent's lines are still in the file later, and still in the
                 pull request after review.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="neutral">
+        <div class="wrap">
+          <p class="eyebrow">Neutral by design</p>
+          <h2>Lab-neutral, and private by default.</h2>
+          <p class="lede">
+            Sessionly is not any agent maker's tool. It reads every agent's sessions the same way
+            and says where one records less, so a comparison is not scored by one of the players.
+          </p>
+          <div class="cells">
+            <div class="cell">
+              <h3>Every agent, one way</h3>
+              <p>
+                Claude Code, Codex, Cursor and Grok, on a machine or in the cloud, mapped to the
+                same tool names and the same session record.
+              </p>
+            </div>
+            <div class="cell">
+              <h3>A ledger, not marks in your repo</h3>
+              <p>
+                Nothing is written into your commits: no notes, no trailers. Pull requests are
+                matched to sessions by hashes of the lines, on your server.
+              </p>
+            </div>
+            <div class="cell">
+              <h3>Uploads are opt-in</h3>
+              <p>
+                Nothing leaves a machine until you connect a server. The default upload has no
+                text from prompts, commands or files, and source code is never sent.
               </p>
             </div>
           </div>
@@ -372,13 +420,6 @@
               </p>
             </div>
             <div class="cell">
-              <h3>A hook that stays out of the way</h3>
-              <p>
-                The capture hook appends one line and exits. It never prints and always exits 0,
-                whatever its input, so a capture failure cannot block or change your session.
-              </p>
-            </div>
-            <div class="cell">
               <h3>You choose what is uploaded</h3>
               <p>
                 The default upload has counts, timings and relative paths but no text at all.
@@ -396,6 +437,37 @@
               </p>
             </div>
             <div class="cell">
+              <h3>What a pull request cost</h3>
+              <p>
+                The cost of the sessions matched to a pull request, each counted for its share of
+                the lines, and the cost of an agent line that got through review. Marked
+                "at least" where it is a floor and <code>~</code> where it is an estimate.
+              </p>
+            </div>
+            <div class="cell">
+              <h3>Figure history</h3>
+              <p>
+                Under a pull request's figures, each time they moved: when, what prompted the
+                report and why, from new commits to a session uploaded since or a newer Action.
+              </p>
+            </div>
+            <div class="cell">
+              <h3>Match again</h3>
+              <p>
+                A session uploaded after the merge? <b>Match again</b> matches the pull request
+                against the sessions the server holds now, without asking GitHub. The page says
+                when a repository reports with an older Action, and
+                <code>sessionly status</code> when a newer CLI is out.
+              </p>
+            </div>
+            <div class="cell">
+              <h3>Your data, out or gone</h3>
+              <p>
+                On the hosted service the owner can download the whole organisation as JSON lines,
+                or delete it from the Team page. Removing a person can erase their sessions too.
+              </p>
+            </div>
+            <div class="cell">
               <h3>An open record</h3>
               <p>
                 One session record with a published JSON Schema is the contract between the
@@ -409,7 +481,7 @@
       <section id="agents">
         <div class="wrap">
           <p class="eyebrow">Agents</p>
-          <h2>Claude Code, Cursor and Grok, side by side.</h2>
+          <h2>Claude Code, Codex, Cursor and Grok, side by side.</h2>
           <p class="lede">
             Each agent's tools are mapped to common names (Read, Edit, Write, Bash, Grep, Glob),
             and each agent's sessions are read from where that agent keeps them. Where an agent
@@ -421,6 +493,7 @@
                 <tr>
                   <th scope="col"></th>
                   <th scope="col">Claude Code</th>
+                  <th scope="col">Codex</th>
                   <th scope="col">Cursor</th>
                   <th scope="col">Grok</th>
                 </tr>
@@ -429,6 +502,7 @@
                 <tr>
                   <th scope="row">How sessions arrive</th>
                   <td>Hooks as they happen; transcripts for past sessions</td>
+                  <td>Its rollout files, plus its own hooks once you approve them in Codex</td>
                   <td>Its transcript files, plus the hooks, which Cursor also runs</td>
                   <td>Its session files, plus the hooks, which Grok also runs</td>
                 </tr>
@@ -437,9 +511,11 @@
                   <td>Yes</td>
                   <td>Yes</td>
                   <td>Yes</td>
+                  <td>Yes</td>
                 </tr>
                 <tr>
                   <th scope="row">Subagents</th>
+                  <td>Yes</td>
                   <td>Yes</td>
                   <td>Yes</td>
                   <td class="no">Not recorded by Grok</td>
@@ -447,12 +523,14 @@
                 <tr>
                   <th scope="row">Model and tokens</th>
                   <td>Per request</td>
+                  <td>Per model response</td>
                   <td>Per turn, for turns the hooks saw</td>
                   <td>Yes</td>
                 </tr>
                 <tr>
                   <th scope="row">Cost</th>
                   <td>Claude Code's recorded total, with an estimate for what it leaves out</td>
+                  <td class="no">Not recorded</td>
                   <td>
                     An estimate at API list prices for turns the hooks saw. Not what Cursor bills
                   </td>
@@ -463,13 +541,16 @@
                   <td>Yes</td>
                   <td>Yes</td>
                   <td>Yes</td>
+                  <td>Yes</td>
                 </tr>
               </tbody>
             </table>
           </div>
           <p class="note">
-            Checked with the Cursor editor 3.27 and Grok 1.0.77. Cursor's command-line agent is
-            not read yet. Sign-in files of either agent are never opened.
+            Checked with Codex 0.169.0, the Cursor editor 3.27 and Grok 1.0.77. Codex records
+            tokens but no cost, so its sessions add nothing to cost totals. Codex's editor
+            extension and its subagents are read but not checked yet, and Cursor's command-line
+            agent is not read yet. No agent's sign-in files are opened.
           </p>
         </div>
       </section>
@@ -479,10 +560,11 @@
           <p class="eyebrow">Cloud agents</p>
           <h2>Sessions that run in the cloud are in the ledger too.</h2>
           <p class="lede">
-            A Claude Code session on the web or a Cursor cloud agent runs in a sandbox the platform
-            starts, with a fresh clone of your repository and nothing from your machine. Both
-            platforms run the hooks a repository carries, so that is where capture goes: one
-            command writes a small script and its hook entries, and you commit them.
+            A Claude Code session on the web, a Cursor cloud agent or a Codex cloud task runs in a
+            sandbox the platform starts, with a fresh clone of your repository and nothing from
+            your machine. Claude Code and Cursor run the hooks a repository carries; Codex's cloud
+            runs none, but reads <code>AGENTS.md</code>. So one command writes a small script, its
+            hook entries and a section in <code>AGENTS.md</code>, and you commit them.
           </p>
           <div class="split">
             <div>
@@ -494,8 +576,9 @@
                   does nothing.
                 </li>
                 <li>
-                  <b>Filed under whoever started it.</b> Git in a sandbox is set up as the agent,
-                  so the person is the one the platform names.
+                  <b>Filed under whoever started it.</b> In Claude Code's and Cursor's sandboxes
+                  git is set up as the agent, so the person is the one the platform names. In
+                  Codex's, git is set up as the person who started the task.
                 </li>
                 <li>
                   <b>Shell edits count.</b> In a sandbox an agent often edits with
@@ -509,8 +592,9 @@
                   leaves the sandbox.
                 </li>
                 <li>
-                  <b>Tied to its pull request by branch.</b> A cloud agent commits under its own
-                  name, so its session is matched to the pull request of the branch it pushed. A
+                  <b>Tied to its pull request by branch.</b> In Claude Code's and Cursor's clouds
+                  the agent commits under its own name, so its session is matched to the pull
+                  request of the branch it pushed. A
                   cloud agent's pull request with no captured session is marked as such.
                 </li>
               </ul>
@@ -525,7 +609,7 @@
               <pre><span class="c"># in the repository's root</span>
 <span class="c">$</span> sessionly install --repo
 <span class="c">$</span> git add .sessionly .claude/settings.json \
-    .cursor/hooks.json
+    .cursor/hooks.json AGENTS.md
 <span class="c">$</span> git commit -m "Capture cloud agent sessions"
 
 <span class="c"># in the cloud environment, as secrets</span>
@@ -543,6 +627,7 @@ SESSIONLY_LINE_HASHES=on</pre>
                   <th scope="col"></th>
                   <th scope="col">Claude Code on the web</th>
                   <th scope="col">Cursor cloud agents</th>
+                  <th scope="col">Codex cloud tasks</th>
                 </tr>
               </thead>
               <tbody>
@@ -550,6 +635,10 @@ SESSIONLY_LINE_HASHES=on</pre>
                   <th scope="row">How sessions arrive</th>
                   <td>The repository's hooks, and the transcript Claude Code keeps in the sandbox</td>
                   <td>The repository's hooks only: Cursor's cloud keeps no transcript</td>
+                  <td>
+                    No hooks run. The section in <code>AGENTS.md</code> asks the agent to run the
+                    script before its first change in a turn and after its last
+                  </td>
                 </tr>
                 <tr>
                   <th scope="row">Prompts</th>
@@ -558,28 +647,40 @@ SESSIONLY_LINE_HASHES=on</pre>
                     Yes, except that the prompt an agent is started with does not always reach
                     the hooks. Its turn is then kept and marked as not captured
                   </td>
+                  <td class="no">When each turn began and ended, not the text</td>
                 </tr>
                 <tr>
                   <th scope="row">Tool calls, files and lines changed</th>
                   <td>Yes, shell edits included</td>
                   <td>Yes, shell edits included</td>
+                  <td>
+                    Files and lines changed per turn, shell edits included. One tool call,
+                    <code>Turn</code>, stands for all of a turn's work
+                  </td>
                 </tr>
                 <tr>
                   <th scope="row">Model, tokens and cost</th>
                   <td>As on a developer's machine</td>
                   <td class="no">The model only. Cursor's cloud gives hooks no token counts</td>
+                  <td class="no">Not recorded</td>
                 </tr>
                 <tr>
                   <th scope="row">Reaching your server</th>
                   <td>Once its host is on the environment's list of allowed domains</td>
                   <td>As it is</td>
+                  <td>
+                    Once its host is on the allowed domains, and GitHub, for the binary's download
+                  </td>
                 </tr>
               </tbody>
             </table>
           </div>
           <p class="note">
-            Capture was checked in real sessions on both platforms on 14 November 2026, with
-            Sessionly 0.3. In a sandbox all of a shell command's edits are counted. On a person's
+            Claude Code on the web and Cursor's cloud agents were checked with one real session
+            each on 14 November 2026. Codex's cloud was examined on 17 November 2026, with Codex
+            0.167: its whole path (download, capture, upload) has run in tests but not yet in
+            Codex's cloud itself, and a turn is recorded only if the agent runs the commands
+            <code>AGENTS.md</code> asks for. In a sandbox all of a shell command's edits are counted. On a person's
             machine only those sure to be the agent's are: whatever the person saved while a long
             command ran would otherwise be put down to the agent. Claude
             Code's documentation says a repository's hooks are not loaded in sessions over several
@@ -604,6 +705,11 @@ SESSIONLY_LINE_HASHES=on</pre>
                 agent and model, review rounds, and comments by people and by review bots. Its own
                 page shows the sessions that wrote it, its files, and a link to each review and
                 comment on GitHub: their text stays there.
+              </li>
+              <li>
+                <b>What it cost:</b> the matched sessions' cost, each counted for its share of the
+                lines, and the cost of an agent line that got through review. It reads "at least"
+                when a session has no cost figure, and is marked ~ when it is an estimate.
               </li>
               <li>
                 <b>By model:</b> the same, summed, so you can see whose lines get through review
@@ -754,7 +860,7 @@ SESSIONLY_LINE_HASHES=on</pre>
                 <li>The <code>sessionly</code> binary: capture, ledger, rewrite rate, upload</li>
                 <li>Server and team dashboard</li>
                 <li>Pull request attribution and the GitHub Action</li>
-                <li>Claude Code, Cursor and Grok, on a machine or in the cloud</li>
+                <li>Claude Code, Codex, Cursor and Grok, on a machine or in the cloud</li>
                 <li>One Docker Compose file to self-host</li>
               </ul>
               <a class="btn primary" href="#start">Get started</a>
@@ -784,6 +890,7 @@ SESSIONLY_LINE_HASHES=on</pre>
                 <li>The same code as the self-hosted server</li>
                 <li>The same content levels: metadata by default, previews opt-in</li>
                 <li>Sign in with Google or GitHub; your org's data is kept apart from every other</li>
+                <li>The owner can download the organisation's data, or delete it</li>
                 <li>Runs in Frankfurt, Germany</li>
               </ul>
               <a class="btn" href="https://app.sessionly.dev">Create an organisation</a>
@@ -818,6 +925,10 @@ SESSIONLY_LINE_HASHES=on</pre>
                   or removed, and the settings file as it was is saved beside it.
                 </li>
                 <li>
+                  <b>Codex asks first.</b> Codex runs a new hook only once you approve it: start
+                  <code>codex</code> and accept the hooks it shows, or run <code>/hooks</code>.
+                </li>
+                <li>
                   <b>Easy to undo.</b> <code>sessionly uninstall</code> takes the hooks out again.
                 </li>
                 <li>
@@ -832,8 +943,8 @@ SESSIONLY_LINE_HASHES=on</pre>
               <pre><span class="c"># a release's archive for your system, from GitHub</span>
 <span class="c">$</span> tar -xzf sessionly-*.tar.gz
 <span class="c">$</span> mv sessionly ~/.local/bin/   <span class="c"># or anywhere on your PATH</span>
-<span class="c">$</span> sessionly install   <span class="c"># adds hooks to ~/.claude/settings.json</span>
-<span class="c">$</span> sessionly import    <span class="c"># past sessions of all three agents</span>
+<span class="c">$</span> sessionly install   <span class="c"># adds the agents' hooks</span>
+<span class="c">$</span> sessionly import    <span class="c"># past sessions of all four agents</span>
 <span class="c">$</span> sessionly list
 <span class="c">$</span> sessionly summary --by tool
 <span class="c">$</span> sessionly show &lt;session&gt;</pre>
@@ -886,7 +997,7 @@ SESSIONLY_LINE_HASHES=on</pre>
             <h3>Read the numbers for what they are.</h3>
             <p>
               Cost is the agent's own recorded figure where there is one and an estimate from
-              token counts elsewhere; it is not an invoice. The rewrite rate measures whether
+              token counts elsewhere; Codex records none. It is not an invoice. The rewrite rate measures whether
               lines survived, not whether they were good or why they changed. The agent share of
               a pull request is a floor. Names and emails come from git config, or for a cloud
               session from the platform: a label, not a verified identity.
@@ -903,8 +1014,9 @@ SESSIONLY_LINE_HASHES=on</pre>
             repository.
           </p>
           <div class="actions">
-            <a class="btn primary lg" href="#start">Get started</a>
-            <a class="btn link lg" href="https://github.com/KIvanow/sessionly">Read the code</a>
+            <a class="btn primary lg" href="https://app.sessionly.dev/#/demo">Try the live demo</a>
+            <a class="btn second lg" href="#start">Get started</a>
+            <a class="btn link lg" href="https://github.com/KIvanow/sessionly">Star on GitHub</a>
           </div>
         </div>
       </section>
@@ -924,7 +1036,7 @@ SESSIONLY_LINE_HASHES=on</pre>
           <p>
             A ledger of AI coding agent sessions. Open source under Apache-2.0 and
             <a href="https://docs.sessionly.dev/server.html">self-hosted</a>. Claude Code,
-            Cursor, Grok and GitHub are trademarks of their owners; Sessionly is not affiliated
+            Codex, Cursor, Grok and GitHub are trademarks of their owners; Sessionly is not affiliated
             with them.
           </p>
           <p>Email <a href="mailto:support@sessionly.dev">support@sessionly.dev</a>.</p>
@@ -934,6 +1046,7 @@ SESSIONLY_LINE_HASHES=on</pre>
           <a href="/terms">Terms</a>
           <a href="/dpa">DPA</a>
           <a href="/security">Security</a>
+          <a href="https://app.sessionly.dev/#/demo">Demo</a>
           <a href="https://github.com/KIvanow/sessionly">GitHub</a>
           <a href="https://docs.sessionly.dev">Docs</a>
           <a href="https://github.com/KIvanow/sessionly/tree/main/action">GitHub Action</a>

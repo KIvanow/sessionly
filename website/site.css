@@ -412,6 +412,17 @@ footer :focus-visible {
   background: var(--pop);
   text-decoration: none;
 }
+.band .btn.second {
+  border-color: var(--band-text);
+}
+.band .btn.second:hover {
+  background: var(--band-text);
+  color: var(--band);
+  text-decoration: none;
+}
+.btn.star span {
+  margin-right: 8px;
+}
 .band .btn.link {
   padding: 0;
   font-weight: 500;
@@ -605,6 +616,7 @@ tbody tr:last-child > * {
 .w71 { width: 71%; } .w72 { width: 72%; } .w73 { width: 73%; } .w77 { width: 77%; }
 .w79 { width: 79%; } .w81 { width: 81%; } .w84 { width: 84%; } .w88 { width: 88%; }
 .w90 { width: 90%; } .w91 { width: 91%; } .w92 { width: 92%; }
+.w12 { width: 12%; } .w56 { width: 56%; } .w89 { width: 89%; } .w100 { width: 100%; }
 
 /* Hero */
 .hero {
@@ -745,7 +757,7 @@ tbody tr:last-child > * {
   margin-top: -84px;
 }
 .ledger table {
-  min-width: 820px;
+  min-width: 640px;
   font-family: var(--mono);
   font-size: 17px;
 }
@@ -761,7 +773,73 @@ tbody tr:last-child > * {
 .ledger th:last-child,
 .ledger td:last-child {
   padding-right: 22px;
-  width: 30%;
+  width: 40%;
+}
+.ledger .none {
+  color: var(--muted);
+}
+/* On a phone the four columns fit without scrolling: the bar gives way first. */
+@media (max-width: 639px) {
+  .ledger table {
+    min-width: 0;
+    font-size: 13px;
+  }
+  .ledger th,
+  .ledger td {
+    padding: 14px 4px;
+  }
+  .ledger th:first-child,
+  .ledger td:first-child {
+    padding-left: 14px;
+  }
+  .ledger th:last-child,
+  .ledger td:last-child {
+    padding-right: 14px;
+    width: auto;
+  }
+  .ledger thead th {
+    font-size: 10px;
+    letter-spacing: 0.02em;
+  }
+  .ledger tbody th {
+    font-size: 14px;
+  }
+  .ledger .share {
+    gap: 8px;
+  }
+  .ledger .share .track {
+    display: none;
+  }
+  .ledger .share b {
+    min-width: 0;
+    margin-left: auto;
+  }
+  .sheet-head,
+  .sheet-foot {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+}
+/* Under the demo's figures: what they are, and the way to them. */
+.sheet-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px 32px;
+  padding: 16px 22px 18px;
+  border-top: 1px solid var(--ink);
+  font-size: 14.5px;
+  line-height: 1.5;
+}
+.sheet-foot p {
+  flex: 1 1 420px;
+  margin: 0;
+  color: var(--muted);
+}
+.sheet-foot a {
+  font-weight: 600;
+  white-space: nowrap;
 }
 .ledger thead th {
   padding-top: 12px;
