@@ -408,6 +408,12 @@ function Shell({
   const repoChoices = scope.repo && !repos.includes(scope.repo) ? [scope.repo, ...repos] : repos;
   const orgName = me.org !== "default" && me.org_name ? me.org_name : null;
   const heading = HEADINGS[page === "team" ? (isAdmin ? page : "") : page === "pulls" ? (seesAll ? page : "") : page === "connect" && viewer ? "" : (page ?? "")];
+  // What a viewer of the demo cannot open is still in the menu, so the demo shows what there is, and says why not.
+  const unavailable = (label: string) => (
+    <span className="unavailable" aria-disabled="true" title="Not available in the demo">
+      {label}
+    </span>
+  );
   const link = (target: string, label: string) => (
     <a href={`#/${target}`} aria-current={page === target || (target === "pulls" && page === "pull") ? "page" : undefined}>
       {label}
@@ -423,8 +429,8 @@ function Shell({
             {link("", "Overview")}
             {link("sessions", "Sessions")}
             {seesAll && link("pulls", "Pull requests")}
-            {isAdmin && link("team", "Team")}
-            {!viewer && link("connect", "Connect")}
+            {isAdmin ? link("team", "Team") : viewer && unavailable("Team")}
+            {viewer ? unavailable("Connect") : link("connect", "Connect")}
           </nav>
           <span className="who">
             {sessions.length > 1 ? (
