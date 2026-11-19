@@ -224,8 +224,6 @@ button.quiet:hover:not(:disabled) { background: none; text-decoration-thickness:
   text-decoration: none;
 }
 .top nav a:hover { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 6px; }
-/* In the demo: there, and not to be opened. */
-.top nav .unavailable { padding: 7px 12px; color: var(--band-text); font-size: 14.5px; font-weight: 500; opacity: 0.45; cursor: not-allowed; }
 /* Where one is: paper on the band, as the website's own call to action. */
 .top nav a[aria-current="page"] { background: var(--band-text); color: var(--band); font-weight: 600; }
 .top :focus-visible { outline-color: var(--band-blue); }
