@@ -20,6 +20,18 @@ const UNKNOWN = "(unknown)";
 
 export class Conflict extends Error {}
 
+/**
+ * This address belongs to someone who was removed. A change for them is refused.
+ * An upload passes `{ stored: false }` so its answer still says the session was not stored.
+ */
+export class RemovedPerson extends Error {
+  readonly answer: { stored: false } | undefined;
+  constructor(answer?: { stored: false }) {
+    super("this person has been removed");
+    this.answer = answer;
+  }
+}
+
 const num = (value: unknown): number => (value == null ? 0 : Number(value));
 const numOrNull = (value: unknown): number | null => (value == null ? null : Number(value));
 /** A jsonb array of strings, which a driver may hand over parsed or as text. */
@@ -45,16 +57,16 @@ export function ownerOf(upload: Upload, uploader: Principal): string {
 
 /**
  * What storing an upload did. `excluded` means the repository is stopped, so
- * nothing was stored. `removed` means the address it is filed under belongs
- * to someone who was removed, so nothing was stored.
+ * nothing was stored. An address that belongs to someone who was removed
+ * throws `RemovedPerson` instead, and nothing is stored.
  */
-export type StoreResult = { stored: boolean; excluded?: true; removed?: true };
+export type StoreResult = { stored: boolean; excluded?: true };
 
 /**
  * Store one session, replacing an earlier upload of the same session.
- * `stored` is false when what the server has was kept instead, when the
- * person has stopped the repository (then a copy of theirs is removed), or
- * when the address it is filed under belongs to someone who was removed.
+ * `stored` is false when what the server has was kept instead, or when the
+ * person has stopped the repository (then a copy of theirs is removed).
+ * Someone who was removed refuses the upload.
  */
 export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal): Promise<StoreResult> {
   const s: Session = upload.session ?? {};
@@ -72,7 +84,7 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   // After the lock. A removal that is deleting their sessions has either
   // finished, and this sees it, or it is waiting for this upload to commit
   // and will delete what this stores.
-  if (await personRemoved(db, owner.email)) return { stored: false, removed: true };
+  if (await personRemoved(db, owner.email)) throw new RemovedPerson({ stored: false });
   if (await submissionStopped(db, owner.email, place)) {
     await dropOwn(db, key, owner.email, mayRefile);
     return { stored: false, excluded: true };
@@ -330,13 +342,6 @@ export async function includeRepo(db: OrgDb, email: string, raw: unknown): Promi
 
 /** `parseRepo` refused the name. The route says so as a 400. */
 export class RepoNameError extends Error {}
-
-/** This address belongs to someone who was removed. A change for them is refused. */
-export class RemovedPerson extends Error {
-  constructor() {
-    super("this person has been removed");
-  }
-}
 
 /**
  * Take back one session its uploader no longer has: what it held is now part

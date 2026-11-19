@@ -175,13 +175,8 @@ function People({
     if (!removing) return;
     const id = removing.user.id;
     const data = also ? "?data=true" : "";
-    setRemoving(null);
-    try {
-      await api(token, `/users/${encodeURIComponent(id)}${data}`, { method: "DELETE" });
-      list.reload();
-    } catch (err) {
-      setProblem((err as Error).message);
-    }
+    await api(token, `/users/${encodeURIComponent(id)}${data}`, { method: "DELETE" });
+    list.reload();
   }
 
   async function forget(user: UserInfo) {
@@ -272,7 +267,13 @@ function People({
         </div>
       )}
       {removing && (
-        <Confirm title={`Remove ${removing.user.email}?`} onClose={() => setRemoving(null)}>
+        <Confirm
+          title={`Remove ${removing.user.email}?`}
+          confirmLabel="Remove"
+          pendingLabel="Removing…"
+          onConfirm={confirmRemove}
+          onClose={() => setRemoving(null)}
+        >
           <p>
             They can no longer sign in, and uploads from their machines stop. A CI token made under their address keeps
             reporting pull requests. A session a cloud token files under this address is not stored. Revoke either token
@@ -293,24 +294,39 @@ function People({
               ? "A repository they had stopped is no longer stopped."
               : "The repositories they stopped stay stopped."}
           </p>
-          <div className="ask-actions">
-            <button type="button" onClick={confirmRemove}>
-              Remove
-            </button>
-            <button type="button" className="quiet" onClick={() => setRemoving(null)}>
-              Cancel
-            </button>
-          </div>
         </Confirm>
       )}
     </section>
   );
 }
 
-/** A small dialog. Escape and Cancel both leave it. */
-function Confirm({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+/**
+ * A small dialog. The request stays in it: both buttons wait, Escape and
+ * Cancel do nothing until it finishes, and a failure is said here.
+ */
+function Confirm({
+  title,
+  confirmLabel,
+  pendingLabel,
+  canConfirm = true,
+  onConfirm,
+  onClose,
+  children,
+}: {
+  title: string;
+  confirmLabel: string;
+  pendingLabel: string;
+  /** False while the answer is not ready, such as a name that is not typed yet. */
+  canConfirm?: boolean;
+  onConfirm: () => Promise<void>;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
+  const pendingRef = useRef(false);
+  const [pending, setPending] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
   useEffect(() => {
     const dialog = ref.current;
     dialog?.showModal();
@@ -318,6 +334,29 @@ function Confirm({ title, children, onClose }: { title: string; children: React.
       dialog?.close();
     };
   }, []);
+
+  function leave() {
+    if (pendingRef.current) return;
+    onClose();
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (pendingRef.current || !canConfirm) return;
+    pendingRef.current = true;
+    setPending(true);
+    setProblem(null);
+    try {
+      await onConfirm();
+      onClose();
+    } catch (err) {
+      setProblem((err as Error).message);
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
+    }
+  }
+
   return (
     <dialog
       ref={ref}
@@ -325,11 +364,22 @@ function Confirm({ title, children, onClose }: { title: string; children: React.
       aria-labelledby={titleId}
       onCancel={(event) => {
         event.preventDefault();
-        onClose();
+        leave();
       }}
     >
       <h2 id={titleId}>{title}</h2>
-      {children}
+      <form onSubmit={submit}>
+        {children}
+        {problem && <p role="alert">{problem}</p>}
+        <div className="ask-actions">
+          <button type="submit" disabled={pending || !canConfirm}>
+            {pending ? pendingLabel : confirmLabel}
+          </button>
+          <button type="button" className="quiet" disabled={pending} onClick={leave}>
+            Cancel
+          </button>
+        </div>
+      </form>
     </dialog>
   );
 }
@@ -351,25 +401,18 @@ function OrganisationData({
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [typed, setTyped] = useState("");
-  const [pending, setPending] = useState(false);
-  const pendingRef = useRef(false);
 
-  async function removeOrg(e: React.FormEvent) {
-    e.preventDefault();
-    if (pendingRef.current) return;
-    pendingRef.current = true;
-    setPending(true);
-    setProblem(null);
+  async function removeOrg() {
     try {
       await api(token, "/org", { method: "DELETE", body: { name: typed.trim() } });
-      onSignOut();
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) onSignOut();
-      else setProblem((err as Error).message);
-    } finally {
-      pendingRef.current = false;
-      setPending(false);
+      if (err instanceof ApiError && err.status === 401) {
+        onSignOut();
+        return;
+      }
+      throw err;
     }
+    onSignOut();
   }
 
   async function download() {
@@ -407,8 +450,8 @@ function OrganisationData({
     <section className="card">
       <h2>Organisation data</h2>
       <p className="muted">
-        One file with the organisation, its people, sessions, pull requests, stopped repositories and tokens. A
-        token's secret is not in it.
+        One file with the organisation, its people, sessions, pull requests (the lines matched to them, and earlier
+        figures), stopped repositories and tokens. A token's secret is not in it.
       </p>
       <div className="ask-actions">
         <button type="button" onClick={download} disabled={busy}>
@@ -424,33 +467,17 @@ function OrganisationData({
       {deleting && (
         <Confirm
           title="Delete this organisation?"
-          onClose={() => {
-            if (!pendingRef.current) setDeleting(false);
-          }}
+          confirmLabel="Delete this organisation"
+          pendingLabel="Deleting…"
+          canConfirm={typed.trim() === orgName}
+          onConfirm={removeOrg}
+          onClose={() => setDeleting(false)}
         >
           <p>Everyone is signed out now. Everything is deleted for good in 7 days. Backups rotate out 7 days after that.</p>
-          <form onSubmit={removeOrg}>
-            <label>
-              Type {orgName} to confirm
-              <input value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
-            </label>
-            {problem && <p role="alert">{problem}</p>}
-            <div className="ask-actions">
-              <button type="submit" disabled={pending || typed.trim() !== orgName}>
-                {pending ? "Deleting…" : "Delete this organisation"}
-              </button>
-              <button
-                type="button"
-                className="quiet"
-                disabled={pending}
-                onClick={() => {
-                  if (!pendingRef.current) setDeleting(false);
-                }}
-              >
-                Cancel
-              </button>
-            </div>
-          </form>
+          <label>
+            Type {orgName} to confirm
+            <input value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
+          </label>
         </Confirm>
       )}
     </section>

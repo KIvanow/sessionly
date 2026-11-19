@@ -1,9 +1,26 @@
-// Deleting an organisation's rows, and restoring one during the seven days
-// before that. Both run as the database's owner: once an organisation is
-// marked deleted, a request's token is refused, and the rate counters have
-// no organisation to set. The default organisation of a self-hosted server
-// is never removed.
-import type { Db } from "./db.ts";
+// Marking an organisation deleted, restoring that during the seven days
+// before its rows go, and removing those rows. Marking it deleted is a
+// request, as the organisation. Restoring and removing run as the database's
+// owner: once it is marked deleted, a request's token is refused, and the
+// rate counters have no organisation to set. The default organisation of a
+// self-hosted server is never removed.
+import type { Db, OrgDb } from "./db.ts";
+import { orgRateKeys } from "./limits.ts";
+
+/** The name typed to delete an organisation was missing or wrong. The route says 400. */
+export class OrgNameError extends Error {}
+
+/**
+ * Mark an organisation deleted. The row stays until the purge. `name` is what
+ * the owner typed, and it has to be this organisation's name.
+ */
+export async function deleteOrg(db: OrgDb, name: string): Promise<void> {
+  const typed = name.trim();
+  if (!typed) throw new OrgNameError("type the organisation's name");
+  const [org] = await db.query<{ name: string }>(`SELECT name FROM orgs WHERE id = $1`, [db.orgId]);
+  if (org?.name !== typed) throw new OrgNameError("that is not this organisation's name");
+  await db.query(`UPDATE orgs SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL`, [db.orgId]);
+}
 
 /** Clear a deletion that has not been purged. False when there is nothing to restore. */
 export async function restoreOrg(db: Db, id: string): Promise<boolean> {
@@ -40,7 +57,7 @@ export async function purgeDeletedOrgs(db: Db): Promise<string[]> {
         [id],
       );
       if (!rows[0]) return "gone" as const;
-      await tx.query(`DELETE FROM rate_counters WHERE key = ANY($1::text[])`, [[`invites:${id}`, `export:${id}`]]);
+      await tx.query(`DELETE FROM rate_counters WHERE key = ANY($1::text[])`, [orgRateKeys(id)]);
       return "removed" as const;
     }, { patient: true });
     if (outcome === "busy") break;

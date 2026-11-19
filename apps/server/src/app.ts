@@ -14,9 +14,10 @@ import {
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
 import { exportLines } from "./export.ts";
-import { allowed, giveBack, onceEvery, take } from "./limits.ts";
+import { allowed, exportKey, giveBack, invitesKey, onceEvery, take } from "./limits.ts";
 import { PROVIDER_NAMES } from "./oauth.ts";
 import { emailFrom, newUserId, offers, openRoutes, type Accounts } from "./signup.ts";
+import { deleteOrg, OrgNameError } from "./orgs.ts";
 import { addUser, forgetAccount, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
 import {
   Conflict,
@@ -386,7 +387,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     // Anything else is refused further on, uncounted.
     if (p.role !== "admin" || !email) return next();
     const limited = (error: string) => c.json({ error, code: "rate_limited" }, 429);
-    const perOrg = await take(ownerDb, `invites:${p.orgId}`, 3600, INVITES_PER_HOUR);
+    const perOrg = await take(ownerDb, invitesKey(p.orgId), 3600, INVITES_PER_HOUR);
     if (!perOrg) return limited(`an organisation can add ${INVITES_PER_HOUR} people an hour; try again later`);
     await next();
     if (c.res.status !== 201) await giveBack(ownerDb, perOrg);
@@ -403,7 +404,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     if (!p.owner) return c.json({ error: "only the owner of an organisation can do this" }, 403);
     // Counted from the last export that was allowed, inside one transaction so
     // two at once cannot both pass. A refusal above takes none of the ten minutes.
-    const within = await ownerDb.transaction((tx) => onceEvery(tx, `export:${p.orgId}`, 600));
+    const within = await ownerDb.transaction((tx) => onceEvery(tx, exportKey(p.orgId), 600));
     if (!within) {
       return c.json(
         { error: "an organisation can be exported once every ten minutes; try again later", code: "rate_limited" },
@@ -459,8 +460,12 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
 
   const failed = failureLog();
   api.onError((err, c) => {
-    if (err instanceof BadRequest || err instanceof RepoNameError) return c.json({ error: err.message }, 400);
-    if (err instanceof RemovedPerson) return c.json({ error: err.message, code: "person_removed" }, 403);
+    if (err instanceof BadRequest || err instanceof RepoNameError || err instanceof OrgNameError) {
+      return c.json({ error: err.message }, 400);
+    }
+    if (err instanceof RemovedPerson) {
+      return c.json({ error: err.message, code: "person_removed", ...err.answer }, 403);
+    }
     if (err instanceof BadReport) return c.json({ error: err.message }, 422);
     if (err instanceof ApiError) return c.json({ error: err.message, code: err.code }, err.status);
     if (err instanceof UserProblem) return c.json({ error: err.message, code: err.code }, err.status);
@@ -482,12 +487,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       );
     }
     const body = (await c.req.json().catch(() => null)) as { name?: unknown } | null;
-    const name = typeof body?.name === "string" ? body.name.trim() : "";
-    if (!name) throw new BadRequest("type the organisation's name");
-    const db = c.get("db");
-    const [org] = await db.query<{ name: string }>(`SELECT name FROM orgs WHERE id = $1`, [db.orgId]);
-    if (org?.name !== name) throw new BadRequest("that is not this organisation's name");
-    await db.query(`UPDATE orgs SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL`, [db.orgId]);
+    await deleteOrg(c.get("db"), typeof body?.name === "string" ? body.name : "");
     return c.body(null, 204);
   });
 
@@ -554,17 +554,12 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   api.put("/sessions/:machine/:source/:session", async (c) => {
     const upload = c.get("upload");
     if (!upload) throw new Error("the upload was not checked");
-    let result: { stored: boolean; excluded?: true; removed?: true };
+    let result: { stored: boolean; excluded?: true };
     try {
       result = await storeUpload(c.get("db"), upload, c.get("principal"));
     } catch (err) {
       if (err instanceof Conflict) return c.json({ error: err.message }, 409);
       throw err;
-    }
-    // Removed: the address this session is filed under belongs to someone who was removed.
-    // The code says so. A 403 with none is the token, and an uploader then stops the run.
-    if (result.removed) {
-      return c.json({ error: "this person has been removed", stored: false, code: "person_removed" }, 403);
     }
     // Not stored, and not excluded: the server already has more of this cloud session.
     // Excluded: the person stopped the repository, so the session was not kept.

@@ -2,6 +2,21 @@
 // they hold across several copies of the server.
 import type { Queryable } from "./db.ts";
 
+/** People an organisation has added in the current hour. */
+export function invitesKey(orgId: string): string {
+  return `invites:${orgId}`;
+}
+
+/** The last export an organisation was allowed to take. */
+export function exportKey(orgId: string): string {
+  return `export:${orgId}`;
+}
+
+/** Every rate counter that names an organisation. A purge deletes these with it. */
+export function orgRateKeys(orgId: string): string[] {
+  return [invitesKey(orgId), exportKey(orgId)];
+}
+
 /** The start of the window of `$2` seconds that now is in. */
 const WINDOW = `to_timestamp(floor(extract(epoch FROM now()) / $2::int) * $2::int)`;
 
