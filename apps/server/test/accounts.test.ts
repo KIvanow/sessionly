@@ -99,13 +99,15 @@ interface Trip {
   provider?: ProviderName;
   /** They came to create an organisation. */
   create?: boolean;
+  /** They came to view the demo (the website's Demo button). */
+  demo?: boolean;
   server?: Hono<Env>;
   from?: string;
 }
 
 /** Leave for a provider, as a browser would: where it is sent, and the cookie it is given. */
 async function leave(trip: Trip = {}) {
-  const response = await (trip.server ?? app).request(`/api/v1/auth/${trip.provider ?? "google"}${trip.create ? "?create" : ""}`, {
+  const response = await (trip.server ?? app).request(`/api/v1/auth/${trip.provider ?? "google"}${trip.create ? "?create" : trip.demo ? "?demo" : ""}`, {
     headers: { "x-forwarded-for": trip.from ?? nextCaller() },
   });
   assert.equal(response.status, 302);
@@ -139,7 +141,7 @@ async function arrive(emails: string[], trip: Trip & { account?: string } = {}):
   assert.equal(to.href, "https://app.test/#signed-in", `not signed in: ${to.hash}`);
   const cookie = cookiesOf(response).find((each) => each.startsWith(`${ARRIVED}=`));
   assert.ok(cookie, "no sign-in was given to the browser");
-  assert.match(cookie, new RegExp(`^${ARRIVED}=[\\w-]{43}\\.${trip.create ? "new" : "in"}$`));
+  assert.match(cookie, new RegExp(`^${ARRIVED}=[\\w-]{43}\\.${trip.create ? "new" : trip.demo ? "demo" : "in"}$`));
   return cookie;
 }
 
@@ -1614,6 +1616,12 @@ test("anyone who signs in may join the organisation a repository is shown in, as
   }
   for (const path of ["/users", "/tokens", "/me/tokens", "/export"]) assert.equal((await on("GET", path, token)).status, 403, path);
   assert.equal((await db.query(`SELECT 1 FROM sessions WHERE org_id = 'showcase'`)).length, 1);
+
+  // someone who came by the website's Demo button is told which it is, to be taken straight in; nobody else is
+  const fromButton = await arrive(["button@example.com"], { server: demoApp, demo: true });
+  const told = (await call(demoApp, "POST", "/auth/check", { body: { code: fromButton } })).body;
+  assert.deepEqual([told.demo_org, told.orgs.map((o: { user_id: string }) => o.user_id)], ["showcase", ["demo"]]);
+  assert.equal("demo_org" in (await call(demoApp, "POST", "/auth/check", { body: { code: await arrive(["plain@example.com"], { server: demoApp }) } })).body, false);
 
   // the next time, it is a place of theirs like any other; and they can sign out
   const again = await arrive(["visitor@example.com"], { server: demoApp });

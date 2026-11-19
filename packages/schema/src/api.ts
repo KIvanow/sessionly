@@ -107,6 +107,11 @@ export interface Arrival {
   orgs: Membership[];
   /** How many more they were added to, beyond the ones listed. */
   more: number;
+  /**
+   * They came to view the demo (the website's Demo button): the organisation
+   * it is in, to be taken into straight away when it is among `orgs`.
+   */
+  demo_org?: string;
 }
 
 /** What signing in to an organisation, or creating one, gives (`/auth/verify`). */

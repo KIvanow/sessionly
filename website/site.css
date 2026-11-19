@@ -265,6 +265,12 @@ footer :focus-visible {
     font-size: 14px;
   }
 }
+@media (max-width: 519px) {
+  /* Phones: Demo is in the menu, so the buttons that are left still fit on one line. */
+  .top .cta .demo {
+    display: none;
+  }
+}
 @media (max-width: 479px) {
   /* Narrow phones: brand, Sign in and Menu on one line. Get started is in the menu. */
   .top .cta .primary {
@@ -300,6 +306,9 @@ footer :focus-visible {
 @media (min-width: 1020px) and (max-width: 1099px) {
   .top .cta .btn {
     padding: 0 10px;
+  }
+  .top .cta .btn.icon {
+    padding: 0 6px;
   }
 }
 
@@ -357,6 +366,25 @@ footer :focus-visible {
   color: var(--band);
 }
 .top .btn.primary:hover {
+  text-decoration: none;
+}
+/* GitHub as its mark, which says it in less room than the word: the header holds one more button. */
+.top .btn.icon {
+  padding-left: 10px;
+  padding-right: 10px;
+}
+.top .btn.icon svg {
+  flex: none;
+  width: 20px;
+  height: 20px;
+}
+/* Real work to look at, signed in as a viewer: outlined, beside the way in. */
+.top .btn.demo {
+  border-color: var(--band-text);
+}
+.top .btn.demo:hover {
+  background: var(--band-text);
+  color: var(--band);
   text-decoration: none;
 }
 /* The way into the hosted app. Blue, and last, so it is the button that asks to be clicked. */

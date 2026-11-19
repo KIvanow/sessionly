@@ -59,9 +59,17 @@ export function landingOf(hash: string): Landing | null {
  * The membership to take someone straight into, without asking: the only
  * organisation there is for them, which they have signed in to before with
  * this account. Never when this browser is signed in somewhere already:
- * then whoever is at it is asked, whatever brought the sign-in about.
+ * then whoever is at it is asked, whatever brought the sign-in about. The
+ * one exception is the demo, for someone who came to view it: it is open to
+ * anyone, and lets them change nothing.
  */
 export function straightIn(arrival: Arrival, signedIn: boolean): string | null {
+  // Came to view the demo (the website's Demo button): into it, as a viewer, whatever else they are in. Only as
+  // the account that may sign in there; when it is not offered (closed, or they were removed), they are asked.
+  if (arrival.demo_org) {
+    const demo = arrival.orgs.find((org) => org.org_id === arrival.demo_org);
+    if (demo && !demo.other_account) return demo.user_id;
+  }
   if (signedIn || arrival.create || arrival.more > 0) return null;
   const [only, ...others] = arrival.orgs;
   return only && !others.length && !only.first_time && !only.other_account ? only.user_id : null;

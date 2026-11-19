@@ -483,7 +483,7 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
     const state = randomBytes(24).toString("base64url");
     const verifier = randomBytes(32).toString("base64url");
     // What they came for is theirs to say, and decides only which page they land on.
-    const wants = c.req.query("create") === undefined ? "in" : "new";
+    const wants = c.req.query("create") !== undefined ? "new" : c.req.query("demo") !== undefined ? "demo" : "in";
     // Each start leaves a cookie for ten minutes. Past a few, the earlier
     // ones go: a browser sent here over and over would otherwise carry more
     // of them than a request may.
@@ -498,7 +498,7 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
   /** The code this browser was given when it came back, and what it came for. */
   const held = (c: Context) => {
     const [code, wants] = getCookie(c, arrivedAs)?.split(".") ?? [];
-    return code && code.length <= 200 ? { code, create: wants === "new" } : null;
+    return code && code.length <= 200 ? { code, create: wants === "new", demo: wants === "demo" } : null;
   };
   const forget = (code: string) => db.query(`DELETE FROM sign_in_codes WHERE code_hash = $1`, [hash(code)]);
 
@@ -552,7 +552,7 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
     const earlier = held(c);
     if (earlier) await forget(earlier.code);
     const secret = await arrived(db, { provider: provider.name, ...person });
-    setCookie(c, arrivedAs, `${secret}.${wants === "new" ? "new" : "in"}`, { ...ours, maxAge: CODE_MINUTES * 60 });
+    setCookie(c, arrivedAs, `${secret}.${wants === "new" || wants === "demo" ? wants : "in"}`, { ...ours, maxAge: CODE_MINUTES * 60 });
     // Nothing of it in the address: the page asks, and the cookie answers.
     return c.redirect(`${home}/#signed-in`);
   };
@@ -614,7 +614,15 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
     if (!Number.isInteger(shown) || shown < 0 || shown > 100_000) return c.json({ error: "shown must be a whole number" }, 400);
     const { orgs, more } = await membershipsOf(db, found, shown);
     const door = shown ? null : await demoDoor(db, found);
-    return c.json({ provider: found.provider, emails: found.emails, create: mine.create, orgs: door ? [...orgs, door] : orgs, more });
+    return c.json({
+      provider: found.provider,
+      emails: found.emails,
+      create: mine.create,
+      orgs: door ? [...orgs, door] : orgs,
+      more,
+      // Came by the website's Demo button: the dashboard takes them into it, if it is among those.
+      ...(mine.demo && demoOrg ? { demo_org: demoOrg } : {}),
+    });
   });
 
   // "Not now": the sign-in is over, here and in this browser.
