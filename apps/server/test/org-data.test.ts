@@ -184,6 +184,20 @@ test("an owner can export every row of the organisation, and an admin or a membe
      VALUES ('org-out', 'github.com/acme/web', 7, 'm1', 'claude-code', 'out-s', 3, 3)
      ON CONFLICT DO NOTHING`,
   );
+  // Another organisation's pull history. The file must not contain it.
+  await db.query(
+    `INSERT INTO pull_requests (
+       org_id, repo, number, author, state, first_event, last_event, first_files, last_files, attribution
+     ) VALUES ('org-other', 'github.com/acme/other', 9, 'eve', 'open', 'opened', 'opened', '[]', '[]', '{}')`,
+  );
+  await db.query(
+    `INSERT INTO pull_sessions (org_id, repo, number, machine_id, source, session_id, lines, weight)
+     VALUES ('org-other', 'github.com/acme/other', 9, 'm1', 'claude-code', 'other-lines', 9, 9)`,
+  );
+  await db.query(
+    `INSERT INTO pull_request_reports (org_id, repo, number, event, commits, lines, agent_lines, sessions)
+     VALUES ('org-other', 'github.com/acme/other', 9, 'opened', 1, 9, 0, '[{"session_id":"other-org-report"}]')`,
+  );
 
   const file = await exported(owner.token);
   assert.equal(file.status, 200);
@@ -208,9 +222,17 @@ test("an owner can export every row of the organisation, and an admin or a membe
   assert.ok(of("session").some((row) => row.session_id === "out-s" && JSON.stringify(row.payload).includes("out-only-preview")));
   assert.equal(of("pull_request").length, await count("pull_requests"));
   assert.equal(of("pull_session").length, await count("pull_sessions"));
-  assert.ok(of("pull_session").length > 0);
+  const association = of("pull_session").find((row) => row.session_id === "out-s");
+  assert.ok(association);
+  assert.equal(association.org_id, "org-out");
+  assert.equal(association.repo, "github.com/acme/web");
+  assert.equal(Number(association.number), 7);
+  assert.equal(Number(association.lines), 3);
   assert.equal(of("pull_request_report").length, await count("pull_request_reports"));
-  assert.ok(of("pull_request_report").length > 0);
+  const history = of("pull_request_report").find((row) => row.repo === "github.com/acme/web" && Number(row.number) === 7);
+  assert.ok(history);
+  assert.equal(history.org_id, "org-out");
+  assert.equal(history.event, "opened");
   const pullRow = of("pull_request").find((row) => row.title === "out-only-pull");
   assert.ok(pullRow);
   for (const column of ["first_files", "last_files", "attribution", "detail", "feedback"]) {
@@ -224,7 +246,11 @@ test("an owner can export every row of the organisation, and an admin or a membe
   assert.doesNotMatch(file.text, new RegExp(hash(owner.token)));
   assert.doesNotMatch(file.text, new RegExp(owner.token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.doesNotMatch(file.text, /other-org-marker/);
+  assert.doesNotMatch(file.text, /other-lines/);
+  assert.doesNotMatch(file.text, /other-org-report/);
   assert.equal(of("session").some((row) => row.session_id === "other-s"), false);
+  assert.equal(of("pull_session").some((row) => row.org_id !== "org-out"), false);
+  assert.equal(of("pull_request_report").some((row) => row.org_id !== "org-out"), false);
 
   const again = await exported(owner.token);
   assert.equal(again.status, 429);
@@ -397,7 +423,8 @@ test("removing a person can delete their sessions and nobody else's", async () =
   assert.equal(await count("sessions", "ann@people.example"), 0);
   assert.equal(await count("sessions", "bob@people.example"), 1);
   assert.equal(await count("repo_exclusions", "ann@people.example"), 0);
-  assert.equal(await count("repos_allowed_again", "ann@people.example"), 0);
+  // One allowance, and the number stays so the next one is not 1 again.
+  assert.equal(await count("repos_allowed_again", "ann@people.example"), 1);
   assert.equal(await count("repo_exclusions", "bob@people.example"), 1);
   assert.equal((await call(admin, "GET", "/prs")).body.pulls[0].title, "stays on the pull request");
   // A token that was already accepted can still ask to stop a repository.
@@ -412,7 +439,7 @@ test("removing a person can delete their sessions and nobody else's", async () =
   assert.equal(unstopped.status, 403);
   assert.equal(unstopped.body.code, "person_removed");
   assert.equal(await count("repo_exclusions", "ann@people.example"), 0);
-  assert.equal(await count("repos_allowed_again", "ann@people.example"), 0);
+  assert.equal(await count("repos_allowed_again", "ann@people.example"), 1);
   const kept = async (id: string) => {
     const [row] = await db.query<{ matched: unknown; opened_matched: unknown; weight: unknown; opened_weight: unknown }>(
       `SELECT matched, opened_matched, weight, opened_weight FROM pull_sessions
@@ -463,6 +490,46 @@ test("removing a person can delete their sessions and nobody else's", async () =
   );
   assert.equal((await call(bobLingering.token, "PUT", "/repos/excluded", { repo: "~/Later" })).status, 403);
   assert.equal(await count("repo_exclusions", "bob@people.example"), 1);
+});
+
+test("erasing sessions keeps the allowance number a machine already saw", async () => {
+  await newOrg(db, "org-allow", "Allow");
+  await db.query(
+    `INSERT INTO users (id, org_id, email, role) VALUES
+       ('usr_ada', 'org-allow', 'ada@allow.example', 'member')`,
+  );
+  const admin = await tokenFor(db, { email: "admin@allow.example", role: "admin" }, "org-allow");
+  const ada = await tokenFor(db, { email: "ada@allow.example", role: "member" }, "org-allow");
+  const uploaded = session("ada-s", { user: { name: null, email: "ada@allow.example" } });
+  assert.equal((await put(ada, uploaded)).status, 200);
+  // One allowance. A machine that was here stores 1, then goes offline.
+  assert.equal((await call(ada, "PUT", "/repos/excluded", { repo: "~/Notes" })).status, 200);
+  assert.equal((await call(ada, "DELETE", "/repos/excluded?repo=~/Notes")).status, 200);
+  assert.deepEqual((await call(ada, "GET", "/repos/excluded")).body, { repos: [], allowed_again: 1 });
+
+  assert.equal((await call(admin, "DELETE", "/users/usr_ada?data=true")).status, 200);
+  const [kept] = await db.query<{ times: unknown }>(
+    `SELECT times FROM repos_allowed_again WHERE org_id = 'org-allow' AND owner_email = 'ada@allow.example'`,
+  );
+  assert.equal(Number(kept?.times), 1);
+
+  // Brought back without a sign-in provider: the same clearing a re-add does.
+  await db.query(`UPDATE users SET removed_at = NULL WHERE org_id = 'org-allow' AND id = 'usr_ada'`);
+  const back = await tokenFor(db, { email: "ada@allow.example", role: "member" }, "org-allow");
+  assert.equal((await call(back, "GET", "/repos/excluded")).body.allowed_again, 1);
+  // The session the erasure removed is not here. The machine still has it,
+  // and still has 1, so it does not ask while the number stays 1.
+  assert.deepEqual((await call(back, "GET", "/sessions/held?machine=m1")).body.sessions, []);
+
+  // The next allowance is 2, which that machine has not seen. It asks, finds
+  // the session gone, and sends it again. The server stores it.
+  assert.equal((await call(back, "PUT", "/repos/excluded", { repo: "~/Notes" })).status, 200);
+  assert.equal((await call(back, "DELETE", "/repos/excluded?repo=~/Notes")).status, 200);
+  assert.equal((await call(back, "GET", "/repos/excluded")).body.allowed_again, 2);
+  assert.equal((await put(back, uploaded)).status, 200);
+  assert.deepEqual((await call(back, "GET", "/sessions/held?machine=m1")).body.sessions, [
+    { source: "claude-code", session_id: "ada-s" },
+  ]);
 });
 
 test("a purge removes an organisation deleted 8 days ago, and leaves one deleted 6 days ago", async () => {
