@@ -81,6 +81,20 @@ Nothing is uploaded unless you connect a server, and by default an upload has no
 prompts or commands. More: [Server](docs-site/server.md), [Uploading](docs-site/uploading.md),
 and [Data and privacy](docs-site/data.md) for what is kept and what is sent.
 
+The owner of an organisation can download everything it has:
+
+- `GET /api/v1/export` — the organisation as JSONL (one object a line). Once every ten minutes.
+  A token for a machine cannot, even the owner's.
+- `DELETE /api/v1/org` — on a hosted service, the owner deletes the organisation by sending its
+  name. Everyone is signed out at once. The rows go after 7 days.
+  `pnpm org restore <id>` undoes that within the 7 days;
+  `pnpm org purge` removes what is due.
+- `DELETE /api/v1/users/{id}?data=true` — an admin removes a person and deletes their sessions.
+  Without `data=true`, the sessions stay. Pull requests stay either way. A session filed under
+  their address is not stored while they stay removed.
+
+The full list is the [API reference](docs-site/api.md).
+
 ## Pull requests
 
 A [GitHub Action](action/) reports each pull request to the server, which works out how much

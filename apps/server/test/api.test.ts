@@ -175,6 +175,11 @@ test("members see their own sessions, admins see everyone's", async () => {
   // filters
   const admin = (query: string) => get(tokens.admin, `/sessions?${query}`);
   assert.deepEqual(ids(await admin("user=BOB")), ["s-bob-1"]);
+  // `user` contains the text, so one address counts another. `user_is` is that person only.
+  assert.deepEqual(ids(await admin("user=example.com")), ["future-1", "s-ann-1", "s-bob-1"]);
+  assert.deepEqual(ids(await admin("user_is=ann@example.com")), ["future-1", "s-ann-1"]);
+  assert.deepEqual(ids(await admin("user_is=ann")), []);
+  assert.equal((await admin("user_is=ann@example.com&limit=1")).body.total, 2);
   assert.deepEqual(ids(await admin("repo=acme/api")), ["s-bob-1"]);
   assert.deepEqual(ids(await admin("model=haiku")), ["s-bob-1"]);
   assert.deepEqual(ids(await admin("q=billing_bug")), ["s-bob-1"]);

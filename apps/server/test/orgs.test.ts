@@ -224,7 +224,7 @@ test("a pull request is attributed from its own organisation's sessions only", a
 
 test("the database itself confines a request to its organisation", async () => {
   // Counted first as the owner, who sees every organisation's rows.
-  const tables = ["sessions", "pull_requests", "pull_sessions", "tokens", "orgs"];
+  const tables = ["sessions", "pull_requests", "pull_sessions", "pull_request_reports", "tokens", "orgs"];
   const mine = new Map<string, number>();
   for (const table of tables) {
     const column = table === "orgs" ? "id" : "org_id";
@@ -308,9 +308,10 @@ test("requests are granted exactly the tables they must reach", async () => {
   );
   const can = Object.fromEntries(granted.map((t) => [t.name, t.can]));
   // Everything an organisation owns: all of it, behind row-level security.
-  for (const table of ["tokens", "sessions", "pull_requests", "pull_sessions", "repo_exclusions", "repos_allowed_again"]) assert.equal(can[table], "select,insert,update,delete", table);
-  // Its own row of the organisations, to read.
-  assert.equal(can.orgs, "select");
+  for (const table of ["tokens", "sessions", "pull_requests", "pull_sessions", "pull_request_reports", "shown_sessions", "repo_exclusions", "repos_allowed_again"]) assert.equal(can[table], "select,insert,update,delete", table);
+  // Its own row: to read, and to mark the organisation deleted. Removing the
+  // row is the purge, which runs as the database's owner.
+  assert.equal(can.orgs, "select,update");
   // And nothing else: not the record of migrations.
   assert.equal(can.migrations, "");
   // A table with an org column that requests cannot reach was forgotten.
@@ -514,6 +515,13 @@ test("a database from before organisations lands in the default one", async (t) 
       assert.equal((await ask(token, "/sessions")).total, 1);
       assert.equal((await ask(token, "/prs")).total, 1);
     }
+    // The pull request it already had is the first row of its history, so the next change has something to compare with.
+    const page = await ask("old-token", "/prs/detail?repo=github.com/acme/web&number=3");
+    assert.equal(page.history.length, 1);
+    assert.deepEqual(
+      [page.history[0].event, page.history[0].lines, page.history[0].agent_lines, page.history[0].commits, page.history[0].change.reason],
+      ["opened", 0, 0, 0, null],
+    );
     // Opening it again changes nothing.
   } finally {
     await upgraded.close();

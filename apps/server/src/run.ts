@@ -38,6 +38,7 @@ import { createApp, type Extension } from "./app.ts";
 import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Db, type Migrations } from "./db.ts";
 import { copyRepo, demoFrom, type Demo } from "./demo.ts";
 import { tidy } from "./limits.ts";
+import { purgeDeletedOrgs } from "./orgs.ts";
 import {
   github,
   google,
@@ -209,21 +210,22 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
  * Keep a repository shown in another organisation up to date: now, and
  * every so many minutes from then. Both organisations have to be there; the
  * one it is shown in is made by whoever runs the server, like any other, so
- * that it has an owner.
+ * that it has an owner. Nothing that goes wrong here ends the server: it is
+ * said, and tried again the next time.
  */
-async function showing(db: Db, demo: Demo, key: string | undefined): Promise<void> {
-  const there = await db.query<{ id: string }>(`SELECT id FROM orgs WHERE id IN ($1, $2) AND deleted_at IS NULL`, [demo.from, demo.org]);
-  const missing = [demo.from, demo.org].filter((id) => !there.some((org) => org.id === id));
-  if (missing.length) {
-    console.warn(`SESSIONLY_DEMO_FROM and SESSIONLY_DEMO_ORG: there is no organisation ${missing.join(" or ")}. The repository is not shown.`);
-    return;
-  }
+function showing(db: Db, demo: Demo, key: string | undefined): void {
   let busy = false;
   const copy = async () => {
     // One that is still going (the first copies every session) is not started beside itself.
     if (busy) return;
     busy = true;
     try {
+      const there = await db.query<{ id: string }>(`SELECT id FROM orgs WHERE id IN ($1, $2) AND deleted_at IS NULL`, [demo.from, demo.org]);
+      const missing = [demo.from, demo.org].filter((id) => !there.some((org) => org.id === id));
+      if (missing.length) {
+        console.warn(`SESSIONLY_DEMO_FROM and SESSIONLY_DEMO_ORG: there is no organisation ${missing.join(" or ")}. The repository is not shown.`);
+        return;
+      }
       const done = await copyRepo(
         (fn) => db.asOrg(demo.from, fn),
         (fn) => db.asOrg(demo.org, fn),
@@ -231,8 +233,10 @@ async function showing(db: Db, demo: Demo, key: string | undefined): Promise<voi
         key,
         (err) => console.error(`showing ${demo.repo} in ${demo.org}:`, err),
       );
-      if (done.copied + done.removed + done.failed > 0) {
-        console.log(`${demo.repo} in ${demo.org}: ${done.copied} sessions copied, ${done.removed} removed, ${done.failed} failed; ${done.matched} pull requests matched again.`);
+      if (done.copied + done.kept + done.removed + done.failed + done.matched > 0) {
+        console.log(
+          `${demo.repo} in ${demo.org}: ${done.copied} sessions copied, ${done.kept} left as they were, ${done.removed} removed, ${done.failed} failed; ${done.matched} pull requests matched again.`,
+        );
       }
     } catch (err) {
       console.error(`showing ${demo.repo} in ${demo.org} failed:`, err);
@@ -241,7 +245,7 @@ async function showing(db: Db, demo: Demo, key: string | undefined): Promise<voi
     }
   };
   setInterval(() => void copy(), demo.minutes * 60_000).unref();
-  await copy();
+  void copy();
 }
 
 export async function runServer(options: RunOptions = {}): Promise<void> {
@@ -276,8 +280,21 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   // Old counters and sign-ins nobody finished are cleared away now and then.
   const tidying = setInterval(() => void tidy(db).catch((err) => console.error("tidying failed:", err)), 15 * 60_000);
   tidying.unref();
+  // Organisations whose owner asked for them to be deleted, a week ago.
+  // Two replicas of a hosted service must not both do it.
+  const purging = setInterval(() => {
+    void purgeDeletedOrgs(db)
+      .then((ids) => {
+        if (ids.length) console.log(`Removed organisations deleted more than 7 days ago: ${ids.join(", ")}`);
+      })
+      .catch((err) => console.error("purging organisations failed:", err));
+  }, 60 * 60_000);
+  purging.unref();
+  const asked = demoFrom(process.env);
+  const demo = asked && !("problem" in asked) ? asked : undefined;
   const app = createApp(db, {
     hashKey: hashKeyOf(process.env),
+    demo: demo && { org: demo.org, hide: demo.hide },
     webRoot,
     accounts,
     telemetry,
@@ -301,8 +318,7 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       });
   counting();
 
-  const demo = demoFrom(process.env);
-  if (demo && !("problem" in demo)) void showing(db, demo, hashKeyOf(process.env));
+  if (demo) showing(db, demo, hashKeyOf(process.env));
 
   const port = Number(process.env.PORT ?? 8080);
   const hostname = process.env.HOST ?? "127.0.0.1";

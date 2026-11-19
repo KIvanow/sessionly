@@ -21,6 +21,12 @@ export interface Me {
   org_name?: string;
   /** Whether the token is a person's own: they signed in, or it is for their machines. */
   signed_in?: boolean;
+  /**
+   * The owner of the organisation. True when this person signed in and is
+   * the owner, and for the bootstrap admin token of a server that is not
+   * hosted. A token for a machine is not, even the owner's.
+   */
+  owner: boolean;
 }
 
 /** A service people sign in with. */
@@ -632,6 +638,82 @@ export interface PullSession {
 }
 
 /**
+ * A session's lines in a pull request at one point in its history: which
+ * session, and how many of the pull request's lines were put down to it.
+ * No line hashes.
+ */
+export interface PullHistorySession {
+  machine_id: string;
+  source: string;
+  session_id: string;
+  lines: number;
+}
+
+/**
+ * A session named in a change between two reports. `session` is what is
+ * known of it now, and null once it has been deleted.
+ */
+export interface PullHistoryNamedSession extends PullHistorySession {
+  session: PullSession["session"] | null;
+}
+
+/** A session still matched, whose line count changed. `lines` is the count now. */
+export interface PullHistorySessionChange extends PullHistoryNamedSession {
+  lines_before: number;
+}
+
+/**
+ * What changed between one report and the one before it. The first report
+ * kept has nothing before it: the before-fields and `reason` are null, and
+ * the session lists are empty.
+ */
+export interface PullHistoryChange {
+  lines_before: number | null;
+  agent_lines_before: number | null;
+  commits_before: number | null;
+  /** Sessions matched now that were not before, with their lines. */
+  sessions_added: PullHistoryNamedSession[];
+  /** Sessions matched before that no longer are. */
+  sessions_gone: PullHistoryNamedSession[];
+  sessions_changed: PullHistorySessionChange[];
+  /**
+   * Why the figures moved, in a few words, chosen in this order: new
+   * commits (`2 new commits`); fewer commits (`2 commits removed`); sessions
+   * uploaded since (`1 session uploaded since: +17 agent lines`); sessions
+   * no longer matched; a newer Action (`Action 0.2.0, was 0.1.0`, or
+   * `Action 0.2.0` when the one before named no version); a session whose
+   * line count changed (`1 session's lines changed: +1 agent lines`);
+   * otherwise `matched again, nothing new`. Null on the first report.
+   */
+  reason: string | null;
+}
+
+/**
+ * The figures a pull request had at one report, or when it was matched
+ * again. Newest first on the page. At most 50 are kept.
+ */
+export interface PullHistory {
+  /** When the figures were worked out. */
+  at: string;
+  /**
+   * What prompted the report: `opened`, `synchronize`, `review`, `closed`,
+   * `manual`, or `match` when the lines were matched again on the server.
+   */
+  event: string;
+  commits: number;
+  lines: number;
+  agent_lines: number;
+  /** The sessions matched then, and how many lines of the pull request each had. */
+  sessions: PullHistorySession[];
+  /**
+   * The Action's version on the report that produced these figures. A later
+   * report that names a newer one, and moves nothing else, is a later row.
+   */
+  reporter_version: string | null;
+  change: PullHistoryChange;
+}
+
+/**
  * One pull request, with what the list leaves out. `files`, `sessions` and
  * `feedback` are null on a pull request last reported before they were kept.
  */
@@ -665,6 +747,8 @@ export interface PullDetail extends PullRow {
   repo_reporter_version: string | null;
   /** The version of the Action this server knows as current. */
   reporter_current: string;
+  /** Earlier figures, newest first, each with what changed against the one before it. */
+  history: PullHistory[];
 }
 
 export interface PullList {

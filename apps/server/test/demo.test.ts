@@ -3,7 +3,7 @@ import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
 import type { Db, OrgDb } from "../src/db.ts";
-import { copyRepo, demoFrom, inRepo, shown } from "../src/demo.ts";
+import { copyRepo, demoFrom, inRepo, rulesOf, shown, shownReport } from "../src/demo.ts";
 import { newOrg, testDb, tokenFor } from "./helpers.ts";
 
 const h = (n: number) => n.toString(16).padStart(16, "0");
@@ -16,11 +16,11 @@ const work = { admin: "", ann: "" };
 const demo = { admin: "", ci: "" };
 const from = <T>(fn: (db: OrgDb) => Promise<T>) => db.asOrg("work", fn);
 const to = <T>(fn: (db: OrgDb) => Promise<T>) => db.asOrg("demo", fn);
-const copy = () => copyRepo(from, to, { repo: REPO, hide: ["notes"] });
+const copy = (hide = ["notes"], repo = REPO) => copyRepo(from, to, { repo, hide });
 
 before(async () => {
   db = await testDb();
-  app = createApp(db, {});
+  app = createApp(db, { demo: { org: "demo", hide: ["notes"] } });
   await newOrg(db, "work");
   await newOrg(db, "demo");
   work.admin = await tokenFor(db, { email: "boss@example.com", role: "admin" }, "work");
@@ -94,23 +94,62 @@ test("a path of the repository that may be shown, and one that is somewhere else
   }
   // a folder may be named with its slash
   assert.ok(!inRepo("notes/a.md", ["notes/"]));
+  // what is hidden is hidden in a worktree's copy of the repository, and as a machine with Windows writes it
+  for (const path of [".claude/worktrees/w1/notes/plan.md", "worktrees/w1/notes", "notes\\plan.md", ".claude\\worktrees\\w1\\notes\\plan.md", "..\\up\\a.ts"]) {
+    assert.ok(!inRepo(path, ["notes"]), path);
+  }
+  assert.ok(inRepo("src\\a.ts", ["notes"]));
+});
+
+test("nothing a later version of the record adds, at any depth, is shown before it is put there", () => {
+  // every object in a session, and the session, with a field nobody has heard of
+  const mark = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(mark);
+    if (value && typeof value === "object") {
+      return { ...Object.fromEntries(Object.entries(value).map(([name, inner]) => [name, mark(inner)])), LATER: "SECRET of a later version" };
+    }
+    return value;
+  };
+  const made = JSON.stringify(shown(mark(session("s1", REPO)) as never, ["notes"]));
+  assert.doesNotMatch(made, /LATER|SECRET/);
+  // and what is shown of it is what was before
+  assert.deepEqual(JSON.parse(made), JSON.parse(JSON.stringify(shown(session("s1", REPO) as never, ["notes"]))));
+});
+
+test("a pull request's report is kept without the files that are not shown", () => {
+  const report = {
+    repo: REPO, number: 9, author: "ann", state: "open", created_at: "2026-11-10T12:00:00Z", event: "opened", commits: 1,
+    reviews: 0, changes_requested: 0, review_comments: 0, bot_review_comments: 0, review_rounds: 0,
+    files: [{ path: "src/a.ts", hashes: [h(1)] }, { path: "notes/SECRET-plan.md", hashes: [h(2)] }],
+    feedback: [
+      { kind: "inline", url: null, author: "bob", bot: false, at: "2026-11-10T13:00:00Z", path: "notes/SECRET-plan.md", line: 4 },
+      { kind: "inline", url: null, author: "bob", bot: false, at: "2026-11-10T13:00:00Z", path: "src/a.ts", line: 2 },
+      { kind: "review", url: null, author: "bob", bot: false, at: "2026-11-10T13:00:00Z", state: "approved" },
+    ],
+  } as never;
+  const made = shownReport(report, ["notes"]);
+  assert.doesNotMatch(JSON.stringify(made), /SECRET/);
+  assert.deepEqual(made.files.map((f) => f.path), ["src/a.ts"]);
+  // the comment is still counted; where it was is not said
+  assert.deepEqual(made.feedback!.map((f) => [f.kind, f.path ?? null, f.line ?? null]), [["inline", null, null], ["inline", "src/a.ts", 2], ["review", null, null]]);
 });
 
 test("a session as it is shown holds nothing that was typed or run, and nothing outside the repository", () => {
-  const made = shown(session("s1", REPO) as never, ["notes"]);
+  // as it is stored: a field with nothing in it is not there
+  const made = JSON.parse(JSON.stringify(shown(session("s1", REPO) as never, ["notes"])));
   assert.doesNotMatch(JSON.stringify(made), /SECRET|sly_|sha256/);
-  const s = made.session!;
+  const s = made.session;
   // who, when, with what and for how much stay
   assert.deepEqual(
     [s.user, s.models, s.cost, s.repo, s.content, s.title, s.cwd],
     [{ name: "Ann", email: "ann@example.com" }, ["claude-opus-5-5"], { total_usd: 6, source: "recorded" }, { remote: REPO, branch: "work" }, "metadata", null, null],
   );
   assert.deepEqual(s.prompts, [{ prompt_id: "p1", at: "2026-11-10T09:00:00Z", ended_at: "2026-11-10T09:30:00Z", outcome: "completed" }]);
-  assert.deepEqual(s.tool_calls!.map((t) => [t.tool, t.status, t.file_path]), [["Edit", "ok", "src/a.ts"], ["Bash", "failed", null]]);
-  assert.deepEqual(s.files!.map((f) => f.path), ["src/a.ts"]);
+  assert.deepEqual(s.tool_calls!.map((t: any) => [t.tool, t.status, t.file_path]), [["Edit", "ok", "src/a.ts"], ["Bash", "failed", null]]);
+  assert.deepEqual(s.files!.map((f: any) => f.path), ["src/a.ts"]);
   assert.deepEqual(s.subagents, [{ agent_id: "a1", agent_type: "Explore", description: null, tool_calls: 4 }]);
   assert.deepEqual(s.instruction_files, ["CLAUDE.md"]);
-  assert.deepEqual(made.rewrite!.files!.map((f) => f.path), ["src/a.ts"]);
+  assert.deepEqual(made.rewrite!.files!.map((f: any) => f.path), ["src/a.ts"]);
   assert.deepEqual(made.lines, [{ path: "src/a.ts", model: "claude-opus-5-5", hashes: [h(1), h(2), h(3)] }]);
 });
 
@@ -123,11 +162,11 @@ test("one repository's sessions are shown in another organisation, and kept up t
     repo: REPO, number: 1, title: "Add a", url: `https://${REPO}/pull/1`, author: "ann", state: "open",
     created_at: "2026-11-10T12:00:00Z", event: "opened", commits: 1, reviews: 0, changes_requested: 0,
     review_comments: 0, bot_review_comments: 0, review_rounds: 0, commit_emails: ["ann@example.com"],
-    files: [{ path: "src/a.ts", hashes: [h(1), h(2), h(3), h(77)] }],
+    files: [{ path: "src/a.ts", hashes: [h(1), h(2), h(3), h(77)] }, { path: "notes/SECRET-plan.md", hashes: [h(900)] }],
   };
   assert.equal((await call(demo.ci, "PUT", "/prs", report)).body.attribution.now.agent_lines, 0);
 
-  assert.deepEqual(await copy(), { copied: 2, removed: 0, failed: 0, matched: 1 });
+  assert.deepEqual(await copy(), { copied: 2, kept: 0, removed: 0, failed: 0, matched: 1 });
   // only that repository's, and the pull request's lines are theirs now, at what they cost
   assert.deepEqual(await shownIds(), ["s1", "s2"]);
   const pull = (await call(demo.admin, "GET", `/prs/detail?repo=${REPO}&number=1`)).body;
@@ -145,12 +184,12 @@ test("one repository's sessions are shown in another organisation, and kept up t
   assert.match((await call(work.admin, "GET", "/sessions/m1/claude-code/s1")).text, /SECRET here is my token/);
 
   // nothing new: nothing is done, and no pull request is matched again
-  assert.deepEqual(await copy(), { copied: 0, removed: 0, failed: 0, matched: 0 });
+  assert.deepEqual(await copy(), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 0 });
 
   // one sent again is copied again; one taken back is gone there too, and from the pull request
   assert.equal((await put(session("s2", REPO, [4, 5, 6]))).status, 200);
   assert.equal((await call(work.ann, "DELETE", "/sessions/m1/claude-code/s1")).status, 200);
-  assert.deepEqual(await copy(), { copied: 1, removed: 1, failed: 0, matched: 1 });
+  assert.deepEqual(await copy(), { copied: 1, kept: 0, removed: 1, failed: 0, matched: 1 });
   assert.deepEqual(await shownIds(), ["s2"]);
   assert.equal((await call(demo.admin, "GET", `/prs/detail?repo=${REPO}&number=1`)).body.attribution.now.agent_lines, 0);
   const lines = await db.query<{ n: unknown }>(`SELECT sum(hashed_lines) AS n FROM sessions WHERE org_id = 'demo'`);
@@ -162,6 +201,35 @@ test("one repository's sessions are shown in another organisation, and kept up t
   assert.equal((await call(direct, "PUT", "/sessions/m1/claude-code/own", own)).status, 200);
   await copy();
   assert.deepEqual(await shownIds(), ["own", "s2"]);
+
+  // a pull request that was to be matched again and was not (the server stopped) is matched the next time
+  await db.query(`UPDATE pull_requests SET matched_at = matched_at - interval '1 hour' WHERE org_id = 'demo'`);
+  assert.deepEqual(await copy(), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 1 });
+  assert.deepEqual(await copy(), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 0 });
+
+  // another path is hidden: what was copied before is copied again without it
+  assert.equal((await put(session("s3", REPO, [7]))).status, 200);
+  assert.deepEqual([(await copy()).copied, rulesOf(["notes"]) === rulesOf(["notes", "src"])], [1, false]);
+  const files = async () => (await call(demo.admin, "GET", `/files?repo_is=${encodeURIComponent(REPO)}`)).body.files.map((f: any) => f.path);
+  assert.deepEqual(await files(), ["src/a.ts"]);
+  assert.deepEqual((await copy(["notes", "src"])).copied, 2);
+  assert.deepEqual(await files(), []);
+  const hashes = await db.query<{ n: unknown }>(`SELECT sum(hashed_lines) AS n FROM sessions WHERE org_id = 'demo' AND repo = $1`, [REPO]);
+  assert.equal(Number(hashes[0]?.n), 0);
+
+  // a session the organisation it is shown in will not take (its person stopped the repository there) is
+  // offered once, and not again until it changes. (Both of hers are offered: the paths not shown are as they were again.)
+  const ann = await tokenFor(db, { email: "ann@example.com", role: "member" }, "demo");
+  assert.equal((await call(ann, "PUT", "/repos/excluded", { repo: REPO })).status, 200);
+  assert.deepEqual(await shownIds(), ["own"]);
+  assert.equal((await put(session("s3", REPO, [7, 8]))).status, 200);
+  assert.deepEqual([(await copy()).kept, (await copy()).kept], [2, 0]);
+  assert.equal((await call(ann, "DELETE", `/repos/excluded?repo=${encodeURIComponent(REPO)}`)).status, 200);
+
+  // another repository is shown now: what was sent of the first is removed
+  assert.equal((await put(session("next", "github.com/acme/next"))).status, 200);
+  const moved = await copy(["notes"], "github.com/acme/next");
+  assert.deepEqual([moved.copied, await shownIds()], [1, ["next", "own"]]);
 });
 
 test("the settings of a demo: all of them or none, and two organisations", () => {

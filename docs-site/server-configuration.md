@@ -86,17 +86,21 @@ nothing else:
 - **Left out:** every prompt (its text, its length and its hash), the title, what a tool was
   given and what it said went wrong, what a subagent was asked to do, the working directory
   and where the clone is, and every path outside the repository or under
-  `SESSIONLY_DEMO_HIDE`.
+  `SESSIONLY_DEMO_HIDE` (in a worktree's copy of the repository too).
 
 A session taken back, or whose repository its person stopped, is removed from the second
-organisation at the next copy. Sessions uploaded to the second organisation directly, from
-other repositories, are left alone.
+organisation at the next copy, and so is everything that was copied when another repository
+is named. A change to `SESSIONLY_DEMO_HIDE` copies every session again at the next start.
+Only sessions the server copied are ever removed there: ones uploaded to the second
+organisation directly are left alone.
 
 Pull requests are not copied: report them to the second organisation with a second step of
 the [Action](pull-requests.md) and a `ci` token of that organisation (`comment: false`, so
-the pull request gets one comment). After each copy that changed something, the server
-matches that organisation's pull requests again, since a report arrives before the sessions
-that wrote its lines.
+the pull request gets one comment). The server keeps such a report without the files under
+`SESSIONLY_DEMO_HIDE`; after a change to that setting, report the pull requests once more
+(the workflow, run by hand). After each copy that changed something, the server matches that
+organisation's pull requests again, since a report arrives before the sessions that wrote
+its lines.
 
 The second organisation is made like any other, so that it has an owner. Whoever can open it
 sees the costs and the addresses of the people who worked on the repository.

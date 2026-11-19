@@ -11,7 +11,20 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ALLOWED = {
-  "apps/server/src": ["db.ts", "auth.ts", "cli.ts", "run.ts", "app.ts", "lib.ts", "testing.ts", "signup.ts"],
+  "apps/server/src": [
+    "db.ts",
+    "auth.ts",
+    "cli.ts",
+    "run.ts",
+    "app.ts",
+    "lib.ts",
+    "testing.ts",
+    "signup.ts",
+    // Purging an organisation, and restoring one, run as the operator or the
+    // hourly job. A request's token is already refused, and rate counters
+    // have no organisation to set.
+    "orgs.ts",
+  ],
   "ee/src": ["migrate.ts"],
 };
 // `import … from` and `export … from`: named, `* as`, `*`, or default. No
@@ -42,6 +55,9 @@ const IN_APP = [
   /\bownerDb\.asOrg\(c\.get\("principal"\)\.orgId,/,
   // Counters of what was asked for lately: they belong to no organisation.
   /\b(?:allowed|take|giveBack)\(ownerDb,/,
+  // An export's ten minutes, counted from the last one. The lock and the
+  // record are one transaction, and the counter belongs to no organisation.
+  /\bownerDb\.transaction\(\(tx\) => onceEvery\(tx,/,
   // Whether the database answers at all.
   /\bownerDb\.query\(`SELECT 1`\)/,
   // Signing in and signing up, before anyone is known (signup.ts).

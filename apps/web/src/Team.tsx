@@ -1,6 +1,6 @@
 import type { CreatedToken, Role, TokenInfo, UserInfo } from "@sessionly/schema";
-import { useState } from "react";
-import { api } from "./api.ts";
+import { useEffect, useId, useRef, useState } from "react";
+import { ApiError, api } from "./api.ts";
 import { CopyButton } from "./CopyButton.tsx";
 import { dateTime } from "./format.ts";
 import { Loader } from "./Loader.tsx";
@@ -140,18 +140,43 @@ function People({
     }
   }
 
-  async function remove(user: UserInfo) {
-    const sure = window.confirm(
-      `Remove ${user.email}? They can no longer sign in, and uploads from their machines stop. Their sessions stay. ` +
-        "Tokens made under their address for CI or a cloud environment keep working: revoke those below if they should stop too.",
-    );
-    if (!sure) return;
+  const [removing, setRemoving] = useState<{ user: UserInfo; sessions: number | null } | null>(null);
+  const [also, setAlso] = useState(false);
+  const [counting, setCounting] = useState(false);
+  const removeAsk = useRef<AbortController | null>(null);
+
+  async function askRemove(user: UserInfo) {
+    removeAsk.current?.abort();
+    const controller = new AbortController();
+    removeAsk.current = controller;
+    setProblem(null);
+    setAlso(false);
+    setCounting(true);
+    let sessions: number | null = null;
     try {
-      await api(token, `/users/${encodeURIComponent(user.id)}`, { method: "DELETE" });
-      list.reload();
+      const page = await api<{ total: number }>(token, `/sessions?user_is=${encodeURIComponent(user.email)}&limit=1`, {
+        signal: controller.signal,
+      });
+      sessions = page.total;
     } catch (err) {
-      setProblem((err as Error).message);
+      if (controller.signal.aborted) return;
+      if (err instanceof ApiError && err.status === 401) {
+        onSignOut();
+        return;
+      }
+    } finally {
+      if (removeAsk.current === controller) setCounting(false);
     }
+    if (removeAsk.current !== controller) return;
+    setRemoving({ user, sessions });
+  }
+
+  async function confirmRemove() {
+    if (!removing) return;
+    const id = removing.user.id;
+    const data = also ? "?data=true" : "";
+    await api(token, `/users/${encodeURIComponent(id)}${data}`, { method: "DELETE" });
+    list.reload();
   }
 
   async function forget(user: UserInfo) {
@@ -230,7 +255,7 @@ function People({
                       </button>
                     )}{" "}
                     {u.role !== "owner" && (
-                      <button className="quiet" onClick={() => remove(u)}>
+                      <button className="quiet" onClick={() => askRemove(u)} disabled={counting}>
                         Remove
                       </button>
                     )}
@@ -240,6 +265,220 @@ function People({
             </tbody>
           </table>
         </div>
+      )}
+      {removing && (
+        <Confirm
+          title={`Remove ${removing.user.email}?`}
+          confirmLabel="Remove"
+          pendingLabel="Removing…"
+          onConfirm={confirmRemove}
+          onClose={() => setRemoving(null)}
+        >
+          <p>
+            They can no longer sign in, and uploads from their machines stop. A CI token made under their address keeps
+            reporting pull requests. A session a cloud token files under this address is not stored. Revoke either token
+            below if it should stop too.
+          </p>
+          <label className="check">
+            <input type="checkbox" checked={also} onChange={(e) => setAlso(e.target.checked)} />
+            <span>
+              Also delete their{" "}
+              {removing.sessions === null ? "sessions" : `${removing.sessions} ${removing.sessions === 1 ? "session" : "sessions"}`}{" "}
+              and the repositories they stopped
+            </span>
+          </label>
+          <p className="muted">
+            Pull requests stay. A session that was removed is shown as “(deleted since)” on a pull request. While they
+            stay removed, a session filed under this address is not stored. Adding them again lets a session in.{" "}
+            {also
+              ? "A repository they had stopped is no longer stopped."
+              : "The repositories they stopped stay stopped."}
+          </p>
+        </Confirm>
+      )}
+    </section>
+  );
+}
+
+/**
+ * A small dialog. The request stays in it: both buttons wait, Escape and
+ * Cancel do nothing until it finishes, and a failure is said here.
+ */
+function Confirm({
+  title,
+  confirmLabel,
+  pendingLabel,
+  canConfirm = true,
+  onConfirm,
+  onClose,
+  children,
+}: {
+  title: string;
+  confirmLabel: string;
+  pendingLabel: string;
+  /** False while the answer is not ready, such as a name that is not typed yet. */
+  canConfirm?: boolean;
+  onConfirm: () => Promise<void>;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+  const pendingRef = useRef(false);
+  const [pending, setPending] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  useEffect(() => {
+    const dialog = ref.current;
+    dialog?.showModal();
+    return () => {
+      dialog?.close();
+    };
+  }, []);
+
+  function leave() {
+    if (pendingRef.current) return;
+    onClose();
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (pendingRef.current || !canConfirm) return;
+    pendingRef.current = true;
+    setPending(true);
+    setProblem(null);
+    try {
+      await onConfirm();
+      onClose();
+    } catch (err) {
+      setProblem((err as Error).message);
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
+    }
+  }
+
+  return (
+    <dialog
+      ref={ref}
+      className="ask"
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        event.preventDefault();
+        leave();
+      }}
+    >
+      <h2 id={titleId}>{title}</h2>
+      <form onSubmit={submit}>
+        {children}
+        {problem && <p role="alert">{problem}</p>}
+        <div className="ask-actions">
+          <button type="submit" disabled={pending || !canConfirm}>
+            {pending ? pendingLabel : confirmLabel}
+          </button>
+          <button type="button" className="quiet" disabled={pending} onClick={leave}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    </dialog>
+  );
+}
+
+/** Download the organisation, and on a hosted service delete it. The owner only. */
+function OrganisationData({
+  token,
+  orgName,
+  hosted,
+  onSignOut,
+}: {
+  token: string;
+  orgName: string;
+  /** Deleting is not offered on a server of one team. */
+  hosted: boolean;
+  onSignOut: () => void;
+}) {
+  const [problem, setProblem] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [typed, setTyped] = useState("");
+
+  async function removeOrg() {
+    try {
+      await api(token, "/org", { method: "DELETE", body: { name: typed.trim() } });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        onSignOut();
+        return;
+      }
+      throw err;
+    }
+    onSignOut();
+  }
+
+  async function download() {
+    setProblem(null);
+    setBusy(true);
+    try {
+      const response = await fetch("/api/v1/export", { headers: { authorization: `Bearer ${token}` } });
+      if (response.status === 401) {
+        onSignOut();
+        return;
+      }
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error ?? `The download failed (HTTP ${response.status}).`);
+      }
+      const blob = await response.blob();
+      const named =
+        /filename="([^"]+)"/.exec(response.headers.get("content-disposition") ?? "")?.[1] ?? "sessionly.jsonl";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = named;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setProblem((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card">
+      <h2>Organisation data</h2>
+      <p className="muted">
+        One file with the organisation, its people, sessions, pull requests (the lines matched to them, and earlier
+        figures), stopped repositories and tokens. A token's secret is not in it.
+      </p>
+      <div className="ask-actions">
+        <button type="button" onClick={download} disabled={busy}>
+          {busy ? "Preparing the file…" : "Download everything (JSONL)"}
+        </button>
+        {hosted && (
+          <button type="button" className="quiet" onClick={() => (setTyped(""), setDeleting(true), setProblem(null))}>
+            Delete this organisation
+          </button>
+        )}
+      </div>
+      {problem && <p role="alert">{problem}</p>}
+      {deleting && (
+        <Confirm
+          title="Delete this organisation?"
+          confirmLabel="Delete this organisation"
+          pendingLabel="Deleting…"
+          canConfirm={typed.trim() === orgName}
+          onConfirm={removeOrg}
+          onClose={() => setDeleting(false)}
+        >
+          <p>Everyone is signed out now. Everything is deleted for good in 7 days. Backups rotate out 7 days after that.</p>
+          <label>
+            Type {orgName} to confirm
+            <input value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
+          </label>
+        </Confirm>
       )}
     </section>
   );
@@ -251,6 +490,8 @@ export function Team({
   people,
   address,
   myEmail,
+  orgName,
+  owner,
   hosted,
   onSignOut,
 }: {
@@ -261,6 +502,10 @@ export function Team({
   address: string;
   /** The address of whoever is looking. */
   myEmail: string;
+  /** The organisation's name, which deleting it asks to be typed. */
+  orgName: string;
+  /** The person signed in is the owner. The card below is theirs. */
+  owner: boolean;
   /** A hosted service: its organisations have no license files to install. */
   hosted: boolean;
   onSignOut: () => void;
@@ -387,6 +632,7 @@ export function Team({
           </div>
         )}
       </section>
+      {owner && <OrganisationData token={token} orgName={orgName} hosted={hosted} onSignOut={onSignOut} />}
       {!hosted && <License token={token} onSignOut={onSignOut} />}
     </>
   );

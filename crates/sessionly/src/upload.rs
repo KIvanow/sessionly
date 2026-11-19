@@ -655,7 +655,7 @@ impl Client {
             format!("HTTP {status}: {detail}")
         };
         Err(match status {
-            401 | 403 if !is_license_refusal(&body) => SendError::Auth(message),
+            401 | 403 if !refuses_this_request(&body) => SendError::Auth(message),
             400..=499 => SendError::Rejected(message),
             _ => SendError::Unavailable(message),
         })
@@ -841,13 +841,16 @@ pub enum TakenBack {
     NotNow,
 }
 
-/// A 403 about the license or the caller's role is about this request, not
-/// about the token being wrong.
-fn is_license_refusal(body: &str) -> bool {
+/// A 403 about this request, not about the token being wrong: the license,
+/// the caller's role, or one session filed under someone who was removed.
+/// The last of those ends that session. The others in the run still go.
+fn refuses_this_request(body: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v["code"].as_str().map(String::from))
-        .is_some_and(|code| code.starts_with("license_") || code == "admins_only")
+        .is_some_and(|code| {
+            code.starts_with("license_") || code == "admins_only" || code == "person_removed"
+        })
 }
 
 /// Percent-encode everything outside `[A-Za-z0-9._-]`.
