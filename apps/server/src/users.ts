@@ -139,7 +139,11 @@ export async function removeUser(db: OrgDb, id: string, by: Principal, options?:
   );
   await forgetLines(db, removed);
   await db.query(`DELETE FROM repo_exclusions WHERE org_id = $1 AND owner_email = $2`, [db.orgId, user.email]);
-  await db.query(`DELETE FROM repos_allowed_again WHERE org_id = $1 AND owner_email = $2`, [db.orgId, user.email]);
+  // The number of times they allowed a repository again stays. A machine
+  // keeps the number it last saw. Removing the row would start the next
+  // allowance at 1 again, and a machine that was offline, and already saw
+  // 1, would not send the sessions this delete removed. The next allowance
+  // adds one, which that machine has not seen.
 }
 
 /**
