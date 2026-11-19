@@ -288,6 +288,7 @@ export function App() {
       people={(options?.providers.length ?? 0) > 0}
       address={options?.publicUrl || window.location.origin}
       hosted={options?.hosted === true}
+      options={options}
       sessions={savedSessions()}
       onSwitch={use}
       onSignOut={signOut}
@@ -311,6 +312,7 @@ function Shell({
   people,
   address,
   hosted,
+  options: auth,
   sessions,
   onSwitch,
   onSignOut,
@@ -324,6 +326,8 @@ function Shell({
   address: string;
   /** A service many organisations share: no license files there. */
   hosted: boolean;
+  /** What the server offers for signing in: whether a viewer of the demo may create an organisation of their own. */
+  options: AuthOptions | null;
   /** Sessions in other organisations, to switch to. */
   sessions: Saved[];
   onSwitch: (token: string) => void;
@@ -349,6 +353,8 @@ function Shell({
   // A viewer, of the organisation a repository is shown in, sees what an admin sees and changes nothing.
   const viewer = me.role === "viewer";
   const seesAll = isAdmin || viewer;
+  // From the demo, a way to an organisation of their own, where anyone may make one.
+  const mayCreate = viewer && auth?.signup === true;
   const refresh = () => {
     options.reload();
     setRevision((n) => n + 1);
@@ -420,6 +426,11 @@ function Shell({
     </a>
   );
 
+  // Their own organisation, made the way anyone makes one; the demo stays among their sessions.
+  if (page === "create" && mayCreate) {
+    return <Login options={auth} problem={null} onToken={onSwitch} creating onBack={() => (window.location.hash = "#/")} />;
+  }
+
   return (
     <>
       <header className="top">
@@ -431,6 +442,7 @@ function Shell({
             {seesAll && link("pulls", "Pull requests")}
             {isAdmin ? link("team", "Team") : viewer && unavailable("Team")}
             {viewer ? unavailable("Connect") : link("connect", "Connect")}
+            {mayCreate && link("create", "Create your organisation")}
           </nav>
           <span className="who">
             {sessions.length > 1 ? (

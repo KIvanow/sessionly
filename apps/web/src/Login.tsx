@@ -19,15 +19,20 @@ export function Login({
   problem,
   onRetry,
   onToken,
+  creating = false,
+  onBack,
 }: {
   options: AuthOptions | null;
   problem: string | null;
   /** Something to try again about `problem`, if there is. */
   onRetry?: () => void;
   onToken: (token: string) => void;
+  /** Opened to create an organisation, by someone already signed in (a viewer of the demo): only that, and a way back. */
+  creating?: boolean;
+  onBack?: () => void;
 }) {
   const providers = options?.providers ?? [];
-  const [chosen, setChosen] = useState<Mode | null>(null);
+  const [chosen, setChosen] = useState<Mode | null>(creating ? "create" : null);
   const mode: Mode = chosen ?? (providers.length ? "sign-in" : "token");
   const [token, setToken] = useState("");
 
@@ -79,6 +84,13 @@ export function Login({
         {mode === "token" && (
           <p className="muted">Use the token you were given for this server. It is kept in this browser only.</p>
         )}
+        {creating ? (
+          <p className="ways">
+            <button type="button" className="quiet" onClick={onBack}>
+              Back to the demo
+            </button>
+          </p>
+        ) : (
         <p className="ways">
           {providers.length > 0 && mode !== "sign-in" && (
             <button type="button" className="quiet" onClick={() => setChosen("sign-in")}>
@@ -96,6 +108,7 @@ export function Login({
             </button>
           )}
         </p>
+        )}
       </form>
     </main>
   );
