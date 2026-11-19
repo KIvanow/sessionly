@@ -6,8 +6,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countHashedLines, migrationAt, openDb, type Db } from "../src/db.ts";
-import { testDb, testDbUrl, tokenFor } from "./helpers.ts";
-import { attribute, breakdown, CURRENT_ACTION, type Claim, MATCH_AT_ONCE, olderAction, UNKNOWN_REPORTER, weigh, writers } from "../src/pulls.ts";
+import { newOrg, testDb, testDbUrl, tokenFor } from "./helpers.ts";
+import { attribute, breakdown, CURRENT_ACTION, type Claim, historyChange, MATCH_AT_ONCE, olderAction, UNKNOWN_REPORTER, weigh, writers } from "../src/pulls.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
 const h = (n: number) => n.toString(16).padStart(16, "0");
@@ -965,6 +965,258 @@ test("the pull requests the list's filters choose are matched again, some at a t
   assert.ok(Date.parse(ahead.body.started) < Date.now() + 60_000);
 });
 
+const snap = (
+  commits: number,
+  lines: number,
+  agent: number,
+  sessions: { id: string; lines: number }[] = [],
+  version: string | null = null,
+) => ({
+  commits,
+  lines,
+  agent_lines: agent,
+  sessions: sessions.map((s) => ({ machine_id: "m1", source: "claude-code", session_id: s.id, lines: s.lines })),
+  reporter_version: version,
+});
+
+test("the reason for a change is chosen in a fixed order", () => {
+  const before = snap(1, 6, 4, [{ id: "s1", lines: 4 }], "0.1.0");
+  assert.equal(historyChange(snap(1, 6, 4), null).reason, null);
+  assert.equal(historyChange(snap(2, 8, 4, [{ id: "s1", lines: 4 }], "0.2.0"), before).reason, "1 new commit");
+  assert.equal(historyChange(snap(4, 9, 5, [{ id: "s1", lines: 4 }, { id: "s2", lines: 1 }]), before).reason, "3 new commits");
+  // no new commits: a session that arrived, with how far the agent lines moved
+  assert.equal(
+    historyChange(snap(1, 6, 21, [{ id: "s1", lines: 4 }, { id: "s2", lines: 17 }]), before).reason,
+    "1 session uploaded since: +17 agent lines",
+  );
+  assert.equal(
+    historyChange(snap(1, 6, 6, [{ id: "s1", lines: 4 }, { id: "s2", lines: 1 }, { id: "s3", lines: 1 }]), before).reason,
+    "2 sessions uploaded since: +2 agent lines",
+  );
+  assert.equal(historyChange(snap(1, 6, 0, []), before).reason, "1 session no longer matched: -4 agent lines");
+  assert.equal(
+    historyChange(snap(1, 6, 0, [], "0.9.0"), { ...before, sessions: [
+      { machine_id: "m1", source: "claude-code", session_id: "s1", lines: 2 },
+      { machine_id: "m1", source: "claude-code", session_id: "s2", lines: 2 },
+    ] }).reason,
+    "2 sessions no longer matched: -4 agent lines",
+  );
+  // fewer commits, ahead of a session that arrived, as new commits are
+  assert.equal(historyChange(snap(0, 6, 4, [{ id: "s1", lines: 4 }], "0.1.0"), before).reason, "1 commit removed");
+  assert.equal(
+    historyChange(snap(1, 8, 5, [{ id: "s1", lines: 4 }, { id: "s2", lines: 1 }], "0.1.0"), snap(3, 6, 4, [{ id: "s1", lines: 4 }], "0.1.0")).reason,
+    "2 commits removed",
+  );
+  // same sessions, same commits, a newer Action, and the lines moved: the versions are named
+  assert.equal(historyChange(snap(1, 7, 4, [{ id: "s1", lines: 4 }], "0.2.0"), before).reason, "Action 0.2.0, was 0.1.0");
+  // a newer Action also wins when a session's line count changed with it
+  assert.equal(historyChange(snap(1, 7, 5, [{ id: "s1", lines: 5 }], "0.2.0"), before).reason, "Action 0.2.0, was 0.1.0");
+  // the one before named no version that can be read
+  assert.equal(historyChange(snap(1, 7, 4, [{ id: "s1", lines: 4 }], "0.2.0"), { ...before, reporter_version: null }).reason, "Action 0.2.0");
+  assert.equal(historyChange(snap(1, 7, 4, [{ id: "s1", lines: 4 }], "0.1.0"), before).reason, "matched again, nothing new");
+  // an existing session whose line count changed is neither added nor gone
+  const shifted = historyChange(snap(1, 6, 5, [{ id: "s1", lines: 5 }], "0.1.0"), before);
+  assert.equal(shifted.reason, "1 session's lines changed: +1 agent lines");
+  assert.deepEqual(shifted.sessions_changed, [
+    { machine_id: "m1", source: "claude-code", session_id: "s1", lines: 5, lines_before: 4 },
+  ]);
+  const prior = snap(1, 6, 4, [{ id: "s1", lines: 3 }, { id: "s2", lines: 1 }], "0.1.0");
+  assert.equal(
+    historyChange(snap(1, 6, 6, [{ id: "s1", lines: 4 }, { id: "s2", lines: 2 }], "0.1.0"), prior).reason,
+    "2 sessions' lines changed: +2 agent lines",
+  );
+});
+
+test("a pull request keeps a history of its figures and says what moved them", async () => {
+  const repo = "github.com/acme/history";
+  const detail = async (number: number) =>
+    (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(repo)}&number=${number}`)).body;
+  const upload = (id: string, path: string, ...lines: number[]) => {
+    const s = session(id, "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [
+      { path, model: null, hashes: lines.map(h) },
+    ]);
+    s.session.repo.remote = repo;
+    return call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, s);
+  };
+  const sent = (number: number, overrides: Record<string, unknown> = {}) =>
+    call(tokens.ci, "PUT", "/prs", report({ repo, number, ...overrides }));
+
+  // Two identical reports leave one row. A different event is not, by itself, a change.
+  assert.equal((await sent(1, { files: [file("a.ts", 1, 2)] })).status, 200);
+  assert.equal((await sent(1, { event: "synchronize", files: [file("a.ts", 1, 2)] })).status, 200);
+  let page = await detail(1);
+  assert.equal(page.history.length, 1);
+  assert.equal(page.history[0].event, "opened");
+  assert.equal(page.history[0].change.reason, null);
+  assert.deepEqual([page.history[0].lines, page.history[0].agent_lines, page.history[0].commits], [2, 0, 1]);
+  assert.deepEqual(page.history[0].sessions, []);
+
+  // A session uploaded between reports is named, and the reason says so.
+  assert.equal((await upload("s-new", "a.ts", 1)).status, 200);
+  assert.equal((await sent(1, { event: "synchronize", files: [file("a.ts", 1, 2)] })).status, 200);
+  page = await detail(1);
+  assert.equal(page.history.length, 2);
+  const arrived = page.history[0];
+  assert.equal(arrived.event, "synchronize");
+  assert.deepEqual(arrived.change.sessions_added.map((s: { session_id: string; lines: number }) => [s.session_id, s.lines]), [["s-new", 1]]);
+  assert.equal(arrived.change.sessions_added[0].session.owner_email, "ann@example.com");
+  assert.equal(arrived.change.reason, "1 session uploaded since: +1 agent lines");
+  assert.deepEqual([arrived.change.agent_lines_before, arrived.agent_lines], [0, 1]);
+  assert.deepEqual([arrived.change.lines_before, arrived.lines], [2, 2]);
+
+  // More commits and more lines: the commits are the reason, ahead of anything else.
+  assert.equal((await sent(1, { event: "synchronize", commits: 3, files: [file("a.ts", 1, 2, 3, 4)] })).status, 200);
+  page = await detail(1);
+  assert.equal(page.history[0].change.reason, "2 new commits");
+  assert.deepEqual([page.history[0].change.commits_before, page.history[0].commits], [1, 3]);
+  assert.deepEqual([page.history[0].change.lines_before, page.history[0].lines], [2, 4]);
+
+  // A session deleted between reports is gone from the next one.
+  await db.query(`DELETE FROM sessions WHERE session_id = 's-new' AND org_id = 'default'`);
+  assert.equal((await sent(1, { event: "synchronize", commits: 3, files: [file("a.ts", 1, 2, 3, 4)] })).status, 200);
+  page = await detail(1);
+  assert.deepEqual(page.history[0].change.sessions_gone.map((s: { session_id: string; session: unknown }) => [s.session_id, s.session]), [["s-new", null]]);
+  assert.equal(page.history[0].change.reason, "1 session no longer matched: -1 agent lines");
+
+  // A newer Action that moves nothing else is its own row. The one before it keeps its version.
+  assert.equal((await sent(2, {
+    commits: 1, files: [file("b.ts", 10)], reporter: { name: "sessionly-action", version: "0.1.0" },
+  })).status, 200);
+  assert.equal((await sent(2, {
+    event: "synchronize", commits: 1, files: [file("b.ts", 10)], reporter: { name: "sessionly-action", version: "0.2.0" },
+  })).status, 200);
+  page = await detail(2);
+  assert.equal(page.history.length, 2);
+  assert.equal(page.history[0].reporter_version, "0.2.0");
+  assert.equal(page.history[0].change.reason, "Action 0.2.0, was 0.1.0");
+  assert.deepEqual([page.history[0].lines, page.history[0].agent_lines], [1, 0]);
+  assert.equal(page.history[1].reporter_version, "0.1.0");
+  assert.equal(page.history[1].change.reason, null);
+  // The same version again, with the same figures, adds nothing.
+  assert.equal((await sent(2, {
+    event: "synchronize", commits: 1, files: [file("b.ts", 10)], reporter: { name: "sessionly-action", version: "0.2.0" },
+  })).status, 200);
+  assert.equal((await detail(2)).history.length, 2);
+  // The lines moved, and the version was already the current one: nothing new.
+  assert.equal((await sent(2, {
+    event: "synchronize", commits: 1, files: [file("b.ts", 10, 11)], reporter: { name: "sessionly-action", version: "0.2.0" },
+  })).status, 200);
+  page = await detail(2);
+  assert.equal(page.history[0].change.reason, "matched again, nothing new");
+  assert.equal(page.history[1].reporter_version, "0.2.0");
+  // The lines moved with the version: that is the reason.
+  assert.equal((await sent(2, {
+    event: "synchronize", commits: 1, files: [file("b.ts", 10, 11, 12)], reporter: { name: "sessionly-action", version: "0.3.0" },
+  })).status, 200);
+  page = await detail(2);
+  assert.equal(page.history[0].change.reason, "Action 0.3.0, was 0.2.0");
+  assert.equal(page.history[0].reporter_version, "0.3.0");
+  assert.equal(page.history[1].reporter_version, "0.2.0");
+
+  // A session that arrives after the last report is a match, not a new report.
+  assert.equal((await sent(3, { event: "closed", state: "merged", files: [file("c.ts", 20, 21)] })).status, 200);
+  assert.equal((await upload("s-match", "c.ts", 20)).status, 200);
+  const matched = await call(tokens.admin, "POST", "/prs/match", { repo, number: 3 });
+  assert.equal(matched.status, 200);
+  page = await detail(3);
+  assert.equal(page.history.length, 2);
+  assert.equal(page.history[0].event, "match");
+  assert.deepEqual(page.history[0].change.sessions_added.map((s: { session_id: string }) => s.session_id), ["s-match"]);
+  assert.equal(page.history[0].change.reason, "1 session uploaded since: +1 agent lines");
+  assert.equal(page.history[1].event, "closed");
+
+  // The 51st change drops the oldest row. Fifty are kept, the latest first.
+  for (let i = 1; i <= 51; i++) {
+    const lines = Array.from({ length: i }, (_, n) => 1000 + n);
+    assert.equal((await sent(4, { commits: i, event: i === 1 ? "opened" : "synchronize", files: [file("d.ts", ...lines)] })).status, 200);
+  }
+  page = await detail(4);
+  assert.equal(page.history.length, 50);
+  assert.equal(page.history.some((row: { commits: number }) => row.commits === 1), false);
+  assert.equal(page.history[0].commits, 51);
+  assert.equal(page.history[49].commits, 2);
+  assert.equal(page.history[0].change.reason, "1 new commit");
+
+  // A session already matched, whose line count grew, says so.
+  assert.equal((await sent(5, { files: [file("e.ts", 30, 31)] })).status, 200);
+  assert.equal((await upload("s-grow", "e.ts", 30)).status, 200);
+  assert.equal((await sent(5, { event: "synchronize", files: [file("e.ts", 30, 31)] })).status, 200);
+  assert.equal((await upload("s-grow", "e.ts", 30, 31)).status, 200);
+  assert.equal((await sent(5, { event: "synchronize", files: [file("e.ts", 30, 31)] })).status, 200);
+  page = await detail(5);
+  assert.equal(page.history[0].change.reason, "1 session's lines changed: +1 agent lines");
+  assert.deepEqual(
+    page.history[0].change.sessions_changed.map((s: { session_id: string; lines: number; lines_before: number }) => [s.session_id, s.lines_before, s.lines]),
+    [["s-grow", 1, 2]],
+  );
+  assert.equal(page.history[0].change.sessions_added.length, 0);
+  assert.equal(page.history[0].change.sessions_gone.length, 0);
+
+  // A rebase that drops commits says so, when nothing else on the ladder moved.
+  assert.equal((await sent(6, { commits: 4, files: [file("f.ts", 40)] })).status, 200);
+  assert.equal((await sent(6, { event: "synchronize", commits: 2, files: [file("f.ts", 40)] })).status, 200);
+  page = await detail(6);
+  assert.equal(page.history[0].change.reason, "2 commits removed");
+  assert.deepEqual([page.history[0].change.commits_before, page.history[0].commits], [4, 2]);
+});
+
+test("two reports of a new pull request at once keep one history row when the figures match", async () => {
+  const repo = "github.com/acme/history-once";
+  const detail = async (number: number) =>
+    (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(repo)}&number=${number}`)).body;
+  const same = report({ repo, number: 1, files: [file("a.ts", 1, 2)] });
+  const [a, b] = await Promise.all([call(tokens.ci, "PUT", "/prs", same), call(tokens.ci, "PUT", "/prs", same)]);
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  assert.equal((await detail(1)).history.length, 1);
+
+  const [c, d] = await Promise.all([
+    call(tokens.ci, "PUT", "/prs", report({ repo, number: 2, commits: 1, files: [file("b.ts", 1)] })),
+    call(tokens.ci, "PUT", "/prs", report({ repo, number: 2, commits: 2, event: "synchronize", files: [file("b.ts", 1, 2)] })),
+  ]);
+  assert.equal(c.status, 200);
+  assert.equal(d.status, 200);
+  const both = await detail(2);
+  assert.deepEqual(both.history.map((row: { commits: number }) => row.commits).sort((x: number, y: number) => x - y), [1, 2]);
+});
+
+test("another organisation's history is not visible", async () => {
+  await newOrg(db, "org-hist", "History");
+  const ci = await tokenFor(db, { email: "ci@hist.example", role: "ci" }, "org-hist");
+  const admin = await tokenFor(db, { email: "boss@hist.example", role: "admin" }, "org-hist");
+  const repo = "github.com/hist/app";
+  assert.equal((await call(ci, "PUT", "/prs", report({ repo, number: 1, files: [file("a.ts", 1)] }))).status, 200);
+  const theirs = await call(admin, "GET", `/prs/detail?repo=${encodeURIComponent(repo)}&number=1`);
+  assert.equal(theirs.status, 200);
+  assert.equal(theirs.body.history.length, 1);
+
+  // The default organisation is told nothing of it, by the API or by a query with no filter.
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(repo)}&number=1`)).status, 404);
+  await db.asOrg("default", async (scoped) => {
+    const rows = await scoped.query<{ repo: string }>(`SELECT repo FROM pull_request_reports`);
+    assert.equal(rows.some((row) => row.repo === repo), false);
+    assert.ok(rows.length > 0);
+  });
+  // Writing a row into the other organisation is refused.
+  await assert.rejects(
+    db.asOrg("default", (scoped) =>
+      scoped.query(
+        `INSERT INTO pull_request_reports (org_id, repo, number, event, commits, lines, agent_lines, sessions)
+         VALUES ('org-hist', $1, 1, 'manual', 1, 1, 0, '[]')`,
+        [repo],
+      ),
+    ),
+    /row-level security/,
+  );
+  // And that organisation sees its own, and only its own.
+  const [seen] = await db.asOrg("org-hist", (scoped) => scoped.query<{ n: unknown }>(`SELECT count(*) AS n FROM pull_request_reports`));
+  const [all] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM pull_request_reports WHERE org_id = 'org-hist'`);
+  const [others] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM pull_request_reports WHERE org_id <> 'org-hist'`);
+  assert.equal(Number(seen?.n), Number(all?.n));
+  assert.equal(Number(seen?.n), 1);
+  assert.ok(Number(others?.n) > 0);
+});
+
 test("what a pull request's sessions cost it: each for the share of its lines that are there", async () => {
   const repo = "github.com/acme/cost";
   const range = (from: number, count: number) => Array.from({ length: count }, (_, i) => from + i);
@@ -1244,8 +1496,15 @@ test("pull requests and sessions from before the cost was shown have one after t
        ('old-cost', 'github.com/acme/old', 1, 'ann', 'merged', 'opened', 'closed', '[]', '[]', $1::jsonb, $2::jsonb),
        ('old-cost', 'github.com/acme/old', 2, 'ann', 'merged', 'opened', 'closed', '[]', '[]', $1::jsonb, NULL),
        ('old-cost', 'github.com/acme/old', 3, 'ann', 'merged', 'opened', 'closed', '[]', '[]', $1::jsonb, $2::jsonb)`,
-    [attribution, JSON.stringify({ files: [], sessions: [{ machine_id: "m1", source: "claude-code", session_id: "s1", lines: 2 }] })],
+    [attribution, JSON.stringify({
+      files: [],
+      sessions: [
+        { machine_id: "m1", source: "claude-code", session_id: "s1", lines: 2 },
+        { machine_id: "m1", source: "claude-code", session_id: "s0", lines: 0 },
+      ],
+    })],
   );
+  await old.query(`UPDATE pull_requests SET reporter_version = '0.4.0', commits = 7 WHERE org_id = 'old-cost' AND number = 1`);
   await old.close();
 
   const upgraded = await openDb(url);
@@ -1272,6 +1531,20 @@ test("pull requests and sessions from before the cost was shown have one after t
     // and its row says so, where it would have a share
     const page = await (await upgradedApp.request("/api/v1/prs/detail?repo=github.com/acme/old&number=1", { headers: { authorization: `Bearer ${admin}` } })).json() as any;
     assert.deepEqual(page.sessions.map((s: any) => [s.session_id, s.cost_share_usd, s.uncounted]), [["s1", null, true]]);
+    // the first history row is the figures already stored, and the sessions that had lines then
+    const kept = (sessions: { session_id: string; lines: number }[]) => sessions.map((s) => [s.session_id, s.lines]).sort();
+    assert.equal(page.history.length, 1);
+    assert.equal(page.history[0].change.reason, null);
+    assert.equal(page.history[0].event, "closed");
+    assert.equal(page.history[0].reporter_version, "0.4.0");
+    assert.deepEqual([page.history[0].commits, page.history[0].lines, page.history[0].agent_lines], [7, 2, 2]);
+    assert.deepEqual(kept(page.history[0].sessions), [["s1", 2]]);
+    const bare = await (await upgradedApp.request("/api/v1/prs/detail?repo=github.com/acme/old&number=2", { headers: { authorization: `Bearer ${admin}` } })).json() as any;
+    assert.equal(bare.history.length, 1);
+    assert.deepEqual(bare.history[0].sessions, []);
+    const third = await (await upgradedApp.request("/api/v1/prs/detail?repo=github.com/acme/old&number=3", { headers: { authorization: `Bearer ${admin}` } })).json() as any;
+    assert.equal(third.history[0].reporter_version, null);
+    assert.deepEqual(kept(third.history[0].sessions), [["s1", 2]]);
     assert.deepEqual(await countHashedLines(upgraded), { counted: 1, failed: 0 });
     const list = await (await upgradedApp.request("/api/v1/prs?state=merged", { headers: { authorization: `Bearer ${admin}` } })).json() as any;
     const costs = Object.fromEntries(list.pulls.map((p: any) => [p.number, p.cost && [p.cost.usd, p.cost.estimated, p.cost.sessions_unshared, p.cost.opened_usd]]));

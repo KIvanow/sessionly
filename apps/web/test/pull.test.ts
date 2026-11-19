@@ -1,7 +1,40 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { byOf, countFeedback, feedbackLabel, matchAll, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web } from "../src/pull.ts";
+import { byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, matchAll, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web } from "../src/pull.ts";
+
+test("a moved agent figure says what it was, and why", () => {
+  const history = [
+    { at: "2026-11-17T21:00:00.000Z", agent_lines: 382, change: { reason: "1 session uploaded since: +17 agent lines" } },
+    { at: "2026-11-17T19:23:00.000Z", agent_lines: 365, change: { reason: null } },
+  ];
+  assert.equal(figureBecause("1 session uploaded since: +17 agent lines"), "1 session uploaded since");
+  assert.equal(figureBecause("1 session's lines changed: +1 agent lines"), "1 session's lines changed");
+  assert.equal(figureBecause("2 new commits"), "2 new commits");
+  assert.equal(figureBecause("2 commits removed"), "2 commits removed");
+  assert.equal(figureBecause("Action 0.2.0, was 0.1.0"), "Action 0.2.0, was 0.1.0");
+  assert.equal(
+    figureShift(history, (iso) => (iso === history[0]!.at ? "17 Nov, 21:00" : `wrong ${iso}`), (n) => String(n)),
+    "Was 365 until 17 Nov, 21:00: 1 session uploaded since.",
+  );
+  // The agent lines did not move: the history still says why, and the headline does not.
+  assert.equal(
+    figureShift(
+      [
+        { at: "t1", agent_lines: 365, change: { reason: "2 new commits" } },
+        { at: "t0", agent_lines: 365, change: { reason: null } },
+      ],
+      (iso) => iso,
+      (n) => String(n),
+    ),
+    null,
+  );
+  assert.equal(figureShift([history[1]!], (iso) => iso, (n) => String(n)), null);
+  assert.equal(historyEvent("synchronize"), "Pushed");
+  assert.equal(historyEvent("match"), "Matched again");
+  assert.equal(historyEvent("ready_for_review"), "Marked ready");
+  assert.equal(historyEvent("something_else"), "something else");
+});
 
 test("a pull request says how current its figures are", () => {
   const when = (iso: string | null) => `<${iso}>`;

@@ -11,6 +11,8 @@ import type {
   PullDetail,
   PullFeedback,
   PullFile,
+  PullHistory,
+  PullHistoryNamedSession,
   PullList,
   PullMatch,
   PullMatches,
@@ -689,6 +691,212 @@ async function match(
   };
 }
 
+/** How many reports of one pull request are kept. The oldest past this are dropped. */
+const HISTORY_KEPT = 50;
+
+/**
+ * One request stores or matches a pull request at a time, its first too,
+ * when there is no row yet to hold. The later one then sees what the earlier
+ * left. The same lock a report takes, so a rematch waits for it.
+ */
+async function holdPull(db: OrgDb, repo: string, number: number): Promise<void> {
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-pull:${db.orgId}:${repo}#${number}`]);
+}
+
+/** A session's key and its lines in a pull request, as a history row stores them. */
+interface ReportSession {
+  machine_id: string;
+  source: string;
+  session_id: string;
+  lines: number;
+}
+
+/** The figures a history row is compared by. The version is kept, and is not one of them. */
+interface HistoryFigures {
+  commits: number;
+  lines: number;
+  agent_lines: number;
+  sessions: ReportSession[];
+  reporter_version: string | null;
+}
+
+function sessionsOf(value: unknown): ReportSession[] {
+  const list = json<unknown>(value);
+  if (!Array.isArray(list)) return [];
+  const sessions: ReportSession[] = [];
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue;
+    const s = item as Record<string, unknown>;
+    if (typeof s.machine_id !== "string" || typeof s.source !== "string" || typeof s.session_id !== "string") continue;
+    sessions.push({ machine_id: s.machine_id, source: s.source, session_id: s.session_id, lines: num(s.lines) });
+  }
+  return sessions;
+}
+
+const sessionSignature = (sessions: ReportSession[]): string =>
+  sessions.map((s) => `${sessionKey(s)}\n${s.lines}`).sort().join("\n");
+
+const picked = (s: ReportSession): ReportSession => ({
+  machine_id: s.machine_id,
+  source: s.source,
+  session_id: s.session_id,
+  lines: s.lines,
+});
+
+/** Whether `version` is a newer Action than `before`. One that cannot be read is not. */
+function newerAction(before: string | null, version: string | null): boolean {
+  if (!version || !actionNumbers(version)) return false;
+  return olderAction(before, version);
+}
+
+const signed = (n: number): string => `${n > 0 ? "+" : ""}${n}`;
+const sessionsWord = (n: number): string => (n === 1 ? "1 session" : `${n} sessions`);
+const linesChanged = (n: number): string => (n === 1 ? "1 session's lines changed" : `${n} sessions' lines changed`);
+
+type RawSessionChange = ReportSession & { lines_before: number };
+
+/** A change before each named session is joined to what is known of it now. */
+interface RawChange {
+  lines_before: number | null;
+  agent_lines_before: number | null;
+  commits_before: number | null;
+  sessions_added: ReportSession[];
+  sessions_gone: ReportSession[];
+  sessions_changed: RawSessionChange[];
+  reason: string | null;
+}
+
+/** The words for a newer Action: its version, and the one it replaced when that one can be read. */
+function actionReason(before: string | null, version: string): string {
+  return before && actionNumbers(before) ? `Action ${version}, was ${before}` : `Action ${version}`;
+}
+
+/**
+ * What changed between two reports, and the reason in words. New commits
+ * first, then fewer commits, then sessions that arrived, then sessions that
+ * are gone, then a newer Action, then a session whose line count changed,
+ * and otherwise that it was matched again. With no earlier report there is
+ * nothing to compare, and no reason.
+ */
+export function historyChange(now: HistoryFigures, before: HistoryFigures | null): RawChange {
+  if (!before) {
+    return {
+      lines_before: null,
+      agent_lines_before: null,
+      commits_before: null,
+      sessions_added: [],
+      sessions_gone: [],
+      sessions_changed: [],
+      reason: null,
+    };
+  }
+  const prev = new Map(before.sessions.map((s) => [sessionKey(s), s]));
+  const next = new Map(now.sessions.map((s) => [sessionKey(s), s]));
+  const added: ReportSession[] = [];
+  const gone: ReportSession[] = [];
+  const changed: RawSessionChange[] = [];
+  for (const [key, s] of next) {
+    const was = prev.get(key);
+    if (!was) added.push(s);
+    else if (was.lines !== s.lines) changed.push({ ...s, lines_before: was.lines });
+  }
+  for (const [key, s] of prev) {
+    if (!next.has(key)) gone.push(s);
+  }
+  const byLines = (a: ReportSession, b: ReportSession) => b.lines - a.lines || a.session_id.localeCompare(b.session_id);
+  added.sort(byLines);
+  gone.sort(byLines);
+  changed.sort(byLines);
+
+  const commits = now.commits - before.commits;
+  const dropped = -commits;
+  const delta = signed(now.agent_lines - before.agent_lines);
+  let reason = "matched again, nothing new";
+  if (commits > 0) reason = commits === 1 ? "1 new commit" : `${commits} new commits`;
+  else if (commits < 0) reason = dropped === 1 ? "1 commit removed" : `${dropped} commits removed`;
+  else if (added.length > 0) reason = `${sessionsWord(added.length)} uploaded since: ${delta} agent lines`;
+  else if (gone.length > 0) reason = `${sessionsWord(gone.length)} no longer matched: ${delta} agent lines`;
+  else if (newerAction(before.reporter_version, now.reporter_version) && now.reporter_version) {
+    reason = actionReason(before.reporter_version, now.reporter_version);
+  } else if (changed.length > 0) reason = `${linesChanged(changed.length)}: ${delta} agent lines`;
+
+  return {
+    lines_before: before.lines,
+    agent_lines_before: before.agent_lines,
+    commits_before: before.commits,
+    sessions_added: added,
+    sessions_gone: gone,
+    sessions_changed: changed,
+    reason,
+  };
+}
+
+/**
+ * Keep the figures of a report, in the same transaction as the pull request.
+ * A row is written when the lines, the agent lines, the commits or the set
+ * of sessions and their line counts differ from the latest one, and when a
+ * newer Action reports the same figures. That row keeps the version that
+ * produced it; the one before it is left as it was, so a later change is
+ * not explained by a version that already had a row. Only the latest
+ * `HISTORY_KEPT` stay.
+ */
+async function recordReport(
+  db: OrgDb,
+  report: HistoryFigures & { repo: string; number: number; event: string },
+): Promise<void> {
+  const [latest] = await db.query<{
+    commits: unknown;
+    lines: unknown;
+    agent_lines: unknown;
+    sessions: unknown;
+    reporter_version: unknown;
+  }>(
+    `SELECT commits, lines, agent_lines, sessions, reporter_version
+     FROM pull_request_reports
+     WHERE org_id = $1 AND repo = $2 AND number = $3
+     ORDER BY at DESC, id DESC
+     LIMIT 1`,
+    [db.orgId, report.repo, report.number],
+  );
+  const version = latest && typeof latest.reporter_version === "string" ? latest.reporter_version : null;
+  const same =
+    latest != null &&
+    num(latest.commits) === report.commits &&
+    num(latest.lines) === report.lines &&
+    num(latest.agent_lines) === report.agent_lines &&
+    sessionSignature(sessionsOf(latest.sessions)) === sessionSignature(report.sessions);
+  // Same figures, and not a newer Action: the row already there still says
+  // which version produced it.
+  if (same && !newerAction(version, report.reporter_version)) return;
+  await db.query(
+    `INSERT INTO pull_request_reports
+       (org_id, repo, number, event, commits, lines, agent_lines, sessions, reporter_version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)`,
+    [
+      db.orgId,
+      report.repo,
+      report.number,
+      report.event,
+      report.commits,
+      report.lines,
+      report.agent_lines,
+      JSON.stringify(report.sessions.map(picked)),
+      report.reporter_version,
+    ],
+  );
+  await db.query(
+    `DELETE FROM pull_request_reports
+     WHERE org_id = $1 AND repo = $2 AND number = $3
+       AND id NOT IN (
+         SELECT id FROM pull_request_reports
+         WHERE org_id = $1 AND repo = $2 AND number = $3
+         ORDER BY at DESC, id DESC
+         LIMIT ${HISTORY_KEPT}
+       )`,
+    [db.orgId, report.repo, report.number],
+  );
+}
+
 /**
  * Store a report, replacing the last one for the pull request, and work out
  * which of its lines agents wrote. The lines of the first report are kept
@@ -697,8 +905,8 @@ async function match(
 export async function storePull(db: OrgDb, report: PullReport, key?: string): Promise<PullAttribution> {
   // One report of a pull request at a time, its first too, when there is no
   // row yet to hold: the later one then sees what the earlier left, the state
-  // and the lines it was first reported with.
-  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-pull:${db.orgId}:${report.repo}#${report.number}`]);
+  // and the lines it was first reported with. Held until the history is written.
+  await holdPull(db, report.repo, report.number);
   const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string }>(
     `SELECT first_files, first_event, state FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
     [db.orgId, report.repo, report.number],
@@ -777,6 +985,16 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   // Closing without merging, or opening again, changes what its lines take from other pull requests.
   const turned = existing != null && (existing.state === "closed") !== (report.state === "closed");
   await keepSessions(db, report.repo, report.number, sessions, turned);
+  await recordReport(db, {
+    repo: report.repo,
+    number: report.number,
+    event: report.event,
+    commits: report.commits,
+    lines: attribution.now.lines,
+    agent_lines: attribution.now.agent_lines,
+    sessions: sessions.filter((s) => s.lines > 0).map(picked),
+    reporter_version: typeof columns.reporter_version === "string" ? columns.reporter_version : null,
+  });
   return attribution;
 }
 
@@ -896,10 +1114,12 @@ export async function rematchPull(
   number: number,
   key?: string,
 ): Promise<PullMatch | "needs_report" | null> {
+  await holdPull(db, repo, number);
   // The row is held until this is stored, so that a report arriving meanwhile
   // waits, and its files are not left beside figures made from the ones before.
   const [r] = await db.query(
-    `SELECT head_repo, head_ref, created_at, first_event, first_files, last_files, committers, aliases
+    `SELECT head_repo, head_ref, created_at, first_event, first_files, last_files, committers, aliases,
+            commits, reporter_version
      FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
     [db.orgId, repo, number],
   );
@@ -934,6 +1154,16 @@ export async function rematchPull(
     [db.orgId, repo, number, JSON.stringify(attribution), JSON.stringify({ files })],
   );
   await keepSessions(db, repo, number, sessions, false);
+  await recordReport(db, {
+    repo,
+    number,
+    event: "match",
+    commits: num(r.commits),
+    lines: attribution.now.lines,
+    agent_lines: attribution.now.agent_lines,
+    sessions: sessions.filter((s) => s.lines > 0).map(picked),
+    reporter_version: typeof r.reporter_version === "string" ? r.reporter_version : null,
+  });
   return { attribution, matched_at: iso(stored?.matched_at) ?? new Date().toISOString() };
 }
 
@@ -1301,13 +1531,14 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
   if (!r) return null;
   const detail = r.detail == null ? null : json<{ files: PullFile[] }>(r.detail);
   const row = pullRow(r);
-  const [reporter, shares] = await Promise.all([
+  const [reporter, shares, history] = await Promise.all([
     repoReporters(db, [repo]).then((found) => found.get(repo)),
     detail
       ? sharesIn(db, { sql: `SELECT $2::text AS repo, $3::integer AS number`, params: [db.orgId, repo, number] }, true).then(
           (found) => found.get(pullKey(row)) ?? [],
         )
       : Promise.resolve(null),
+    pullHistory(db, repo, number),
   ]);
   return {
     ...row,
@@ -1323,7 +1554,92 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
     sessions: shares && shares.filter((s) => s.wrote.lines > 0).map((s) => s.wrote),
     feedback: r.feedback == null ? null : json<PullFeedback[]>(r.feedback),
     feedback_total: r.feedback == null || r.feedback_total == null ? null : num(r.feedback_total),
+    history,
   };
+}
+
+/** The pull request's history, newest first, each with what changed against the one before it. */
+async function pullHistory(db: OrgDb, repo: string, number: number): Promise<PullHistory[]> {
+  const rows = await db.query(
+    `SELECT at, event, commits, lines, agent_lines, sessions, reporter_version
+     FROM pull_request_reports
+     WHERE org_id = $1 AND repo = $2 AND number = $3
+     ORDER BY at DESC, id DESC`,
+    [db.orgId, repo, number],
+  );
+  const snaps: (HistoryFigures & { at: string; event: string })[] = rows.map((row) => ({
+    at: iso(row.at) ?? "",
+    event: String(row.event),
+    commits: num(row.commits),
+    lines: num(row.lines),
+    agent_lines: num(row.agent_lines),
+    sessions: sessionsOf(row.sessions),
+    reporter_version: typeof row.reporter_version === "string" ? row.reporter_version : null,
+  }));
+  const changes = snaps.map((snap, i) => historyChange(snap, snaps[i + 1] ?? null));
+  const named = changes.flatMap((change) => [...change.sessions_added, ...change.sessions_gone, ...change.sessions_changed]);
+  const known = new Map((await withSessions(db, named)).map((s) => [sessionKey(s), s.session]));
+  const name = (s: ReportSession): PullHistoryNamedSession => ({ ...s, session: known.get(sessionKey(s)) ?? null });
+  return snaps.map((snap, i) => {
+    const change = changes[i]!;
+    return {
+      at: snap.at,
+      event: snap.event,
+      commits: snap.commits,
+      lines: snap.lines,
+      agent_lines: snap.agent_lines,
+      sessions: snap.sessions,
+      reporter_version: snap.reporter_version,
+      change: {
+        lines_before: change.lines_before,
+        agent_lines_before: change.agent_lines_before,
+        commits_before: change.commits_before,
+        sessions_added: change.sessions_added.map(name),
+        sessions_gone: change.sessions_gone.map(name),
+        sessions_changed: change.sessions_changed.map((s) => ({ ...name(s), lines_before: s.lines_before })),
+        reason: change.reason,
+      },
+    };
+  });
+}
+
+/** What is known now of the sessions a history row names. */
+async function withSessions(
+  db: OrgDb,
+  wrote: ReportSession[],
+): Promise<(ReportSession & { session: PullSession["session"] })[]> {
+  if (wrote.length === 0) return [];
+  const params: unknown[] = [db.orgId];
+  const keys = wrote
+    .map((s) => `($${params.push(s.machine_id)}::text, $${params.push(s.source)}::text, $${params.push(s.session_id)}::text)`)
+    .join(", ");
+  const rows = await db.query(
+    `SELECT machine_id, source, session_id, owner_email, runtime, title, started_at, active_ms, cost_usd,
+            cost_source, primary_model, prompts
+     FROM sessions WHERE org_id = $1 AND (machine_id, source, session_id) IN (${keys})`,
+    params,
+  );
+  const key = (s: { machine_id: unknown; source: unknown; session_id: unknown }) => `${s.machine_id}\n${s.source}\n${s.session_id}`;
+  const found = new Map(rows.map((row) => [key(row as never), row]));
+  return wrote.map((s) => {
+    const row = found.get(key(s));
+    return {
+      ...s,
+      session: row
+        ? {
+            owner_email: String(row.owner_email),
+            runtime: (row.runtime as string) ?? null,
+            title: (row.title as string) ?? null,
+            started_at: iso(row.started_at),
+            active_ms: num(row.active_ms),
+            cost_usd: row.cost_usd == null ? null : Number(row.cost_usd),
+            cost_source: (row.cost_source as string) ?? null,
+            primary_model: (row.primary_model as string) ?? null,
+            prompts: num(row.prompts),
+          }
+        : null,
+    };
+  });
 }
 
 /** Pull requests, most recently created first. */
