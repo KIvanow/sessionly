@@ -92,6 +92,20 @@ test("straight in only to the one organisation someone has signed in to before, 
   assert.equal(straightIn(arrival([place()], { create: true }), false), null);
 });
 
+test("someone who came to view the demo is taken into it, signed in elsewhere or not, and asked when it is not offered", () => {
+  const demo = place({ user_id: "demo", org_id: "showcase", first_time: true, demo: true });
+  const own = place();
+  // a first time, beside an organisation of their own, and in a browser signed in somewhere already
+  assert.equal(straightIn(arrival([own, demo], { demo_org: "showcase" }), true), "demo");
+  // a viewer already: their own membership there
+  assert.equal(straightIn(arrival([own, place({ user_id: "usr_9", org_id: "showcase" })], { demo_org: "showcase" }), true), "usr_9");
+  // not offered (closed, or removed from it), or kept for another account: asked as anyone is
+  assert.equal(straightIn(arrival([own], { demo_org: "showcase" }), true), null);
+  assert.equal(straightIn(arrival([own, place({ user_id: "usr_9", org_id: "showcase", other_account: "github" })], { demo_org: "showcase" }), true), null);
+  // without having come for it, the demo is one choice among others
+  assert.equal(straightIn(arrival([own, demo]), false), null);
+});
+
 test("a browser is signed in if it has a token in use or a session it kept", () => {
   browser("nothing");
   assert.equal(signedInHere(), false);

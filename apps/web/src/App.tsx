@@ -264,6 +264,8 @@ export function App() {
           setProblem(null);
           use(value);
         }}
+        // The website's Demo button leads here: signing in then takes them straight into the demo.
+        start={window.location.hash === "#/demo" && options?.providers.length ? "demo" : undefined}
       />
     );
   }
@@ -428,7 +430,11 @@ function Shell({
 
   // Their own organisation, made the way anyone makes one; the demo stays among their sessions.
   if (page === "create" && mayCreate) {
-    return <Login options={auth} problem={null} onToken={onSwitch} creating onBack={() => (window.location.hash = "#/")} />;
+    return <Login options={auth} problem={null} onToken={onSwitch} start="create" onBack={() => (window.location.hash = "#/")} backLabel="Back to the demo" />;
+  }
+  // The website's Demo button, for someone signed in here already: the same way in, and taken into the demo.
+  if (page === "demo") {
+    return <Login options={auth} problem={null} onToken={onSwitch} start="demo" onBack={() => (window.location.hash = "#/")} />;
   }
 
   return (
