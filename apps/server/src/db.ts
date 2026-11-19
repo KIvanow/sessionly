@@ -798,6 +798,21 @@ const MIGRATIONS: string[] = [
   // After the migrations that have already shipped: a database on those
   // must still be able to take this one.
   toApp(`UPDATE ON orgs`),
+  // A session copied into the organisation one repository is shown in, by
+  // `importDemo` (demo.ts): only such a row is replaced or removed by the next
+  // import. Any other upload of the session makes it its uploader's again.
+  `ALTER TABLE sessions ADD COLUMN copied boolean NOT NULL DEFAULT false`,
+  // In that organisation: by which paths not shown a pull request's files,
+  // lines and comments were last taken out of (a hash, as `rulesOf` makes it).
+  // One kept by others has them taken out again at the next import.
+  `ALTER TABLE pull_requests ADD COLUMN shown_rules text`,
+  // Anyone who signs in may join the organisation a repository is shown in
+  // (demo.ts) as a viewer: they see all of it, as an admin does, and change
+  // nothing (app.ts).
+  `ALTER TABLE users DROP CONSTRAINT users_role_check`,
+  `ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('owner', 'admin', 'member', 'viewer'))`,
+  `ALTER TABLE tokens DROP CONSTRAINT tokens_role_check`,
+  `ALTER TABLE tokens ADD CONSTRAINT tokens_role_check CHECK (role IN ('admin', 'member', 'ci', 'env', 'viewer'))`,
 ];
 
 /**

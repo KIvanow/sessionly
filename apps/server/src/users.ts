@@ -7,7 +7,7 @@ import { forgetLines, holdUploads } from "./sessions.ts";
 export interface UserInfo {
   id: string;
   email: string;
-  role: "owner" | "admin" | "member";
+  role: "owner" | "admin" | "member" | "viewer";
   created_at: string;
   removed_at: string | null;
   /**
@@ -120,7 +120,7 @@ export async function removeUser(db: OrgDb, id: string, by: Principal, options?:
   // By person, and by address for tokens made before they were a user here.
   await db.query(
     `UPDATE tokens SET revoked_at = now()
-     WHERE org_id = $1 AND revoked_at IS NULL AND role IN ('admin', 'member')
+     WHERE org_id = $1 AND revoked_at IS NULL AND role IN ('admin', 'member', 'viewer')
        AND (user_id = $2 OR email = $3)`,
     [db.orgId, id, user.email],
   );

@@ -17,13 +17,15 @@ interface Props {
   setScope: (scope: Scope) => void;
   /** Repositories to offer in the filter. */
   repos: string[];
+  /** For a viewer, who can look and change nothing. */
+  readOnly?: boolean;
   onSignOut: () => void;
 }
 
 const writer = (by: LinesBy) => `${toolName(by.tool)}${by.model ? ` · ${modelName(by.model)}` : ""}`;
 
 /** Pull requests the GitHub Action reported: how much agents wrote, and how it fared in review. */
-export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
+export function Pulls({ token, scope, setScope, repos, readOnly = false, onSignOut }: Props) {
   const [state, setState] = useState("merged");
   const [offset, setOffset] = useState(0);
   useEffect(() => setOffset(0), [state, scope]);
@@ -141,15 +143,17 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
         <section className="card" aria-label="Pull requests">
           <div className="card-head">
             <h2>Pull requests</h2>
-            <button
-              type="button"
-              className="quiet"
-              disabled={matching !== null}
-              title="Count sessions that were uploaded after a pull request was last reported"
-              onClick={matchAgain}
-            >
-              {matching === null ? "Match these to sessions again" : `Matching… ${count(matching)} done`}
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                className="quiet"
+                disabled={matching !== null}
+                title="Count sessions that were uploaded after a pull request was last reported"
+                onClick={matchAgain}
+              >
+                {matching === null ? "Match these to sessions again" : `Matching… ${count(matching)} done`}
+              </button>
+            )}
           </div>
           <OlderActions repos={older} />
           <div className="scroll">

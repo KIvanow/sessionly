@@ -6,6 +6,7 @@
 //   node src/cli.ts person forget-account --email ann@example.com
 //   node src/cli.ts org restore <id>
 //   node src/cli.ts org purge
+//   node src/cli.ts demo import
 // The last two are for an organisation its owner asked to delete: restore
 // clears that during the seven days before its rows are removed, and purge
 // removes every organisation that has been waiting longer than that. The
@@ -13,13 +14,18 @@
 // the one they have here: for an owner whose account is gone, whom nobody
 // in the organisation can let in. Token and person commands take --org <id>
 // for an organisation other than a self-hosted install's own, "default".
+// demo import copies the sessions of SESSIONLY_DEMO_REPO from SESSIONLY_DEMO_FROM
+// into SESSIONLY_DEMO_ORG, as demo.ts says, in place of the copies made before;
+// run it again (by hand, or from cron) to bring them up to date.
 // With the embedded database, stop the server first (one process at a time),
 // or use the /api/v1/tokens endpoints with an admin token instead.
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createToken, DEFAULT_ORG, listTokens, revokeToken, type Role } from "./auth.ts";
 import { openDb } from "./db.ts";
+import { demoFrom, importDemo } from "./demo.ts";
 import { purgeDeletedOrgs, restoreOrg } from "./orgs.ts";
+import { hashKeyOf } from "./run.ts";
 import { forgetAccount, listUsers, UserProblem } from "./users.ts";
 
 const { positionals, values } = parseArgs({
@@ -38,11 +44,12 @@ function usage(): never {
     "usage: token create --email <email> [--name <name>] [--role admin|member] | token list | token revoke <id>\n" +
       "       person list | person forget-account --email <email>\n" +
       "       (each with [--org <id>])\n" +
-      "       org restore <id> | org purge",
+      "       org restore <id> | org purge\n" +
+      "       demo import",
   );
   process.exit(2);
 }
-if (group !== "token" && group !== "person" && group !== "org") usage();
+if (group !== "token" && group !== "person" && group !== "org" && group !== "demo") usage();
 
 const embedded = fileURLToPath(new URL("../data/pglite", import.meta.url));
 const db = await openDb(process.env.DATABASE_URL ?? `file:${embedded}`);
@@ -60,6 +67,33 @@ try {
       process.exitCode = 1;
     }
   } else if (group === "org") {
+    usage();
+  } else if (group === "demo" && action === "import" && !id) {
+    const demo = demoFrom(process.env);
+    const there = demo && !("problem" in demo)
+      ? await db.query<{ id: string }>(`SELECT id FROM orgs WHERE id IN ($1, $2) AND deleted_at IS NULL`, [demo.from, demo.org])
+      : [];
+    if (!demo) {
+      console.error("SESSIONLY_DEMO_FROM, SESSIONLY_DEMO_REPO and SESSIONLY_DEMO_ORG are not set: there is nothing to import.");
+      process.exitCode = 1;
+    } else if ("problem" in demo) {
+      console.error(demo.problem);
+      process.exitCode = 1;
+    } else if (there.length < 2) {
+      console.error(`There is no organisation "${there.some((o) => o.id === demo.from) ? demo.org : demo.from}".`);
+      process.exitCode = 1;
+    } else {
+      const done = await importDemo((fn) => db.asOrg(demo.from, fn), (fn) => db.asOrg(demo.org, fn), demo, {
+        key: hashKeyOf(process.env),
+        log: (err) => console.error(err),
+      });
+      console.log(
+        `${demo.repo} in ${demo.org}: ${done.copied} sessions copied, ${done.skipped} turned down, ${done.removed} copies removed; ` +
+          `${done.matched} pull requests matched again${done.failed ? `, ${done.failed} failed` : ""}.`,
+      );
+      if (done.failed) process.exitCode = 1;
+    }
+  } else if (group === "demo") {
     usage();
   } else if (!(await db.query(`SELECT id FROM orgs WHERE id = $1 AND deleted_at IS NULL`, [org]))[0]) {
     console.error(`There is no organisation "${org}".`);

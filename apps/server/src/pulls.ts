@@ -61,7 +61,7 @@ export interface Claim {
 type SessionKey = Pick<PullSession, "machine_id" | "source" | "session_id">;
 
 /** A worktree kept in a `worktrees` or `.worktrees` folder, as agents do: what follows is the path in it. */
-const IN_WORKTREE = /^(?:.*\/)?\.?worktrees\/[^/]+\/(.+)$/;
+export const IN_WORKTREE = /^(?:.*\/)?\.?worktrees\/[^/]+\/(.+)$/;
 
 /**
  * Whether a session's file is this file of the repository. A session that
@@ -699,7 +699,7 @@ const HISTORY_KEPT = 50;
  * when there is no row yet to hold. The later one then sees what the earlier
  * left. The same lock a report takes, so a rematch waits for it.
  */
-async function holdPull(db: OrgDb, repo: string, number: number): Promise<void> {
+export async function holdPull(db: OrgDb, repo: string, number: number): Promise<void> {
   await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-pull:${db.orgId}:${repo}#${number}`]);
 }
 
@@ -1237,6 +1237,12 @@ export interface PullFilters {
   state?: string;
   /** Merged, closed or (if still open) created at or after this. */
   since?: string;
+  /**
+   * Exactly a repository whose sessions are matched with the pull request's
+   * lines, in any case: its own, the one its branch is in, or another name it
+   * goes by. Not a substring, as `repo` is: `acme/shown` is not `acme/shown-2`.
+   */
+  sessions_repo?: string;
 }
 
 function where(orgId: string, filters: PullFilters): { sql: string; params: unknown[] } {
@@ -1244,9 +1250,33 @@ function where(orgId: string, filters: PullFilters): { sql: string; params: unkn
   const bind = (value: unknown) => `$${params.push(value)}`;
   const conditions: string[] = [`org_id = ${bind(orgId)}`];
   if (filters.repo) conditions.push(`repo ILIKE ${bind(`%${filters.repo.replace(/[\\%_]/g, "\\$&")}%`)}`);
+  if (filters.sessions_repo) {
+    const name = bind(filters.sessions_repo.toLowerCase());
+    conditions.push(
+      `(lower(repo) = ${name} OR lower(head_repo) = ${name} OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(coalesce(aliases, '[]'::jsonb)) AS a(name) WHERE lower(a.name) = ${name}))`,
+    );
+  }
   if (filters.state) conditions.push(`state = ${bind(filters.state)}`);
   if (filters.since) conditions.push(`coalesce(merged_at, closed_at, created_at) >= ${bind(filters.since)}::timestamptz`);
   return { sql: `WHERE ${conditions.join(" AND ")}`, params };
+}
+
+/**
+ * The paths of the files of a repository's pull requests (`sessions_repo`),
+ * as each was first reported and as it was last: the files known to be in
+ * it. The first report of one is kept for good, so a path known once stays
+ * known.
+ */
+export async function reportedPaths(db: OrgDb, repo: string): Promise<string[]> {
+  const { sql, params } = where(db.orgId, { sessions_repo: repo });
+  const rows = await db.query<{ path: string }>(
+    `SELECT DISTINCT f.file->>'path' AS path
+     FROM (SELECT first_files || last_files AS files FROM pull_requests ${sql}) AS p,
+          jsonb_array_elements(p.files) AS f(file)
+     WHERE f.file->>'path' IS NOT NULL`,
+    params,
+  );
+  return rows.map((row) => String(row.path));
 }
 
 /** To a millionth of a dollar: sums of shares are then the same however they were added up. */

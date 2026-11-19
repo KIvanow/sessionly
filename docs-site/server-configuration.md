@@ -25,6 +25,8 @@ Everything is set through the environment, or through the `.env` file `pnpm serv
 | `SESSIONLY_TRUST_PROXY` | `true` when the server is behind a proxy of yours that sets `X-Forwarded-For`: the caller's address is then taken from it. Used only for the limits on signing in, which are per address. |
 | `SESSIONLY_TELEMETRY`, `DO_NOT_TRACK` | `SESSIONLY_TELEMETRY=off` stops the dashboard counting its pages, and so does `DO_NOT_TRACK=1`. See [Dashboard](dashboard.md#page-counts). |
 | `SESSIONLY_HASH_KEY` | 32 characters or more of random text (`openssl rand -hex 32`). The server keeps a hash of each email address on a pull request's commits, to [match its lines again](pull-requests.md#the-pull-requests-page) later; with this set, the hash is keyed, and the database alone does not confirm a guessed address. Without it the hash is a plain one. Keep it the same: after a change, pull requests have to be reported once more before they can be matched again. |
+| `SESSIONLY_DEMO_FROM`, `SESSIONLY_DEMO_REPO`, `SESSIONLY_DEMO_ORG` | Shows one repository's sessions in a second organisation, for a demo of real work, as `node src/cli.ts demo import` copies them: see [below](#showing-a-repository-in-another-organisation). All three or none. |
+| `SESSIONLY_DEMO_HIDE` | What of that repository not to show, separated by commas: file names, paths, folders and patterns with `*`, as the Action's `ignore` takes them. See [below](#what-is-not-shown). |
 | `SESSIONLY_HOSTED` | `true` for a service many organisations sign up to. It has settings of its own (`SESSIONLY_SIGNUP`, `SESSIONLY_SIGNUP_CODE` and the sign-up limits): see [`infra/`](https://github.com/KIvanow/sessionly/blob/main/infra/README.md). |
 | `SESSIONLY_ORG` | The ee server only: this install's org id. See [Editions and license](editions.md). |
 
@@ -64,3 +66,109 @@ out like any other, and the limit is the default 30 seconds.)
 
 The limits are set for each transaction, not for the connection, so a pooler in transaction
 mode in front of Postgres works.
+
+## Showing a repository in another organisation
+
+With `SESSIONLY_DEMO_FROM` (the id of the organisation sessions are uploaded to),
+`SESSIONLY_DEMO_REPO` (the repository, as sessions are filed under it:
+`github.com/owner/name`) and `SESSIONLY_DEMO_ORG` (the id of another organisation),
+`node src/cli.ts demo import` copies that repository's sessions from the first organisation to
+the second, in place of what it copied before. Run it again to bring the second up to date: by
+hand, or from cron, for example once a day:
+
+```
+0 6 * * * cd /opt/sessionly/infra && docker compose --env-file .env -f docker-compose.hosted.yml run --rm --no-deps -T -w /app/apps/server server node src/cli.ts demo import
+```
+
+Nothing changes on anyone's machine, and no other repository's sessions are read. The repository may also be given as its address
+(`https://github.com/owner/name.git`, `git@github.com:owner/name.git`), and its letters in
+either case. A folder (`~/code/name`) is not a repository's name, and the server says so when
+it starts. When the first organisation has none of the repository's sessions (a name written
+wrong), the import changes nothing and says so.
+
+What is copied is written anew from what is safe to show, and the second organisation holds
+nothing else:
+
+- **Kept:** who ran the session and under whose address it is filed, when, for how long, the
+  agent and its models, token counts and cost, how each prompt and tool call ended and the
+  name of the tool, whether it ran in the cloud and, for one that did, on which branch, the files it read or
+  changed that are known to be in the repository (see below), and the hashes of the lines it
+  added to them.
+- **Left out:** every prompt (its text, its length and its hash), the title, what a tool was
+  given and what it said went wrong, which MCP server a tool is from (any such tool is shown
+  as `mcp`), what a subagent was asked to do and its type, the cloud platform's id of the
+  session, the working directory and where the clone is, the branch of a session on the
+  person's machine, the name of a worktree's folder, and every path that is outside the
+  repository, under `SESSIONLY_DEMO_HIDE` (in a worktree's copy of the repository too), or
+  not known to be in it. How many lines the session added to those is kept, without their
+  hashes, so that it hashed as many lines in both organisations. A worktree outside the clone
+  (`~/worktrees/feat`, or a folder beside the clone) is somewhere else on the person's machine
+  too: the files a session changed there, and its lines, are left out, as there is no telling
+  which of its paths are the repository's. A pull request written in such a worktree shows
+  fewer agent lines in the second organisation than in the first.
+
+A path is known to be in the repository when a pull request reported to the second
+organisation names it among its files, as it was first reported or as it was last (in a
+worktree's copy of the repository too). A file a session wrote that nobody committed
+(`.env.local`, a note of the person's own) is in none of them, and is never shown. Whoever can
+report pull requests to the second organisation (a `ci` or `admin` token there) decides which
+paths are known.
+
+What a session cost a pull request is its cost in the proportion of its lines there to all
+it added. A pull request costs the same in both organisations when none of the lines its
+sessions added elsewhere are left out. Lines added to a file that is hidden, or not known,
+are counted but cannot be matched to any pull request: what they cost is in no pull request
+of the second organisation, though it was in one in the first.
+
+Each import removes every copy it made before and copies the sessions again, so a session
+taken back, or whose repository its person stopped, is gone from the second organisation after
+the next one. The server marks its copies: only those are replaced or removed. A session
+uploaded to the second organisation directly, under any name, is left alone, and one there
+under the same name as one of the repository's is not copied over. One the second organisation
+turns down (its person stopped the repository there, or was removed) is skipped.
+
+Pull requests are not copied: report them to the second organisation with a second step of
+the [Action](pull-requests.md) and a `ci` token of that organisation (`comment: false`, so
+the pull request gets one comment). The server keeps such a report without the files under
+`SESSIONLY_DEMO_HIDE`, and without where a comment on one of them is. When that setting
+changes, what it hides now is taken out of the pull requests already kept there at the next
+import: their files as first and
+as last reported, the files on their page, where their comments are, and which of their lines
+each session wrote. Then they are matched again. Their figures are then those of a pull
+request reported after the change: a hidden file's lines leave both what it was opened with
+and what it has now, so what survived review is of the files shown. A file hidden and then
+shown again comes back with the next report, but only in what the pull request has now: what
+it was opened with is kept for good, so those lines count as added after it was opened. Each
+import ends by matching the repository's pull requests there again, since a report arrives
+before the sessions that wrote its lines are copied.
+
+The second organisation is made like any other, so that it has an owner. Anyone who signs in
+with Google or GitHub is offered it, and can join it as a `viewer`: they see everything an
+admin sees (every session, the pull requests, the costs and the addresses of the people who
+worked on the repository) and change nothing. It is offered only while it holds nothing but
+the server's copies: a session uploaded to it directly closes it, as the settings may then
+name the organisation the work is in.
+
+### What is not shown
+
+`SESSIONLY_DEMO_HIDE` takes entries as the Action's [`ignore`](pull-requests.md) does: a file
+name, a path, or a pattern with `*` (which also matches `/`). One without a `/` matches a file
+of that name in any folder; one with a `/` is a path from the repository's root. An entry also
+hides a folder of that name, with everything in it: `docs`, `docs/` and `/docs` all hide every
+folder called `docs`, wherever it is, and `site/docs` only the one at `site/docs`. A leading `/`
+or `./` is taken off, letters match in either case, and an entry is matched in a worktree's
+copy of the repository too. A blank entry between two commas is none.
+
+```
+SESSIONLY_DEMO_HIDE=docs/, *.env, secrets.md, site/private/*.md
+```
+
+An entry that can hide nothing (`/`, `.`, one that climbs out with `..`, or a place on a
+machine such as `~/repo/notes` or `C:\repo\notes`) is said when the server starts; then
+nothing is imported and pull requests reported to `SESSIONLY_DEMO_ORG` are refused, until it
+is put right. Write a path from the repository's root (`notes`): `/home/ann/repo/notes` is
+taken as a folder `home` of the repository. Whenever `SESSIONLY_DEMO_ORG` is set, its reports
+are kept without what `SESSIONLY_DEMO_HIDE` hides, even when the other settings are wrong. When
+`SESSIONLY_DEMO_FROM` names the same organisation, reports to it are refused instead: check
+that the two are not the wrong way round, as the work's pull requests would then be kept
+without those paths.

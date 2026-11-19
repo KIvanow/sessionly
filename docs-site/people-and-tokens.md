@@ -17,6 +17,7 @@ owner, whatever name the record carries.
 | `admin` | The same for everyone's sessions in the organisation, and also: the Pull requests and Team pages, creating and revoking tokens, adding and removing people. |
 | `ci` | For the [GitHub Action](pull-requests.md): report pull requests, and nothing else. |
 | `env` | For a cloud agent's environment (see [Cloud sessions](cloud-sessions.md)): upload sessions, and nothing else. |
+| `viewer` | Only in the organisation a repository is [shown in](server-configuration.md#showing-a-repository-in-another-organisation), which anyone who signs in may join: see what an admin sees, and change nothing. |
 
 - A cloud session an `env` token uploads is filed under the person the platform says started
   it, since several people start sessions in one environment. It can take back only a session

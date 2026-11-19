@@ -284,6 +284,8 @@ interface Membership {
    * one: that account's provider. Only that account gets in.
    */
   other_account: ProviderName | null;
+  /** The organisation a repository is shown in, which anyone may join as a viewer (`demoDoor`). */
+  demo?: boolean;
 }
 
 const MEMBERSHIP = `SELECT u.id AS user_id, u.org_id, o.name AS org_name, u.email, u.confirmed_at IS NULL AS first_time,
@@ -332,7 +334,7 @@ async function membershipsOf(db: Queryable, who: Arrival, shown = 0): Promise<{ 
 
 /** The token role someone signs in with: an owner can do what an admin can. */
 function tokenRole(userRole: string): Role {
-  return userRole === "member" ? "member" : "admin";
+  return userRole === "member" || userRole === "viewer" ? userRole : "admin";
 }
 
 interface SignedIn {
@@ -399,8 +401,15 @@ class Refused extends Error {
 
 
 
-/** The routes under /api/v1/auth that need no token. */
-export function openRoutes(db: Db, accounts: Accounts): Hono {
+/** What `/check` lists, and `/verify` takes, for joining the organisation a repository is shown in. */
+const DEMO = "demo";
+
+/**
+ * The routes under /api/v1/auth that need no token. `demoOrg` is the
+ * organisation a repository is shown in (demo.ts), which anyone who signs in
+ * may join as a viewer.
+ */
+export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
   const open = new Hono();
   const home = accounts.publicUrl?.replace(/\/+$/, "");
   const secure = home?.startsWith("https://") === true;
@@ -570,6 +579,26 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
       )
     )[0];
 
+  /**
+   * For someone with no place yet in the organisation a repository is shown
+   * in, a way in as a viewer. Not for one who was removed from it, and only
+   * while it holds nothing but the server's copies of sessions: settings
+   * that named the organisation the work is in instead must not open it to
+   * everyone.
+   */
+  const demoDoor = async (q: Queryable, who: Arrival): Promise<Membership | null> => {
+    if (!demoOrg) return null;
+    const [row] = await q.query<{ name: string; there: boolean; own: boolean }>(
+      `SELECT o.name,
+              EXISTS (SELECT 1 FROM users u WHERE u.org_id = o.id AND u.email = ANY($2::text[])) AS there,
+              EXISTS (SELECT 1 FROM sessions s WHERE s.org_id = o.id AND NOT s.copied) AS own
+       FROM orgs o WHERE o.id = $1 AND o.deleted_at IS NULL`,
+      [demoOrg, who.emails],
+    );
+    if (!row || row.there || row.own) return null;
+    return { user_id: DEMO, org_id: demoOrg, org_name: row.name, email: who.emails[0]!, first_time: true, invited_by: null, invited_via: null, other_account: null, demo: true };
+  };
+
   // Who the provider said this is, and where they can sign in, without
   // using the code: the dashboard shows it and asks. Being added to an
   // organisation is someone else's doing, and must not sign anyone in to a
@@ -583,7 +612,9 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
     if (!mine || !found) return invalid(c);
     const shown = Number((await body(c)).shown ?? 0);
     if (!Number.isInteger(shown) || shown < 0 || shown > 100_000) return c.json({ error: "shown must be a whole number" }, 400);
-    return c.json({ provider: found.provider, emails: found.emails, create: mine.create, ...(await membershipsOf(db, found, shown)) });
+    const { orgs, more } = await membershipsOf(db, found, shown);
+    const door = shown ? null : await demoDoor(db, found);
+    return c.json({ provider: found.provider, emails: found.emails, create: mine.create, orgs: door ? [...orgs, door] : orgs, more });
   });
 
   // "Not now": the sign-in is over, here and in this browser.
@@ -623,6 +654,28 @@ export function openRoutes(db: Db, accounts: Accounts): Hono {
       const userId = text(sent.user_id);
       if (!userId) return c.json({ error: "say where: user_id to sign in, or org_name to create an organisation" }, 400);
       if (!code) return invalid(c);
+      if (userId === DEMO) {
+        // Joining the organisation a repository is shown in, as a viewer, under the main address the provider vouched for.
+        try {
+          const signed = await db.transaction(async (tx) => {
+            const found = await used(tx);
+            if (!found) return null;
+            const door = await demoDoor(tx, found);
+            if (!door) throw new Refused("not_open", "that organisation cannot be joined; sign in again");
+            const user = { id: newUserId(), org_id: door.org_id, org_name: door.org_name, email: door.email, role: "viewer" };
+            const added = await tx.query(
+              `INSERT INTO users (id, org_id, email, role, confirmed_at, sign_in_provider, sign_in_account)
+               VALUES ($1, $2, $3, 'viewer', now(), $4, $5) ON CONFLICT (org_id, email) DO NOTHING RETURNING 1`,
+              [user.id, user.org_id, user.email, found.provider, found.account],
+            );
+            if (added.length === 0) return null;
+            return signIn(tx, user, found.provider, false);
+          });
+          return signed ? done(signed) : invalid(c);
+        } catch (err) {
+          return refusal(err, 403);
+        }
+      }
       try {
         const signed = await db.transaction(async (tx) => {
           const found = await used(tx);

@@ -176,6 +176,25 @@ export function Arrived({
 /** One organisation to sign in to, with what tells it from another of the same name. */
 function Place({ org, busy, onChoose }: { org: Membership; busy: boolean; onChoose: () => void }) {
   const twin = sameNameElsewhere(org.org_name, org.org_id);
+  if (org.demo) {
+    return (
+      <section className="place">
+        <dl className="facts">
+          <dt>Demo</dt>
+          <dd>{org.org_name}</dd>
+          <dt>As</dt>
+          <dd>{org.email}, a viewer</dd>
+        </dl>
+        <p className="muted">
+          Real work, shown to anyone who signs in: its sessions, pull requests and what they cost. You can look around
+          and change nothing.
+        </p>
+        <button type="button" className="primary" disabled={busy} onClick={onChoose}>
+          View the demo
+        </button>
+      </section>
+    );
+  }
   return (
     <section className="place">
       <dl className="facts">

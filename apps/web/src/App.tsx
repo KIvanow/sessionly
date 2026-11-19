@@ -346,6 +346,9 @@ function Shell({
   const [revision, setRevision] = useState(0);
   const [page, ...rest] = route.split("/");
   const isAdmin = me.role === "admin";
+  // A viewer, of the organisation a repository is shown in, sees what an admin sees and changes nothing.
+  const viewer = me.role === "viewer";
+  const seesAll = isAdmin || viewer;
   const refresh = () => {
     options.reload();
     setRevision((n) => n + 1);
@@ -370,8 +373,8 @@ function Shell({
         />
       );
     }
-    if (page === "connect") return <Connect token={token} me={me} onSignOut={onSignOut} />;
-    if (page === "pull" && isAdmin && rest.length === 2 && /^[1-9]\d*$/.test(rest[1]!)) {
+    if (page === "connect" && !viewer) return <Connect token={token} me={me} onSignOut={onSignOut} />;
+    if (page === "pull" && seesAll && rest.length === 2 && /^[1-9]\d*$/.test(rest[1]!)) {
       let repo: string | null = null;
       try {
         repo = decodeURIComponent(rest[0]!);
@@ -379,11 +382,11 @@ function Shell({
         // not an address this dashboard made: the overview, below
       }
       // A page of its own for each: none of one pull request shows under another's address.
-      if (repo) return <PullView key={`${repo}#${rest[1]}`} token={token} repo={repo} number={Number(rest[1])} onSignOut={onSignOut} />;
+      if (repo) return <PullView key={`${repo}#${rest[1]}`} token={token} repo={repo} number={Number(rest[1])} readOnly={viewer} onSignOut={onSignOut} />;
     }
-    if (page === "pulls" && isAdmin) {
+    if (page === "pulls" && seesAll) {
       return (
-        <Pulls token={token} scope={scope} setScope={setScope} repos={options.data?.repos ?? []} onSignOut={onSignOut} />
+        <Pulls token={token} scope={scope} setScope={setScope} repos={options.data?.repos ?? []} readOnly={viewer} onSignOut={onSignOut} />
       );
     }
     return (
@@ -391,12 +394,12 @@ function Shell({
         key={revision}
         token={token}
         scope={scope}
-        showUsers={isAdmin}
+        showUsers={seesAll}
         onPick={(pick) => setScope((current) => ({ ...current, pick }))}
         onSignOut={onSignOut}
       />
     );
-  }, [page, rest.join("/"), token, scope, isAdmin, options.data, people, address, hosted, me, revision]);
+  }, [page, rest.join("/"), token, scope, isAdmin, viewer, seesAll, options.data, people, address, hosted, me, revision]);
 
   const scoped = page === "" || page === "sessions";
   const repos = options.data?.repos ?? [];
@@ -404,7 +407,7 @@ function Shell({
   // while it is selected, so the control under the filters still names it.
   const repoChoices = scope.repo && !repos.includes(scope.repo) ? [scope.repo, ...repos] : repos;
   const orgName = me.org !== "default" && me.org_name ? me.org_name : null;
-  const heading = HEADINGS[page === "team" || page === "pulls" ? (isAdmin ? page : "") : (page ?? "")];
+  const heading = HEADINGS[page === "team" ? (isAdmin ? page : "") : page === "pulls" ? (seesAll ? page : "") : page === "connect" && viewer ? "" : (page ?? "")];
   const link = (target: string, label: string) => (
     <a href={`#/${target}`} aria-current={page === target || (target === "pulls" && page === "pull") ? "page" : undefined}>
       {label}
@@ -419,9 +422,9 @@ function Shell({
           <nav aria-label="Main">
             {link("", "Overview")}
             {link("sessions", "Sessions")}
-            {isAdmin && link("pulls", "Pull requests")}
+            {seesAll && link("pulls", "Pull requests")}
             {isAdmin && link("team", "Team")}
-            {link("connect", "Connect")}
+            {!viewer && link("connect", "Connect")}
           </nav>
           <span className="who">
             {sessions.length > 1 ? (
@@ -461,7 +464,7 @@ function Shell({
                 <option value="all">All time</option>
               </select>
             </label>
-            {isAdmin && (
+            {seesAll && (
               <label>
                 Person
                 <select value={scope.user} onChange={(e) => setScope({ ...scope, user: e.target.value })}>
@@ -528,7 +531,7 @@ function Shell({
             )}
           </form>
         )}
-        {scoped && <Excluded token={token} repo={scope.repo} onChange={refresh} onSignOut={onSignOut} />}
+        {scoped && !viewer && <Excluded token={token} repo={scope.repo} onChange={refresh} onSignOut={onSignOut} />}
         {view}
       </main>
     </>

@@ -25,11 +25,26 @@ jobs:
       pull-requests: write
       # Only the report of an earlier pull request compares commits.
       contents: read
+    env:
+      # A step cannot ask whether a secret is set; it can ask this.
+      DEMO_TOKEN: ${{ secrets.SESSIONLY_DEMO_TOKEN }}
     steps:
-      - uses: KIvanow/sessionly/action@e56f9a3325ac1233ac35785da72a69c803d45200 # who reviewed and commented, and where, 17 November 2026
+      - uses: KIvanow/sessionly/action@c0b1e569d8686e3b244daa68fa73ea19c16748f9 # several pull requests in one run ("all", 20-60), 18 November 2026
         with:
           url: https://app.sessionly.dev
           # A token with the ci role, which can report pull requests and nothing else.
           token: ${{ secrets.SESSIONLY_TOKEN }}
           pr-number: ${{ inputs.number }}
           backfill: ${{ github.event_name == 'workflow_dispatch' }}
+      # The same report to the organisation this repository is shown in to
+      # anyone (see "Showing a repository in another organisation" in the docs),
+      # where there is a token for it. The comment above is the only one.
+      - if: env.DEMO_TOKEN != ''
+        uses: KIvanow/sessionly/action@c0b1e569d8686e3b244daa68fa73ea19c16748f9
+        with:
+          url: https://app.sessionly.dev
+          token: ${{ secrets.SESSIONLY_DEMO_TOKEN }}
+          pr-number: ${{ inputs.number }}
+          backfill: ${{ github.event_name == 'workflow_dispatch' }}
+          comment: false
+          summary: false

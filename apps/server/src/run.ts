@@ -24,6 +24,11 @@
 //   SESSIONLY_SIGNUPS_PER_NETWORK  organisations created an hour from one network (default 10)
 //   SESSIONLY_HASH_KEY     32 characters or more, kept secret and kept the same: what is stored of the
 //                          addresses on a pull request's commits is hashed with it (hosted: required)
+//   SESSIONLY_DEMO_FROM, SESSIONLY_DEMO_REPO, SESSIONLY_DEMO_ORG
+//                          one repository's sessions, uploaded to the first organisation, are shown
+//                          in the second without anything that was typed or run, as
+//                          `node src/cli.ts demo import` copies them (see demo.ts); reports to the
+//                          second are kept without SESSIONLY_DEMO_HIDE: what of it not to show
 //   SESSIONLY_TELEMETRY    "off" for the dashboard not to count which of its pages are opened
 //                          (also off when DO_NOT_TRACK is set)
 import { existsSync } from "node:fs";
@@ -31,6 +36,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp, type Extension } from "./app.ts";
 import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Migrations } from "./db.ts";
+import { demoFrom, reportsShownIn } from "./demo.ts";
 import { tidy } from "./limits.ts";
 import { purgeDeletedOrgs } from "./orgs.ts";
 import {
@@ -189,6 +195,11 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
   if (env.SESSIONLY_HASH_KEY?.trim() && !hashKeyOf(env)) {
     notes.push(`SESSIONLY_HASH_KEY is shorter than ${HASH_KEY_LENGTH} characters, and is not used.`);
   }
+  const demo = demoFrom(env);
+  if (demo && "problem" in demo) notes.push(demo.problem);
+  // What is wrong with the paths not to show is said even when something else is: reports are refused for it.
+  const reports = reportsShownIn(env);
+  if (reports && "problem" in reports && !notes.includes(reports.problem)) notes.push(reports.problem);
   const mail = ["RESEND_API_KEY", "SESSIONLY_EMAIL_FROM", "SMTP_URL"].filter((name) => env[name]);
   if (mail.length) {
     notes.push(
@@ -242,6 +253,8 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   purging.unref();
   const app = createApp(db, {
     hashKey: hashKeyOf(process.env),
+    // Whatever else is wrong with the settings of a demo: reports there are never kept whole.
+    demo: reportsShownIn(process.env),
     webRoot,
     accounts,
     telemetry,

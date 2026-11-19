@@ -68,7 +68,7 @@ export type StoreResult = { stored: boolean; excluded?: true };
  * person has stopped the repository (then a copy of theirs is removed).
  * Someone who was removed refuses the upload.
  */
-export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal): Promise<StoreResult> {
+export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal, { copy = false }: { copy?: boolean } = {}): Promise<StoreResult> {
   const s: Session = upload.session ?? {};
   const owner = { email: ownerOf(upload, uploader) };
   const cloud = s.runtime?.kind === "cloud";
@@ -86,7 +86,7 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   // and will delete what this stores.
   if (await personRemoved(db, owner.email)) throw new RemovedPerson({ stored: false });
   if (await submissionStopped(db, owner.email, place)) {
-    await dropOwn(db, key, owner.email, mayRefile);
+    await dropOwn(db, key, owner.email, mayRefile, copy);
     return { stored: false, excluded: true };
   }
   const [existing] = await db.query<{ owner_email: string; runtime: string | null; prompts: number }>(
@@ -151,6 +151,8 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     rw_lines_surviving: rewrite?.lines_surviving ?? null,
     rw_measured_at: rewrite?.measured_at ?? null,
     payload: JSON.stringify(upload),
+    // A copy made by `importDemo` (demo.ts). Any other upload of the session makes it its uploader's.
+    copied: copy,
   };
   const names = Object.keys(columns);
   const casts: Record<string, string> = { models: "::jsonb", payload: "::jsonb" };
@@ -160,12 +162,13 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     .map((name) => `${name} = EXCLUDED.${name}`);
   // The check above read the row a moment ago. If someone else stored this
   // very session in between, it is theirs: the update is skipped, not won by
-  // whoever came last.
+  // whoever came last. A copy replaces only a copy.
   const stored = await db.query(
     `INSERT INTO sessions (${names.join(", ")}) VALUES (${placeholders.join(", ")})
      ON CONFLICT (org_id, machine_id, source, session_id)
      DO UPDATE SET ${updates.join(", ")}, updated_at = now()
-     WHERE sessions.owner_email = EXCLUDED.owner_email OR sessions.owner_email = $${names.length + 1}
+     WHERE (sessions.owner_email = EXCLUDED.owner_email OR sessions.owner_email = $${names.length + 1})
+       ${copy ? "AND sessions.copied" : ""}
      RETURNING 1`,
     [...Object.values(columns), mayRefile],
   );
@@ -206,11 +209,12 @@ async function personRemoved(db: OrgDb, email: string): Promise<boolean> {
  * Delete this person's copy of one session, if it is theirs. `refiled` is the
  * address of the environment uploading it, whose copy is this person's too.
  */
-async function dropOwn(db: OrgDb, key: unknown[], email: string, refiled: string | null): Promise<void> {
+async function dropOwn(db: OrgDb, key: unknown[], email: string, refiled: string | null, copy = false): Promise<void> {
+  // A copy drops only a copy: one uploaded by this name is not what stopping the repository was about.
   const removed = await db.query(
     `DELETE FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4
-       AND (owner_email = $5 OR owner_email = $6)
+       AND (owner_email = $5 OR owner_email = $6) ${copy ? "AND copied" : ""}
      RETURNING machine_id, source, session_id`,
     [...key, email, refiled],
   );
@@ -395,12 +399,15 @@ export interface Filters {
  * starts with the viewer's organisation: an admin sees all of it, anyone
  * else their own sessions in it.
  */
+/** An admin sees everyone's sessions, and so does a viewer of the organisation a repository is shown in. */
+const seesAll = (p: Principal): boolean => p.role === "admin" || p.role === "viewer";
+
 function where(viewer: Principal, filters: Filters): { sql: string; params: unknown[] } {
   const params: unknown[] = [];
   const bind = (value: unknown) => `$${params.push(value)}`;
   const like = (text: string) => bind(`%${text.replace(/[\\%_]/g, "\\$&")}%`);
   const conditions: string[] = [`org_id = ${bind(viewer.orgId)}`];
-  if (viewer.role !== "admin") conditions.push(`owner_email = ${bind(viewer.email)}`);
+  if (!seesAll(viewer)) conditions.push(`owner_email = ${bind(viewer.email)}`);
   if (filters.user) conditions.push(`owner_email ILIKE ${like(filters.user)}`);
   if (filters.user_is) conditions.push(`owner_email = ${bind(filters.user_is)}`);
   if (filters.repo) conditions.push(`repo ILIKE ${like(filters.repo)}`);
@@ -571,7 +578,7 @@ export async function getSession(
     [db.orgId, key.machine_id, key.source, key.session_id],
   );
   const row = rows[0];
-  if (!row || (viewer.role !== "admin" && row.owner_email !== viewer.email)) return null;
+  if (!row || (!seesAll(viewer) && row.owner_email !== viewer.email)) return null;
   const payload = typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
   return { owner_email: row.owner_email, updated_at: iso(row.updated_at) ?? "", upload: payload as Upload };
 }

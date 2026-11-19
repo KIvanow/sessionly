@@ -12,7 +12,8 @@ import { challengeOf, ProviderProblem, type Provider, type ProviderName } from "
 import { accountsFrom, hostedProblems, unheeded } from "../src/run.ts";
 import { emailFrom, INVITATIONS_SHOWN, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
 import { forgetAccount } from "../src/users.ts";
-import { testDb, testDbUrl, tokenFor } from "./helpers.ts";
+import { storeUpload } from "../src/sessions.ts";
+import { newOrg, testDb, testDbUrl, tokenFor } from "./helpers.ts";
 
 let db: Db;
 let app: Hono<Env>;
@@ -1567,4 +1568,64 @@ test("an organisation's id is readable and its own", () => {
   assert.match(orgIdFor("!!!"), /^org-[a-z0-9]{6}$/);
   assert.match(orgIdFor("x".repeat(200)), /^x{40}-[a-z0-9]{6}$/);
   assert.notEqual(orgIdFor("Same"), orgIdFor("Same"));
+});
+
+test("anyone who signs in may join the organisation a repository is shown in, as a viewer who can only look", async () => {
+  await newOrg(db, "showcase", "Showcase");
+  const demoApp = createApp(db, { accounts: hosted, demo: { org: "showcase", hide: [] } });
+  const on = (method: string, path: string, token: string, body?: unknown) => call(demoApp, method, path, { token, body });
+  // one of the server's copies there, as `demo import` stores it
+  const upload = (id: string) => ({
+    schema_version: 1,
+    session: { schema_version: 1, source: "claude-code", machine_id: "m1", session_id: id, started_at: "2026-11-10T09:00:00Z", repo: { remote: "github.com/acme/shown" } },
+  });
+  const ann = { orgId: "showcase", email: "ann@example.com", name: null, role: "member" as const, tokenId: null, userId: null, signedIn: false, owner: false };
+  await db.asOrg("showcase", (tx) => storeUpload(tx, upload("copy1") as never, ann, { copy: true }));
+
+  // offered to someone nobody added, and joined as a viewer
+  const code = await arrive(["visitor@example.com"], { server: demoApp });
+  const offered = (await call(demoApp, "POST", "/auth/check", { body: { code } })).body.orgs as { user_id: string; org_id: string; demo?: boolean }[];
+  assert.deepEqual(offered.map((o) => [o.org_id, o.user_id, o.demo]), [["showcase", "demo", true]]);
+  const joined = await call(demoApp, "POST", "/auth/verify", { body: { code, user_id: "demo" } });
+  assert.equal(joined.status, 200, JSON.stringify(joined.body));
+  assert.deepEqual([joined.body.org.id, joined.body.role], ["showcase", "viewer"]);
+  const token = joined.body.token as string;
+
+  // they see everyone's sessions, and the pull requests
+  const seen = await on("GET", "/sessions", token);
+  assert.deepEqual([seen.status, seen.body.sessions.map((s: { session_id: string }) => s.session_id)], [200, ["copy1"]]);
+  assert.equal((await on("GET", "/sessions/m1/claude-code/copy1", token)).status, 200);
+  assert.equal((await on("GET", "/prs", token)).status, 200);
+  assert.equal((await on("GET", "/prs/summary", token)).status, 200);
+  // and change nothing: no upload, no taking back, no tokens, no people, no stopping a repository, no matching
+  for (const [method, path, body] of [
+    ["PUT", "/sessions/m1/claude-code/mine", upload("mine")],
+    ["DELETE", "/sessions/m1/claude-code/copy1", undefined],
+    ["POST", "/me/tokens", { name: "laptop" }],
+    ["POST", "/tokens", { email: "x@example.com", role: "admin" }],
+    ["POST", "/users", { email: "x@example.com", role: "admin" }],
+    ["PUT", "/repos/excluded", { repo: "github.com/acme/shown" }],
+    ["POST", "/prs/match", {}],
+    ["PUT", "/prs", { repo: "github.com/acme/shown", number: 1 }],
+    ["DELETE", "/org", undefined],
+  ] as const) {
+    const answer = await on(method, path, token, body);
+    assert.equal(answer.status, 403, `${method} ${path}`);
+  }
+  for (const path of ["/users", "/tokens", "/me/tokens", "/export"]) assert.equal((await on("GET", path, token)).status, 403, path);
+  assert.equal((await db.query(`SELECT 1 FROM sessions WHERE org_id = 'showcase'`)).length, 1);
+
+  // the next time, it is a place of theirs like any other; and they can sign out
+  const again = await arrive(["visitor@example.com"], { server: demoApp });
+  const theirs = (await call(demoApp, "POST", "/auth/check", { body: { code: again } })).body.orgs as { user_id: string; demo?: boolean }[];
+  assert.deepEqual([theirs.length, theirs[0]!.user_id.startsWith("usr_"), theirs[0]!.demo], [1, true, undefined]);
+  assert.equal((await on("DELETE", "/auth/session", token)).status, 200);
+
+  // an organisation holding a session that is not one of the server's copies is not opened to anyone:
+  // the settings may name the one the work is in
+  await db.asOrg("showcase", (tx) => storeUpload(tx, upload("own") as never, ann));
+  const later = await arrive(["someone@example.com"], { server: demoApp });
+  assert.deepEqual((await call(demoApp, "POST", "/auth/check", { body: { code: later } })).body.orgs, []);
+  const forced = await call(demoApp, "POST", "/auth/verify", { body: { code: later, user_id: "demo" } });
+  assert.deepEqual([forced.status, forced.body.code], [403, "not_open"]);
 });
