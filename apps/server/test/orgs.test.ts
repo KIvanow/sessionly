@@ -1323,10 +1323,31 @@ test("removing a person can delete their sessions and nobody else's", async () =
   assert.equal(await count("repos_allowed_again", "ann@people.example"), 0);
   assert.equal(await count("repo_exclusions", "bob@people.example"), 1);
   assert.equal((await call(admin, "GET", "/prs")).body.pulls[0].title, "stays on the pull request");
-  // Without the flag, the person goes and the sessions stay.
+  // A cloud session filed under the removed address is not stored. One filed
+  // under someone who is still here is. A CI token still reports a pull request.
+  const env = await tokenFor(db, { email: "env@people.example", role: "env" }, "org-people");
+  const cloud = (id: string, email: string) =>
+    session(id, {
+      machine_id: "cloud",
+      runtime: { kind: "cloud", id: `cse_${id}` },
+      user: { name: null, email },
+    });
+  const refused = await put(env, cloud("ann-cloud", "ann@people.example"));
+  assert.equal(refused.status, 403);
+  assert.equal(refused.body.stored, false);
+  assert.match(refused.body.error, /removed/);
+  assert.equal(await count("sessions", "ann@people.example"), 0);
+  assert.equal((await put(env, cloud("bob-cloud", "bob@people.example"))).status, 200);
+  assert.equal(await count("sessions", "bob@people.example"), 2);
+  assert.equal((await call(ci, "PUT", "/prs", pull(5, { title: "a later report" }))).status, 200);
+  // Without the flag, the person goes and the sessions stay. A session filed
+  // under them after that is still not stored.
   assert.equal((await call(admin, "DELETE", "/users/usr_bob")).status, 200);
-  assert.equal(await count("sessions", "bob@people.example"), 1);
+  assert.equal(await count("sessions", "bob@people.example"), 2);
   assert.equal(await count("repo_exclusions", "bob@people.example"), 1);
+  const later = await put(env, cloud("bob-later", "bob@people.example"));
+  assert.equal(later.status, 403);
+  assert.equal(await count("sessions", "bob@people.example"), 2);
 });
 
 test("a purge removes an organisation deleted 8 days ago, and leaves one deleted 6 days ago", async () => {

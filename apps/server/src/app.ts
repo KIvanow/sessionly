@@ -552,13 +552,15 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   api.put("/sessions/:machine/:source/:session", async (c) => {
     const upload = c.get("upload");
     if (!upload) throw new Error("the upload was not checked");
-    let result: { stored: boolean; excluded?: true };
+    let result: { stored: boolean; excluded?: true; removed?: true };
     try {
       result = await storeUpload(c.get("db"), upload, c.get("principal"));
     } catch (err) {
       if (err instanceof Conflict) return c.json({ error: err.message }, 409);
       throw err;
     }
+    // Removed: the address this session is filed under belongs to someone who was removed.
+    if (result.removed) return c.json({ error: "this person has been removed", stored: false }, 403);
     // Not stored, and not excluded: the server already has more of this cloud session.
     // Excluded: the person stopped the repository, so the session was not kept.
     return c.json(result);

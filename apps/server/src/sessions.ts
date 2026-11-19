@@ -43,13 +43,18 @@ export function ownerOf(upload: Upload, uploader: Principal): string {
   return uploader.role === "env" && cloud && /^\S+@\S+$/.test(named) ? named : uploader.email;
 }
 
-/** What storing an upload did. `excluded` means the repository is stopped, so nothing was stored. */
-export type StoreResult = { stored: boolean; excluded?: true };
+/**
+ * What storing an upload did. `excluded` means the repository is stopped, so
+ * nothing was stored. `removed` means the address it is filed under belongs
+ * to someone who was removed, so nothing was stored.
+ */
+export type StoreResult = { stored: boolean; excluded?: true; removed?: true };
 
 /**
  * Store one session, replacing an earlier upload of the same session.
- * `stored` is false when what the server has was kept instead, or when the
- * person has stopped the repository: then a copy of theirs is removed.
+ * `stored` is false when what the server has was kept instead, when the
+ * person has stopped the repository (then a copy of theirs is removed), or
+ * when the address it is filed under belongs to someone who was removed.
  */
 export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal): Promise<StoreResult> {
   const s: Session = upload.session ?? {};
@@ -64,6 +69,10 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   const mayRefile = uploader.role === "env" ? uploader.email : null;
   // Before the row is read: stopping the repository removes what is there.
   await oneAtATime(db, owner.email, "storing");
+  // After the lock. A removal that is deleting their sessions has either
+  // finished, and this sees it, or it is waiting for this upload to commit
+  // and will delete what this stores.
+  if (await personRemoved(db, owner.email)) return { stored: false, removed: true };
   if (await submissionStopped(db, owner.email, place)) {
     await dropOwn(db, key, owner.email, mayRefile);
     return { stored: false, excluded: true };
@@ -161,6 +170,24 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
 async function oneAtATime(db: OrgDb, email: string, doing: "storing" | "stopping"): Promise<void> {
   const lock = doing === "stopping" ? "pg_advisory_xact_lock" : "pg_advisory_xact_lock_shared";
   await db.query(`SELECT ${lock}(hashtext($1))`, [`sessionly-stop:${db.orgId}:${email}`]);
+}
+
+/**
+ * Hold uploads of this address until the transaction ends. Deleting their
+ * sessions takes the same turn as stopping a repository: an upload that is
+ * already storing finishes first, and one that waits finds them removed.
+ */
+export async function holdUploads(db: OrgDb, email: string): Promise<void> {
+  await oneAtATime(db, email, "stopping");
+}
+
+/** True when this address belongs to someone who was removed. */
+async function personRemoved(db: OrgDb, email: string): Promise<boolean> {
+  const [row] = await db.query(`SELECT 1 AS gone FROM users WHERE org_id = $1 AND email = $2 AND removed_at IS NOT NULL`, [
+    db.orgId,
+    email,
+  ]);
+  return row != null;
 }
 
 /**

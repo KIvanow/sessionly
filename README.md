@@ -90,7 +90,8 @@ The owner of an organisation can download everything it has:
   `pnpm org restore <id>` undoes that within the 7 days;
   `pnpm org purge` removes what is due.
 - `DELETE /api/v1/users/{id}?data=true` — an admin removes a person and deletes their sessions.
-  Without `data=true`, the sessions stay. Pull requests stay either way.
+  Without `data=true`, the sessions stay. Pull requests stay either way. A session filed under
+  their address is not stored while they stay removed.
 
 The full list is the [API reference](docs-site/api.md).
 

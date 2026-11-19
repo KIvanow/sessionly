@@ -274,8 +274,9 @@ function People({
       {removing && (
         <Confirm title={`Remove ${removing.user.email}?`} onClose={() => setRemoving(null)}>
           <p>
-            They can no longer sign in, and uploads from their machines stop. Tokens made under their address for CI
-            or a cloud environment keep working: revoke those below if they should stop too.
+            They can no longer sign in, and uploads from their machines stop. A CI token made under their address keeps
+            reporting pull requests. A session a cloud token files under this address is not stored. Revoke either token
+            below if it should stop too.
           </p>
           <label className="check">
             <input type="checkbox" checked={also} onChange={(e) => setAlso(e.target.checked)} />
@@ -286,8 +287,9 @@ function People({
             </span>
           </label>
           <p className="muted">
-            Pull requests stay. A session that was removed is shown as “(deleted since)” on a pull request. If you
-            delete them, a CI or cloud token that keeps working can submit those repositories again.
+            Pull requests stay. A session that was removed is shown as “(deleted since)” on a pull request. While they
+            stay removed, a session filed under this address is not stored. Adding them again lets a session in, and a
+            repository they had stopped is no longer stopped.
           </p>
           <div className="ask-actions">
             <button type="button" onClick={confirmRemove}>
