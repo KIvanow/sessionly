@@ -37,6 +37,8 @@ export function Arrived({
 }) {
   const create = arrival.create;
   const maySignUp = options?.signup === true;
+  // The demo, which anyone may join: making an organisation of their own is offered beside it, as plainly.
+  const offersDemo = arrival.orgs.some((org) => org.demo === true);
   // What they came for, until they choose otherwise; and never the form
   // for creating one where that is not open, whenever that becomes known.
   const [chosen, setChosen] = useState<boolean | null>(null);
@@ -157,9 +159,18 @@ export function Arrived({
             </button>
           </p>
         )}
+        {/* Beside the demo, making one's own organisation is offered as plainly. */}
+        {offersDemo && maySignUp && (
+          <>
+            <p className="or">or</p>
+            <button type="button" className="primary" disabled={busy} onClick={() => (setFailed(null), setCreating(true))}>
+              Create an organisation
+            </button>
+          </>
+        )}
         {failed && <p role="alert">{failed}</p>}
         <p className="ways">
-          {maySignUp && (
+          {maySignUp && !offersDemo && (
             <button type="button" className="quiet" onClick={() => (setFailed(null), setCreating(true))}>
               Create an organisation
             </button>
