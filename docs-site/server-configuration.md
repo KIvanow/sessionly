@@ -74,7 +74,7 @@ With `SESSIONLY_DEMO_FROM` (the id of the organisation sessions are uploaded to)
 `SESSIONLY_DEMO_REPO` (the repository, as sessions are filed under it:
 `github.com/owner/name`) and `SESSIONLY_DEMO_ORG` (the id of another organisation), the server
 copies that repository's sessions from the first organisation to the second: when it starts,
-and every 30 minutes after. Nothing changes on anyone's machine, and no other repository's
+and every `SESSIONLY_DEMO_MINUTES` after (30 by default). Nothing changes on anyone's machine, and no other repository's
 sessions are read. The repository may also be given as its address
 (`https://github.com/owner/name.git`, `git@github.com:owner/name.git`), and its letters in
 either case. A folder (`~/code/name`) is not a repository's name, and the server says so when
@@ -84,42 +84,65 @@ What is copied is written anew from what is safe to show, and the second organis
 nothing else:
 
 - **Kept:** who ran the session and under whose address it is filed, when, for how long, the
-  agent and its models, token counts and cost, how each prompt and tool call ended, the files
-  of the repository it read or changed, and the hashes of the lines it added.
+  agent and its models, token counts and cost, how each prompt and tool call ended and the
+  name of the tool, whether it ran in the cloud and on which branch, the files it read or
+  changed that are known to be in the repository (see below), and the hashes of the lines it
+  added to them.
 - **Left out:** every prompt (its text, its length and its hash), the title, what a tool was
-  given and what it said went wrong, what a subagent was asked to do, the working directory
-  and where the clone is, and every path outside the repository or under
-  `SESSIONLY_DEMO_HIDE` (in a worktree's copy of the repository too). How many lines the
-  session added to those is kept, without their hashes: what it cost a pull request is its
-  cost in the proportion of its lines there to all it added, and is then the same in both
-  organisations. A worktree outside the clone (`~/worktrees/feat`, or a folder beside the
-  clone) is somewhere else on the person's machine too: the files a session changed there,
-  and its lines, are left out, as there is no telling which of its paths are the
-  repository's. A pull request written in such a worktree shows fewer agent lines in the
-  second organisation than in the first.
+  given and what it said went wrong, which MCP server a tool is from (any such tool is shown
+  as `mcp`), what a subagent was asked to do and its type, the cloud platform's id of the
+  session, the working directory and where the clone is, and every path that is outside the
+  repository, under `SESSIONLY_DEMO_HIDE` (in a worktree's copy of the repository too), or
+  not known to be in it. How many lines the session added to those is kept, without their
+  hashes, so that it hashed as many lines in both organisations. A worktree outside the clone
+  (`~/worktrees/feat`, or a folder beside the clone) is somewhere else on the person's machine
+  too: the files a session changed there, and its lines, are left out, as there is no telling
+  which of its paths are the repository's. A pull request written in such a worktree shows
+  fewer agent lines in the second organisation than in the first.
+
+A path is known to be in the repository when a pull request reported to the second
+organisation names it among its files, as it was first reported or as it was last (in a
+worktree's copy of the repository too). A file a session wrote that nobody committed
+(`.env.local`, a note of the person's own) is in none of them, and is never shown. A session
+copied before a pull request named one of its files is copied again at the next copy after
+that report.
+
+What a session cost a pull request is its cost in the proportion of its lines there to all
+it added. A pull request costs the same in both organisations when none of the lines its
+sessions added elsewhere are left out. Lines added to a file that is hidden, or not known,
+are counted but cannot be matched to any pull request: what they cost is in no pull request
+of the second organisation, though it was in one in the first.
 
 A session taken back, or whose repository its person stopped, is removed from the second
 organisation at the next copy, and so is everything that was copied when another repository
 is named. A copy deleted in the second organisation is copied again. One it turns down (its
 person stopped the repository there, or was removed, or a session of the same name there is
-someone else's) is not offered again until it changes. A change to `SESSIONLY_DEMO_HIDE`
-copies every session again at the next start. Only sessions the server copied are ever
-removed there: ones uploaded to the second organisation directly are left alone.
+someone else's) is offered again when it changes, when its person has allowed a repository
+again in the second organisation since, and otherwise a day later. A change to
+`SESSIONLY_DEMO_HIDE` copies every session again at the next start; one the second
+organisation turns down then is removed from it, as the copy it has shows what may now be
+hidden. Only sessions the server copied are ever removed there: ones uploaded to the second
+organisation directly are left alone.
 
 When the first organisation has none of the repository's sessions, what was copied is kept
 until it has had none on three copies in a row (an hour and a half, at the default 30
-minutes; the count starts again when the server does). So a repository named wrong does not
-empty the demo at once, and the server says it each time. When the first organisation is
-gone, or deleted, everything copied from it is removed at the next copy. When the second
-one is gone, nothing is copied, and the server says so.
+minutes; the count is kept in the database, and goes on when the server is started again).
+So a repository named wrong does not empty the demo at once, and the server says it each
+time. When the first organisation is gone, or deleted, everything copied from it is removed
+at the next copy. When the second one is gone, nothing is copied, and the server says so.
+
+When `SESSIONLY_DEMO_ORG` names another organisation, or is unset, the server removes what
+it copied from the one it copied to before, when it starts, and says so. While the settings
+are set but wrong, the organisation `SESSIONLY_DEMO_ORG` names is left as it is.
 
 Pull requests are not copied: report them to the second organisation with a second step of
 the [Action](pull-requests.md) and a `ci` token of that organisation (`comment: false`, so
 the pull request gets one comment). The server keeps such a report without the files under
 `SESSIONLY_DEMO_HIDE`; after a change to that setting, report the pull requests once more
-(the workflow, run by hand). After each copy that changed something, the server matches the
-repository's pull requests there again, since a report arrives before the sessions that wrote
-its lines.
+(the workflow, run by hand). After each copy, the server matches again the pull requests
+there that a session it copied or removed may change (those whose look-back of 90 days
+takes it in, and for a cloud session those on its branch), since a report arrives before
+the sessions that wrote its lines.
 
 The second organisation is made like any other, so that it has an owner. Whoever can open it
 sees the costs and the addresses of the people who worked on the repository.

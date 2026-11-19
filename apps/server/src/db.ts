@@ -807,20 +807,45 @@ const MIGRATIONS: string[] = [
   // sent again. Whose a session is, is read from the session, so no address
   // is kept here. One that was removed stays a while with when, which is
   // what says the pull requests there are due to be matched again.
+  // `known` is which paths of the repository were known to be committed
+  // when it was made (a hash of them), and `withheld` whether it left out a
+  // path of it for not being one of them: such a copy is made again once
+  // more are known. `started_at`, and the branch of a cloud session, say
+  // which pull requests a copy or a removal may change. `copied_at` is when
+  // what is there last changed. `declined_at` is when it was last turned
+  // down, and `allowed_again` how often its person had allowed a repository
+  // again there by then: one turned down is offered again a day later, or
+  // when that number has changed.
   `CREATE TABLE shown_sessions (
-     org_id     text NOT NULL REFERENCES orgs ON DELETE CASCADE,
-     machine_id text NOT NULL,
-     source     text NOT NULL,
-     session_id text NOT NULL,
-     sent_at    text NOT NULL,
-     rules      text NOT NULL,
-     stored     boolean NOT NULL,
-     copied_at  timestamptz NOT NULL,
-     removed_at timestamptz,
+     org_id        text NOT NULL REFERENCES orgs ON DELETE CASCADE,
+     machine_id    text NOT NULL,
+     source        text NOT NULL,
+     session_id    text NOT NULL,
+     sent_at       text NOT NULL,
+     rules         text NOT NULL,
+     known         text NOT NULL,
+     withheld      boolean NOT NULL,
+     stored        boolean NOT NULL,
+     started_at    timestamptz,
+     cloud_branch  text,
+     copied_at     timestamptz NOT NULL,
+     removed_at    timestamptz,
+     declined_at   timestamptz,
+     allowed_again integer NOT NULL DEFAULT 0,
      PRIMARY KEY (org_id, machine_id, source, session_id)
    )`,
   toApp(`SELECT, INSERT, UPDATE, DELETE ON shown_sessions`),
   ...rowLevelSecurity("shown_sessions"),
+  // How many copies in a row found none of the repository's sessions where
+  // they are uploaded, for the organisation they are shown in: kept here, so
+  // that a server started again often still gets to the count that removes
+  // them. No row is none.
+  `CREATE TABLE shown_empty_copies (
+     org_id text PRIMARY KEY REFERENCES orgs ON DELETE CASCADE,
+     copies integer NOT NULL
+   )`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON shown_empty_copies`),
+  ...rowLevelSecurity("shown_empty_copies"),
 ];
 
 /**

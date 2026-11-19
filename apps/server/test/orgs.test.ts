@@ -308,7 +308,7 @@ test("requests are granted exactly the tables they must reach", async () => {
   );
   const can = Object.fromEntries(granted.map((t) => [t.name, t.can]));
   // Everything an organisation owns: all of it, behind row-level security.
-  for (const table of ["tokens", "sessions", "pull_requests", "pull_sessions", "pull_request_reports", "shown_sessions", "repo_exclusions", "repos_allowed_again"]) assert.equal(can[table], "select,insert,update,delete", table);
+  for (const table of ["tokens", "sessions", "pull_requests", "pull_sessions", "pull_request_reports", "shown_sessions", "shown_empty_copies", "repo_exclusions", "repos_allowed_again"]) assert.equal(can[table], "select,insert,update,delete", table);
   // Its own row: to read, and to mark the organisation deleted. Removing the
   // row is the purge, which runs as the database's owner.
   assert.equal(can.orgs, "select,update");

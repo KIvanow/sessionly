@@ -144,8 +144,9 @@ export const EXPORTED_TABLES: readonly string[] = EXPORTED.map((spec) => spec.ta
  * `repos_allowed_again` is a counter a machine compares with the one it saw.
  * `shown_sessions` is the server's own note of which sessions it copied into
  * an organisation a repository is shown in, and when: the sessions are exported.
+ * `shown_empty_copies` is its count of copies in a row that found none to copy.
  */
-export const OMITTED_FROM_EXPORT: readonly string[] = ["repos_allowed_again", "shown_sessions"];
+export const OMITTED_FROM_EXPORT: readonly string[] = ["repos_allowed_again", "shown_sessions", "shown_empty_copies"];
 
 async function* tableLines(
   each: <T>(fn: (db: OrgDb) => Promise<T>) => Promise<T>,

@@ -23,6 +23,13 @@ services:
       # The dashboard counts which of its pages are opened (docs-site/dashboard.md); "off" stops it.
       SESSIONLY_TELEMETRY: ${SESSIONLY_TELEMETRY:-}
       DO_NOT_TRACK: ${DO_NOT_TRACK:-}
+      # Optional: one repository's sessions shown in a second organisation
+      # (docs-site/server-configuration.md). Empty, nothing is shown.
+      SESSIONLY_DEMO_FROM: ${SESSIONLY_DEMO_FROM:-}
+      SESSIONLY_DEMO_REPO: ${SESSIONLY_DEMO_REPO:-}
+      SESSIONLY_DEMO_ORG: ${SESSIONLY_DEMO_ORG:-}
+      SESSIONLY_DEMO_HIDE: ${SESSIONLY_DEMO_HIDE:-}
+      SESSIONLY_DEMO_MINUTES: ${SESSIONLY_DEMO_MINUTES:-}
     depends_on:
       db:
         condition: service_healthy

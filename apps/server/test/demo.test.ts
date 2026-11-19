@@ -3,8 +3,8 @@ import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
 import type { Db, OrgDb } from "../src/db.ts";
-import { copyRepo, demoFrom, EMPTY_COPIES, hideFrom, inRepo, repoOf, reportsShownIn, rulesOf, shown, shownReport } from "../src/demo.ts";
-import { showRepo, unheeded } from "../src/run.ts";
+import { copyRepo, demoFrom, EMPTY_COPIES, hideFrom, inRepo, repoOf, reportsShownIn, rulesOf, shown, shownReport, withheld, type Rules } from "../src/demo.ts";
+import { showRepo, unheeded, unshowElsewhere } from "../src/run.ts";
 import { newOrg, testDb, tokenFor } from "./helpers.ts";
 
 const h = (n: number) => n.toString(16).padStart(16, "0");
@@ -18,6 +18,8 @@ const demo = { admin: "", ci: "" };
 const from = <T>(fn: (db: OrgDb) => Promise<T>) => db.asOrg("work", fn);
 const to = <T>(fn: (db: OrgDb) => Promise<T>) => db.asOrg("demo", fn);
 const copy = (hide = ["notes"], repo = REPO) => copyRepo(from, to, { repo, hide });
+// The paths of the repository its pull requests have named, one of them hidden: what may be shown is the others.
+const KNOWN: Rules = { hide: ["notes"], known: new Set(["src/a.ts", "CLAUDE.md", "notes/SECRET-plan.md"]) };
 
 before(async () => {
   db = await testDb();
@@ -111,10 +113,10 @@ test("nothing a later version of the record adds, at any depth, is shown before 
     }
     return value;
   };
-  const made = JSON.stringify(shown(mark(session("s1", REPO)) as never, ["notes"]));
+  const made = JSON.stringify(shown(mark(session("s1", REPO)) as never, KNOWN));
   assert.doesNotMatch(made, /LATER|SECRET/);
   // and what is shown of it is what was before
-  assert.deepEqual(JSON.parse(made), JSON.parse(JSON.stringify(shown(session("s1", REPO) as never, ["notes"]))));
+  assert.deepEqual(JSON.parse(made), JSON.parse(JSON.stringify(shown(session("s1", REPO) as never, KNOWN))));
 });
 
 test("a pull request's report is kept without the files that are not shown", () => {
@@ -137,7 +139,7 @@ test("a pull request's report is kept without the files that are not shown", () 
 
 test("a session as it is shown holds nothing that was typed or run, and nothing outside the repository", () => {
   // as it is stored: a field with nothing in it is not there
-  const made = JSON.parse(JSON.stringify(shown(session("s1", REPO) as never, ["notes"])));
+  const made = JSON.parse(JSON.stringify(shown(session("s1", REPO) as never, KNOWN)));
   assert.doesNotMatch(JSON.stringify(made), /SECRET|sly_|sha256/);
   const s = made.session;
   // who, when, with what and for how much stay
@@ -148,11 +150,36 @@ test("a session as it is shown holds nothing that was typed or run, and nothing 
   assert.deepEqual(s.prompts, [{ prompt_id: "p1", at: "2026-11-10T09:00:00Z", ended_at: "2026-11-10T09:30:00Z", outcome: "completed" }]);
   assert.deepEqual(s.tool_calls!.map((t: any) => [t.tool, t.status, t.file_path]), [["Edit", "ok", "src/a.ts"], ["Bash", "failed", null]]);
   assert.deepEqual(s.files!.map((f: any) => f.path), ["src/a.ts"]);
-  assert.deepEqual(s.subagents, [{ agent_id: "a1", agent_type: "Explore", description: null, tool_calls: 4 }]);
+  // a subagent's type may be the name of one the person made
+  assert.deepEqual(s.subagents, [{ agent_id: "a1", agent_type: null, description: null, tool_calls: 4 }]);
   assert.deepEqual(s.instruction_files, ["CLAUDE.md"]);
   assert.deepEqual(made.rewrite!.files!.map((f: any) => f.path), ["src/a.ts"]);
   // and of the lines of a file not shown, how many: no path, no model, no hash
   assert.deepEqual(made.lines, [{ path: "src/a.ts", model: "claude-opus-5-5", hashes: [h(1), h(2), h(3)] }, { path: "", model: null, hashes: [""] }]);
+  // nothing it names in the repository is left out for not being known
+  assert.equal(withheld(session("s1", REPO) as never, KNOWN), false);
+
+  // with no path of the repository known, none is shown: of every line, only that it was there
+  const unknown = { hide: ["notes"], known: new Set<string>() };
+  const bare = JSON.parse(JSON.stringify(shown(session("s1", REPO) as never, unknown)));
+  assert.doesNotMatch(JSON.stringify(bare), /src|CLAUDE|[0-9a-f]{16}/);
+  assert.deepEqual(
+    [bare.session.files, bare.session.tool_calls.map((t: any) => t.file_path), bare.session.instruction_files, bare.rewrite.files, bare.lines],
+    [[], [null, null], [], [], [{ path: "", model: null, hashes: ["", "", "", ""] }]],
+  );
+  assert.equal(withheld(session("s1", REPO) as never, unknown), true);
+  // a worktree's copy of a known file is that file
+  const inWorktree = session("s1", REPO);
+  inWorktree.session.files = [{ path: ".claude/worktrees/w1/src/a.ts", writes: 1, lines_added: 3 }];
+  assert.deepEqual(shown(inWorktree as never, KNOWN).session!.files!.map((f) => f.path), [".claude/worktrees/w1/src/a.ts"]);
+
+  // which servers a person's tools come from, and the platform's id of a cloud session, are not shown
+  const more = session("s1", REPO) as any;
+  more.session.runtime = { kind: "cloud", id: "cse_SECRET" };
+  more.session.tool_calls.push({ tool_use_id: "t3", tool: "mcp__SECRET-crm__find", status: "ok" }, { tool_use_id: "t4", tool: "MCP:SECRET-move", status: "ok" });
+  const madeMore = shown(more, KNOWN).session!;
+  assert.doesNotMatch(JSON.stringify(madeMore), /SECRET/);
+  assert.deepEqual([madeMore.runtime, madeMore.tool_calls!.map((t) => t.tool)], [{ kind: "cloud", id: null }, ["Edit", "Bash", "mcp", "mcp"]]);
 });
 
 test("one repository's sessions are shown in another organisation, and kept up to date there", async () => {
@@ -232,7 +259,9 @@ test("one repository's sessions are shown in another organisation, and kept up t
   assert.deepEqual(await shownIds(), ["own"]);
   assert.equal((await put(session("s3", REPO, [7, 8]))).status, 200);
   assert.deepEqual([(await copy()).kept, (await copy()).kept], [2, 0]);
+  // she allows it again there: both are offered again, and taken
   assert.equal((await call(ann, "DELETE", `/repos/excluded?repo=${encodeURIComponent(REPO)}`)).status, 200);
+  assert.deepEqual([(await copy()).copied, await shownIds()], [2, ["own", "s2", "s3"]]);
 
   // another repository is shown now: what was sent of the first is removed
   assert.equal((await put(session("next", "github.com/acme/next"))).status, 200);
@@ -351,6 +380,10 @@ test("a copy deleted where it is shown is sent again, and one turned down there 
   assert.deepEqual(await copyLogged(), { copied: 0, kept: 1, removed: 0, failed: 0, matched: 0 });
   assert.deepEqual(await copyLogged(), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 0 });
   assert.deepEqual([logged, await idsIn(p.admin)], [[], [["a1", "ann@example.com"], ["b1", "bob@example.com"]]]);
+  // a day later it is offered again, in case what turned it down has gone; it has not, so once
+  await db.query(`UPDATE shown_sessions SET declined_at = declined_at - interval '25 hours' WHERE org_id = $1 AND session_id = 'b1'`, [p.there]);
+  assert.deepEqual(await copyLogged(), { copied: 0, kept: 1, removed: 0, failed: 0, matched: 0 });
+  assert.deepEqual(await copyLogged(), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 0 });
   const bobs = await db.query<{ repo: string }>(`SELECT repo FROM sessions WHERE org_id = $1 AND session_id = 'b1'`, [p.there]);
   assert.deepEqual(bobs.map((r) => r.repo), ["github.com/acme/elsewhere"]);
 
@@ -367,7 +400,10 @@ test("a copy deleted where it is shown is sent again, and one turned down there 
   const columns = await db.query<{ name: string }>(
     `SELECT column_name AS name FROM information_schema.columns WHERE table_name = 'shown_sessions' ORDER BY ordinal_position`,
   );
-  assert.deepEqual(columns.map((c) => c.name), ["org_id", "machine_id", "source", "session_id", "sent_at", "rules", "stored", "copied_at", "removed_at"]);
+  assert.deepEqual(columns.map((c) => c.name), [
+    "org_id", "machine_id", "source", "session_id", "sent_at", "rules", "known", "withheld", "stored", "started_at", "cloud_branch",
+    "copied_at", "removed_at", "declined_at", "allowed_again",
+  ]);
   assert.doesNotMatch(JSON.stringify(await db.query(`SELECT * FROM shown_sessions WHERE org_id = $1`, [p.there])), /@/);
 });
 
@@ -414,18 +450,21 @@ test("the repository is named as sessions are filed under it, and a name that ma
   assert.equal((await copyRepo(p.from, p.to, { repo: REPO, hide: [] })).copied, 1);
   // the owner and name in other letters are the same repository: nothing to do
   assert.deepEqual(await copyRepo(p.from, p.to, { repo: "github.com/ACME/Shown", hide: [] }), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 0 });
-  // one with none of its sessions: what was sent is left, and said, until that has held on EMPTY_COPIES copies in a row
-  const empty = { copies: 0 };
+  // one with none of its sessions: what was sent is left, and said, until that has held on EMPTY_COPIES copies in a row.
+  // Each copy is on its own, as after the server is started again: the count is the database's.
   const logged: unknown[] = [];
-  const wrong = () => copyRepo(p.from, p.to, { repo: "github.com/acme/typo", hide: [] }, { empty, log: (err) => logged.push(err) });
+  const wrong = () => copyRepo(p.from, p.to, { repo: "github.com/acme/typo", hide: [] }, { log: (err) => logged.push(err) });
+  const counted = async () => (await db.query<{ copies: unknown }>(`SELECT copies FROM shown_empty_copies WHERE org_id = $1`, [p.there])).map((r) => Number(r.copies));
   assert.equal(EMPTY_COPIES, 3);
   assert.deepEqual([(await wrong()).removed, (await wrong()).removed], [0, 0]);
+  assert.deepEqual(await counted(), [2]);
   assert.equal(logged.length, 2);
   assert.match(String(logged[0]), /no sessions of github\.com\/acme\/typo/);
+  assert.match(String(logged[1]), /\(2 so far\)/);
   assert.deepEqual(await idsIn(p.admin), [["n1", "ann@example.com"]]);
   // put right in between: the count starts again
-  assert.deepEqual((await copyRepo(p.from, p.to, { repo: REPO, hide: [] }, { empty })).removed, 0);
-  assert.equal(empty.copies, 0);
+  assert.deepEqual((await copyRepo(p.from, p.to, { repo: REPO, hide: [] })).removed, 0);
+  assert.deepEqual(await counted(), []);
   assert.deepEqual([(await wrong()).removed, (await wrong()).removed, (await wrong()).removed], [0, 0, 1]);
   assert.deepEqual(await idsIn(p.admin), []);
 });
@@ -452,4 +491,150 @@ test("after a copy, only the shown repository's pull requests are matched again"
   const after = await when();
   // the first and the third, and not the second
   assert.deepEqual([done.copied, done.matched, after[1] !== before[1], after[2] === before[2], after[3] !== before[3]], [1, 2, true, true, true]);
+});
+
+/** A pull request of the shown repository, committed to by Ann, with these files. */
+const pullOf = (number: number, files: { path: string; hashes: string[] }[], more: Record<string, unknown> = {}) => ({
+  repo: REPO, number, author: "ann", state: "open", created_at: "2026-11-10T12:00:00Z", event: "opened", commits: 1, reviews: 0,
+  changes_requested: 0, review_comments: 0, bot_review_comments: 0, review_rounds: 0, commit_emails: ["ann@example.com"], files, ...more,
+});
+
+/** Everything the organisation a repository is shown in answers about its sessions and files, and keeps of them. */
+async function everything(org: string, admin: string, id: string, pull?: number) {
+  const paths = ["/sessions", `/sessions/m1/claude-code/${id}`, "/files", "/summary?by=repo", "/filters", ...(pull ? [`/prs/detail?repo=${REPO}&number=${pull}`] : [])];
+  const answers = await Promise.all(paths.map((path) => call(admin, "GET", path)));
+  const kept = await db.query(`SELECT * FROM sessions WHERE org_id = $1`, [org]);
+  return `${answers.map((a) => a.text).join("\n")}\n${JSON.stringify(kept)}`;
+}
+
+test("a copy made by other rules is removed when the one by these is turned down", async () => {
+  const p = await pair("stale");
+  const ci = await tokenFor(db, { email: "ci@example.com", role: "ci" }, p.there);
+  // both of the session's files of the repository are known, and nothing is hidden yet
+  assert.equal((await call(ci, "PUT", "/prs", pullOf(1, [{ path: "src/a.ts", hashes: [h(1)] }, { path: "notes/SECRET-plan.md", hashes: [h(900)] }]))).status, 200);
+  assert.equal((await send(p.ann, session("st1", REPO))).status, 200);
+  assert.equal((await copyRepo(p.from, p.to, { repo: REPO, hide: [] })).copied, 1);
+  const payload = async () => JSON.stringify(await db.query(`SELECT payload FROM sessions WHERE org_id = $1`, [p.there]));
+  assert.match(await payload(), /notes\/SECRET-plan\.md/);
+  // she is removed there, and her data is left: her copy stays, and nothing of hers is taken any more
+  await db.query(`INSERT INTO users (id, org_id, email, role) VALUES ('usr_ann_stale', $1, 'ann@example.com', 'member')`, [p.there]);
+  assert.equal((await call(p.admin, "DELETE", "/users/usr_ann_stale")).status, 200);
+  assert.deepEqual(await idsIn(p.admin), [["st1", "ann@example.com"]]);
+  // the notes are hidden now: the copy that shows them cannot be replaced, so it goes, and the pull request is matched without it
+  assert.deepEqual(await copyRepo(p.from, p.to, { repo: REPO, hide: ["notes"] }), { copied: 0, kept: 0, removed: 1, failed: 0, matched: 1 });
+  assert.deepEqual(await idsIn(p.admin), []);
+  assert.doesNotMatch(await everything(p.there, p.admin, "st1"), /notes/);
+  assert.equal((await call(p.admin, "GET", `/prs/detail?repo=${REPO}&number=1`)).body.attribution.now.agent_lines, 0);
+  // and it is noted as turned down, not offered again at each copy
+  assert.deepEqual(await copyRepo(p.from, p.to, { repo: REPO, hide: ["notes"] }), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 0 });
+  const [noted] = await db.query<{ stored: boolean }>(`SELECT stored FROM shown_sessions WHERE org_id = $1`, [p.there]);
+  assert.equal(noted?.stored, false);
+});
+
+test("a path is shown only once a pull request reported where it is shown names it", async () => {
+  const p = await pair("known");
+  const ci = await tokenFor(db, { email: "ci@example.com", role: "ci" }, p.there);
+  // a file that is committed, and one that never is
+  const k1 = session("k1", REPO, [11, 12]) as any;
+  k1.session.files.push({ path: ".env.local", writes: 1, lines_added: 1 });
+  k1.session.tool_calls.push({ tool_use_id: "t3", prompt_id: "p1", tool: "Write", status: "ok", file_path: ".env.local", lines_added: 1 });
+  k1.rewrite.files.push({ path: ".env.local", lines_added: 1, lines_surviving: 1 });
+  k1.session.instruction_files.push(".env.local");
+  k1.lines.push({ path: ".env.local", model: "claude-opus-5-5", hashes: [h(13)] });
+  assert.equal((await send(p.ann, k1)).status, 200);
+  const hashed = async (org: string) =>
+    (await db.query<{ n: unknown }>(`SELECT sum(hashed_lines) AS n FROM sessions WHERE org_id = $1`, [org])).map((r) => Number(r.n))[0];
+  const copyIt = () => copyRepo(p.from, p.to, { repo: REPO, hide: ["notes"] });
+
+  // before any report: neither path, and no hash, only that 4 lines were there (2 + 1 hidden + 1 not known)
+  assert.deepEqual(await copyIt(), { copied: 1, kept: 0, removed: 0, failed: 0, matched: 0 });
+  const before = await everything(p.there, p.admin, "k1");
+  assert.doesNotMatch(before, /src\/a\.ts|\.env\.local|notes/);
+  assert.doesNotMatch(before.replace(/"(?:machine_id|session_id|id|org_id)":"[^"]*"/g, ""), /[0-9a-f]{16}/);
+  const [lines] = await db.query<{ lines: unknown }>(`SELECT payload->'lines' AS lines FROM sessions WHERE org_id = $1`, [p.there]);
+  assert.deepEqual(typeof lines!.lines === "string" ? JSON.parse(lines!.lines) : lines!.lines, [{ path: "", model: null, hashes: ["", "", "", ""] }]);
+  assert.deepEqual([await hashed(p.there), await hashed(p.work)], [4, 4]);
+  // nothing has changed: it is not copied again
+  assert.deepEqual(await copyIt(), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 0 });
+
+  // a pull request names the committed file: its lines are the session's only once the session is copied again
+  const pull = pullOf(1, [{ path: "src/a.ts", hashes: [h(11), h(12), h(50)] }]);
+  assert.equal((await call(ci, "PUT", "/prs", pull)).body.attribution.now.agent_lines, 0);
+  assert.deepEqual(await copyIt(), { copied: 1, kept: 0, removed: 0, failed: 0, matched: 1 });
+  const files = (await call(p.admin, "GET", `/files?repo_is=${encodeURIComponent(REPO)}`)).body.files.map((f: any) => f.path);
+  assert.deepEqual(files, ["src/a.ts"]);
+  const [after] = await db.query<{ lines: unknown }>(`SELECT payload->'lines' AS lines FROM sessions WHERE org_id = $1`, [p.there]);
+  assert.deepEqual(typeof after!.lines === "string" ? JSON.parse(after!.lines) : after!.lines, [
+    { path: "src/a.ts", model: "claude-opus-5-5", hashes: [h(11), h(12)] },
+    { path: "", model: null, hashes: ["", ""] },
+  ]);
+  // 2 of its 4 lines are in the pull request: $6 x 2/4, as where it was uploaded
+  const detail = (await call(p.admin, "GET", `/prs/detail?repo=${REPO}&number=1`)).body;
+  assert.deepEqual([detail.attribution.now.agent_lines, detail.cost.usd], [2, 3]);
+  // the file nobody committed is still nowhere
+  assert.doesNotMatch(await everything(p.there, p.admin, "k1", 1), /\.env\.local|notes/);
+  assert.doesNotMatch(JSON.stringify(await db.query(`SELECT * FROM shown_sessions WHERE org_id = $1`, [p.there])), /\.env|@/);
+  assert.deepEqual([await hashed(p.there), await hashed(p.work)], [4, 4]);
+  // and with nothing more known, nothing more is done, though it still leaves one out
+  assert.deepEqual(await copyIt(), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 0 });
+});
+
+test("a copy matches again only the pull requests it can change", async () => {
+  const p = await pair("window");
+  const ci = await tokenFor(db, { email: "ci@example.com", role: "ci" }, p.there);
+  const files = [{ path: "src/a.ts", hashes: [h(1)] }];
+  // created soon after the sessions start, and so long after that they are out of its look-back, the last on a cloud agent's branch
+  assert.equal((await call(ci, "PUT", "/prs", pullOf(1, files))).status, 200);
+  assert.equal((await call(ci, "PUT", "/prs", pullOf(2, files, { created_at: "2027-03-01T12:00:00Z" }))).status, 200);
+  assert.equal((await call(ci, "PUT", "/prs", pullOf(3, files, { created_at: "2027-03-01T12:00:00Z", head_ref: "claude/far" }))).status, 200);
+  const when = async () =>
+    Object.fromEntries(
+      (await db.query<{ number: unknown; at: unknown }>(`SELECT number, matched_at::text AS at FROM pull_requests WHERE org_id = $1`, [p.there])).map((r) => [Number(r.number), r.at]),
+    );
+  const changed = (a: Record<number, unknown>, b: Record<number, unknown>) => [1, 2, 3].map((n) => a[n] !== b[n]);
+  // a session on the person's machine, started 10 November 2026: 2 and 3 look back no further than 1 December
+  const before = await when();
+  assert.equal((await send(p.ann, session("w1", REPO))).status, 200);
+  assert.equal((await copyRepo(p.from, p.to, { repo: REPO, hide: [] })).matched, 1);
+  const between = await when();
+  assert.deepEqual(changed(before, between), [true, false, false]);
+  // a cloud session on 3's branch, as long before: cloud sessions on its branch are counted at any time
+  const cloud = session("w2", REPO) as any;
+  cloud.session.runtime = { kind: "cloud", id: "cse_1" };
+  cloud.session.repo.branch = "claude/far";
+  assert.equal((await send(p.ann, cloud)).status, 200);
+  assert.equal((await copyRepo(p.from, p.to, { repo: REPO, hide: [] })).matched, 2);
+  assert.deepEqual(changed(between, await when()), [true, false, true]);
+  const third = (await call(p.admin, "GET", `/prs/detail?repo=${REPO}&number=3`)).body;
+  assert.deepEqual(third.attribution.cloud, { agents: ["claude-code"], sessions: 1 });
+});
+
+// Last: it takes back what was copied into every organisation of this file but the one it is told to keep.
+test("what was copied into an organisation that is not the one shown in any more is taken back", async () => {
+  const p = await pair("moved");
+  const ci = await tokenFor(db, { email: "ci@example.com", role: "ci" }, p.there);
+  assert.equal((await call(ci, "PUT", "/prs", pullOf(1, [{ path: "src/a.ts", hashes: [h(1), h(2), h(3)] }]))).status, 200);
+  assert.equal((await send(p.ann, session("m1s", REPO))).status, 200);
+  assert.equal((await copyRepo(p.from, p.to, { repo: REPO, hide: [] })).copied, 1);
+  const agentLines = async () => (await call(p.admin, "GET", `/prs/detail?repo=${REPO}&number=1`)).body.attribution.now.agent_lines;
+  assert.equal(await agentLines(), 3);
+  // a session uploaded straight to it is not the server's to take back
+  const direct = await tokenFor(db, { email: "host@example.com", role: "member" }, p.there);
+  assert.equal((await call(direct, "PUT", "/sessions/m1/claude-code/own", session("own", "github.com/acme/elsewhere"))).status, 200);
+  const warned: string[] = [];
+  const warn = (text: string) => warned.push(text);
+  // while it is SESSIONLY_DEMO_ORG, as when the settings are set but wrong (reportsShownIn still names it), it is left
+  const named = reportsShownIn({ SESSIONLY_DEMO_ORG: p.there, SESSIONLY_DEMO_MINUTES: "soon" })?.org;
+  assert.equal(named, p.there);
+  const others = (await unshowElsewhere(db, named, { warn })).map((done) => done.org);
+  assert.ok(!others.includes(p.there));
+  assert.deepEqual(await idsIn(p.admin), [["m1s", "ann@example.com"], ["own", "host@example.com"]]);
+  // then it is not: its copies go, the pull request is matched without them, and what was noted of them goes
+  warned.length = 0;
+  assert.deepEqual(await unshowElsewhere(db, undefined, { warn }), [{ org: p.there, removed: 1, failed: 0, matched: 1 }]);
+  assert.match(warned[0]!, new RegExp(`${p.there} is not SESSIONLY_DEMO_ORG any more`));
+  assert.deepEqual(await idsIn(p.admin), [["own", "host@example.com"]]);
+  assert.equal(await agentLines(), 0);
+  assert.deepEqual(await db.query(`SELECT org_id FROM shown_sessions`), []);
+  assert.deepEqual(await unshowElsewhere(db, undefined, { warn }), []);
 });

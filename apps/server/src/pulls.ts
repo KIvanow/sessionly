@@ -1243,6 +1243,13 @@ export interface PullFilters {
    * goes by. Not a substring, as `repo` is: `acme/shown` is not `acme/shown-2`.
    */
   sessions_repo?: string;
+  /**
+   * Only those a session copied into the organisation, or removed from it,
+   * may have changed since they were last matched (demo.ts): one that
+   * started within the look-back of the pull request (`claimsFor`), or a
+   * cloud session on its branch (`cloudOf`, which counts those at any time).
+   */
+  shown_changed?: boolean;
 }
 
 function where(orgId: string, filters: PullFilters): { sql: string; params: unknown[] } {
@@ -1258,7 +1265,33 @@ function where(orgId: string, filters: PullFilters): { sql: string; params: unkn
   }
   if (filters.state) conditions.push(`state = ${bind(filters.state)}`);
   if (filters.since) conditions.push(`coalesce(merged_at, closed_at, created_at) >= ${bind(filters.since)}::timestamptz`);
+  if (filters.shown_changed) {
+    conditions.push(
+      `EXISTS (SELECT 1 FROM shown_sessions k WHERE k.org_id = pull_requests.org_id
+         AND greatest(k.copied_at, coalesce(k.removed_at, k.copied_at)) > coalesce(pull_requests.matched_at, '-infinity'::timestamptz)
+         AND (k.started_at IS NULL OR k.started_at >= pull_requests.created_at - interval '${LOOK_BACK_DAYS * 24} hours'
+              OR k.cloud_branch = pull_requests.head_ref))`,
+    );
+  }
   return { sql: `WHERE ${conditions.join(" AND ")}`, params };
+}
+
+/**
+ * The paths of the files of a repository's pull requests (`sessions_repo`),
+ * as each was first reported and as it was last: the files known to be in
+ * it. The first report of one is kept for good, so a path known once stays
+ * known.
+ */
+export async function reportedPaths(db: OrgDb, repo: string): Promise<string[]> {
+  const { sql, params } = where(db.orgId, { sessions_repo: repo });
+  const rows = await db.query<{ path: string }>(
+    `SELECT DISTINCT f.file->>'path' AS path
+     FROM (SELECT first_files || last_files AS files FROM pull_requests ${sql}) AS p,
+          jsonb_array_elements(p.files) AS f(file)
+     WHERE f.file->>'path' IS NOT NULL`,
+    params,
+  );
+  return rows.map((row) => String(row.path));
 }
 
 /** To a millionth of a dollar: sums of shares are then the same however they were added up. */

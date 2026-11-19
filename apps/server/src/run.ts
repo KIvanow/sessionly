@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp, type Extension } from "./app.ts";
 import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Db, type Migrations } from "./db.ts";
-import { copyRepo, demoFrom, reportsShownIn, type Copied, type CopyOptions, type Demo } from "./demo.ts";
+import { copyRepo, demoFrom, reportsShownIn, unshow, type Copied, type CopyOptions, type Demo } from "./demo.ts";
 import { tidy } from "./limits.ts";
 import { purgeDeletedOrgs } from "./orgs.ts";
 import {
@@ -228,25 +228,65 @@ export async function showRepo(db: Db, demo: Demo, options: CopyOptions & { warn
 }
 
 /**
+ * Take back what was copied into each organisation that is not `shownIn`,
+ * the one SESSIONLY_DEMO_ORG names now (undefined when it names none): the
+ * demo was moved to another, or turned off. With the settings of a demo set
+ * but wrong, SESSIONLY_DEMO_ORG is still the one it is meant for, and is
+ * left as it is. Each organisation taken back is said (`warn`) before, and
+ * what was done in it is what this returns.
+ */
+export async function unshowElsewhere(
+  db: Db,
+  shownIn: string | undefined,
+  options: CopyOptions & { warn?: (text: string) => void } = {},
+): Promise<({ org: string } & Awaited<ReturnType<typeof unshow>>)[]> {
+  const warn = options.warn ?? (() => {});
+  const rows = await db.query<{ org_id: string }>(
+    `SELECT DISTINCT org_id FROM shown_sessions WHERE org_id IS DISTINCT FROM $1::text ORDER BY org_id`,
+    [shownIn ?? null],
+  );
+  const done = [];
+  for (const { org_id: org } of rows) {
+    warn(`${org} is not SESSIONLY_DEMO_ORG any more: the sessions the server copied into it are removed.`);
+    done.push({ org, ...(await unshow((fn) => db.asOrg(org, fn), options)) });
+  }
+  return done;
+}
+
+/** Taking back what was copied elsewhere, as the server does it: what goes wrong, and what was done, said. */
+const unshowing = (db: Db, shownIn: string | undefined, key: string | undefined): Promise<void> =>
+  unshowElsewhere(db, shownIn, {
+    key,
+    log: (err) => console.error("taking back what was copied:", err),
+    warn: (text) => console.warn(text),
+  })
+    .then((done) => {
+      for (const { org, removed, failed, matched } of done) {
+        console.log(`${org}: ${removed} copied sessions removed, ${failed} failed; ${matched} pull requests matched again.`);
+      }
+    })
+    .catch((err) => console.error("taking back what was copied failed:", err));
+
+/**
  * Keep a repository shown in another organisation up to date: now, and
  * every so many minutes from then. The one it is shown in has to be there,
  * and is made by whoever runs the server, like any other, so that it has an
  * owner; without the one they are uploaded to, what was copied from it is
- * removed (`showRepo`). Nothing that goes wrong here ends the server: it is
- * said, and tried again the next time.
+ * removed (`showRepo`). What was copied into any other organisation is
+ * taken back (`unshowElsewhere`). Nothing that goes wrong here ends the
+ * server: it is said, and tried again the next time.
  */
 function showing(db: Db, demo: Demo, key: string | undefined): void {
   let busy = false;
-  // From one copy to the next: how many in a row found none of the repository's sessions.
-  const empty = { copies: 0 };
   const copy = async () => {
     // One that is still going (the first copies every session) is not started beside itself.
     if (busy) return;
     busy = true;
     try {
+      // What was copied into another organisation before is taken back first, whatever happens to this copy.
+      await unshowing(db, demo.org, key);
       const done = await showRepo(db, demo, {
         key,
-        empty,
         log: (err) => console.error(`showing ${demo.repo} in ${demo.org}:`, err),
         warn: (text) => console.warn(text),
       });
@@ -337,6 +377,8 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   counting();
 
   if (demo) showing(db, demo, hashKeyOf(process.env));
+  // No demo, or one whose settings are wrong: only what is not SESSIONLY_DEMO_ORG is taken back, once.
+  else void unshowing(db, reportsShownIn(process.env)?.org, hashKeyOf(process.env));
 
   const port = Number(process.env.PORT ?? 8080);
   const hostname = process.env.HOST ?? "127.0.0.1";
