@@ -13,9 +13,11 @@ import {
   type Role,
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
-import { allowed, giveBack, take } from "./limits.ts";
+import { exportLines } from "./export.ts";
+import { allowed, exportKey, giveBack, invitesKey, onceEvery, take } from "./limits.ts";
 import { PROVIDER_NAMES } from "./oauth.ts";
 import { emailFrom, newUserId, offers, openRoutes, type Accounts } from "./signup.ts";
+import { deleteOrg, OrgNameError } from "./orgs.ts";
 import { addUser, forgetAccount, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
 import {
   Conflict,
@@ -27,6 +29,7 @@ import {
   listExcluded,
   listFiles,
   listSessions,
+  RemovedPerson,
   RepoNameError,
   removeUpload,
   storeUpload,
@@ -129,6 +132,7 @@ function matchAsked(sent: unknown): { repo?: string; state?: string; since?: str
 function filtersFrom(query: Record<string, string>): Filters {
   return {
     user: query.user || undefined,
+    user_is: query.user_is || undefined,
     repo: query.repo || undefined,
     repo_is: query.repo_is || undefined,
     model: query.model || undefined,
@@ -281,7 +285,9 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const accounts = options.accounts ?? {};
 
   api.use("*", async (c, next) => {
-    const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap);
+    const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap, {
+      hosted: options.accounts?.hosted === true,
+    });
     if (!principal) return c.json({ error: "missing or unknown token" }, 401);
     if (accounts.ratePerMinute) {
       const within = await allowed(ownerDb, `token:${principal.tokenId ?? "environment"}`, 60, accounts.ratePerMinute);
@@ -381,10 +387,55 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     // Anything else is refused further on, uncounted.
     if (p.role !== "admin" || !email) return next();
     const limited = (error: string) => c.json({ error, code: "rate_limited" }, 429);
-    const perOrg = await take(ownerDb, `invites:${p.orgId}`, 3600, INVITES_PER_HOUR);
+    const perOrg = await take(ownerDb, invitesKey(p.orgId), 3600, INVITES_PER_HOUR);
     if (!perOrg) return limited(`an organisation can add ${INVITES_PER_HOUR} people an hour; try again later`);
     await next();
     if (c.res.status !== 201) await giveBack(ownerDb, perOrg);
+  });
+
+  // The organisation's data, as a file. Read a page at a time, each in its
+  // own transaction, and before the one transaction the rest of a request
+  // runs in: the embedded database has a single connection, and holding it
+  // for the whole download would stop every other request. The next page is
+  // read when the client takes another line, so a slow download does not
+  // queue the rest of the organisation.
+  api.get("/export", async (c) => {
+    const p = c.get("principal");
+    if (!p.owner) return c.json({ error: "only the owner of an organisation can do this" }, 403);
+    // Counted from the last export that was allowed, inside one transaction so
+    // two at once cannot both pass. A refusal above takes none of the ten minutes.
+    const within = await ownerDb.transaction((tx) => onceEvery(tx, exportKey(p.orgId), 600));
+    if (!within) {
+      return c.json(
+        { error: "an organisation can be exported once every ten minutes; try again later", code: "rate_limited" },
+        429,
+      );
+    }
+    const exportedAt = new Date().toISOString();
+    const filename = `sessionly-${p.orgId}-${exportedAt.slice(0, 10)}.jsonl`;
+    c.header("content-type", "application/x-ndjson; charset=utf-8");
+    c.header("content-disposition", `attachment; filename="${filename}"`);
+    const each = <T>(fn: (db: OrgDb) => Promise<T>) => ownerDb.asOrg(c.get("principal").orgId, fn);
+    const encoder = new TextEncoder();
+    const lines = exportLines(each, exportedAt);
+    const body = new ReadableStream({
+      async pull(controller) {
+        try {
+          const next = await lines.next();
+          if (next.done) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(encoder.encode(`${JSON.stringify(next.value)}\n`));
+        } catch (err) {
+          controller.error(err);
+        }
+      },
+      async cancel() {
+        await lines.return(undefined);
+      },
+    });
+    return c.body(body);
   });
 
   // The rest of the request runs in one transaction, as the organisation of
@@ -409,7 +460,12 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
 
   const failed = failureLog();
   api.onError((err, c) => {
-    if (err instanceof BadRequest || err instanceof RepoNameError) return c.json({ error: err.message }, 400);
+    if (err instanceof BadRequest || err instanceof RepoNameError || err instanceof OrgNameError) {
+      return c.json({ error: err.message }, 400);
+    }
+    if (err instanceof RemovedPerson) {
+      return c.json({ error: err.message, code: "person_removed", ...err.answer }, 403);
+    }
     if (err instanceof BadReport) return c.json({ error: err.message }, 422);
     if (err instanceof ApiError) return c.json({ error: err.message, code: err.code }, err.status);
     if (err instanceof UserProblem) return c.json({ error: err.message, code: err.code }, err.status);
@@ -418,10 +474,32 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   });
 
   const whoami = (p: Principal) => ({ ok: true, org: p.orgId, email: p.email, name: p.name, role: p.role });
+  // The owner asks for the organisation to be deleted. The name in the body
+  // is them saying so on purpose. From the next request, every token of it
+  // is refused. The rows go after 7 days. A server of one team has no such
+  // request: whoever runs it drops the database.
+  api.delete("/org", async (c) => {
+    if (!c.get("principal").owner) return c.json({ error: "only the owner of an organisation can do this" }, 403);
+    if (options.accounts?.hosted !== true) {
+      return c.json(
+        { error: "deleting an organisation is for the hosted service; on a server of your own, drop the database" },
+        403,
+      );
+    }
+    const body = (await c.req.json().catch(() => null)) as { name?: unknown } | null;
+    await deleteOrg(c.get("db"), typeof body?.name === "string" ? body.name : "");
+    return c.body(null, 204);
+  });
+
   api.get("/ping", (c) => c.json(whoami(c.get("principal"))));
   api.get("/me", async (c) => {
     const p = c.get("principal");
-    return c.json({ ...whoami(p), org_name: await orgName(c.get("db")), signed_in: p.userId !== null });
+    return c.json({
+      ...whoami(p),
+      org_name: await orgName(c.get("db")),
+      signed_in: p.userId !== null,
+      owner: p.owner,
+    });
   });
 
   // Sign out: the token someone got by signing in stops working.
@@ -674,7 +752,9 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     return c.json(user, 201);
   });
   users.delete("/:id", async (c) => {
-    await removeUser(c.get("db"), c.req.param("id"), c.get("principal"));
+    // data=true also deletes their sessions and the repositories they stopped.
+    // Anything else is the removal alone, as it always was.
+    await removeUser(c.get("db"), c.req.param("id"), c.get("principal"), { data: c.req.query("data") === "true" });
     return c.json({ removed: true });
   });
   // Let someone in with another account than the one they signed in with:

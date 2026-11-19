@@ -32,6 +32,7 @@ import { serve } from "@hono/node-server";
 import { createApp, type Extension } from "./app.ts";
 import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Migrations } from "./db.ts";
 import { tidy } from "./limits.ts";
+import { purgeDeletedOrgs } from "./orgs.ts";
 import {
   github,
   google,
@@ -229,6 +230,16 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   // Old counters and sign-ins nobody finished are cleared away now and then.
   const tidying = setInterval(() => void tidy(db).catch((err) => console.error("tidying failed:", err)), 15 * 60_000);
   tidying.unref();
+  // Organisations whose owner asked for them to be deleted, a week ago.
+  // Two replicas of a hosted service must not both do it.
+  const purging = setInterval(() => {
+    void purgeDeletedOrgs(db)
+      .then((ids) => {
+        if (ids.length) console.log(`Removed organisations deleted more than 7 days ago: ${ids.join(", ")}`);
+      })
+      .catch((err) => console.error("purging organisations failed:", err));
+  }, 60 * 60_000);
+  purging.unref();
   const app = createApp(db, {
     hashKey: hashKeyOf(process.env),
     webRoot,

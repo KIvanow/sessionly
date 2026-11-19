@@ -793,6 +793,11 @@ const MIGRATIONS: string[] = [
           ), '[]'::jsonb),
           p.reporter_version
    FROM pull_requests p`,
+  // The owner can mark the organisation deleted. The row stays until the
+  // purge, which runs as the database's owner and is what removes it.
+  // After the migrations that have already shipped: a database on those
+  // must still be able to take this one.
+  toApp(`UPDATE ON orgs`),
 ];
 
 /**

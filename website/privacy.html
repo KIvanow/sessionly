@@ -392,8 +392,8 @@
           <ul>
             <li>
               <strong>Uploaded sessions and pull request reports</strong> are kept while the org's
-              account on the Hosted Service exists, and deleted when the org asks me to delete
-              them or closes its account. Uploading a session again replaces the earlier copy.
+              account on the Hosted Service exists, and deleted 7 days after the owner deletes
+              the org from the dashboard. Uploading a session again replaces the earlier copy.
             </li>
             <li>
               <strong>Tokens</strong> are kept while the account exists. A revoked token stops
@@ -410,9 +410,10 @@
             </li>
           </ul>
           <p>
-            When I no longer need personal information, I delete or anonymize it. To delete your
-            account and its data, email me (see below). You can delete the sessions you submitted
-            from a repository, and stop further ones, from the dashboard or with
+            When I no longer need personal information, I delete or anonymize it. The owner of
+            an org deletes it, and its data, from the dashboard. An admin can remove a person
+            and delete that person's sessions from the same page. You can delete the sessions
+            you submitted from a repository, and stop further ones, from the dashboard or with
             <code>sessionly exclude</code>. That removes only the sessions your account submitted.
             What the
             <code>sessionly</code> program keeps on your own machine is yours to delete: remove
@@ -500,10 +501,14 @@
           <p>
             Some of this you can do yourself: <code>sessionly export</code> shows exactly what
             your machine would upload for a session, <code>sessionly disconnect</code> stops
-            uploads, and an org's admins can revoke tokens. If your sessions were uploaded by or
-            for an org, ask that org first, since it decides what happens to them. For anything
-            else, email <a href="mailto:kristiyan@sessionly.dev">kristiyan@sessionly.dev</a>. I
-            will respond in accordance with applicable law and within a reasonable time.
+            uploads, and an org's admins can revoke tokens. The owner of an org on the Hosted
+            Service can download everything that org has, as a JSONL file, from the dashboard
+            (Team, Organisation data). The file has the org, its people, sessions, pull request
+            reports, stopped repositories and tokens, and never a token's secret. If your
+            sessions were uploaded by or for an org, ask that org first, since it decides what
+            happens to them. For anything else, email
+            <a href="mailto:kristiyan@sessionly.dev">kristiyan@sessionly.dev</a>. I will respond
+            in accordance with applicable law and within a reasonable time.
           </p>
           <p>
             <strong>Emails.</strong> I send service emails only: replies to what you wrote, tokens

@@ -341,9 +341,11 @@ Compose then warns that it did not make that volume itself, and uses it all the 
 
 ## Not built yet
 
-- **Plans, quotas and billing.** Every organisation is unlimited.
-- **Deleting an organisation and exporting its data** from the dashboard. An operator can
-  delete one in the database: `DELETE FROM orgs WHERE id = '…'` takes everything of it along.
+- **Plans, quotas and billing.** Every organisation is unlimited. Exporting an
+  organisation and deleting it are on the dashboard. Within 7 days, the same
+  `docker compose … run -w /app/apps/server` as `person forget-account` undoes a
+  deletion with `node src/cli.ts org restore <id>`, and `node src/cli.ts org purge`
+  removes what is due.
 - **A deploy job.** Updating is the commands above, by hand.
 - **Inviting someone by a link.** A person is added by address, and has to sign in with a
   Google or GitHub account that has that address. Nothing tells them they were added.

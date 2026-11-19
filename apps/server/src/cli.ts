@@ -4,16 +4,22 @@
 //   node src/cli.ts token revoke <id>
 //   node src/cli.ts person list
 //   node src/cli.ts person forget-account --email ann@example.com
-// The last lets a person sign in with another Google or GitHub account than
+//   node src/cli.ts org restore <id>
+//   node src/cli.ts org purge
+// The last two are for an organisation its owner asked to delete: restore
+// clears that during the seven days before its rows are removed, and purge
+// removes every organisation that has been waiting longer than that. The
+// person command lets a person sign in with another Google or GitHub account than
 // the one they have here: for an owner whose account is gone, whom nobody
-// in the organisation can let in. Each takes --org <id> for an organisation
-// other than a self-hosted install's own, "default".
+// in the organisation can let in. Token and person commands take --org <id>
+// for an organisation other than a self-hosted install's own, "default".
 // With the embedded database, stop the server first (one process at a time),
 // or use the /api/v1/tokens endpoints with an admin token instead.
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createToken, DEFAULT_ORG, listTokens, revokeToken, type Role } from "./auth.ts";
 import { openDb } from "./db.ts";
+import { purgeDeletedOrgs, restoreOrg } from "./orgs.ts";
 import { forgetAccount, listUsers, UserProblem } from "./users.ts";
 
 const { positionals, values } = parseArgs({
@@ -31,18 +37,31 @@ function usage(): never {
   console.error(
     "usage: token create --email <email> [--name <name>] [--role admin|member] | token list | token revoke <id>\n" +
       "       person list | person forget-account --email <email>\n" +
-      "       (each with [--org <id>])",
+      "       (each with [--org <id>])\n" +
+      "       org restore <id> | org purge",
   );
   process.exit(2);
 }
-if (group !== "token" && group !== "person") usage();
+if (group !== "token" && group !== "person" && group !== "org") usage();
 
 const embedded = fileURLToPath(new URL("../data/pglite", import.meta.url));
 const db = await openDb(process.env.DATABASE_URL ?? `file:${embedded}`);
 const org = values.org ?? DEFAULT_ORG;
 try {
-  const [known] = await db.query(`SELECT id FROM orgs WHERE id = $1 AND deleted_at IS NULL`, [org]);
-  if (!known) {
+  if (group === "org" && action === "purge" && !id) {
+    const gone = await purgeDeletedOrgs(db);
+    console.log(gone.length ? `Removed ${gone.join(", ")}.` : "Nothing was due to be removed.");
+  } else if (group === "org" && action === "restore" && id) {
+    // This one is deleted, so the check below (which refuses a deleted
+    // organisation) does not apply. Restoring is how it comes back.
+    if (await restoreOrg(db, id)) console.log(`"${id}" is restored. Its tokens work again.`);
+    else {
+      console.error(`There is no organisation "${id}" waiting to be deleted.`);
+      process.exitCode = 1;
+    }
+  } else if (group === "org") {
+    usage();
+  } else if (!(await db.query(`SELECT id FROM orgs WHERE id = $1 AND deleted_at IS NULL`, [org]))[0]) {
     console.error(`There is no organisation "${org}".`);
     process.exitCode = 1;
   } else if (group === "person" && action === "list") {

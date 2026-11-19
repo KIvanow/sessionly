@@ -74,14 +74,24 @@ People then make the tokens for their own machines on the Connect page
 Team page has no list of people.
 
 **Removing a person** ends their sign-in and revokes their `admin` and `member` tokens. A `ci`
-or `env` token that was made under their address keeps working: revoke those yourself on the
-Team page. Nobody can remove themselves.
+token made under their address keeps reporting pull requests. An `env` token keeps working, and
+a session it files under their address is not stored until they are added again. Revoke those
+on the Team page if the token should stop too. Nobody can remove themselves. The confirmation
+can also delete that person's sessions, and the repositories they stopped. Pull requests stay,
+and a session that is gone is shown as "(deleted since)" on a pull request. While they stay
+removed, a session filed under their address is not stored. Leaving the box unticked keeps the
+sessions and the repositories they stopped. Ticking it forgets those repositories, so adding
+the person again does not stop them.
 
 **The owner** is who signed an organisation up on a hosted service; a server of your own has
-none. An owner cannot be removed, and only an admin who has signed in (not one with a token)
-can let an owner in with a new account. For an owner with no other admin,
+none, and there the admin token from the environment is the owner for a download. An owner
+cannot be removed, and only an admin who has signed in (not one with a token) can let an
+owner in with a new account. For an owner with no other admin,
 `pnpm person forget-account --email owner@example.com` does (with the embedded database,
-stop the server first). `pnpm person list` shows the people there are.
+stop the server first). `pnpm person list` shows the people there are. On a hosted service
+the owner can download everything the organisation has, and can delete the organisation,
+from the Team page. Deleting it signs everyone out at once. The rows go after 7 days.
+`pnpm org restore <id>` undoes that within the 7 days, and `pnpm org purge` removes what is due.
 
 ## Organisations
 

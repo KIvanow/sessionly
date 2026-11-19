@@ -20,6 +20,18 @@ const UNKNOWN = "(unknown)";
 
 export class Conflict extends Error {}
 
+/**
+ * This address belongs to someone who was removed. A change for them is refused.
+ * An upload passes `{ stored: false }` so its answer still says the session was not stored.
+ */
+export class RemovedPerson extends Error {
+  readonly answer: { stored: false } | undefined;
+  constructor(answer?: { stored: false }) {
+    super("this person has been removed");
+    this.answer = answer;
+  }
+}
+
 const num = (value: unknown): number => (value == null ? 0 : Number(value));
 const numOrNull = (value: unknown): number | null => (value == null ? null : Number(value));
 /** A jsonb array of strings, which a driver may hand over parsed or as text. */
@@ -43,13 +55,18 @@ export function ownerOf(upload: Upload, uploader: Principal): string {
   return uploader.role === "env" && cloud && /^\S+@\S+$/.test(named) ? named : uploader.email;
 }
 
-/** What storing an upload did. `excluded` means the repository is stopped, so nothing was stored. */
+/**
+ * What storing an upload did. `excluded` means the repository is stopped, so
+ * nothing was stored. An address that belongs to someone who was removed
+ * throws `RemovedPerson` instead, and nothing is stored.
+ */
 export type StoreResult = { stored: boolean; excluded?: true };
 
 /**
  * Store one session, replacing an earlier upload of the same session.
  * `stored` is false when what the server has was kept instead, or when the
- * person has stopped the repository: then a copy of theirs is removed.
+ * person has stopped the repository (then a copy of theirs is removed).
+ * Someone who was removed refuses the upload.
  */
 export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal): Promise<StoreResult> {
   const s: Session = upload.session ?? {};
@@ -64,6 +81,10 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   const mayRefile = uploader.role === "env" ? uploader.email : null;
   // Before the row is read: stopping the repository removes what is there.
   await oneAtATime(db, owner.email, "storing");
+  // After the lock. A removal that is deleting their sessions has either
+  // finished, and this sees it, or it is waiting for this upload to commit
+  // and will delete what this stores.
+  if (await personRemoved(db, owner.email)) throw new RemovedPerson({ stored: false });
   if (await submissionStopped(db, owner.email, place)) {
     await dropOwn(db, key, owner.email, mayRefile);
     return { stored: false, excluded: true };
@@ -164,6 +185,24 @@ async function oneAtATime(db: OrgDb, email: string, doing: "storing" | "stopping
 }
 
 /**
+ * Hold uploads of this address until the transaction ends. Deleting their
+ * sessions takes the same turn as stopping a repository: an upload that is
+ * already storing finishes first, and one that waits finds them removed.
+ */
+export async function holdUploads(db: OrgDb, email: string): Promise<void> {
+  await oneAtATime(db, email, "stopping");
+}
+
+/** True when this address belongs to someone who was removed. */
+async function personRemoved(db: OrgDb, email: string): Promise<boolean> {
+  const [row] = await db.query(`SELECT 1 AS gone FROM users WHERE org_id = $1 AND email = $2 AND removed_at IS NOT NULL`, [
+    db.orgId,
+    email,
+  ]);
+  return row != null;
+}
+
+/**
  * Delete this person's copy of one session, if it is theirs. `refiled` is the
  * address of the environment uploading it, whose copy is this person's too.
  */
@@ -188,7 +227,7 @@ async function dropOwn(db: OrgDb, key: unknown[], email: string, refiled: string
  * at once, so none is left with lines shared out with them, and what the
  * other sessions' lines count as is their own affair.
  */
-async function forgetLines(db: OrgDb, sessions: Record<string, unknown>[]): Promise<void> {
+export async function forgetLines(db: OrgDb, sessions: Record<string, unknown>[]): Promise<void> {
   if (sessions.length === 0) return;
   // After any report that is storing these now: it then finds the session gone, or this finds what it stored.
   await holdPullSessions(db);
@@ -250,6 +289,9 @@ export async function excludeRepo(
   if (!parsed.ok) throw new RepoNameError(parsed.error);
   const { repo, coversFolders } = parsed.name;
   await oneAtATime(db, email, "stopping");
+  // After the lock, so a removal that is deleting what they stopped has
+  // either finished or is waiting. A preference must not land after it.
+  if (await personRemoved(db, email)) throw new RemovedPerson();
   await db.query(
     `INSERT INTO repo_exclusions (org_id, owner_email, repo) VALUES ($1, $2, $3)
      ON CONFLICT (org_id, owner_email, repo) DO NOTHING`,
@@ -281,6 +323,8 @@ export async function excludeRepo(
 export async function includeRepo(db: OrgDb, email: string, raw: unknown): Promise<string | null> {
   const parsed = parseRepo(raw);
   if (!parsed.ok) throw new RepoNameError(parsed.error);
+  await oneAtATime(db, email, "stopping");
+  if (await personRemoved(db, email)) throw new RemovedPerson();
   const rows = await db.query<{ repo: string }>(
     `DELETE FROM repo_exclusions WHERE org_id = $1 AND owner_email = $2 AND repo = $3 RETURNING repo`,
     [db.orgId, email, parsed.name.repo],
@@ -326,6 +370,8 @@ export type { GroupBy };
 export interface Filters {
   /** Substring of the uploader's email. */
   user?: string;
+  /** The uploader's address exactly. `user` is a substring, so it counts other people too. */
+  user_is?: string;
   /** Substring of the repository. */
   repo?: string;
   /** The repository exactly, as a summary by repository names it. */
@@ -356,6 +402,7 @@ function where(viewer: Principal, filters: Filters): { sql: string; params: unkn
   const conditions: string[] = [`org_id = ${bind(viewer.orgId)}`];
   if (viewer.role !== "admin") conditions.push(`owner_email = ${bind(viewer.email)}`);
   if (filters.user) conditions.push(`owner_email ILIKE ${like(filters.user)}`);
+  if (filters.user_is) conditions.push(`owner_email = ${bind(filters.user_is)}`);
   if (filters.repo) conditions.push(`repo ILIKE ${like(filters.repo)}`);
   if (filters.repo_is === UNKNOWN) conditions.push(`repo IS NULL`);
   else if (filters.repo_is) conditions.push(`repo = ${bind(filters.repo_is)}`);

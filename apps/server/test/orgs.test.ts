@@ -309,8 +309,9 @@ test("requests are granted exactly the tables they must reach", async () => {
   const can = Object.fromEntries(granted.map((t) => [t.name, t.can]));
   // Everything an organisation owns: all of it, behind row-level security.
   for (const table of ["tokens", "sessions", "pull_requests", "pull_sessions", "pull_request_reports", "repo_exclusions", "repos_allowed_again"]) assert.equal(can[table], "select,insert,update,delete", table);
-  // Its own row of the organisations, to read.
-  assert.equal(can.orgs, "select");
+  // Its own row: to read, and to mark the organisation deleted. Removing the
+  // row is the purge, which runs as the database's owner.
+  assert.equal(can.orgs, "select,update");
   // And nothing else: not the record of migrations.
   assert.equal(can.migrations, "");
   // A table with an org column that requests cannot reach was forgotten.

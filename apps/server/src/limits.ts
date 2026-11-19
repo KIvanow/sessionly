@@ -2,6 +2,21 @@
 // they hold across several copies of the server.
 import type { Queryable } from "./db.ts";
 
+/** People an organisation has added in the current hour. */
+export function invitesKey(orgId: string): string {
+  return `invites:${orgId}`;
+}
+
+/** The last export an organisation was allowed to take. */
+export function exportKey(orgId: string): string {
+  return `export:${orgId}`;
+}
+
+/** Every rate counter that names an organisation. A purge deletes these with it. */
+export function orgRateKeys(orgId: string): string[] {
+  return [invitesKey(orgId), exportKey(orgId)];
+}
+
 /** The start of the window of `$2` seconds that now is in. */
 const WINDOW = `to_timestamp(floor(extract(epoch FROM now()) / $2::int) * $2::int)`;
 
@@ -30,6 +45,28 @@ export async function take(db: Queryable, key: string, seconds: number, max: num
 /** `take`, for what is never given back. */
 export async function allowed(db: Queryable, key: string, seconds: number, max: number): Promise<boolean> {
   return (await take(db, key, seconds, max)) !== null;
+}
+
+/**
+ * Let `key` through once every `seconds`, counted from the last time it was
+ * let through. A window that starts on the clock would let two through, one
+ * at each end of it. Call this inside a transaction: the wait and the record
+ * are one lock, so two at once cannot both pass. Exactly `seconds` since the
+ * last one is enough. What is refused is not recorded, and an older record of
+ * the same key is replaced by this one.
+ */
+export async function onceEvery(db: Queryable, key: string, seconds: number): Promise<boolean> {
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`rate:${key}`]);
+  const [recent] = await db.query<{ recent: boolean }>(
+    `SELECT true AS recent FROM rate_counters
+     WHERE key = $1 AND window_start > clock_timestamp() - make_interval(secs => $2::int)
+     LIMIT 1`,
+    [key, seconds],
+  );
+  if (recent) return false;
+  await db.query(`DELETE FROM rate_counters WHERE key = $1`, [key]);
+  await db.query(`INSERT INTO rate_counters (key, window_start, n) VALUES ($1, clock_timestamp(), 1)`, [key]);
+  return true;
 }
 
 /**

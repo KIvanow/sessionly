@@ -30,7 +30,7 @@ curl -H "Authorization: Bearer $SESSIONLY_TOKEN" https://sessionly.example.com/a
 | | Who | |
 |---|---|---|
 | `GET /ping` | any token | Whether the token is accepted, with its organisation, address, name and role. |
-| `PUT /sessions/{machine_id}/{source}/{session_id}` | person, `env` | Stores or replaces one session. The body is the payload described under [What an upload contains](upload-contents.md). Answers `{"stored": true}`; `{"stored": false, "excluded": true}` for a repository its person stopped. `422` for a body that does not fit the schema (with the first five things wrong with it) or whose address is not the session's, `409` for a session that is someone else's. |
+| `PUT /sessions/{machine_id}/{source}/{session_id}` | person, `env` | Stores or replaces one session. The body is the payload described under [What an upload contains](upload-contents.md). Answers `{"stored": true}`; `{"stored": false, "excluded": true}` for a repository its person stopped. `403` with code `person_removed` when the address it is filed under belongs to someone who was removed: that session is refused, and a shared token goes on to the next. `422` for a body that does not fit the schema (with the first five things wrong with it) or whose address is not the session's, `409` for a session that is someone else's. |
 | `DELETE /sessions/{machine_id}/{source}/{session_id}` | person, `env` | Takes one back. Only the person a session is filed under can; the answer is `{"removed": true}`, or `false` if there was none of theirs. |
 | `GET /sessions/{machine_id}/{source}/{session_id}` | person | One session: `owner_email`, `updated_at` and the `upload` as it was stored. `404` if it is not there or not theirs to see. |
 | `GET /sessions` | person | A page of sessions, newest first: `{"sessions": […], "total": n}`. Takes the filters below and `limit` (50, at most 500) and `offset`. |
@@ -44,6 +44,7 @@ curl -H "Authorization: Bearer $SESSIONLY_TOKEN" https://sessionly.example.com/a
 | Filter | Keeps sessions |
 |---|---|
 | `user`, `repo`, `model` | whose person, repository or models contain the text, in any case |
+| `user_is` | filed under exactly that address |
 | `repo_is`, `model_is` | of exactly that repository, or with exactly that main model; `(unknown)` for those with none |
 | `tool` | from one agent: `claude-code`, `cursor`, `grok` or `codex` |
 | `runtime` | `cloud`, or `local` for those on people's machines |
@@ -55,8 +56,8 @@ curl -H "Authorization: Bearer $SESSIONLY_TOKEN" https://sessionly.example.com/a
 | | Who | |
 |---|---|---|
 | `GET /repos/excluded` | person | The repositories the token's person stopped. |
-| `PUT /repos/excluded` | person | Stops one: the body is `{"repo": "…"}`. Deletes the sessions that person already submitted from it, and says how many. |
-| `DELETE /repos/excluded?repo=…` | person | Allows one again. |
+| `PUT /repos/excluded` | person | Stops one: the body is `{"repo": "…"}`. Deletes the sessions that person already submitted from it, and says how many. A person who was removed is `403` (`person_removed`). |
+| `DELETE /repos/excluded?repo=…` | person | Allows one again. A person who was removed is `403` (`person_removed`). |
 
 How a repository is named, and what a path covers, is under
 [Uploading](uploading.md#stopping-a-repository).
@@ -120,7 +121,7 @@ Action is a row of its own, and the row before it keeps the version that produce
 
 | | Who | |
 |---|---|---|
-| `GET /me` | person | Who the token is, and in which organisation. |
+| `GET /me` | person | Who the token is, and in which organisation. `owner` is true when they signed in as the organisation's owner. A token for a machine is not an owner, even the owner's own. On a server that is not hosted, the admin token from the environment is the owner and nobody else is. |
 | `GET /me/tokens` | person | Their own tokens. |
 | `POST /me/tokens` | person | A new `member` token for a machine of theirs: `{"name": "…"}`, optional. The token is in the answer, once. |
 | `DELETE /me/tokens/{id}` | person | Revokes one of them. |
@@ -130,8 +131,10 @@ Action is a row of its own, and the row before it keeps the version that produce
 | `DELETE /tokens/{id}` | `admin` | Revokes one. |
 | `GET /users` | `admin` | The people who may sign in. |
 | `POST /users` | `admin` | Adds one: `{"email": "…", "role": "member"}`, the role `admin` or `member`. `409` where neither Google nor GitHub is set up, or for someone already there; 30 an hour at most. |
-| `DELETE /users/{id}` | `admin` | Removes one. |
+| `DELETE /users/{id}` | `admin` | Removes one. Their sessions stay. With `?data=true`, their sessions are deleted too, and so are the repositories they stopped; pull requests stay. A session filed under their address is not stored while they stay removed. |
+| `DELETE /org` | owner, hosted | Deletes the organisation. The body is `{"name": "<the organisation's name>"}`. The wrong name is `400`. The right name is `204`: every token of the organisation is then `401`, and it is no longer offered at sign-in. The rows are removed after 7 days. Not offered on a server that is not hosted (`403`). |
 | `POST /users/{id}/forget-account` | `admin` | Lets a person in with another Google or GitHub account than the one they have used. |
+| `GET /export` | owner | The organisation as JSON lines (`application/x-ndjson`), a download named `sessionly-<org>-<date>.jsonl`. One line each for the organisation (with the time and the server's version), each person (no sign-in account ids), each session (its columns and the payload as uploaded), each pull request (every column), the lines each session has in a pull request, each earlier set of figures for a pull request, each stopped repository, and each token (never the hash). Once every ten minutes per organisation (`429`, code `rate_limited`). An admin or a member is `403`. A token for a machine is not an owner, even the owner's. On a server that is not hosted, the admin token from the environment is. |
 
 ## Without a token
 
