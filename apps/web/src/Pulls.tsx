@@ -6,7 +6,7 @@ import { average, count, dateTime, modelName, percent, repoName, share, shareOf,
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { matchAll, nameSome, pullHref, web } from "./pull.ts";
+import { costIsFloor, costText, matchAll, nameSome, pullCost, pullHref, pullsCostNote, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -108,7 +108,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
       )}
       {total && total.pulls > 0 && (
         <>
-          <section className="tiles three" aria-label="Totals">
+          <section className="tiles" aria-label="Totals">
             <Tile
               label="Pull requests"
               value={count(total.pulls)}
@@ -125,6 +125,11 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
               value={shareOf(total.agent_lines_surviving, total.opened_agent_lines)}
               part={share(total.agent_lines_surviving, total.opened_agent_lines)}
               note={`${count(total.agent_lines_surviving)} of ${count(total.opened_agent_lines)}, in ${count(total.pulls_from_open)} pull requests reported since they were opened`}
+            />
+            <Tile
+              label="Agent cost"
+              value={costText(total.cost_usd, total.cost_estimated, total.pulls_with_cost_missing > 0)}
+              note={pullsCostNote(total)}
             />
           </section>
           <ByModel summary={summary.data!} />
@@ -158,6 +163,7 @@ export function Pulls({ token, scope, setScope, repos, onSignOut }: Props) {
                   <th scope="col" className="num">By agents</th>
                   <th scope="col">Written with</th>
                   <th scope="col" className="num">Agent lines that survived review</th>
+                  <th scope="col" className="num">Agent cost</th>
                   <th scope="col" className="num">Review rounds</th>
                   <th scope="col" className="num">Comments by people</th>
                   <th scope="col" className="num">by bots</th>
@@ -314,6 +320,12 @@ function Row({ p }: { p: PullRow }) {
         {p.first_event === "opened" && a.first.agent_lines > 0
           ? `${shareOf(surviving, a.first.agent_lines)} of ${count(a.first.agent_lines)}`
           : "–"}
+      </td>
+      <td
+        className="num nowrap"
+        title={p.cost && p.cost.usd != null && costIsFloor(p.cost) ? "At least: a session of it has no cost figure, or one that leaves requests out" : undefined}
+      >
+        {pullCost(p.cost, "≥ ")}
       </td>
       <td className="num">{count(p.review_rounds)}</td>
       <td className="num">{count(p.review_comments)}</td>

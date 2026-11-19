@@ -14,6 +14,7 @@ import {
 } from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
 import type { OrgDb } from "./db.ts";
+import { holdPullSessions } from "./pulls.ts";
 
 const UNKNOWN = "(unknown)";
 
@@ -167,11 +168,36 @@ async function oneAtATime(db: OrgDb, email: string, doing: "storing" | "stopping
  * address of the environment uploading it, whose copy is this person's too.
  */
 async function dropOwn(db: OrgDb, key: unknown[], email: string, refiled: string | null): Promise<void> {
-  await db.query(
+  const removed = await db.query(
     `DELETE FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4
-       AND (owner_email = $5 OR owner_email = $6)`,
+       AND (owner_email = $5 OR owner_email = $6)
+     RETURNING machine_id, source, session_id`,
     [...key, email, refiled],
+  );
+  await forgetLines(db, removed);
+}
+
+/**
+ * A deleted session's lines go from the pull requests that kept which ones
+ * they were. That it had lines there, and how many, stays: the pull request
+ * then says a session of it was deleted since.
+ *
+ * Without them its lines in each count whole, as `weigh` counts those of a
+ * pull request whose lines were not kept. They go from all its pull requests
+ * at once, so none is left with lines shared out with them, and what the
+ * other sessions' lines count as is their own affair.
+ */
+async function forgetLines(db: OrgDb, sessions: Record<string, unknown>[]): Promise<void> {
+  if (sessions.length === 0) return;
+  // After any report that is storing these now: it then finds the session gone, or this finds what it stored.
+  await holdPullSessions(db);
+  await db.query(
+    `UPDATE pull_sessions p SET matched = NULL, opened_matched = NULL, weight = p.lines, opened_weight = p.opened_lines
+     FROM jsonb_to_recordset($2::jsonb) AS gone(machine_id text, source text, session_id text)
+     WHERE p.org_id = $1 AND p.machine_id = gone.machine_id AND p.source = gone.source
+       AND p.session_id = gone.session_id AND (p.matched IS NOT NULL OR p.opened_matched IS NOT NULL)`,
+    [db.orgId, JSON.stringify(sessions.map((s) => ({ machine_id: s.machine_id, source: s.source, session_id: s.session_id })))],
   );
 }
 
@@ -244,9 +270,10 @@ export async function excludeRepo(
        AND s.repo IS NOT DISTINCT FROM gone.repo
        AND s.repo_root IS NOT DISTINCT FROM gone.root
        AND s.cwd IS NOT DISTINCT FROM gone.cwd
-     RETURNING 1`,
+     RETURNING s.machine_id, s.source, s.session_id`,
     [db.orgId, email, gone.map((place) => place.repo), gone.map((place) => place.root), gone.map((place) => place.cwd)],
   );
+  await forgetLines(db, removed);
   return { repo, sessions_removed: removed.length, covers_folders: coversFolders };
 }
 
@@ -287,9 +314,10 @@ export async function removeUpload(
   const removed = await db.query(
     `DELETE FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4 AND owner_email = $5
-     RETURNING 1`,
+     RETURNING machine_id, source, session_id`,
     [db.orgId, key.machine_id, key.source, key.session_id, uploader.email],
   );
+  await forgetLines(db, removed);
   return removed.length > 0;
 }
 

@@ -2,7 +2,7 @@ import type { PullDetail, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { type By, byOf, countFeedback, feedbackLabel, matchedLine, web } from "./pull.ts";
+import { type By, byOf, countFeedback, feedbackLabel, matchedLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
 import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -73,7 +73,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
         repoOlder={p.repo_reporter_older}
         older={p.reporter_older}
       />
-      <section className="tiles" aria-label="Totals">
+      <section className="tiles five" aria-label="Totals">
         <Tile label="Lines added" value={count(a.now.lines)} note={`in ${count(p.commits)} ${p.commits === 1 ? "commit" : "commits"}`} />
         <Tile
           label="Written by agents"
@@ -98,6 +98,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
           value={count(p.review_comments + p.bot_review_comments)}
           note={`${count(p.review_comments)} by people, ${count(p.bot_review_comments)} by bots, in ${count(p.review_rounds)} ${p.review_rounds === 1 ? "round" : "rounds"} of review`}
         />
+        <Tile label="Agent cost" value={pullCost(p.cost)} note={pullCostNote(p.cost)} />
       </section>
 
       {a.now.by.length > 0 && (
@@ -130,6 +131,14 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
 
       <section className="card" aria-label="Sessions">
         <h2>Sessions that wrote it</h2>
+        {p.cost?.usd != null && (
+          <p className="muted hint">
+            A session's cost here is its share of what the whole session cost: as many of the lines it
+            uploaded hashes of as are in this pull request. A line that is in other pull requests too
+            is shared out between them. Their sum is the agent cost above: what the matched sessions
+            cost, not what making the pull request did.
+          </p>
+        )}
         {p.sessions == null ? (
           <Earlier what="Which sessions wrote its lines" dependsOnAction={false} />
         ) : p.sessions.length === 0 ? (
@@ -148,7 +157,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
                   <th scope="col">Tool</th>
                   <th scope="col">Model</th>
                   <th scope="col">Started</th>
-                  <th scope="col" className="num">Cost</th>
+                  <th scope="col" className="num">Cost in this pull request</th>
                   <th scope="col" className="num">Lines in this pull request</th>
                 </tr>
               </thead>
@@ -299,6 +308,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
 function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
   const known = s.session;
   const name = known?.title || `Session ${s.session_id.slice(0, 8)}`;
+  const its = sessionShare(s);
   return (
     <tr>
       <td className="title">
@@ -309,7 +319,17 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
       <td className="nowrap">{toolName(s.source)}</td>
       <td className="nowrap">{known?.primary_model ? modelName(known.primary_model) : "–"}</td>
       <td className="nowrap">{dateTime(known?.started_at)}</td>
-      <td className="num">{known ? cost(known.cost_usd, known.cost_source) : "–"}</td>
+      <td className="num" title={its.why ?? undefined}>
+        {its.text != null ? (
+          <>
+            {its.text} <span className="muted">of {cost(known?.cost_usd ?? null, known?.cost_source ?? null)}</span>
+          </>
+        ) : s.uncounted ? (
+          <span className="muted">not known yet</span>
+        ) : (
+          "–"
+        )}
+      </td>
       <td className="num">
         {count(s.lines)} <span className="muted">({percent(share(s.lines, lines))})</span>
       </td>

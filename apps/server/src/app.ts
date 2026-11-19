@@ -271,6 +271,13 @@ export function dashboardPolicy(telemetry?: Telemetry | null): string {
  * request carries and opens that organisation's transaction; no route below
  * may touch it (`scripts/check-unscoped.mjs` checks each line it is on).
  */
+/**
+ * Reading pull requests takes several statements, whose figures and
+ * sessions have to be of one moment: a report stored between two of them
+ * would otherwise leave lines of before beside costs of after.
+ */
+const readsPulls = (method: string, path: string): boolean => method === "GET" && /\/prs(?:\/[a-z]+)?$/.test(path);
+
 export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
   const accounts = options.accounts ?? {};
@@ -441,7 +448,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
         // A handler that threw has been answered for already (see onError).
         // What it wrote before throwing must not stay.
         if (c.error) throw new Undo();
-      });
+      }, { snapshot: readsPulls(c.req.method, c.req.path) });
     } catch (err) {
       if (!(err instanceof Undo)) throw err;
     }
