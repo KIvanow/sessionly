@@ -112,7 +112,7 @@ organisation names it among its files, as it was first reported or as it was las
 worktree's copy of the repository too). A file a session wrote that nobody committed
 (`.env.local`, a note of the person's own) is in none of them, and is never shown. Whoever can
 report pull requests to the second organisation (a `ci` or `admin` token there) decides which
-paths are known, so let visitors in as members.
+paths are known.
 
 What a session cost a pull request is its cost in the proportion of its lines there to all
 it added. A pull request costs the same in both organisations when none of the lines its
@@ -142,8 +142,12 @@ it was opened with is kept for good, so those lines count as added after it was 
 import ends by matching the repository's pull requests there again, since a report arrives
 before the sessions that wrote its lines are copied.
 
-The second organisation is made like any other, so that it has an owner. Whoever can open it
-sees the costs and the addresses of the people who worked on the repository.
+The second organisation is made like any other, so that it has an owner. Anyone who signs in
+with Google or GitHub is offered it, and can join it as a `viewer`: they see everything an
+admin sees (every session, the pull requests, the costs and the addresses of the people who
+worked on the repository) and change nothing. It is offered only while it holds nothing but
+the server's copies: a session uploaded to it directly closes it, as the settings may then
+name the organisation the work is in.
 
 ### What is not shown
 

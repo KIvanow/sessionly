@@ -12,7 +12,20 @@ import { useApi } from "./useApi.ts";
 const BY: Record<By, string> = { people: "People", bots: "Bots", author: "The author" };
 
 /** One pull request: what agents wrote of it, in which sessions, and how review went. */
-export function PullView({ token, repo, number, onSignOut }: { token: string; repo: string; number: number; onSignOut: () => void }) {
+export function PullView({
+  token,
+  repo,
+  number,
+  readOnly = false,
+  onSignOut,
+}: {
+  token: string;
+  repo: string;
+  number: number;
+  /** For a viewer, who can look and change nothing. */
+  readOnly?: boolean;
+  onSignOut: () => void;
+}) {
   const [show, setShow] = useState<"all" | By>("all");
   const [matching, setMatching] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -58,7 +71,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
         </p>
         <p>
           {matchedLine(p)}{" "}
-          {p.matchable && (
+          {p.matchable && !readOnly && (
             <button type="button" className="quiet" disabled={matching} onClick={matchAgain}>
               {matching ? "Matching…" : "Match again"}
             </button>

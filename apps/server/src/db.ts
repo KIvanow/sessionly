@@ -806,6 +806,13 @@ const MIGRATIONS: string[] = [
   // lines and comments were last taken out of (a hash, as `rulesOf` makes it).
   // One kept by others has them taken out again at the next import.
   `ALTER TABLE pull_requests ADD COLUMN shown_rules text`,
+  // Anyone who signs in may join the organisation a repository is shown in
+  // (demo.ts) as a viewer: they see all of it, as an admin does, and change
+  // nothing (app.ts).
+  `ALTER TABLE users DROP CONSTRAINT users_role_check`,
+  `ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('owner', 'admin', 'member', 'viewer'))`,
+  `ALTER TABLE tokens DROP CONSTRAINT tokens_role_check`,
+  `ALTER TABLE tokens ADD CONSTRAINT tokens_role_check CHECK (role IN ('admin', 'member', 'ci', 'env', 'viewer'))`,
 ];
 
 /**

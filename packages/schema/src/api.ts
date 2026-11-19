@@ -8,7 +8,7 @@ import type { Upload } from "./upload.ts";
  * sessions in: it can upload sessions and nothing else, and a cloud session
  * it uploads is filed under the person the platform says started it.
  */
-export type Role = "admin" | "member" | "ci" | "env";
+export type Role = "admin" | "member" | "ci" | "env" | "viewer";
 
 export interface Me {
   ok: true;
@@ -88,6 +88,8 @@ export interface Membership {
    * that account gets in.
    */
   other_account: SignInProvider | null;
+  /** The organisation a repository is shown in, open to anyone who signs in, as a viewer who can change nothing. */
+  demo?: boolean;
 }
 
 /** Who a provider said someone is, and where they can sign in (`/auth/check`). */
@@ -122,7 +124,7 @@ export interface SignedIn {
 export interface UserInfo {
   id: string;
   email: string;
-  role: "owner" | "admin" | "member";
+  role: "owner" | "admin" | "member" | "viewer";
   created_at: string;
   removed_at: string | null;
   /**

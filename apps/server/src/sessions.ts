@@ -399,12 +399,15 @@ export interface Filters {
  * starts with the viewer's organisation: an admin sees all of it, anyone
  * else their own sessions in it.
  */
+/** An admin sees everyone's sessions, and so does a viewer of the organisation a repository is shown in. */
+const seesAll = (p: Principal): boolean => p.role === "admin" || p.role === "viewer";
+
 function where(viewer: Principal, filters: Filters): { sql: string; params: unknown[] } {
   const params: unknown[] = [];
   const bind = (value: unknown) => `$${params.push(value)}`;
   const like = (text: string) => bind(`%${text.replace(/[\\%_]/g, "\\$&")}%`);
   const conditions: string[] = [`org_id = ${bind(viewer.orgId)}`];
-  if (viewer.role !== "admin") conditions.push(`owner_email = ${bind(viewer.email)}`);
+  if (!seesAll(viewer)) conditions.push(`owner_email = ${bind(viewer.email)}`);
   if (filters.user) conditions.push(`owner_email ILIKE ${like(filters.user)}`);
   if (filters.user_is) conditions.push(`owner_email = ${bind(filters.user_is)}`);
   if (filters.repo) conditions.push(`repo ILIKE ${like(filters.repo)}`);
@@ -575,7 +578,7 @@ export async function getSession(
     [db.orgId, key.machine_id, key.source, key.session_id],
   );
   const row = rows[0];
-  if (!row || (viewer.role !== "admin" && row.owner_email !== viewer.email)) return null;
+  if (!row || (!seesAll(viewer) && row.owner_email !== viewer.email)) return null;
   const payload = typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
   return { owner_email: row.owner_email, updated_at: iso(row.updated_at) ?? "", upload: payload as Upload };
 }

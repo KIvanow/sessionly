@@ -317,6 +317,13 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
         return c.json({ error: "this token only uploads sessions" }, 403);
       }
     }
+    // A viewer, of the organisation a repository is shown in, reads and does nothing else, but for signing out.
+    if (principal.role === "viewer") {
+      const signingOut = c.req.method === "DELETE" && c.req.path.endsWith("/auth/session");
+      if (c.req.method !== "GET" && !signingOut) {
+        return c.json({ error: "a viewer can only look", code: "viewer" }, 403);
+      }
+    }
     c.set("principal", principal);
     await next();
   });
@@ -666,6 +673,10 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const adminsOnly = (p: Principal) => {
     if (p.role !== "admin") throw new ApiError(403, "admins_only", "admins only");
   };
+  /** What an admin can read, a viewer can read too. */
+  const readersOnly = (p: Principal) => {
+    if (p.role !== "admin" && p.role !== "viewer") throw new ApiError(403, "admins_only", "admins only");
+  };
   const pullFilters = (query: Record<string, string>): PullFilters => {
     const state = query.state || undefined;
     if (state && !["open", "merged", "closed"].includes(state)) {
@@ -679,12 +690,12 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     return c.json({ stored: true, attribution: await storePull(c.get("db"), report, options.hashKey) });
   });
   api.get("/prs/summary", async (c) => {
-    adminsOnly(c.get("principal"));
+    readersOnly(c.get("principal"));
     return c.json(await summarizePulls(c.get("db"), pullFilters(c.req.query())));
   });
   // The repository's name has slashes in it, so it is asked for by query.
   api.get("/prs/detail", async (c) => {
-    adminsOnly(c.get("principal"));
+    readersOnly(c.get("principal"));
     const query = c.req.query();
     if (!query.repo) throw new BadRequest("repo is required");
     const number = wholeNumber(query.number, 0, 2 ** 31 - 1, "number");
@@ -709,7 +720,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     return c.json(matched);
   });
   api.get("/prs", async (c) => {
-    adminsOnly(c.get("principal"));
+    readersOnly(c.get("principal"));
     const query = c.req.query();
     const page = {
       limit: wholeNumber(query.limit, 50, 500, "limit"),
@@ -822,7 +833,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     });
   }
   // Signing in and signing up need no token, so they come before the API that does.
-  app.route("/api/v1/auth", openRoutes(ownerDb, accounts));
+  app.route("/api/v1/auth", openRoutes(ownerDb, accounts, options.demo && !("problem" in options.demo) ? options.demo.org : undefined));
   // Asked before anyone signs in, so that a page is counted whoever opens it.
   const telemetry = options.telemetry ?? null;
   app.get("/api/v1/telemetry", (c) => c.json(telemetry));
