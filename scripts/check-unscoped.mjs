@@ -55,6 +55,9 @@ const IN_APP = [
   /\bownerDb\.asOrg\(c\.get\("principal"\)\.orgId,/,
   // Counters of what was asked for lately: they belong to no organisation.
   /\b(?:allowed|take|giveBack)\(ownerDb,/,
+  // An export's ten minutes, counted from the last one. The lock and the
+  // record are one transaction, and the counter belongs to no organisation.
+  /\bownerDb\.transaction\(\(tx\) => onceEvery\(tx,/,
   // Whether the database answers at all.
   /\bownerDb\.query\(`SELECT 1`\)/,
   // Signing in and signing up, before anyone is known (signup.ts).
