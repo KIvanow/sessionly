@@ -2,7 +2,7 @@
 import type { OrgDb } from "./db.ts";
 import type { Principal } from "./auth.ts";
 import type { ProviderName } from "./oauth.ts";
-import { holdUploads } from "./sessions.ts";
+import { forgetLines, holdUploads } from "./sessions.ts";
 
 export interface UserInfo {
   id: string;
@@ -129,9 +129,15 @@ export async function removeUser(db: OrgDb, id: string, by: Principal, options?:
   // page says a session is gone. Without this, nothing here is deleted.
   // Wait for an upload that is storing one of theirs. It then commits, and
   // the delete below removes it. An upload that waits sees them removed.
+  // The lines a pull request kept of those sessions go with them. The pull
+  // request stays, and says a session of it was deleted since.
   if (!options?.data) return;
   await holdUploads(db, user.email);
-  await db.query(`DELETE FROM sessions WHERE org_id = $1 AND owner_email = $2`, [db.orgId, user.email]);
+  const removed = await db.query(
+    `DELETE FROM sessions WHERE org_id = $1 AND owner_email = $2 RETURNING machine_id, source, session_id`,
+    [db.orgId, user.email],
+  );
+  await forgetLines(db, removed);
   await db.query(`DELETE FROM repo_exclusions WHERE org_id = $1 AND owner_email = $2`, [db.orgId, user.email]);
   await db.query(`DELETE FROM repos_allowed_again WHERE org_id = $1 AND owner_email = $2`, [db.orgId, user.email]);
 }

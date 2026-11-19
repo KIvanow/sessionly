@@ -215,7 +215,7 @@ async function dropOwn(db: OrgDb, key: unknown[], email: string, refiled: string
  * at once, so none is left with lines shared out with them, and what the
  * other sessions' lines count as is their own affair.
  */
-async function forgetLines(db: OrgDb, sessions: Record<string, unknown>[]): Promise<void> {
+export async function forgetLines(db: OrgDb, sessions: Record<string, unknown>[]): Promise<void> {
   if (sessions.length === 0) return;
   // After any report that is storing these now: it then finds the session gone, or this finds what it stored.
   await holdPullSessions(db);

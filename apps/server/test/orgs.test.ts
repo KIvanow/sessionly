@@ -1316,6 +1316,16 @@ test("removing a person can delete their sessions and nobody else's", async () =
     );
     return Number(row?.n);
   };
+  // Lines a pull request kept of these sessions. Erasing the person clears
+  // which lines they were. The pull request, and the other person's lines, stay.
+  await db.query(
+    `INSERT INTO pull_sessions (
+       org_id, repo, number, machine_id, source, session_id, lines, weight, matched,
+       opened_lines, opened_weight, opened_matched
+     ) VALUES
+       ('org-people', 'github.com/acme/web', 4, 'm1', 'claude-code', 'ann-s', 4, 1.5, '{"src/a.ts":["ab"]}'::jsonb, 4, 1.5, '{"src/a.ts":["ab"]}'::jsonb),
+       ('org-people', 'github.com/acme/web', 4, 'm1', 'claude-code', 'bob-s', 2, 2, '{"src/b.ts":["cd"]}'::jsonb, 2, 2, '{"src/b.ts":["cd"]}'::jsonb)`,
+  );
   assert.equal((await call(admin, "DELETE", "/users/usr_ann?data=true")).status, 200);
   assert.equal(await count("sessions", "ann@people.example"), 0);
   assert.equal(await count("sessions", "bob@people.example"), 1);
@@ -1323,6 +1333,24 @@ test("removing a person can delete their sessions and nobody else's", async () =
   assert.equal(await count("repos_allowed_again", "ann@people.example"), 0);
   assert.equal(await count("repo_exclusions", "bob@people.example"), 1);
   assert.equal((await call(admin, "GET", "/prs")).body.pulls[0].title, "stays on the pull request");
+  const kept = async (id: string) => {
+    const [row] = await db.query<{ matched: unknown; opened_matched: unknown; weight: unknown; opened_weight: unknown }>(
+      `SELECT matched, opened_matched, weight, opened_weight FROM pull_sessions
+       WHERE org_id = 'org-people' AND session_id = $1`,
+      [id],
+    );
+    assert.ok(row, id);
+    return row;
+  };
+  const annLines = await kept("ann-s");
+  assert.equal(annLines.matched, null);
+  assert.equal(annLines.opened_matched, null);
+  assert.equal(Number(annLines.weight), 4);
+  assert.equal(Number(annLines.opened_weight), 4);
+  const bobLines = await kept("bob-s");
+  assert.ok(bobLines.matched);
+  assert.ok(bobLines.opened_matched);
+  assert.equal(Number(bobLines.weight), 2);
   // A cloud session filed under the removed address is not stored. One filed
   // under someone who is still here is. A CI token still reports a pull request.
   const env = await tokenFor(db, { email: "env@people.example", role: "env" }, "org-people");
