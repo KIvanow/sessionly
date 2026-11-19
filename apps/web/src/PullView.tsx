@@ -1,8 +1,8 @@
-import type { PullDetail, PullSession } from "@sessionly/schema";
+import type { PullDetail, PullHistory, PullHistoryNamedSession, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { type By, byOf, countFeedback, feedbackLabel, matchedLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
+import { type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, matchedLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
 import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -79,7 +79,7 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
           label="Written by agents"
           value={shareOf(a.now.agent_lines, a.now.lines)}
           part={share(a.now.agent_lines, a.now.lines)}
-          note={`${count(a.now.agent_lines)} of ${count(a.now.lines)} lines`}
+          note={agentNote(a.now.agent_lines, a.now.lines, figureShift(p.history, dateTime, count))}
         />
         <Tile
           label="Agent lines that survived review"
@@ -100,6 +100,8 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
         />
         <Tile label="Agent cost" value={pullCost(p.cost)} note={pullCostNote(p.cost)} />
       </section>
+
+      <History history={p.history} />
 
       {a.now.by.length > 0 && (
         <section className="card" aria-label="By model">
@@ -303,6 +305,86 @@ export function PullView({ token, repo, number, onSignOut }: { token: string; re
       </section>
     </>
   );
+}
+
+/** The agent tile's note: the count, and, when that count moved, what it was until this report. */
+function agentNote(agentLines: number, lines: number, shift: string | null): string {
+  const now = `${count(agentLines)} of ${count(lines)} lines`;
+  return shift ? `${now}. ${shift}` : now;
+}
+
+function History({ history }: { history: PullHistory[] }) {
+  return (
+    <section className="card" aria-label="History">
+      <h2>History</h2>
+      <p className="muted hint">Each time the figures moved, and when a newer Action reported them as they were.</p>
+      {history.length === 0 ? (
+        <p className="muted">No earlier figures were kept.</p>
+      ) : (
+        <div className="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">When</th>
+                <th scope="col">What</th>
+                <th scope="col" className="num">Figures</th>
+                <th scope="col">Why</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((entry, i) => (
+                <tr key={`${entry.at} ${i}`}>
+                  <td className="nowrap">{dateTime(entry.at)}</td>
+                  <td className="nowrap">{historyEvent(entry.event)}</td>
+                  <td className="num nowrap">{count(entry.agent_lines)} of {count(entry.lines)}</td>
+                  <td>
+                    {entry.change.reason ?? "–"}
+                    <HistorySessions change={entry.change} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Sessions a change names, each a link to the session, as the sessions table links them. */
+function HistorySessions({ change }: { change: PullHistory["change"] }) {
+  const named: { key: string; s: PullHistoryNamedSession; note: string }[] = [
+    ...change.sessions_added.map((s) => ({ key: `added ${sessionKey(s)}`, s, note: "uploaded" })),
+    ...change.sessions_gone.map((s) => ({ key: `gone ${sessionKey(s)}`, s, note: "no longer matched" })),
+    ...change.sessions_changed.map((s) => ({
+      key: `changed ${sessionKey(s)}`,
+      s,
+      note: `was ${count(s.lines_before)}`,
+    })),
+  ];
+  if (named.length === 0) return null;
+  return (
+    <>
+      {" · "}
+      {named.map((item, i) => (
+        <span key={item.key}>
+          {i > 0 && ", "}
+          <HistorySession s={item.s} /> ({item.note})
+        </span>
+      ))}
+    </>
+  );
+}
+
+function sessionKey(s: { machine_id: string; source: string; session_id: string }): string {
+  return `${s.machine_id} ${s.source} ${s.session_id}`;
+}
+
+function HistorySession({ s }: { s: PullHistoryNamedSession }) {
+  const name = s.session?.title || `Session ${s.session_id.slice(0, 8)}`;
+  const label = `${name}, ${count(s.lines)} ${s.lines === 1 ? "line" : "lines"}`;
+  if (!s.session) return <span className="muted">{label} (deleted since)</span>;
+  return <a href={sessionHref(s)}>{label}</a>;
 }
 
 function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
