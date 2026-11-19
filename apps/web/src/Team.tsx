@@ -288,8 +288,10 @@ function People({
           </label>
           <p className="muted">
             Pull requests stay. A session that was removed is shown as “(deleted since)” on a pull request. While they
-            stay removed, a session filed under this address is not stored. Adding them again lets a session in, and a
-            repository they had stopped is no longer stopped.
+            stay removed, a session filed under this address is not stored. Adding them again lets a session in.{" "}
+            {also
+              ? "A repository they had stopped is no longer stopped."
+              : "The repositories they stopped stay stopped."}
           </p>
           <div className="ask-actions">
             <button type="button" onClick={confirmRemove}>
