@@ -29,7 +29,6 @@ services:
       SESSIONLY_DEMO_REPO: ${SESSIONLY_DEMO_REPO:-}
       SESSIONLY_DEMO_ORG: ${SESSIONLY_DEMO_ORG:-}
       SESSIONLY_DEMO_HIDE: ${SESSIONLY_DEMO_HIDE:-}
-      SESSIONLY_DEMO_MINUTES: ${SESSIONLY_DEMO_MINUTES:-}
     depends_on:
       db:
         condition: service_healthy

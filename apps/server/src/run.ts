@@ -26,17 +26,17 @@
 //                          addresses on a pull request's commits is hashed with it (hosted: required)
 //   SESSIONLY_DEMO_FROM, SESSIONLY_DEMO_REPO, SESSIONLY_DEMO_ORG
 //                          one repository's sessions, uploaded to the first organisation, are shown
-//                          in the second without anything that was typed or run (see demo.ts);
-//                          SESSIONLY_DEMO_HIDE: what of it not to show; SESSIONLY_DEMO_MINUTES: how
-//                          often they are brought up to date (default 30)
+//                          in the second without anything that was typed or run, as
+//                          `node src/cli.ts demo import` copies them (see demo.ts); reports to the
+//                          second are kept without SESSIONLY_DEMO_HIDE: what of it not to show
 //   SESSIONLY_TELEMETRY    "off" for the dashboard not to count which of its pages are opened
 //                          (also off when DO_NOT_TRACK is set)
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp, type Extension } from "./app.ts";
-import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Db, type Migrations } from "./db.ts";
-import { copyRepo, demoFrom, hidePulls, reportsShownIn, unshow, type Copied, type CopyOptions, type Demo } from "./demo.ts";
+import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Migrations } from "./db.ts";
+import { demoFrom, reportsShownIn } from "./demo.ts";
 import { tidy } from "./limits.ts";
 import { purgeDeletedOrgs } from "./orgs.ts";
 import {
@@ -209,143 +209,6 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
   return notes;
 }
 
-/**
- * One copy, if both organisations are there. With the one they are uploaded
- * to gone (or deleted, and not purged yet), everything sent from it is
- * removed; with the one they are shown in gone, there is nothing to do, and
- * null says so. `warn` is told either.
- */
-export async function showRepo(db: Db, demo: Demo, options: CopyOptions & { warn?: (text: string) => void } = {}): Promise<Copied | null> {
-  const warn = options.warn ?? (() => {});
-  const there = await db.query<{ id: string }>(`SELECT id FROM orgs WHERE id IN ($1, $2) AND deleted_at IS NULL`, [demo.from, demo.org]);
-  if (!there.some((org) => org.id === demo.org)) {
-    warn(`SESSIONLY_DEMO_ORG: there is no organisation ${demo.org}. The repository is not shown.`);
-    return null;
-  }
-  const source = there.some((org) => org.id === demo.from);
-  if (!source) warn(`SESSIONLY_DEMO_FROM: there is no organisation ${demo.from}. What was copied from it is removed from ${demo.org}.`);
-  return copyRepo(source ? (fn) => db.asOrg(demo.from, fn) : null, (fn) => db.asOrg(demo.org, fn), demo, options);
-}
-
-/**
- * Take back what was copied into each organisation that is not `shownIn`,
- * the one SESSIONLY_DEMO_ORG names now (undefined when it names none): the
- * demo was moved to another, or turned off. With the settings of a demo set
- * but wrong, SESSIONLY_DEMO_ORG is still the one it is meant for, and is
- * left as it is. Each organisation taken back is said (`warn`) before, and
- * what was done in it is what this returns.
- */
-export async function unshowElsewhere(
-  db: Db,
-  shownIn: string | undefined,
-  options: CopyOptions & { warn?: (text: string) => void } = {},
-): Promise<({ org: string } & Awaited<ReturnType<typeof unshow>>)[]> {
-  const warn = options.warn ?? (() => {});
-  const rows = await db.query<{ org_id: string }>(
-    `SELECT DISTINCT org_id FROM shown_sessions WHERE org_id IS DISTINCT FROM $1::text ORDER BY org_id`,
-    [shownIn ?? null],
-  );
-  const done = [];
-  for (const { org_id: org } of rows) {
-    warn(`${org} is not SESSIONLY_DEMO_ORG any more: the sessions the server copied into it are removed.`);
-    done.push({ org, ...(await unshow((fn) => db.asOrg(org, fn), options)) });
-  }
-  return done;
-}
-
-/**
- * Taking back what was copied elsewhere, as the server does it: what goes
- * wrong, and what was done, said. Whether anything failed, and is to be
- * tried again.
- */
-export const unshowing = (db: Db, shownIn: string | undefined, key: string | undefined): Promise<boolean> =>
-  unshowElsewhere(db, shownIn, {
-    key,
-    log: (err) => console.error("taking back what was copied:", err),
-    warn: (text) => console.warn(text),
-  })
-    .then((done) => {
-      for (const { org, removed, failed, matched } of done) {
-        console.log(`${org}: ${removed} copied sessions removed, ${failed} failed; ${matched} pull requests matched again.`);
-      }
-      return done.some(({ failed }) => failed > 0);
-    })
-    .catch((err) => {
-      console.error("taking back what was copied failed:", err);
-      return true;
-    });
-
-/**
- * With no demo to copy, but reports to SESSIONLY_DEMO_ORG kept without the
- * paths not shown: what was reported there by other rules is gone through
- * as a copy would (`hidePulls`). Whether anything failed.
- */
-const hidingReported = (db: Db, reports: ReturnType<typeof reportsShownIn>, key: string | undefined): Promise<boolean> => {
-  if (!reports || "problem" in reports) return Promise.resolve(false);
-  return hidePulls((fn) => db.asOrg(reports.org, fn), reports.hide, { key, log: (err) => console.error(`hiding paths in ${reports.org}:`, err) })
-    .then(({ failed }) => failed > 0)
-    .catch((err) => {
-      console.error(`hiding paths in ${reports.org} failed:`, err);
-      return true;
-    });
-};
-
-/** How long after a failed attempt to take back what was copied it is tried again, when no copy would do it. */
-const TAKE_BACK_AGAIN_MS = 10 * 60_000;
-
-/**
- * With no demo, or one whose settings are wrong: what is not SESSIONLY_DEMO_ORG
- * is taken back, and what was reported there by other rules is gone
- * through, now, and again later for as long as anything fails.
- */
-function takingBack(db: Db, key: string | undefined): void {
-  const reports = reportsShownIn(process.env);
-  const attempt = async () => {
-    const unshown = await unshowing(db, reports?.org, key);
-    const hidden = await hidingReported(db, reports, key);
-    if (unshown || hidden) setTimeout(() => void attempt(), TAKE_BACK_AGAIN_MS).unref();
-  };
-  void attempt();
-}
-
-/**
- * Keep a repository shown in another organisation up to date: now, and
- * every so many minutes from then. The one it is shown in has to be there,
- * and is made by whoever runs the server, like any other, so that it has an
- * owner; without the one they are uploaded to, what was copied from it is
- * removed (`showRepo`). What was copied into any other organisation is
- * taken back (`unshowElsewhere`). Nothing that goes wrong here ends the
- * server: it is said, and tried again the next time.
- */
-function showing(db: Db, demo: Demo, key: string | undefined): void {
-  let busy = false;
-  const copy = async () => {
-    // One that is still going (the first copies every session) is not started beside itself.
-    if (busy) return;
-    busy = true;
-    try {
-      // What was copied into another organisation before is taken back first, whatever happens to this copy.
-      await unshowing(db, demo.org, key);
-      const done = await showRepo(db, demo, {
-        key,
-        log: (err) => console.error(`showing ${demo.repo} in ${demo.org}:`, err),
-        warn: (text) => console.warn(text),
-      });
-      if (done && done.copied + done.kept + done.removed + done.failed + done.matched > 0) {
-        console.log(
-          `${demo.repo} in ${demo.org}: ${done.copied} sessions copied, ${done.kept} left as they were, ${done.removed} removed, ${done.failed} failed; ${done.matched} pull requests matched again.`,
-        );
-      }
-    } catch (err) {
-      console.error(`showing ${demo.repo} in ${demo.org} failed:`, err);
-    } finally {
-      busy = false;
-    }
-  };
-  setInterval(() => void copy(), demo.minutes * 60_000).unref();
-  void copy();
-}
-
 export async function runServer(options: RunOptions = {}): Promise<void> {
   const hosted = process.env.SESSIONLY_HOSTED === "true";
   if (hosted) {
@@ -388,8 +251,6 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       .catch((err) => console.error("purging organisations failed:", err));
   }, 60 * 60_000);
   purging.unref();
-  const asked = demoFrom(process.env);
-  const demo = asked && !("problem" in asked) ? asked : undefined;
   const app = createApp(db, {
     hashKey: hashKeyOf(process.env),
     // Whatever else is wrong with the settings of a demo: reports there are never kept whole.
@@ -416,9 +277,6 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
         if (again) setTimeout(counting, 10 * 60_000).unref();
       });
   counting();
-
-  if (demo) showing(db, demo, hashKeyOf(process.env));
-  else takingBack(db, hashKeyOf(process.env));
 
   const port = Number(process.env.PORT ?? 8080);
   const hostname = process.env.HOST ?? "127.0.0.1";

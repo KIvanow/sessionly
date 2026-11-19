@@ -798,60 +798,13 @@ const MIGRATIONS: string[] = [
   // After the migrations that have already shipped: a database on those
   // must still be able to take this one.
   toApp(`UPDATE ON orgs`),
-  // What an organisation that one repository is shown in (demo.ts) has been
-  // sent: for each session, when the one it was made from was last stored,
-  // and by which rules it was made, so that a session sent again, or the
-  // rules changing, is seen without reading every session each time.
-  // `stored` is whether a copy was kept there: one turned down is not
-  // offered again until it changes, and one kept and since deleted there is
-  // sent again. Whose a session is, is read from the session, so no address
-  // is kept here. One that was removed stays a while with when, which is
-  // what says the pull requests there are due to be matched again.
-  // `known` is which paths of the repository were known to be committed
-  // when it was made (a hash of them), and `withheld` whether it left out a
-  // path of it for not being one of them: such a copy is made again once
-  // more are known. `started_at`, and the branch of a cloud session, say
-  // which pull requests a copy or a removal may change. `copied_at` is when
-  // what is there last changed. `declined_at` is when it was last turned
-  // down, and `allowed_again` how often its person had allowed a repository
-  // again there by then: one turned down is offered again a day later, or
-  // when that number has changed. `stored_at` is when the copy kept there
-  // was stored, as its row has it: a row stored there since by anyone else
-  // has another time, and is not the server's to remove.
-  `CREATE TABLE shown_sessions (
-     org_id        text NOT NULL REFERENCES orgs ON DELETE CASCADE,
-     machine_id    text NOT NULL,
-     source        text NOT NULL,
-     session_id    text NOT NULL,
-     sent_at       text NOT NULL,
-     rules         text NOT NULL,
-     known         text NOT NULL,
-     withheld      boolean NOT NULL,
-     stored        boolean NOT NULL,
-     started_at    timestamptz,
-     cloud_branch  text,
-     copied_at     timestamptz NOT NULL,
-     removed_at    timestamptz,
-     declined_at   timestamptz,
-     allowed_again integer NOT NULL DEFAULT 0,
-     stored_at     timestamptz,
-     PRIMARY KEY (org_id, machine_id, source, session_id)
-   )`,
-  toApp(`SELECT, INSERT, UPDATE, DELETE ON shown_sessions`),
-  ...rowLevelSecurity("shown_sessions"),
-  // How many copies in a row found none of the repository's sessions where
-  // they are uploaded, for the organisation they are shown in: kept here, so
-  // that a server started again often still gets to the count that removes
-  // them. No row is none.
-  `CREATE TABLE shown_empty_copies (
-     org_id text PRIMARY KEY REFERENCES orgs ON DELETE CASCADE,
-     copies integer NOT NULL
-   )`,
-  toApp(`SELECT, INSERT, UPDATE, DELETE ON shown_empty_copies`),
-  ...rowLevelSecurity("shown_empty_copies"),
-  // In the organisation a repository is shown in: by which paths not shown
-  // a pull request's files, lines and comments were last taken out of (a
-  // hash, as `rulesOf` makes it). One kept by others has them taken out again.
+  // A session copied into the organisation one repository is shown in, by
+  // `importDemo` (demo.ts): only such a row is replaced or removed by the next
+  // import. Any other upload of the session makes it its uploader's again.
+  `ALTER TABLE sessions ADD COLUMN copied boolean NOT NULL DEFAULT false`,
+  // In that organisation: by which paths not shown a pull request's files,
+  // lines and comments were last taken out of (a hash, as `rulesOf` makes it).
+  // One kept by others has them taken out again at the next import.
   `ALTER TABLE pull_requests ADD COLUMN shown_rules text`,
 ];
 
