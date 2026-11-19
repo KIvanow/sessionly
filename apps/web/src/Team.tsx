@@ -349,6 +349,26 @@ function OrganisationData({
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [typed, setTyped] = useState("");
+  const [pending, setPending] = useState(false);
+  const pendingRef = useRef(false);
+
+  async function removeOrg(e: React.FormEvent) {
+    e.preventDefault();
+    if (pendingRef.current) return;
+    pendingRef.current = true;
+    setPending(true);
+    setProblem(null);
+    try {
+      await api(token, "/org", { method: "DELETE", body: { name: typed.trim() } });
+      onSignOut();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) onSignOut();
+      else setProblem((err as Error).message);
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
+    }
+  }
 
   async function download() {
     setProblem(null);
@@ -400,31 +420,31 @@ function OrganisationData({
       </div>
       {problem && <p role="alert">{problem}</p>}
       {deleting && (
-        <Confirm title="Delete this organisation?" onClose={() => setDeleting(false)}>
+        <Confirm
+          title="Delete this organisation?"
+          onClose={() => {
+            if (!pendingRef.current) setDeleting(false);
+          }}
+        >
           <p>Everyone is signed out now. Everything is deleted for good in 7 days. Backups rotate out 7 days after that.</p>
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              setProblem(null);
-              try {
-                await api(token, "/org", { method: "DELETE", body: { name: typed.trim() } });
-                onSignOut();
-              } catch (err) {
-                if (err instanceof ApiError && err.status === 401) onSignOut();
-                else setProblem((err as Error).message);
-              }
-            }}
-          >
+          <form onSubmit={removeOrg}>
             <label>
               Type {orgName} to confirm
               <input value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
             </label>
             {problem && <p role="alert">{problem}</p>}
             <div className="ask-actions">
-              <button type="submit" disabled={typed.trim() !== orgName}>
-                Delete this organisation
+              <button type="submit" disabled={pending || typed.trim() !== orgName}>
+                {pending ? "Deleting…" : "Delete this organisation"}
               </button>
-              <button type="button" className="quiet" onClick={() => setDeleting(false)}>
+              <button
+                type="button"
+                className="quiet"
+                disabled={pending}
+                onClick={() => {
+                  if (!pendingRef.current) setDeleting(false);
+                }}
+              >
                 Cancel
               </button>
             </div>
