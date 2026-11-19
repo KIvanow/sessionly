@@ -1,5 +1,5 @@
 import type { CreatedToken, Role, TokenInfo, UserInfo } from "@sessionly/schema";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ApiError, api } from "./api.ts";
 import { CopyButton } from "./CopyButton.tsx";
 import { dateTime } from "./format.ts";
@@ -308,6 +308,7 @@ function People({
 /** A small dialog. Escape and Cancel both leave it. */
 function Confirm({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
   useEffect(() => {
     const dialog = ref.current;
     dialog?.showModal();
@@ -319,12 +320,13 @@ function Confirm({ title, children, onClose }: { title: string; children: React.
     <dialog
       ref={ref}
       className="ask"
+      aria-labelledby={titleId}
       onCancel={(event) => {
         event.preventDefault();
         onClose();
       }}
     >
-      <h2>{title}</h2>
+      <h2 id={titleId}>{title}</h2>
       {children}
     </dialog>
   );
