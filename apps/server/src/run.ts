@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp, type Extension } from "./app.ts";
 import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Db, type Migrations } from "./db.ts";
-import { copyRepo, demoFrom, reportsShownIn, unshow, type Copied, type CopyOptions, type Demo } from "./demo.ts";
+import { copyRepo, demoFrom, hidePulls, reportsShownIn, unshow, type Copied, type CopyOptions, type Demo } from "./demo.ts";
 import { tidy } from "./limits.ts";
 import { purgeDeletedOrgs } from "./orgs.ts";
 import {
@@ -253,8 +253,12 @@ export async function unshowElsewhere(
   return done;
 }
 
-/** Taking back what was copied elsewhere, as the server does it: what goes wrong, and what was done, said. */
-const unshowing = (db: Db, shownIn: string | undefined, key: string | undefined): Promise<void> =>
+/**
+ * Taking back what was copied elsewhere, as the server does it: what goes
+ * wrong, and what was done, said. Whether anything failed, and is to be
+ * tried again.
+ */
+export const unshowing = (db: Db, shownIn: string | undefined, key: string | undefined): Promise<boolean> =>
   unshowElsewhere(db, shownIn, {
     key,
     log: (err) => console.error("taking back what was copied:", err),
@@ -264,8 +268,45 @@ const unshowing = (db: Db, shownIn: string | undefined, key: string | undefined)
       for (const { org, removed, failed, matched } of done) {
         console.log(`${org}: ${removed} copied sessions removed, ${failed} failed; ${matched} pull requests matched again.`);
       }
+      return done.some(({ failed }) => failed > 0);
     })
-    .catch((err) => console.error("taking back what was copied failed:", err));
+    .catch((err) => {
+      console.error("taking back what was copied failed:", err);
+      return true;
+    });
+
+/**
+ * With no demo to copy, but reports to SESSIONLY_DEMO_ORG kept without the
+ * paths not shown: what was reported there by other rules is gone through
+ * as a copy would (`hidePulls`). Whether anything failed.
+ */
+const hidingReported = (db: Db, reports: ReturnType<typeof reportsShownIn>, key: string | undefined): Promise<boolean> => {
+  if (!reports || "problem" in reports) return Promise.resolve(false);
+  return hidePulls((fn) => db.asOrg(reports.org, fn), reports.hide, { key, log: (err) => console.error(`hiding paths in ${reports.org}:`, err) })
+    .then(({ failed }) => failed > 0)
+    .catch((err) => {
+      console.error(`hiding paths in ${reports.org} failed:`, err);
+      return true;
+    });
+};
+
+/** How long after a failed attempt to take back what was copied it is tried again, when no copy would do it. */
+const TAKE_BACK_AGAIN_MS = 10 * 60_000;
+
+/**
+ * With no demo, or one whose settings are wrong: what is not SESSIONLY_DEMO_ORG
+ * is taken back, and what was reported there by other rules is gone
+ * through, now, and again later for as long as anything fails.
+ */
+function takingBack(db: Db, key: string | undefined): void {
+  const reports = reportsShownIn(process.env);
+  const attempt = async () => {
+    const unshown = await unshowing(db, reports?.org, key);
+    const hidden = await hidingReported(db, reports, key);
+    if (unshown || hidden) setTimeout(() => void attempt(), TAKE_BACK_AGAIN_MS).unref();
+  };
+  void attempt();
+}
 
 /**
  * Keep a repository shown in another organisation up to date: now, and
@@ -377,8 +418,7 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   counting();
 
   if (demo) showing(db, demo, hashKeyOf(process.env));
-  // No demo, or one whose settings are wrong: only what is not SESSIONLY_DEMO_ORG is taken back, once.
-  else void unshowing(db, reportsShownIn(process.env)?.org, hashKeyOf(process.env));
+  else takingBack(db, hashKeyOf(process.env));
 
   const port = Number(process.env.PORT ?? 8080);
   const hostname = process.env.HOST ?? "127.0.0.1";

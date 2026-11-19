@@ -122,24 +122,35 @@ again in the second organisation since, and otherwise a day later. A change to
 `SESSIONLY_DEMO_HIDE` copies every session again at the next start; one the second
 organisation turns down then is removed from it, as the copy it has shows what may now be
 hidden. Only sessions the server copied are ever removed there: ones uploaded to the second
-organisation directly are left alone.
+organisation directly are left alone, and so is one stored there under the same name after
+its copy was deleted.
 
 When the first organisation has none of the repository's sessions, what was copied is kept
 until it has had none on three copies in a row (an hour and a half, at the default 30
 minutes; the count is kept in the database, and goes on when the server is started again).
 So a repository named wrong does not empty the demo at once, and the server says it each
-time. When the first organisation is gone, or deleted, everything copied from it is removed
+time. A copy made before a change to `SESSIONLY_DEMO_HIDE` is not kept meanwhile: it is
+removed at once, as it may show what is hidden now. When the first organisation is gone, or deleted, everything copied from it is removed
 at the next copy. When the second one is gone, nothing is copied, and the server says so.
 
 When `SESSIONLY_DEMO_ORG` names another organisation, or is unset, the server removes what
-it copied from the one it copied to before, when it starts, and says so. While the settings
+it copied from the one it copied to before, when it starts, and says so. If any of that
+fails, it tries again every ten minutes until it is done. While the settings
 are set but wrong, the organisation `SESSIONLY_DEMO_ORG` names is left as it is.
 
 Pull requests are not copied: report them to the second organisation with a second step of
 the [Action](pull-requests.md) and a `ci` token of that organisation (`comment: false`, so
 the pull request gets one comment). The server keeps such a report without the files under
-`SESSIONLY_DEMO_HIDE`; after a change to that setting, report the pull requests once more
-(the workflow, run by hand). After each copy, the server matches again the pull requests
+`SESSIONLY_DEMO_HIDE`, and without where a comment on one of them is. When that setting
+changes, what it hides now is taken out of the pull requests already kept there, at the next
+copy (or when the server starts, if the other settings are wrong): their files as first and
+as last reported, the files on their page, where their comments are, and which of their lines
+each session wrote. Then they are matched again. Their figures are then those of a pull
+request reported after the change: a hidden file's lines leave both what it was opened with
+and what it has now, so what survived review is of the files shown. A file hidden and then
+shown again comes back with the next report, but only in what the pull request has now: what
+it was opened with is kept for good, so those lines count as added after it was opened. After
+each copy, the server matches again the pull requests
 there that a session it copied or removed may change (those whose look-back of 90 days
 takes it in, and for a cloud session those on its branch), since a report arrives before
 the sessions that wrote its lines.

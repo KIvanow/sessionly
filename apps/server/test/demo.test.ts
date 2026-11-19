@@ -4,10 +4,14 @@ import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
 import type { Db, OrgDb } from "../src/db.ts";
 import { copyRepo, demoFrom, EMPTY_COPIES, hideFrom, inRepo, repoOf, reportsShownIn, rulesOf, shown, shownReport, withheld, type Rules } from "../src/demo.ts";
-import { showRepo, unheeded, unshowElsewhere } from "../src/run.ts";
+import { holdMatching } from "../src/pulls.ts";
+import { showRepo, unheeded, unshowElsewhere, unshowing } from "../src/run.ts";
+import { storeUpload } from "../src/sessions.ts";
 import { newOrg, testDb, tokenFor } from "./helpers.ts";
 
 const h = (n: number) => n.toString(16).padStart(16, "0");
+/** A JSON column as one database or the other gives it back. */
+const jsonOf = (value: unknown): unknown => (typeof value === "string" ? JSON.parse(value) : value);
 const REPO = "github.com/acme/shown";
 
 let db: Db;
@@ -333,6 +337,13 @@ test("reports to the organisation a repository is shown in are never kept whole"
   assert.equal((await call(ci, "PUT", "/prs", report(1), misset)).status, 200);
   assert.equal((await kept()).length, 1);
   assert.doesNotMatch(JSON.stringify(await kept()), /SECRET/);
+  // nor in the pull request: its files as first and as last reported, and its page, have neither the path nor its line
+  const [pull] = await db.query<Record<string, unknown>>(`SELECT first_files, last_files, detail FROM pull_requests WHERE org_id = 'reported' AND number = 1`);
+  assert.doesNotMatch(JSON.stringify(pull), new RegExp(`SECRET|${h(2)}`));
+  assert.deepEqual(
+    [jsonOf(pull!.first_files), jsonOf(pull!.last_files), (jsonOf(pull!.detail) as any).files.map((f: any) => f.path)],
+    [[{ path: "src/a.ts", hashes: [h(1)] }], [{ path: "src/a.ts", hashes: [h(1)] }], ["src/a.ts"]],
+  );
   // with what is not to be shown not to be read, a report there is refused, and nothing of it is kept
   const unreadable = createApp(db, { demo: reportsShownIn({ ...all, SESSIONLY_DEMO_HIDE: "notes, ../x" }) });
   const refused = await call(ci, "PUT", "/prs", report(2), unreadable);
@@ -402,7 +413,7 @@ test("a copy deleted where it is shown is sent again, and one turned down there 
   );
   assert.deepEqual(columns.map((c) => c.name), [
     "org_id", "machine_id", "source", "session_id", "sent_at", "rules", "known", "withheld", "stored", "started_at", "cloud_branch",
-    "copied_at", "removed_at", "declined_at", "allowed_again",
+    "copied_at", "removed_at", "declined_at", "allowed_again", "stored_at",
   ]);
   assert.doesNotMatch(JSON.stringify(await db.query(`SELECT * FROM shown_sessions WHERE org_id = $1`, [p.there])), /@/);
 });
@@ -607,6 +618,154 @@ test("a copy matches again only the pull requests it can change", async () => {
   assert.deepEqual(changed(between, await when()), [true, false, true]);
   const third = (await call(p.admin, "GET", `/prs/detail?repo=${REPO}&number=3`)).body;
   assert.deepEqual(third.attribution.cloud, { agents: ["claude-code"], sessions: 1 });
+});
+
+test("a path hidden after a pull request was reported is taken out of it, and its figures are those of one reported since", async () => {
+  const p = await pair("rehide");
+  const ci = await tokenFor(db, { email: "ci@example.com", role: "ci" }, p.there);
+  const comment = (path: string, line: number) => ({ kind: "inline", url: null, author: "bob", bot: false, at: "2026-11-10T13:00:00Z", path, line });
+  // reported before the notes were hidden: the report is kept whole
+  const files = [{ path: "src/a.ts", hashes: [h(1), h(2), h(3)] }, { path: "notes/SECRET-plan.md", hashes: [h(900)] }];
+  assert.equal((await call(ci, "PUT", "/prs", pullOf(1, files, { feedback: [comment("notes/SECRET-plan.md", 4), comment("src/a.ts", 2)] }))).status, 200);
+  assert.equal((await send(p.ann, session("rh1", REPO))).status, 200);
+  assert.deepEqual(await copyRepo(p.from, p.to, { repo: REPO, hide: [] }), { copied: 1, kept: 0, removed: 0, failed: 0, matched: 1 });
+  const detail = async () => (await call(p.admin, "GET", `/prs/detail?repo=${REPO}&number=1`)).body;
+  const figures = (d: any) => [d.attribution.first, d.attribution.now.lines, d.attribution.now.agent_lines, d.attribution.by.map((b: any) => [b.lines, b.surviving]), d.cost.usd];
+  // its 4 lines are the session's, which hashed 4: $6
+  assert.deepEqual(figures(await detail()), [{ lines: 4, agent_lines: 4 }, 4, 4, [[4, 4]], 6]);
+
+  // the notes are hidden now: they go from the pull request as first and as last reported, from its page, from where
+  // its comments are and from which lines the session wrote, and it is matched again
+  assert.deepEqual(await copyRepo(p.from, p.to, { repo: REPO, hide: ["notes"] }), { copied: 1, kept: 0, removed: 0, failed: 0, matched: 1 });
+  const hidden = new RegExp(`notes|SECRET|${h(900)}`);
+  assert.doesNotMatch(await everything(p.there, p.admin, "rh1", 1), hidden);
+  for (const table of ["pull_requests", "pull_sessions", "pull_request_reports"]) {
+    assert.doesNotMatch(JSON.stringify(await db.query(`SELECT * FROM ${table} WHERE org_id = $1`, [p.there])), hidden, table);
+  }
+  // the comment is still counted; where it was is not said
+  const after = await detail();
+  assert.deepEqual(after.feedback.map((f: any) => [f.path, f.line]), [[null, null], ["src/a.ts", 2]]);
+  // as if reported with the notes hidden: 3 lines when opened and now, all 3 still there, and of the session's 4 lines 3 are here: $4.50
+  assert.deepEqual(figures(after), [{ lines: 3, agent_lines: 3 }, 3, 3, [[3, 3]], 4.5]);
+  // and once that is done, nothing more is
+  assert.deepEqual(await copyRepo(p.from, p.to, { repo: REPO, hide: ["notes"] }), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 0 });
+});
+
+test("a removal is forgotten only once the pull requests it may change are matched again", async () => {
+  const p = await pair("late");
+  const ci = await tokenFor(db, { email: "ci@example.com", role: "ci" }, p.there);
+  assert.equal((await call(ci, "PUT", "/prs", pullOf(1, [{ path: "src/a.ts", hashes: [h(1), h(2), h(3)] }]))).status, 200);
+  assert.equal((await send(p.ann, session("l1", REPO))).status, 200);
+  assert.equal((await send(p.ann, session("l2", REPO, [7]))).status, 200);
+  assert.deepEqual(await copyRepo(p.from, p.to, { repo: REPO, hide: [] }), { copied: 2, kept: 0, removed: 0, failed: 0, matched: 1 });
+  assert.equal((await call(p.ann, "DELETE", "/sessions/m1/claude-code/l1")).status, 200);
+  assert.deepEqual(await copyRepo(p.from, p.to, { repo: REPO, hide: [] }), { copied: 0, kept: 0, removed: 1, failed: 0, matched: 1 });
+  // as if the server stopped after it removed l1 and before it matched the pull request, and was started 8 days later
+  await db.query(`UPDATE shown_sessions SET copied_at = copied_at - interval '10 days', removed_at = removed_at - interval '8 days' WHERE org_id = $1`, [p.there]);
+  await db.query(`UPDATE pull_requests SET matched_at = now() - interval '9 days' WHERE org_id = $1`, [p.there]);
+  // the pull request is matched again, and only then is the removal forgotten
+  assert.deepEqual(await copyRepo(p.from, p.to, { repo: REPO, hide: [] }), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 1 });
+  const noted = await db.query<{ session_id: string }>(`SELECT session_id FROM shown_sessions WHERE org_id = $1`, [p.there]);
+  assert.deepEqual(noted.map((n) => n.session_id), ["l2"]);
+  assert.deepEqual(await copyRepo(p.from, p.to, { repo: REPO, hide: [] }), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 0 });
+});
+
+test("pull requests left for a report after the key changed do not stop the others being matched again", async () => {
+  const p = await pair("rotated");
+  // 100 kept with another key, matched longest ago, so that the first batch is all of them, and one more that can be matched
+  await db.query(
+    `INSERT INTO pull_requests (org_id, repo, number, author, state, first_event, last_event, first_files, last_files, attribution, created_at, committers, matched_at)
+     SELECT $1, $2, n, 'ann', 'open', 'opened', 'opened', $3::jsonb, $3::jsonb, '{}'::jsonb, '2026-11-10T12:00:00Z',
+            CASE WHEN n <= 100 THEN '["0123456789ab.cdef"]'::jsonb ELSE '[]'::jsonb END,
+            CASE WHEN n <= 100 THEN '2026-01-01'::timestamptz ELSE '2026-01-02'::timestamptz END
+     FROM generate_series(1, 101) AS n`,
+    [p.there, REPO, JSON.stringify([{ path: "src/a.ts", hashes: [h(1)] }])],
+  );
+  assert.equal((await send(p.ann, session("k1", REPO))).status, 200);
+  assert.deepEqual(await copyRepo(p.from, p.to, { repo: REPO, hide: [] }), { copied: 1, kept: 0, removed: 0, failed: 0, matched: 1 });
+  const waiting = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM pull_requests WHERE org_id = $1 AND committers IS NULL`, [p.there]);
+  assert.equal(Number(waiting[0]!.n), 100);
+});
+
+test("while the repository has no sessions, a copy made by other rules is not held", async () => {
+  const p = await pair("held");
+  const ci = await tokenFor(db, { email: "ci@example.com", role: "ci" }, p.there);
+  assert.equal((await call(ci, "PUT", "/prs", pullOf(1, [{ path: "src/a.ts", hashes: [h(1)] }, { path: "notes/SECRET-plan.md", hashes: [h(900)] }]))).status, 200);
+  assert.equal((await send(p.ann, session("hd1", REPO))).status, 200);
+  assert.equal((await copyRepo(p.from, p.to, { repo: REPO, hide: [] })).copied, 1);
+  assert.match(JSON.stringify(await db.query(`SELECT payload FROM sessions WHERE org_id = $1`, [p.there])), /notes\/SECRET-plan\.md/);
+  // it is taken back, and the notes are hidden: the copy that shows them goes at once, and is not held as one by
+  // these rules would be (a name that matches nothing), and the pull request is matched without it
+  assert.equal((await call(p.ann, "DELETE", "/sessions/m1/claude-code/hd1")).status, 200);
+  assert.deepEqual(await copyRepo(p.from, p.to, { repo: REPO, hide: ["notes"] }), { copied: 0, kept: 0, removed: 1, failed: 0, matched: 1 });
+  assert.deepEqual(await idsIn(p.admin), []);
+  assert.doesNotMatch(await everything(p.there, p.admin, "hd1", 1), /notes|SECRET/);
+});
+
+test("a session stored where it is shown, by the same name, after its copy was deleted there is not removed with the copy", async () => {
+  const p = await pair("replaced");
+  assert.equal((await send(p.ann, session("c1", REPO))).status, 200);
+  assert.equal((await send(p.ann, session("c2", REPO))).status, 200);
+  assert.equal((await copyRepo(p.from, p.to, { repo: REPO, hide: [] })).copied, 2);
+  // she deletes the copy there, and uploads one of her own there by the same name; then she takes the first one back
+  const annThere = await tokenFor(db, { email: "ann@example.com", role: "member" }, p.there);
+  assert.equal((await call(annThere, "DELETE", "/sessions/m1/claude-code/c1")).status, 200);
+  assert.equal((await send(annThere, session("c1", "github.com/acme/elsewhere"))).status, 200);
+  assert.equal((await call(p.ann, "DELETE", "/sessions/m1/claude-code/c1")).status, 200);
+  assert.deepEqual(await copyRepo(p.from, p.to, { repo: REPO, hide: [] }), { copied: 0, kept: 0, removed: 0, failed: 0, matched: 0 });
+  const there = await db.query<{ session_id: string; repo: string }>(`SELECT session_id, repo FROM sessions WHERE org_id = $1 ORDER BY session_id`, [p.there]);
+  assert.deepEqual(there.map((s) => [s.session_id, s.repo]), [["c1", "github.com/acme/elsewhere"], ["c2", REPO]]);
+  // and what was noted of the copy is forgotten
+  const noted = await db.query<{ session_id: string }>(`SELECT session_id FROM shown_sessions WHERE org_id = $1 ORDER BY session_id`, [p.there]);
+  assert.deepEqual(noted.map((n) => n.session_id), ["c2"]);
+});
+
+test("taking back what was copied says whether anything failed, to be tried again", async () => {
+  const quiet = console.error;
+  console.error = () => {};
+  try {
+    // nothing to take back
+    const none = { query: async () => [] } as unknown as Db;
+    assert.equal(await unshowing(none, undefined, undefined), false);
+    // the database cannot be read
+    const down = { query: async () => Promise.reject(new Error("down")) } as unknown as Db;
+    assert.equal(await unshowing(down, undefined, undefined), true);
+    // one session's copy cannot be removed, and the rest goes on: what was noted of it is kept for the next time
+    const gone = { machine_id: "m1", source: "claude-code", session_id: "x1", removed: false, stored: true, here: "ann@example.com", stored_at: "2026-11-10 09:00:00+00" };
+    let opened = 0;
+    const deleted: string[] = [];
+    const failing = {
+      query: async () => [{ org_id: "elsewhere" }],
+      asOrg: async (org: string, fn: (db: OrgDb) => Promise<unknown>) => {
+        opened += 1;
+        if (opened === 2) throw new Error("the copy cannot be removed");
+        return fn({ orgId: org, query: async (sql: string) => (sql.startsWith("DELETE FROM shown_sessions") ? (deleted.push(sql), []) : opened === 1 ? [gone] : []) } as unknown as OrgDb);
+      },
+    } as unknown as Db;
+    assert.equal(await unshowing(failing, undefined, undefined), true);
+    assert.deepEqual(deleted, []);
+  } finally {
+    console.error = quiet;
+  }
+});
+
+test("a report made while a copy is being stored waits for it, and is matched with what it stored", async (t) => {
+  // Only a server takes two transactions at once.
+  if (!process.env.TEST_DATABASE_URL) return t.skip("needs a Postgres server (TEST_DATABASE_URL)");
+  const p = await pair("race");
+  const ci = await tokenFor(db, { email: "ci@example.com", role: "ci" }, p.there);
+  const ann = { orgId: p.there, email: "ann@example.com", name: null, role: "member" as const, tokenId: null, userId: null, signedIn: false, owner: false };
+  let settled = false;
+  let reported: ReturnType<typeof call> | undefined;
+  // as a copy does it: the matching is held, the session stored, and only then is the transaction done
+  await db.asOrg(p.there, async (tx) => {
+    await holdMatching(tx, "copying");
+    await storeUpload(tx, shown(session("race1", REPO) as never, { hide: [], known: new Set(["src/a.ts"]) }), ann);
+    reported = call(ci, "PUT", "/prs", pullOf(1, [{ path: "src/a.ts", hashes: [h(1), h(2), h(3)] }])).finally(() => (settled = true));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(settled, false);
+  });
+  assert.equal((await reported!).body.attribution.now.agent_lines, 3);
 });
 
 // Last: it takes back what was copied into every organisation of this file but the one it is told to keep.

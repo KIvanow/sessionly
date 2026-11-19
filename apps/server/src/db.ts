@@ -815,7 +815,9 @@ const MIGRATIONS: string[] = [
   // what is there last changed. `declined_at` is when it was last turned
   // down, and `allowed_again` how often its person had allowed a repository
   // again there by then: one turned down is offered again a day later, or
-  // when that number has changed.
+  // when that number has changed. `stored_at` is when the copy kept there
+  // was stored, as its row has it: a row stored there since by anyone else
+  // has another time, and is not the server's to remove.
   `CREATE TABLE shown_sessions (
      org_id        text NOT NULL REFERENCES orgs ON DELETE CASCADE,
      machine_id    text NOT NULL,
@@ -832,6 +834,7 @@ const MIGRATIONS: string[] = [
      removed_at    timestamptz,
      declined_at   timestamptz,
      allowed_again integer NOT NULL DEFAULT 0,
+     stored_at     timestamptz,
      PRIMARY KEY (org_id, machine_id, source, session_id)
    )`,
   toApp(`SELECT, INSERT, UPDATE, DELETE ON shown_sessions`),
@@ -846,6 +849,10 @@ const MIGRATIONS: string[] = [
    )`,
   toApp(`SELECT, INSERT, UPDATE, DELETE ON shown_empty_copies`),
   ...rowLevelSecurity("shown_empty_copies"),
+  // In the organisation a repository is shown in: by which paths not shown
+  // a pull request's files, lines and comments were last taken out of (a
+  // hash, as `rulesOf` makes it). One kept by others has them taken out again.
+  `ALTER TABLE pull_requests ADD COLUMN shown_rules text`,
 ];
 
 /**

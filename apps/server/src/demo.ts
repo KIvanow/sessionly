@@ -13,8 +13,11 @@ import {
   type AddedLines,
   type Cost,
   type Counts,
+  type FileHashes,
   type FileTouched,
   type ModelUsage,
+  type PullFeedback,
+  type PullFile,
   type PullReport,
   type RewriteMeasurement,
   type Session,
@@ -23,8 +26,8 @@ import {
 } from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
 import type { OrgDb } from "./db.ts";
-import { IN_WORKTREE, rematchPulls, reportedPaths, type PullFilters } from "./pulls.ts";
-import { Conflict, removeUpload, RemovedPerson, storeUpload } from "./sessions.ts";
+import { holdMatching, holdPull, IN_WORKTREE, pullsDue, rematchPulls, reportedPaths, type PullFilters } from "./pulls.ts";
+import { Conflict, forgetLines, RemovedPerson, storeUpload } from "./sessions.ts";
 
 export interface Demo {
   /** The organisation the sessions are uploaded to. */
@@ -330,11 +333,114 @@ function linesShown(lines: AddedLines[], rules: Rules): AddedLines[] {
  * not shown stop.
  */
 export function shownReport(report: PullReport, hide: string[]): PullReport {
-  return {
-    ...report,
-    files: report.files.filter((f) => inRepo(f.path, hide)),
-    feedback: report.feedback?.map((f) => (f.path == null || inRepo(f.path, hide) ? f : { ...f, path: null, line: null })),
+  return { ...report, files: filesShown(report.files, hide), feedback: feedbackShown(report.feedback, hide) };
+}
+
+const filesShown = <T extends { path: string }>(files: T[], hide: string[]): T[] => files.filter((f) => inRepo(f.path, hide));
+
+const feedbackShown = (feedback: PullFeedback[] | undefined, hide: string[]): PullFeedback[] | undefined =>
+  feedback?.map((f) => (f.path == null || inRepo(f.path, hide) ? f : { ...f, path: null, line: null }));
+
+/** A session's lines in a pull request, by file (`pull_sessions`), without the files not shown. */
+const matchedShown = (matched: Record<string, string[]> | null, hide: string[]): Record<string, string[]> | null =>
+  matched && Object.fromEntries(Object.entries(matched).filter(([path]) => inRepo(path, hide)));
+
+const jsonOf = <T>(value: unknown): T => (typeof value === "string" ? JSON.parse(value) : value) as T;
+const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * Take out of one pull request kept where the repository is shown what is
+ * not shown now: its files as first and as last reported, the files of its
+ * page, where its comments are, and which of its lines each session wrote.
+ * One that had any is left to be matched again (no time it was matched).
+ * Whether anything was taken out.
+ */
+async function hidePull(db: OrgDb, repo: string, number: number, hide: string[], rules: string): Promise<boolean> {
+  // As a report holds it: one arriving meanwhile waits, and then keeps the first files as they are after this.
+  await holdPull(db, repo, number);
+  const [r] = await db.query<{ first_files: unknown; last_files: unknown; detail: unknown; feedback: unknown }>(
+    `SELECT first_files, last_files, detail, feedback FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
+    [db.orgId, repo, number],
+  );
+  if (!r) return false;
+  const was = {
+    first: jsonOf<FileHashes[]>(r.first_files),
+    last: jsonOf<FileHashes[]>(r.last_files),
+    detail: r.detail == null ? null : jsonOf<{ files?: PullFile[] }>(r.detail),
+    feedback: r.feedback == null ? null : jsonOf<PullFeedback[]>(r.feedback),
   };
+  const now = {
+    first: filesShown(was.first, hide),
+    last: filesShown(was.last, hide),
+    detail: was.detail && { ...was.detail, files: was.detail.files && filesShown(was.detail.files, hide) },
+    feedback: was.feedback && feedbackShown(was.feedback, hide)!,
+  };
+  const sessions = await db.query<{ machine_id: string; source: string; session_id: string; matched: unknown; opened_matched: unknown }>(
+    `SELECT machine_id, source, session_id, matched, opened_matched FROM pull_sessions WHERE org_id = $1 AND repo = $2 AND number = $3`,
+    [db.orgId, repo, number],
+  );
+  let changed = !same(was, now);
+  for (const s of sessions) {
+    const matched = s.matched == null ? null : jsonOf<Record<string, string[]>>(s.matched);
+    const opened = s.opened_matched == null ? null : jsonOf<Record<string, string[]>>(s.opened_matched);
+    if (same(matched, matchedShown(matched, hide)) && same(opened, matchedShown(opened, hide))) continue;
+    changed = true;
+    await db.query(
+      `UPDATE pull_sessions SET matched = $7::jsonb, opened_matched = $8::jsonb
+       WHERE org_id = $1 AND repo = $2 AND number = $3 AND machine_id = $4 AND source = $5 AND session_id = $6`,
+      [db.orgId, repo, number, s.machine_id, s.source, s.session_id, jsonOrNull(matchedShown(matched, hide)), jsonOrNull(matchedShown(opened, hide))],
+    );
+  }
+  await db.query(
+    `UPDATE pull_requests SET first_files = $4::jsonb, last_files = $5::jsonb, detail = $6::jsonb, feedback = $7::jsonb,
+            shown_rules = $8, matched_at = CASE WHEN $9::boolean THEN NULL ELSE matched_at END
+     WHERE org_id = $1 AND repo = $2 AND number = $3`,
+    [db.orgId, repo, number, JSON.stringify(now.first), JSON.stringify(now.last), jsonOrNull(now.detail), jsonOrNull(now.feedback), rules, changed],
+  );
+  return changed;
+}
+
+/** As a JSON column takes it: null is no value, not the JSON `null`. */
+const jsonOrNull = (value: unknown): string | null => (value == null ? null : JSON.stringify(value));
+
+/**
+ * Take out of the pull requests kept where the repository is shown what is
+ * not shown now, wherever they were last gone through by other rules (or
+ * never): reports are kept without it from the moment it is not shown, but
+ * the first report of a pull request is kept for good. Those that had any
+ * are matched again by the next `matchAgain`. How many could not be gone
+ * through, which are gone through the next time.
+ */
+async function hideInPulls(to: Each, hide: string[], log: (err: unknown) => void): Promise<number> {
+  const rules = rulesOf(hide);
+  const due = await to((db) =>
+    db.query<{ repo: string; number: unknown }>(
+      `SELECT repo, number FROM pull_requests WHERE org_id = $1 AND shown_rules IS DISTINCT FROM $2 ORDER BY repo, number`,
+      [db.orgId, rules],
+    ),
+  );
+  let failed = 0;
+  for (const pull of due) {
+    try {
+      await to((db) => hidePull(db, pull.repo, Number(pull.number), hide, rules));
+    } catch (err) {
+      failed += 1;
+      log(err);
+    }
+  }
+  return failed;
+}
+
+/**
+ * Take out of the pull requests reported to an organisation whose reports
+ * are kept without the paths not shown what is not shown now, and match
+ * again those that had any. `copyRepo` does this first; this is for when no
+ * copy is made (the settings of the demo are wrong, but for SESSIONLY_DEMO_HIDE).
+ */
+export async function hidePulls(to: Each, hide: string[], { key, log = () => {} }: CopyOptions = {}): Promise<{ failed: number; matched: number }> {
+  const failed = await hideInPulls(to, hide, log);
+  const again = await matchAgain(to, {}, key, log);
+  return { failed: failed + again.failed, matched: again.matched };
 }
 
 /**
@@ -390,13 +496,15 @@ interface Sent {
   declined_long_ago: boolean;
   /** How often its person had allowed a repository again there when it was turned down. */
   allowed_again: unknown;
+  /** When the copy kept there was stored, as its row has it. */
+  stored_at: string | null;
 }
 
 /** How long one turned down is left before it is offered again, when nothing else says it may be taken now. */
 const DECLINED_HOURS = 24;
 
 const SENT = `SELECT k.machine_id, k.source, k.session_id, k.sent_at, k.rules, k.known, k.withheld, k.stored,
-                     s.owner_email AS here, k.removed_at IS NOT NULL AS removed, k.allowed_again,
+                     s.owner_email AS here, k.removed_at IS NOT NULL AS removed, k.allowed_again, k.stored_at::text AS stored_at,
                      coalesce(k.declined_at < now() - interval '${DECLINED_HOURS} hours', false) AS declined_long_ago
               FROM shown_sessions k
               LEFT JOIN sessions s ON s.org_id = k.org_id AND s.machine_id = k.machine_id AND s.source = k.source
@@ -473,17 +581,28 @@ async function countEmpty(db: OrgDb, none: boolean): Promise<number> {
  * may have changed since they were last matched (`shown_changed`), some at a
  * time, as the page's own button does it, until none is left or none gets
  * further. That goes by what is kept, so one this could not get to (the
- * server stopped) is matched the next time.
+ * server stopped) is matched the next time. `remaining` are those still to
+ * be matched.
  */
-async function matchAgain(to: Each, filters: PullFilters, key: string | undefined, log: (err: unknown) => void): Promise<{ matched: number; failed: number }> {
+async function matchAgain(
+  to: Each,
+  filters: PullFilters,
+  key: string | undefined,
+  log: (err: unknown) => void,
+): Promise<{ matched: number; failed: number; remaining: number }> {
+  const chosen = { ...filters, shown_changed: true };
   let matched = 0;
   let failed = 0;
-  for (;;) {
-    const some = await rematchPulls(to, { ...filters, shown_changed: true }, undefined, key, log);
+  let remaining = await to((db) => pullsDue(db, chosen));
+  // One left for a report (the key is another now) is not matched, and is no longer to be: that is getting further too.
+  while (remaining > 0) {
+    const some = await rematchPulls(to, chosen, undefined, key, log);
     matched += some.matched;
     failed += some.failed;
-    if (some.remaining === 0 || some.matched === 0) return { matched, failed };
+    if (some.remaining >= remaining) return { matched, failed, remaining: some.remaining };
+    remaining = some.remaining;
   }
+  return { matched, failed, remaining };
 }
 
 /**
@@ -511,8 +630,10 @@ async function matchAgain(to: Each, filters: PullFilters, key: string | undefine
  * repository's sessions, what was sent is left until it has had none on
  * `EMPTY_COPIES` copies in a row.
  *
- * Then the pull requests of the repository there that a copy or a removal
- * may have changed since they were last matched are matched again
+ * First, what is not shown by these rules is taken out of the pull requests
+ * reported there by others (`hideInPulls`). Last, the pull requests of the
+ * repository there that this took files out of, or that a copy or a removal
+ * may have changed since they were last matched, are matched again
  * (`matchAgain`): a report of one comes before the sessions that wrote it,
  * which are copied later.
  *
@@ -525,6 +646,8 @@ export async function copyRepo(
   { key, log = () => {} }: CopyOptions = {},
 ): Promise<Copied> {
   const rules = rulesOf(demo.hide);
+  // Before anything else: what is not shown now is taken out of what was reported there by other rules.
+  const unhidden = await hideInPulls(to, demo.hide, log);
   // The repository's name in any case: `GitHub.com/Acme/Shown` is the same one.
   const theirs = from
     ? await from((db) => db.query<Theirs>(`SELECT ${THEIRS} FROM sessions WHERE org_id = $1 AND lower(repo) = lower($2)`, [db.orgId, demo.repo]))
@@ -551,31 +674,33 @@ export async function copyRepo(
   // there changed is what says which pull requests are to be matched again; a removal noted before is kept in it.
   const note = async (db: OrgDb, s: Theirs, made: { ours: boolean; copied: boolean; withheld: boolean }) => {
     const which = [db.orgId, s.machine_id, s.source, s.session_id];
-    const [here] = await db.query<{ is: boolean }>(
-      `SELECT EXISTS (SELECT 1 FROM sessions WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4) AS is`,
+    // The row there, if any, and when it was stored: the copy's own time when this one stored it.
+    const [here] = await db.query<{ at: string }>(
+      `SELECT updated_at::text AS at FROM sessions WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
       which,
     );
-    const stored = made.ours && here?.is === true;
+    const stored = made.ours && here !== undefined;
+    // A copy kept from before keeps the time it was stored then.
     await db.query(
       `INSERT INTO shown_sessions (org_id, machine_id, source, session_id, sent_at, rules, known, withheld, stored,
-                                   started_at, cloud_branch, copied_at, declined_at, allowed_again)
+                                   started_at, cloud_branch, copied_at, declined_at, allowed_again, stored_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::boolean, $9::boolean, $10::timestamptz, $11, clock_timestamp(),
-               CASE WHEN $9::boolean THEN NULL ELSE clock_timestamp() END, $12)
+               CASE WHEN $9::boolean THEN NULL ELSE clock_timestamp() END, $12, CASE WHEN $13::boolean THEN $14::timestamptz END)
        ON CONFLICT (org_id, machine_id, source, session_id) DO UPDATE
        SET sent_at = EXCLUDED.sent_at, rules = EXCLUDED.rules, known = EXCLUDED.known, withheld = EXCLUDED.withheld,
            stored = EXCLUDED.stored, started_at = EXCLUDED.started_at, cloud_branch = EXCLUDED.cloud_branch,
            copied_at = CASE WHEN $13::boolean OR shown_sessions.stored <> EXCLUDED.stored THEN clock_timestamp()
                             ELSE greatest(shown_sessions.copied_at, coalesce(shown_sessions.removed_at, shown_sessions.copied_at)) END,
-           removed_at = NULL, declined_at = EXCLUDED.declined_at, allowed_again = EXCLUDED.allowed_again`,
-      [...which, s.sent, rules, known, made.withheld, stored, s.started, s.cloud_branch, timesOf(s), made.copied],
+           removed_at = NULL, declined_at = EXCLUDED.declined_at, allowed_again = EXCLUDED.allowed_again,
+           stored_at = CASE WHEN $13::boolean THEN EXCLUDED.stored_at WHEN EXCLUDED.stored THEN shown_sessions.stored_at END`,
+      [...which, s.sent, rules, known, made.withheld, stored, s.started, s.cloud_branch, timesOf(s), made.copied, made.copied ? here?.at ?? null : null],
     );
   };
   // Filed under another person since: theirs now, and not a copy beside the old one.
   const moved = async (db: OrgDb, had: Sent | undefined, owner: string): Promise<boolean> =>
-    had?.stored === true && had.here !== null && had.here !== owner && (await removeUpload(db, as(db.orgId, had.here), had));
+    had !== undefined && had.here !== null && had.here !== owner && (await removeCopy(db, had));
   // A copy by other rules, where none by these is to be had.
-  const outdated = async (db: OrgDb, had: Sent | undefined): Promise<boolean> =>
-    had?.stored === true && had.rules !== rules && had.here !== null && (await removeUpload(db, as(db.orgId, had.here), had));
+  const outdated = async (db: OrgDb, had: Sent | undefined): Promise<boolean> => had !== undefined && had.rules !== rules && (await removeCopy(db, had));
   let copied = 0;
   let kept = 0;
   let removed = 0;
@@ -611,6 +736,7 @@ export async function copyRepo(
       const withheldHere = unknown;
       count(
         await to(async (db) => {
+          await holdMatching(db, "copying");
           const went = await moved(db, had, theirRow.owner_email);
           const { stored } = await storeUpload(db, made, as(db.orgId, theirRow.owner_email));
           const dropped = !stored && (await outdated(db, had));
@@ -627,6 +753,7 @@ export async function copyRepo(
         try {
           count(
             await to(async (db) => {
+              await holdMatching(db, "copying");
               const went = await moved(db, had, theirRow.owner_email);
               const dropped = await outdated(db, had);
               await note(db, theirRow, { ours: keeps, copied: false, withheld: withheldHere });
@@ -653,7 +780,8 @@ export async function copyRepo(
         `and removed if there are none on ${EMPTY_COPIES} copies in a row (${empty} so far).`,
     );
   }
-  for (const gone of holding ? [] : left) {
+  // While it is held, a copy made by other rules is not: it shows what these may hide, and there is no other to replace it.
+  for (const gone of holding ? left.filter((gone) => gone.stored && gone.rules !== rules) : left) {
     try {
       if (await to((db) => removeSent(db, gone))) removed += 1;
     } catch (err) {
@@ -661,9 +789,30 @@ export async function copyRepo(
       log(err);
     }
   }
-  await to((db) => db.query(`DELETE FROM shown_sessions WHERE org_id = $1 AND removed_at < now() - $2 * interval '1 day'`, [db.orgId, REMEMBERED_DAYS]));
   const again = await matchAgain(to, { sessions_repo: demo.repo }, key, log);
-  return { copied, kept, removed, failed: failed + again.failed, matched: again.matched };
+  // A removal is forgotten a while after, and only once no pull request it may change is left to be matched
+  // again: a server stopped longer than that before it matched them would otherwise never do it.
+  if (again.failed === 0 && again.remaining === 0) {
+    await to((db) => db.query(`DELETE FROM shown_sessions WHERE org_id = $1 AND removed_at < now() - $2 * interval '1 day'`, [db.orgId, REMEMBERED_DAYS]));
+  }
+  return { copied, kept, removed, failed: failed + unhidden + again.failed, matched: again.matched };
+}
+
+/**
+ * Remove the copy this kept of a session, if the row there is still that
+ * copy: one stored there since, by anyone, is not this one's to remove.
+ * Whether there was one.
+ */
+async function removeCopy(db: OrgDb, had: Sent): Promise<boolean> {
+  if (!had.stored || had.stored_at === null) return false;
+  const removed = await db.query(
+    `DELETE FROM sessions
+     WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4 AND updated_at = $5::timestamptz
+     RETURNING machine_id, source, session_id`,
+    [db.orgId, had.machine_id, had.source, had.session_id, had.stored_at],
+  );
+  await forgetLines(db, removed);
+  return removed.length > 0;
 }
 
 /**
@@ -671,7 +820,8 @@ export async function copyRepo(
  * and when it went, is all that is kept a while; one that never was is forgotten.
  */
 async function removeSent(db: OrgDb, gone: Sent): Promise<boolean> {
-  const went = gone.stored && gone.here !== null && (await removeUpload(db, as(db.orgId, gone.here), gone));
+  await holdMatching(db, "copying");
+  const went = await removeCopy(db, gone);
   const which = [db.orgId, gone.machine_id, gone.source, gone.session_id];
   if (went) {
     await db.query(`UPDATE shown_sessions SET removed_at = clock_timestamp() WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`, which);
@@ -686,7 +836,8 @@ async function removeSent(db: OrgDb, gone: Sent): Promise<boolean> {
  * in any more (another one is named now, or none): each copy is removed, the
  * pull requests there that were matched with them are matched again, and
  * then what was noted of them is forgotten. The notes go last, and only
- * when nothing failed, so that one cut short is finished the next time.
+ * when nothing failed and none is left to be matched, so that one cut short
+ * is finished the next time.
  */
 export async function unshow(to: Each, { key, log = () => {} }: CopyOptions = {}): Promise<{ removed: number; failed: number; matched: number }> {
   const sent = await to((db) => db.query<Sent>(SENT, [db.orgId]));
@@ -701,7 +852,7 @@ export async function unshow(to: Each, { key, log = () => {} }: CopyOptions = {}
     }
   }
   const again = await matchAgain(to, {}, key, log);
-  if (failed + again.failed === 0) {
+  if (failed + again.failed === 0 && again.remaining === 0) {
     await to(async (db) => {
       await db.query(`DELETE FROM shown_sessions WHERE org_id = $1`, [db.orgId]);
       await db.query(`DELETE FROM shown_empty_copies WHERE org_id = $1`, [db.orgId]);

@@ -665,6 +665,7 @@ async function match(
   now: FileHashes[],
   firstEvent: string,
 ): Promise<{ attribution: PullAttribution; files: PullFile[]; sessions: Kept[] }> {
+  await holdMatching(db, "matching");
   const claims = await claimsFor(db, about);
   // Worked out once, for the figures and for the page: the two then agree.
   const lines = writers(now, claims);
@@ -699,8 +700,22 @@ const HISTORY_KEPT = 50;
  * when there is no row yet to hold. The later one then sees what the earlier
  * left. The same lock a report takes, so a rematch waits for it.
  */
-async function holdPull(db: OrgDb, repo: string, number: number): Promise<void> {
+export async function holdPull(db: OrgDb, repo: string, number: number): Promise<void> {
   await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-pull:${db.orgId}:${repo}#${number}`]);
+}
+
+/**
+ * Held until the transaction ends. Matching pull requests share it; a copy
+ * into the organisation a repository is shown in (demo.ts) takes it alone,
+ * before it changes a session there. A match then either waits for the copy
+ * and sees what it stored, or ends before the copy notes when it changed
+ * what is there, so that the pull request is due to be matched again. When
+ * it was matched could not tell these apart: a match that read the session
+ * as it was may end after the copy has noted the change.
+ */
+export async function holdMatching(db: OrgDb, doing: "matching" | "copying"): Promise<void> {
+  const lock = doing === "copying" ? "pg_advisory_xact_lock" : "pg_advisory_xact_lock_shared";
+  await db.query(`SELECT ${lock}(hashtext($1))`, [`sessionly-shown:${db.orgId}`]);
 }
 
 /** A session's key and its lines in a pull request, as a history row stores them. */
@@ -1191,8 +1206,6 @@ export async function rematchPulls(
   log: (err: unknown) => void = () => {},
 ): Promise<PullMatches> {
   const began = Date.now();
-  const due = (sql: string, params: unknown[]) =>
-    `${sql} AND committers IS NOT NULL AND (matched_at IS NULL OR matched_at < $${params.length + 1}::timestamptz)`;
   const { started, rows } = await each(async (db) => {
     const { sql, params } = where(db.orgId, filters);
     // By the database's clock, which is the one `matched_at` is written with.
@@ -1222,13 +1235,24 @@ export async function rematchPulls(
   }
   return each(async (db) => {
     const { sql, params } = where(db.orgId, filters);
-    const [left] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM pull_requests ${due(sql, params)}`, [...params, started]);
     const [waiting] = await db.query<{ n: unknown }>(
       `SELECT count(*) AS n FROM pull_requests ${sql} AND committers IS NULL`,
       params,
     );
-    return { matched, failed, remaining: num(left?.n), needs_report: num(waiting?.n), started };
+    return { matched, failed, remaining: await pullsDue(db, filters, started), needs_report: num(waiting?.n), started };
   });
+}
+
+/** Of the pull requests a WHERE clause chooses, those that can be matched again and were last matched before the time bound after its parameters. */
+const due = (sql: string, params: unknown[]) =>
+  `${sql} AND committers IS NOT NULL AND (matched_at IS NULL OR matched_at < $${params.length + 1}::timestamptz)`;
+
+/** How many of the pull requests the filters choose are still to be matched again: those last matched before `started`, or before now. */
+export async function pullsDue(db: OrgDb, filters: PullFilters, started?: string): Promise<number> {
+  const { sql, params } = where(db.orgId, filters);
+  const [clock] = started ? [] : await db.query<{ t: unknown }>(`SELECT clock_timestamp() AS t`);
+  const [left] = await db.query<{ n: unknown }>(`SELECT count(*) AS n FROM pull_requests ${due(sql, params)}`, [...params, started ?? iso(clock?.t)]);
+  return num(left?.n);
 }
 
 export interface PullFilters {
@@ -1248,6 +1272,8 @@ export interface PullFilters {
    * may have changed since they were last matched (demo.ts): one that
    * started within the look-back of the pull request (`claimsFor`), or a
    * cloud session on its branch (`cloudOf`, which counts those at any time).
+   * And those whose files were taken out of since, which have no time they
+   * were matched (`hidePulls` in demo.ts).
    */
   shown_changed?: boolean;
 }
@@ -1267,10 +1293,10 @@ function where(orgId: string, filters: PullFilters): { sql: string; params: unkn
   if (filters.since) conditions.push(`coalesce(merged_at, closed_at, created_at) >= ${bind(filters.since)}::timestamptz`);
   if (filters.shown_changed) {
     conditions.push(
-      `EXISTS (SELECT 1 FROM shown_sessions k WHERE k.org_id = pull_requests.org_id
-         AND greatest(k.copied_at, coalesce(k.removed_at, k.copied_at)) > coalesce(pull_requests.matched_at, '-infinity'::timestamptz)
+      `(pull_requests.matched_at IS NULL OR EXISTS (SELECT 1 FROM shown_sessions k WHERE k.org_id = pull_requests.org_id
+         AND greatest(k.copied_at, coalesce(k.removed_at, k.copied_at)) > pull_requests.matched_at
          AND (k.started_at IS NULL OR k.started_at >= pull_requests.created_at - interval '${LOOK_BACK_DAYS * 24} hours'
-              OR k.cloud_branch = pull_requests.head_ref))`,
+              OR k.cloud_branch = pull_requests.head_ref)))`,
     );
   }
   return { sql: `WHERE ${conditions.join(" AND ")}`, params };
