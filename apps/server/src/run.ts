@@ -24,13 +24,19 @@
 //   SESSIONLY_SIGNUPS_PER_NETWORK  organisations created an hour from one network (default 10)
 //   SESSIONLY_HASH_KEY     32 characters or more, kept secret and kept the same: what is stored of the
 //                          addresses on a pull request's commits is hashed with it (hosted: required)
+//   SESSIONLY_DEMO_FROM, SESSIONLY_DEMO_REPO, SESSIONLY_DEMO_ORG
+//                          one repository's sessions, uploaded to the first organisation, are shown
+//                          in the second without anything that was typed or run (see demo.ts);
+//                          SESSIONLY_DEMO_HIDE: paths of it not to show; SESSIONLY_DEMO_MINUTES: how
+//                          often they are brought up to date (default 30)
 //   SESSIONLY_TELEMETRY    "off" for the dashboard not to count which of its pages are opened
 //                          (also off when DO_NOT_TRACK is set)
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp, type Extension } from "./app.ts";
-import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Migrations } from "./db.ts";
+import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Db, type Migrations } from "./db.ts";
+import { copyRepo, demoFrom, type Demo } from "./demo.ts";
 import { tidy } from "./limits.ts";
 import {
   github,
@@ -188,6 +194,8 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
   if (env.SESSIONLY_HASH_KEY?.trim() && !hashKeyOf(env)) {
     notes.push(`SESSIONLY_HASH_KEY is shorter than ${HASH_KEY_LENGTH} characters, and is not used.`);
   }
+  const demo = demoFrom(env);
+  if (demo && "problem" in demo) notes.push(demo.problem);
   const mail = ["RESEND_API_KEY", "SESSIONLY_EMAIL_FROM", "SMTP_URL"].filter((name) => env[name]);
   if (mail.length) {
     notes.push(
@@ -195,6 +203,45 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
     );
   }
   return notes;
+}
+
+/**
+ * Keep a repository shown in another organisation up to date: now, and
+ * every so many minutes from then. Both organisations have to be there; the
+ * one it is shown in is made by whoever runs the server, like any other, so
+ * that it has an owner.
+ */
+async function showing(db: Db, demo: Demo, key: string | undefined): Promise<void> {
+  const there = await db.query<{ id: string }>(`SELECT id FROM orgs WHERE id IN ($1, $2) AND deleted_at IS NULL`, [demo.from, demo.org]);
+  const missing = [demo.from, demo.org].filter((id) => !there.some((org) => org.id === id));
+  if (missing.length) {
+    console.warn(`SESSIONLY_DEMO_FROM and SESSIONLY_DEMO_ORG: there is no organisation ${missing.join(" or ")}. The repository is not shown.`);
+    return;
+  }
+  let busy = false;
+  const copy = async () => {
+    // One that is still going (the first copies every session) is not started beside itself.
+    if (busy) return;
+    busy = true;
+    try {
+      const done = await copyRepo(
+        (fn) => db.asOrg(demo.from, fn),
+        (fn) => db.asOrg(demo.org, fn),
+        demo,
+        key,
+        (err) => console.error(`showing ${demo.repo} in ${demo.org}:`, err),
+      );
+      if (done.copied + done.removed + done.failed > 0) {
+        console.log(`${demo.repo} in ${demo.org}: ${done.copied} sessions copied, ${done.removed} removed, ${done.failed} failed; ${done.matched} pull requests matched again.`);
+      }
+    } catch (err) {
+      console.error(`showing ${demo.repo} in ${demo.org} failed:`, err);
+    } finally {
+      busy = false;
+    }
+  };
+  setInterval(() => void copy(), demo.minutes * 60_000).unref();
+  await copy();
 }
 
 export async function runServer(options: RunOptions = {}): Promise<void> {
@@ -253,6 +300,9 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
         if (again) setTimeout(counting, 10 * 60_000).unref();
       });
   counting();
+
+  const demo = demoFrom(process.env);
+  if (demo && !("problem" in demo)) void showing(db, demo, hashKeyOf(process.env));
 
   const port = Number(process.env.PORT ?? 8080);
   const hostname = process.env.HOST ?? "127.0.0.1";

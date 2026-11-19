@@ -25,6 +25,9 @@ Everything is set through the environment, or through the `.env` file `pnpm serv
 | `SESSIONLY_TRUST_PROXY` | `true` when the server is behind a proxy of yours that sets `X-Forwarded-For`: the caller's address is then taken from it. Used only for the limits on signing in, which are per address. |
 | `SESSIONLY_TELEMETRY`, `DO_NOT_TRACK` | `SESSIONLY_TELEMETRY=off` stops the dashboard counting its pages, and so does `DO_NOT_TRACK=1`. See [Dashboard](dashboard.md#page-counts). |
 | `SESSIONLY_HASH_KEY` | 32 characters or more of random text (`openssl rand -hex 32`). The server keeps a hash of each email address on a pull request's commits, to [match its lines again](pull-requests.md#the-pull-requests-page) later; with this set, the hash is keyed, and the database alone does not confirm a guessed address. Without it the hash is a plain one. Keep it the same: after a change, pull requests have to be reported once more before they can be matched again. |
+| `SESSIONLY_DEMO_FROM`, `SESSIONLY_DEMO_REPO`, `SESSIONLY_DEMO_ORG` | Shows one repository's sessions in a second organisation, for a demo of real work: see [below](#showing-a-repository-in-another-organisation). All three or none. |
+| `SESSIONLY_DEMO_HIDE` | Paths of that repository not to show, separated by commas: a file, or a folder and everything in it (`docs/`). |
+| `SESSIONLY_DEMO_MINUTES` | How often the second organisation is brought up to date (default 30). |
 | `SESSIONLY_HOSTED` | `true` for a service many organisations sign up to. It has settings of its own (`SESSIONLY_SIGNUP`, `SESSIONLY_SIGNUP_CODE` and the sign-up limits): see [`infra/`](https://github.com/KIvanow/sessionly/blob/main/infra/README.md). |
 | `SESSIONLY_ORG` | The ee server only: this install's org id. See [Editions and license](editions.md). |
 
@@ -64,3 +67,36 @@ out like any other, and the limit is the default 30 seconds.)
 
 The limits are set for each transaction, not for the connection, so a pooler in transaction
 mode in front of Postgres works.
+
+## Showing a repository in another organisation
+
+With `SESSIONLY_DEMO_FROM` (the id of the organisation sessions are uploaded to),
+`SESSIONLY_DEMO_REPO` (the repository, as sessions are filed under it:
+`github.com/owner/name`) and `SESSIONLY_DEMO_ORG` (the id of another organisation), the server
+copies that repository's sessions from the first organisation to the second: when it starts,
+and every 30 minutes after. Nothing changes on anyone's machine, and no other repository's
+sessions are read.
+
+What is copied is written anew from what is safe to show, and the second organisation holds
+nothing else:
+
+- **Kept:** who ran the session and under whose address it is filed, when, for how long, the
+  agent and its models, token counts and cost, how each prompt and tool call ended, the files
+  of the repository it read or changed, and the hashes of the lines it added.
+- **Left out:** every prompt (its text, its length and its hash), the title, what a tool was
+  given and what it said went wrong, what a subagent was asked to do, the working directory
+  and where the clone is, and every path outside the repository or under
+  `SESSIONLY_DEMO_HIDE`.
+
+A session taken back, or whose repository its person stopped, is removed from the second
+organisation at the next copy. Sessions uploaded to the second organisation directly, from
+other repositories, are left alone.
+
+Pull requests are not copied: report them to the second organisation with a second step of
+the [Action](pull-requests.md) and a `ci` token of that organisation (`comment: false`, so
+the pull request gets one comment). After each copy that changed something, the server
+matches that organisation's pull requests again, since a report arrives before the sessions
+that wrote its lines.
+
+The second organisation is made like any other, so that it has an owner. Whoever can open it
+sees the costs and the addresses of the people who worked on the repository.
