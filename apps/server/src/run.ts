@@ -27,7 +27,7 @@
 //   SESSIONLY_DEMO_FROM, SESSIONLY_DEMO_REPO, SESSIONLY_DEMO_ORG
 //                          one repository's sessions, uploaded to the first organisation, are shown
 //                          in the second without anything that was typed or run (see demo.ts);
-//                          SESSIONLY_DEMO_HIDE: paths of it not to show; SESSIONLY_DEMO_MINUTES: how
+//                          SESSIONLY_DEMO_HIDE: what of it not to show; SESSIONLY_DEMO_MINUTES: how
 //                          often they are brought up to date (default 30)
 //   SESSIONLY_TELEMETRY    "off" for the dashboard not to count which of its pages are opened
 //                          (also off when DO_NOT_TRACK is set)
@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp, type Extension } from "./app.ts";
 import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Db, type Migrations } from "./db.ts";
-import { copyRepo, demoFrom, type Demo } from "./demo.ts";
+import { copyRepo, demoFrom, reportsShownIn, type Copied, type CopyOptions, type Demo } from "./demo.ts";
 import { tidy } from "./limits.ts";
 import { purgeDeletedOrgs } from "./orgs.ts";
 import {
@@ -197,6 +197,9 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
   }
   const demo = demoFrom(env);
   if (demo && "problem" in demo) notes.push(demo.problem);
+  // What is wrong with the paths not to show is said even when something else is: reports are refused for it.
+  const reports = reportsShownIn(env);
+  if (reports && "problem" in reports && !notes.includes(reports.problem)) notes.push(reports.problem);
   const mail = ["RESEND_API_KEY", "SESSIONLY_EMAIL_FROM", "SMTP_URL"].filter((name) => env[name]);
   if (mail.length) {
     notes.push(
@@ -207,33 +210,47 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
 }
 
 /**
+ * One copy, if both organisations are there. With the one they are uploaded
+ * to gone (or deleted, and not purged yet), everything sent from it is
+ * removed; with the one they are shown in gone, there is nothing to do, and
+ * null says so. `warn` is told either.
+ */
+export async function showRepo(db: Db, demo: Demo, options: CopyOptions & { warn?: (text: string) => void } = {}): Promise<Copied | null> {
+  const warn = options.warn ?? (() => {});
+  const there = await db.query<{ id: string }>(`SELECT id FROM orgs WHERE id IN ($1, $2) AND deleted_at IS NULL`, [demo.from, demo.org]);
+  if (!there.some((org) => org.id === demo.org)) {
+    warn(`SESSIONLY_DEMO_ORG: there is no organisation ${demo.org}. The repository is not shown.`);
+    return null;
+  }
+  const source = there.some((org) => org.id === demo.from);
+  if (!source) warn(`SESSIONLY_DEMO_FROM: there is no organisation ${demo.from}. What was copied from it is removed from ${demo.org}.`);
+  return copyRepo(source ? (fn) => db.asOrg(demo.from, fn) : null, (fn) => db.asOrg(demo.org, fn), demo, options);
+}
+
+/**
  * Keep a repository shown in another organisation up to date: now, and
- * every so many minutes from then. Both organisations have to be there; the
- * one it is shown in is made by whoever runs the server, like any other, so
- * that it has an owner. Nothing that goes wrong here ends the server: it is
+ * every so many minutes from then. The one it is shown in has to be there,
+ * and is made by whoever runs the server, like any other, so that it has an
+ * owner; without the one they are uploaded to, what was copied from it is
+ * removed (`showRepo`). Nothing that goes wrong here ends the server: it is
  * said, and tried again the next time.
  */
 function showing(db: Db, demo: Demo, key: string | undefined): void {
   let busy = false;
+  // From one copy to the next: how many in a row found none of the repository's sessions.
+  const empty = { copies: 0 };
   const copy = async () => {
     // One that is still going (the first copies every session) is not started beside itself.
     if (busy) return;
     busy = true;
     try {
-      const there = await db.query<{ id: string }>(`SELECT id FROM orgs WHERE id IN ($1, $2) AND deleted_at IS NULL`, [demo.from, demo.org]);
-      const missing = [demo.from, demo.org].filter((id) => !there.some((org) => org.id === id));
-      if (missing.length) {
-        console.warn(`SESSIONLY_DEMO_FROM and SESSIONLY_DEMO_ORG: there is no organisation ${missing.join(" or ")}. The repository is not shown.`);
-        return;
-      }
-      const done = await copyRepo(
-        (fn) => db.asOrg(demo.from, fn),
-        (fn) => db.asOrg(demo.org, fn),
-        demo,
+      const done = await showRepo(db, demo, {
         key,
-        (err) => console.error(`showing ${demo.repo} in ${demo.org}:`, err),
-      );
-      if (done.copied + done.kept + done.removed + done.failed + done.matched > 0) {
+        empty,
+        log: (err) => console.error(`showing ${demo.repo} in ${demo.org}:`, err),
+        warn: (text) => console.warn(text),
+      });
+      if (done && done.copied + done.kept + done.removed + done.failed + done.matched > 0) {
         console.log(
           `${demo.repo} in ${demo.org}: ${done.copied} sessions copied, ${done.kept} left as they were, ${done.removed} removed, ${done.failed} failed; ${done.matched} pull requests matched again.`,
         );
@@ -294,7 +311,8 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   const demo = asked && !("problem" in asked) ? asked : undefined;
   const app = createApp(db, {
     hashKey: hashKeyOf(process.env),
-    demo: demo && { org: demo.org, hide: demo.hide },
+    // Whatever else is wrong with the settings of a demo: reports there are never kept whole.
+    demo: reportsShownIn(process.env),
     webRoot,
     accounts,
     telemetry,

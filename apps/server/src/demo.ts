@@ -7,22 +7,23 @@
 // the organisation they are shown in never holds what must not be seen, and
 // nothing that reads from it has to leave anything out.
 import { createHash } from "node:crypto";
-import type {
-  AddedLines,
-  Cost,
-  Counts,
-  FileTouched,
-  ModelUsage,
-  PullReport,
-  RewriteMeasurement,
-  Session,
-  Subagent,
-  Upload,
+import {
+  parseRepo,
+  type AddedLines,
+  type Cost,
+  type Counts,
+  type FileTouched,
+  type ModelUsage,
+  type PullReport,
+  type RewriteMeasurement,
+  type Session,
+  type Subagent,
+  type Upload,
 } from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
 import type { OrgDb } from "./db.ts";
 import { IN_WORKTREE, rematchPulls } from "./pulls.ts";
-import { removeUpload, storeUpload } from "./sessions.ts";
+import { Conflict, removeUpload, RemovedPerson, storeUpload } from "./sessions.ts";
 
 export interface Demo {
   /** The organisation the sessions are uploaded to. */
@@ -31,7 +32,7 @@ export interface Demo {
   repo: string;
   /** The organisation they are shown in. */
   org: string;
-  /** Paths of the repository that are not shown: a file, or a folder and what is in it. */
+  /** What of the repository is not shown, as `hideFrom` reads SESSIONLY_DEMO_HIDE: names, paths and patterns. */
   hide: string[];
   /** How often the copy is brought up to date. */
   minutes: number;
@@ -39,6 +40,47 @@ export interface Demo {
 
 /** One organisation's view of the database, a transaction at a time. */
 type Each = <T>(fn: (db: OrgDb) => Promise<T>) => Promise<T>;
+
+/**
+ * An entry of SESSIONLY_DEMO_HIDE as it is matched: slashes one way, without
+ * a leading `/` or `./` or a trailing `/`, and with no empty or `.` folder.
+ * Empty when there is nothing left, or when it climbs out with `..`: such
+ * an entry could never hide what was meant.
+ */
+function entryOf(written: string): string {
+  const folders = written.trim().replace(/\\/g, "/").split("/").filter((folder) => folder !== "" && folder !== ".");
+  return folders.includes("..") ? "" : folders.join("/");
+}
+
+const patterns = new Map<string, RegExp>();
+
+/**
+ * What one entry hides, as the Action's `ignore` reads it: `*` is anything,
+ * `/` too; an entry with a `/` is a path from the repository's root, and one
+ * without is a name in any folder. It is tried on the path and on each
+ * folder the path is in, so a folder hides everything in it. Letters match
+ * in either case, as on a machine whose disk does not tell them apart. One
+ * that cannot be matched hides everything: it is not left to hide nothing.
+ */
+function patternOf(written: string): RegExp {
+  let pattern = patterns.get(written);
+  if (!pattern) {
+    const entry = entryOf(written);
+    const body = entry.split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+    pattern = entry === "" ? /(?:)/ : new RegExp(entry.includes("/") ? `^${body}$` : `(?:^|/)${body}$`, "i");
+    patterns.set(written, pattern);
+  }
+  return pattern;
+}
+
+/** Whether a path of the repository, or a folder it is in, is one the entries hide. */
+function hidden(file: string, hide: string[]): boolean {
+  const folders = file.split("/");
+  return folders.some((_, i) => {
+    const within = folders.slice(0, i + 1).join("/");
+    return hide.some((entry) => patternOf(entry).test(within));
+  });
+}
 
 /**
  * Whether a path a session names is a file of the repository that may be
@@ -51,9 +93,11 @@ export function inRepo(path: string | null | undefined, hide: string[]): path is
   if (!path) return false;
   const plain = path.replace(/\\/g, "/");
   if (/^[/~]|^[A-Za-z]:/.test(plain) || plain.split("/").includes("..")) return false;
-  const hidden = (file: string) => hide.some((one) => file === one || file.startsWith(one.endsWith("/") ? one : `${one}/`));
-  const inWorktree = IN_WORKTREE.exec(plain)?.[1];
-  return !hidden(plain) && !(inWorktree && hidden(inWorktree));
+  // `./src/a.ts` and `src//a.ts` are `src/a.ts`; `.` is the repository itself, not a file of it.
+  const file = plain.split("/").filter((folder) => folder !== "" && folder !== ".").join("/");
+  if (!file) return false;
+  const inWorktree = IN_WORKTREE.exec(file)?.[1];
+  return !hidden(file, hide) && !(inWorktree && hidden(inWorktree, hide));
 }
 
 // Each kind of thing in a session, written out field by field, down to the
@@ -197,8 +241,24 @@ export function shown(upload: Upload, hide: string[]): Upload {
       instruction_files: (s.instruction_files ?? []).filter((path) => inRepo(path, hide)),
     },
     rewrite: rewriteOf(upload.rewrite, hide),
-    lines: (upload.lines ?? []).filter((l) => inRepo(l.path, hide)).map(linesOf),
+    lines: linesShown(upload.lines ?? [], hide),
   };
+}
+
+/**
+ * The lines of the files that are shown, and of the others only how many
+ * there were. What a session cost a pull request is its cost in the
+ * proportion of its lines there to all the lines it hashed (`sharesIn` in
+ * pulls.ts): without the others it would cost more here than it did. They
+ * are counted as one entry of no path and no model, with an empty string for
+ * each line. No line of a pull request has an empty path, and no hash of one
+ * is empty, so they are never taken to have written one; and a session's
+ * files are its `files`, which this is not in.
+ */
+function linesShown(lines: AddedLines[], hide: string[]): AddedLines[] {
+  const shownLines = lines.filter((l) => inRepo(l.path, hide)).map(linesOf);
+  const others = lines.filter((l) => !inRepo(l.path, hide)).reduce((sum, l) => sum + (l.hashes ?? []).length, 0);
+  return others > 0 ? [...shownLines, { path: "", model: null, hashes: Array<string>(others).fill("") }] : shownLines;
 }
 
 /**
@@ -222,7 +282,7 @@ export function shownReport(report: PullReport, hide: string[]): PullReport {
  */
 const SHOWN_VERSION = 1;
 export const rulesOf = (hide: string[]): string =>
-  createHash("sha256").update(JSON.stringify([SHOWN_VERSION, [...hide].sort()])).digest("hex").slice(0, 16);
+  createHash("sha256").update(JSON.stringify([SHOWN_VERSION, hide.map(entryOf).sort()])).digest("hex").slice(0, 16);
 
 /** A session where it is uploaded: under whom, and when it was last stored, to the microsecond, as text. */
 interface Theirs {
@@ -233,14 +293,20 @@ interface Theirs {
   sent: string;
 }
 
-/** What was sent of one to where it is shown. */
+/**
+ * What was sent of one to where it is shown: whether a copy of it was kept
+ * there, and under whom the session is there now (null when it is not).
+ * Whose it is is read from the session itself, so the note keeps no address
+ * of its own, and goes nowhere a person's removal does not reach.
+ */
 interface Sent {
   machine_id: string;
   source: string;
   session_id: string;
-  owner_email: string;
   sent_at: string;
   rules: string;
+  stored: boolean;
+  here: string | null;
   removed: boolean;
 }
 
@@ -258,59 +324,113 @@ const as = (orgId: string, email: string): Principal => ({
   owner: false,
 });
 
+/**
+ * How the organisation it is shown in turns a session down by throwing: it
+ * is someone else's there, or its person was removed. Asking again gets the
+ * same answer until the session or the rules change.
+ */
+const refused = (err: unknown): boolean => err instanceof Conflict || err instanceof RemovedPerson;
+
 /** How long a session that was removed is remembered to have been: by then every pull request has been matched since. */
 const REMEMBERED_DAYS = 7;
 
 /**
+ * Copies in a row that found none of the repository's sessions where they
+ * are uploaded before what was sent of it is removed. A name that matches
+ * nothing (a repository named wrong, or one moved) would otherwise empty
+ * the demo at once; a repository whose sessions were all taken back is
+ * emptied an hour or so later instead, at the default 30 minutes.
+ */
+export const EMPTY_COPIES = 3;
+
+export interface CopyOptions {
+  /** SESSIONLY_HASH_KEY, which the pull requests' committers are kept with. */
+  key?: string;
+  /** Where what goes wrong, and what is held back, is said. */
+  log?: (err: unknown) => void;
+  /** Copies in a row so far that found none of the repository's sessions: kept by the caller from one to the next. */
+  empty?: { copies: number };
+}
+
+export interface Copied {
+  copied: number;
+  kept: number;
+  removed: number;
+  failed: number;
+  matched: number;
+}
+
+/**
  * Bring the organisation the repository is shown in up to date: sessions
- * that are new, were stored again since they were sent, or were sent by
- * other rules are copied, and ones that are gone (taken back, their
- * repository stopped, the repository shown another now) are removed there
- * too. Each is stored like an upload, in a transaction of its own, so one
- * that fails is said (`log`) and leaves the others.
+ * that are new, were stored again since they were sent, were sent by other
+ * rules or are not there any more are copied, and ones that are gone (taken
+ * back, their repository stopped, the repository shown another now) are
+ * removed there too. Each is stored like an upload, in a transaction of its
+ * own, so one that fails is said (`log`) and leaves the others. One the
+ * organisation turned down (its person stopped the repository there, or was
+ * removed) is noted as such, and offered again only when it changes.
  *
- * Then the pull requests there that were last matched before the latest
- * copy or removal are matched again: a report of one comes before the
- * sessions that wrote it, which are copied later. That goes by what is
- * kept, so one this could not get to (the server stopped) is matched the
- * next time.
+ * `from` is null when the organisation they are uploaded to is gone:
+ * everything sent from it is removed. When it is there and has none of the
+ * repository's sessions, what was sent is left until it has had none on
+ * `EMPTY_COPIES` copies in a row.
+ *
+ * Then the pull requests of the repository there that were last matched
+ * before the latest copy or removal are matched again: a report of one comes
+ * before the sessions that wrote it, which are copied later. That goes by
+ * what is kept, so one this could not get to (the server stopped) is
+ * matched the next time.
  *
  * Only sessions this sent are ever removed where they are shown.
  */
 export async function copyRepo(
-  from: Each,
+  from: Each | null,
   to: Each,
   demo: Pick<Demo, "repo" | "hide">,
-  key?: string,
-  log: (err: unknown) => void = () => {},
-): Promise<{ copied: number; kept: number; removed: number; failed: number; matched: number }> {
+  { key, log = () => {}, empty = { copies: 0 } }: CopyOptions = {},
+): Promise<Copied> {
   const rules = rulesOf(demo.hide);
-  const theirs = await from((db) =>
-    db.query<Theirs>(
-      `SELECT machine_id, source, session_id, owner_email, updated_at::text AS sent FROM sessions WHERE org_id = $1 AND repo = $2`,
-      [db.orgId, demo.repo],
-    ),
-  );
+  // The repository's name in any case: `GitHub.com/Acme/Shown` is the same one.
+  const theirs = from
+    ? await from((db) =>
+        db.query<Theirs>(
+          `SELECT machine_id, source, session_id, owner_email, updated_at::text AS sent FROM sessions WHERE org_id = $1 AND lower(repo) = lower($2)`,
+          [db.orgId, demo.repo],
+        ),
+      )
+    : [];
   const sent = new Map(
     (
       await to((db) =>
         db.query<Sent>(
-          `SELECT machine_id, source, session_id, owner_email, sent_at, rules, removed_at IS NOT NULL AS removed
-           FROM shown_sessions WHERE org_id = $1`,
+          `SELECT k.machine_id, k.source, k.session_id, k.sent_at, k.rules, k.stored, s.owner_email AS here,
+                  k.removed_at IS NOT NULL AS removed
+           FROM shown_sessions k
+           LEFT JOIN sessions s ON s.org_id = k.org_id AND s.machine_id = k.machine_id AND s.source = k.source
+             AND s.session_id = k.session_id
+           WHERE k.org_id = $1`,
           [db.orgId],
         ),
       )
     ).map((s) => [keyOf(s), s]),
   );
-  const note = (db: OrgDb, s: Theirs) =>
+  // Whether a copy is kept is what is there after this, and was this one's to begin with.
+  const note = (db: OrgDb, s: Theirs, ours: boolean) =>
     db.query(
-      `INSERT INTO shown_sessions (org_id, machine_id, source, session_id, owner_email, sent_at, rules, copied_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp())
+      `INSERT INTO shown_sessions (org_id, machine_id, source, session_id, sent_at, rules, stored, copied_at)
+       VALUES ($1, $2, $3, $4, $5, $6,
+               $7::boolean AND EXISTS (SELECT 1 FROM sessions
+                                       WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4),
+               clock_timestamp())
        ON CONFLICT (org_id, machine_id, source, session_id) DO UPDATE
-       SET owner_email = EXCLUDED.owner_email, sent_at = EXCLUDED.sent_at, rules = EXCLUDED.rules,
+       SET sent_at = EXCLUDED.sent_at, rules = EXCLUDED.rules, stored = EXCLUDED.stored,
            copied_at = EXCLUDED.copied_at, removed_at = NULL`,
-      [db.orgId, s.machine_id, s.source, s.session_id, s.owner_email, s.sent, rules],
+      [db.orgId, s.machine_id, s.source, s.session_id, s.sent, rules, ours],
     );
+  // Filed under another person since: theirs now, and not a copy beside the old one.
+  const moved = async (db: OrgDb, had: Sent | undefined, owner: string) => {
+    if (had?.stored && had.here !== null && had.here !== owner) await removeUpload(db, as(db.orgId, had.here), had);
+  };
   let copied = 0;
   let kept = 0;
   let removed = 0;
@@ -318,49 +438,78 @@ export async function copyRepo(
   for (const s of theirs) {
     const had = sent.get(keyOf(s));
     sent.delete(keyOf(s));
-    // What was sent is what is there, by these rules and under the same person: nothing to do.
-    if (had && !had.removed && had.sent_at === s.sent && had.rules === rules && had.owner_email === s.owner_email) continue;
+    // What was sent is what is there, by these rules and under the same person, or was turned down as it is: nothing to do.
+    if (had && !had.removed && had.sent_at === s.sent && had.rules === rules && (!had.stored || had.here === s.owner_email)) continue;
+    let row: (Theirs & { payload: unknown }) | undefined;
     try {
       // With when it was stored, as this statement saw it: one stored again a moment later has another time, and is sent the next time.
-      const [row] = await from((db) =>
+      [row] = await from!((db) =>
         db.query<Theirs & { payload: unknown }>(
           `SELECT machine_id, source, session_id, owner_email, updated_at::text AS sent, payload FROM sessions
-           WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4 AND repo = $5`,
+           WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4 AND lower(repo) = lower($5)`,
           [db.orgId, s.machine_id, s.source, s.session_id, demo.repo],
         ),
       );
       // Gone in the moment since: the next time removes it here.
       if (!row) continue;
+      const theirRow = row;
       const upload = shown((typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload) as Upload, demo.hide);
       const stored = await to(async (db) => {
-        // Filed under another person since: theirs now, and not a copy beside the old one.
-        if (had && !had.removed && had.owner_email !== row.owner_email) await removeUpload(db, as(db.orgId, had.owner_email), had);
-        const { stored } = await storeUpload(db, upload, as(db.orgId, row.owner_email));
+        await moved(db, had, theirRow.owner_email);
+        const { stored } = await storeUpload(db, upload, as(db.orgId, theirRow.owner_email));
         // Noted whether or not it was stored: one the organisation would not take is not offered again until it changes.
-        await note(db, row);
+        await note(db, theirRow, stored || had?.stored === true);
         return stored;
       });
       if (stored) copied += 1;
       else kept += 1;
     } catch (err) {
+      if (row && refused(err)) {
+        // Turned down, and all of it undone: noted on its own, so that it is not offered again and again.
+        const theirRow = row;
+        try {
+          await to(async (db) => {
+            await moved(db, had, theirRow.owner_email);
+            await note(db, theirRow, had?.stored === true);
+          });
+          kept += 1;
+          continue;
+        } catch (noting) {
+          err = noting;
+        }
+      }
       failed += 1;
       log(err);
     }
   }
   // What is left was sent once and is in the repository no more.
-  for (const gone of sent.values()) {
-    if (gone.removed) continue;
+  const left = [...sent.values()].filter((gone) => !gone.removed);
+  const none = from !== null && theirs.length === 0 && left.some((gone) => gone.stored && gone.here !== null);
+  empty.copies = none ? empty.copies + 1 : 0;
+  const holding = none && empty.copies < EMPTY_COPIES;
+  if (holding) {
+    log(
+      `there are no sessions of ${demo.repo} where they are uploaded: what was copied of it is left as it is, ` +
+        `and removed if there are none on ${EMPTY_COPIES} copies in a row (${empty.copies} so far).`,
+    );
+  }
+  for (const gone of holding ? [] : left) {
     try {
-      await to(async (db) => {
-        await removeUpload(db, as(db.orgId, gone.owner_email), gone);
-        await db.query(
-          // Whose it was goes with it: that one was here, and when it went, is all that is kept a while.
-          `UPDATE shown_sessions SET removed_at = clock_timestamp(), owner_email = ''
-           WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
-          [db.orgId, gone.machine_id, gone.source, gone.session_id],
-        );
+      const went = await to(async (db) => {
+        const went = gone.stored && gone.here !== null && (await removeUpload(db, as(db.orgId, gone.here), gone));
+        const which = [db.orgId, gone.machine_id, gone.source, gone.session_id];
+        // That one was here, and when it went, is all that is kept a while; one that never was is forgotten.
+        if (went) {
+          await db.query(
+            `UPDATE shown_sessions SET removed_at = clock_timestamp() WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
+            which,
+          );
+        } else {
+          await db.query(`DELETE FROM shown_sessions WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`, which);
+        }
+        return went;
       });
-      removed += 1;
+      if (went) removed += 1;
     } catch (err) {
       failed += 1;
       log(err);
@@ -380,7 +529,7 @@ export async function copyRepo(
     const since = new Date(latest.getTime() + 1).toISOString();
     // Some at a time, as the page's own button does it, until none is left or none gets further.
     for (;;) {
-      const some = await rematchPulls(to, {}, since, key, log);
+      const some = await rematchPulls(to, { sessions_repo: demo.repo }, since, key, log);
       matched += some.matched;
       failed += some.failed;
       if (some.remaining === 0 || some.matched === 0) break;
@@ -394,6 +543,63 @@ const SETTINGS = ["SESSIONLY_DEMO_FROM", "SESSIONLY_DEMO_REPO", "SESSIONLY_DEMO_
 const EVERY_MINUTES = 30;
 
 /**
+ * SESSIONLY_DEMO_HIDE as entries: separated by commas or new lines, a blank
+ * one being no entry. Each is a file name, a path from the repository's
+ * root, a folder, or a pattern with `*`, with a leading `/` or `./` taken
+ * off (see `patternOf`). One that is nothing once that and a trailing `/`
+ * are taken off (`/`, `.`), or that climbs out with `..`, could only hide
+ * nothing, or not what was meant: the whole setting is then not used.
+ */
+export function hideFrom(text: string | undefined): { hide: string[] } | { problem: string } {
+  const written = (text ?? "").split(/[,\n]/).map((entry) => entry.trim()).filter(Boolean);
+  const unusable = written.filter((entry) => entryOf(entry) === "");
+  if (unusable.length) {
+    return {
+      problem:
+        `SESSIONLY_DEMO_HIDE: ${unusable.map((entry) => `"${entry}"`).join(", ")} cannot be matched to paths of the repository ` +
+        `(an entry is a file name, a path from its root, a folder or a pattern with *, and does not climb out with ..). ` +
+        `The repository is not shown, and pull requests reported to SESSIONLY_DEMO_ORG are refused, until it is put right.`,
+    };
+  }
+  return { hide: written.map(entryOf) };
+}
+
+/**
+ * A repository named as sessions are filed under it (`github.com/owner/name`),
+ * however it is written: as the collector makes the name of a remote
+ * (crates/sessionly/src/git.rs), without the scheme, the credentials, the
+ * port or `.git`, and as `parseRepo` writes one, without a trailing slash;
+ * and with the host in small letters. Null for one that is not a remote: a
+ * folder, or nothing.
+ */
+export function repoOf(text: string): string | null {
+  const parsed = parseRepo(text);
+  if (!parsed.ok || parsed.name.coversFolders) return null;
+  let name = parsed.name.repo;
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(name);
+  if (scheme) name = name.slice(scheme[0].length);
+  else name = name.replace(/^([^/:]+):(?!\/)/, "$1/");
+  const [authority = "", ...path] = name.split("/");
+  const host = authority.slice(authority.lastIndexOf("@") + 1).split(":")[0]!.toLowerCase();
+  const rest = path.join("/").replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  if (!host || !rest || /\s/.test(`${host}/${rest}`)) return null;
+  return `${host}/${rest}`;
+}
+
+/**
+ * Where pull request reports are kept without the paths not shown: in
+ * SESSIONLY_DEMO_ORG whenever it is set, whatever else is wrong with the
+ * settings, so that a mistake in one of them never lets a report in whole.
+ * With SESSIONLY_DEMO_HIDE not to be trusted, reports there are refused.
+ */
+export function reportsShownIn(env: NodeJS.ProcessEnv): { org: string; hide: string[] } | { org: string; problem: string } | undefined {
+  const org = env.SESSIONLY_DEMO_ORG?.trim();
+  if (!org) return undefined;
+  const hide = hideFrom(env.SESSIONLY_DEMO_HIDE);
+  return "problem" in hide ? { org, problem: hide.problem } : { org, hide: hide.hide };
+}
+
+/**
  * The demo the settings ask for: undefined if they ask for none, and what is
  * wrong with them otherwise. All three of where from, which repository and
  * where to are needed, and the two organisations are not the same one: what
@@ -401,20 +607,22 @@ const EVERY_MINUTES = 30;
  * the session itself.
  */
 export function demoFrom(env: NodeJS.ProcessEnv): Demo | { problem: string } | undefined {
-  const [from, repo, org] = SETTINGS.map((name) => env[name]?.trim() ?? "");
+  const [from, written, org] = SETTINGS.map((name) => env[name]?.trim() ?? "");
   const set = SETTINGS.filter((name) => env[name]?.trim());
   if (set.length === 0) return undefined;
   if (set.length < SETTINGS.length) {
     return { problem: `Only ${set.join(" and ")} of ${SETTINGS.join(", ")} ${set.length === 1 ? "is" : "are"} set: showing a repository in another organisation needs all three, and is off.` };
   }
   if (from === org) return { problem: "SESSIONLY_DEMO_FROM and SESSIONLY_DEMO_ORG name the same organisation: a repository is shown in another one, and this is off." };
+  const repo = repoOf(written!);
+  if (!repo) {
+    return { problem: "SESSIONLY_DEMO_REPO is not a repository as sessions are filed under it (github.com/owner/name): showing a repository in another organisation is off." };
+  }
+  const hide = hideFrom(env.SESSIONLY_DEMO_HIDE);
+  if ("problem" in hide) return hide;
   const minutes = Number(env.SESSIONLY_DEMO_MINUTES?.trim() || EVERY_MINUTES);
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 24 * 60) {
     return { problem: "SESSIONLY_DEMO_MINUTES is not a whole number of minutes from 1 to 1440: showing a repository in another organisation is off." };
   }
-  const hide = (env.SESSIONLY_DEMO_HIDE ?? "")
-    .split(/[,\n]/)
-    .map((path) => path.trim().replace(/\\/g, "/").replace(/^\.\//, ""))
-    .filter(Boolean);
-  return { from: from!, repo: repo!, org: org!, hide, minutes };
+  return { from: from!, repo, org: org!, hide: hide.hide, minutes };
 }

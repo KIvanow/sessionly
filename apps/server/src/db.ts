@@ -801,17 +801,20 @@ const MIGRATIONS: string[] = [
   // What an organisation that one repository is shown in (demo.ts) has been
   // sent: for each session, when the one it was made from was last stored,
   // and by which rules it was made, so that a session sent again, or the
-  // rules changing, is seen without reading every session each time. One
-  // that was removed stays a while with when, which is what says the pull
-  // requests there are due to be matched again.
+  // rules changing, is seen without reading every session each time.
+  // `stored` is whether a copy was kept there: one turned down is not
+  // offered again until it changes, and one kept and since deleted there is
+  // sent again. Whose a session is, is read from the session, so no address
+  // is kept here. One that was removed stays a while with when, which is
+  // what says the pull requests there are due to be matched again.
   `CREATE TABLE shown_sessions (
      org_id     text NOT NULL REFERENCES orgs ON DELETE CASCADE,
      machine_id text NOT NULL,
      source     text NOT NULL,
      session_id text NOT NULL,
-     owner_email text NOT NULL,
      sent_at    text NOT NULL,
      rules      text NOT NULL,
+     stored     boolean NOT NULL,
      copied_at  timestamptz NOT NULL,
      removed_at timestamptz,
      PRIMARY KEY (org_id, machine_id, source, session_id)

@@ -247,8 +247,12 @@ export interface Options {
   telemetry?: Telemetry | null;
   /** What the committers kept of a pull request are hashed with (SESSIONLY_HASH_KEY); none: a plain hash. */
   hashKey?: string;
-  /** The organisation one repository is shown in (demo.ts), and the paths of it that are not shown. */
-  demo?: { org: string; hide: string[] };
+  /**
+   * The organisation one repository is shown in (demo.ts), and the paths of
+   * it that are not shown; or why those cannot be trusted, and reports to it
+   * are refused (`reportsShownIn`).
+   */
+  demo?: { org: string; hide: string[] } | { org: string; problem: string };
 }
 
 /**
@@ -363,8 +367,13 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       return c.json({ error: "the body is not JSON" }, 400);
     }
     const report = checkReport(body);
-    // Where one repository is shown, a report is kept without the paths that are not.
+    // Where one repository is shown, a report is kept without the paths that
+    // are not; and not at all while which those are cannot be told.
     const demo = options.demo?.org === c.get("principal").orgId ? options.demo : undefined;
+    if (demo && "problem" in demo) {
+      console.error(`a pull request reported to ${demo.org} is refused:`, demo.problem);
+      return c.json({ error: "this organisation shows a repository to others, and the server's setting of what not to show cannot be used: the report is not kept", code: "demo_hide_unusable" }, 503);
+    }
     c.set("report", demo ? shownReport(report, demo.hide) : report);
     await next();
   });

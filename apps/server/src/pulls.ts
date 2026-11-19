@@ -1237,6 +1237,12 @@ export interface PullFilters {
   state?: string;
   /** Merged, closed or (if still open) created at or after this. */
   since?: string;
+  /**
+   * Exactly a repository whose sessions are matched with the pull request's
+   * lines, in any case: its own, the one its branch is in, or another name it
+   * goes by. Not a substring, as `repo` is: `acme/shown` is not `acme/shown-2`.
+   */
+  sessions_repo?: string;
 }
 
 function where(orgId: string, filters: PullFilters): { sql: string; params: unknown[] } {
@@ -1244,6 +1250,12 @@ function where(orgId: string, filters: PullFilters): { sql: string; params: unkn
   const bind = (value: unknown) => `$${params.push(value)}`;
   const conditions: string[] = [`org_id = ${bind(orgId)}`];
   if (filters.repo) conditions.push(`repo ILIKE ${bind(`%${filters.repo.replace(/[\\%_]/g, "\\$&")}%`)}`);
+  if (filters.sessions_repo) {
+    const name = bind(filters.sessions_repo.toLowerCase());
+    conditions.push(
+      `(lower(repo) = ${name} OR lower(head_repo) = ${name} OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(coalesce(aliases, '[]'::jsonb)) AS a(name) WHERE lower(a.name) = ${name}))`,
+    );
+  }
   if (filters.state) conditions.push(`state = ${bind(filters.state)}`);
   if (filters.since) conditions.push(`coalesce(merged_at, closed_at, created_at) >= ${bind(filters.since)}::timestamptz`);
   return { sql: `WHERE ${conditions.join(" AND ")}`, params };
