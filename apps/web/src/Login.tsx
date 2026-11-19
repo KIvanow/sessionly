@@ -38,8 +38,10 @@ export function Login({
   backLabel?: string;
 }) {
   const providers = options?.providers ?? [];
-  const [chosen, setChosen] = useState<Mode | null>(start ?? null);
-  const mode: Mode = chosen ?? (providers.length ? "sign-in" : "token");
+  const [chosen, setChosen] = useState<Mode | null>(null);
+  // What it was opened for is read on every render, not only the first: that can be known only once the server
+  // has said what it offers, a moment after the page is first drawn.
+  const mode: Mode = chosen ?? start ?? (providers.length ? "sign-in" : "token");
   const [token, setToken] = useState("");
 
   function submit(e: React.FormEvent) {
