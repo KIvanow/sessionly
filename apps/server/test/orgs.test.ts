@@ -224,7 +224,7 @@ test("a pull request is attributed from its own organisation's sessions only", a
 
 test("the database itself confines a request to its organisation", async () => {
   // Counted first as the owner, who sees every organisation's rows.
-  const tables = ["sessions", "pull_requests", "pull_request_reports", "tokens", "orgs"];
+  const tables = ["sessions", "pull_requests", "pull_sessions", "pull_request_reports", "tokens", "orgs"];
   const mine = new Map<string, number>();
   for (const table of tables) {
     const column = table === "orgs" ? "id" : "org_id";
@@ -308,7 +308,7 @@ test("requests are granted exactly the tables they must reach", async () => {
   );
   const can = Object.fromEntries(granted.map((t) => [t.name, t.can]));
   // Everything an organisation owns: all of it, behind row-level security.
-  for (const table of ["tokens", "sessions", "pull_requests", "pull_request_reports", "repo_exclusions", "repos_allowed_again"]) assert.equal(can[table], "select,insert,update,delete", table);
+  for (const table of ["tokens", "sessions", "pull_requests", "pull_sessions", "pull_request_reports", "repo_exclusions", "repos_allowed_again"]) assert.equal(can[table], "select,insert,update,delete", table);
   // Its own row of the organisations, to read.
   assert.equal(can.orgs, "select");
   // And nothing else: not the record of migrations.

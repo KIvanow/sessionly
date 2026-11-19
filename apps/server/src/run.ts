@@ -30,7 +30,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp, type Extension } from "./app.ts";
-import { count, DB_COUNTS, misset, openDb, runMigrations, type Migrations } from "./db.ts";
+import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Migrations } from "./db.ts";
 import { tidy } from "./limits.ts";
 import {
   github,
@@ -239,6 +239,20 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       ? { token: adminToken, email: process.env.SESSIONLY_ADMIN_EMAIL ?? "admin@localhost" }
       : undefined,
   });
+
+  // Sessions from before their line hashes were counted: counted now, beside the requests.
+  // What could not be counted (a statement that failed, the database gone for a moment) is tried again later.
+  const counting = () =>
+    void countHashedLines(db)
+      .then(({ failed }) => failed > 0)
+      .catch((err) => {
+        console.error("counting sessions' line hashes failed:", err);
+        return true;
+      })
+      .then((again) => {
+        if (again) setTimeout(counting, 10 * 60_000).unref();
+      });
+  counting();
 
   const port = Number(process.env.PORT ?? 8080);
   const hostname = process.env.HOST ?? "127.0.0.1";

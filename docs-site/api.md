@@ -66,8 +66,8 @@ How a repository is named, and what a path covers, is under
 | | Who | |
 |---|---|---|
 | `PUT /prs` | `ci`, `admin` | The [Action](pull-requests.md)'s report of one pull request. Answers `{"stored": true, "attribution": {…}}`, the figures the Action then shows. |
-| `GET /prs` | `admin` | A page of pull requests. Filters `repo` (part of its name), `state` (`open`, `merged` or `closed`) and `since`; `limit` (50, at most 500) and `offset`. |
-| `GET /prs/summary` | `admin` | The same pull requests summed by model. Same three filters. |
+| `GET /prs` | `admin` | A page of pull requests. Filters `repo` (part of its name), `state` (`open`, `merged` or `closed`) and `since`; `limit` (50, at most 500) and `offset`. Each has `cost`: what the sessions matched to it cost, each for its share of lines (see [how to read it](pull-requests.md#how-to-read-it)). |
+| `GET /prs/summary` | `admin` | The same pull requests summed by model. Same three filters. Its `total` has what their matched sessions cost (`cost_usd`, null when none has a cost figure). |
 | `GET /prs/detail?repo=…&number=…` | `admin` | One pull request, with its files, the sessions that wrote its lines, its reviews and comments, and `history`. `repo` is its whole name. |
 | `POST /prs/match` | `admin` | Match lines again against the sessions held now, without a report. With `repo` (its whole name) and `number`: one pull request, answered with its figures, or `409` with the code `needs_report` when it was last reported before that could be done. Otherwise the filters of `GET /prs`, for up to 100 at a time: send the answer's `started` back, with the same filters, until `remaining` is 0. Each pull request is matched and stored on its own; `failed` counts those of a request that could not be, which stay among the remaining. |
 

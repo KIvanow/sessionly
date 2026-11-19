@@ -457,6 +457,67 @@ export interface PullCloud {
   sessions: number;
 }
 
+/**
+ * What the sessions matched to a pull request cost, each counted for the
+ * share of its lines that are in the pull request. It is the cost of those
+ * sessions and not of the pull request's whole making: lines that are not
+ * put down to a session carry none.
+ */
+export interface PullCost {
+  /** The sum of the sessions' shares. Null when none of them has a cost figure, or there are none. */
+  usd: number | null;
+  /** Whether any of those shares is of a cost that is estimated, wholly or in part. */
+  estimated: boolean;
+  /** Sessions with lines in it, and how many of those have no cost figure or were deleted: `usd` is then a floor. */
+  sessions: number;
+  sessions_without_cost: number;
+  /** How many of them have a cost that leaves requests out (to models without a known price): `usd` is then a floor too. */
+  sessions_with_cost_partial: number;
+  /**
+   * How many of them have lines in several pull requests, in one of which
+   * they were kept before which lines they are was: the same ones, perhaps,
+   * counted in each. `usd` is then an estimate, until those are matched again.
+   */
+  sessions_unshared: number;
+  /**
+   * How many of those have such lines in a pull request that cannot be
+   * matched again (see `matchable`): only a new report of it by the Action
+   * says which lines they are.
+   */
+  sessions_unshared_for_good: number;
+  /**
+   * How many of those without a cost here have one, whose share is not known
+   * yet: after an upgrade the server counts the line hashes of the sessions
+   * it held, and until it has, what part of one is in a pull request cannot
+   * be said. Counted among `sessions_without_cost`.
+   */
+  sessions_uncounted: number;
+  /**
+   * What an agent line of it cost: `usd` for what the lines of the sessions
+   * that have a cost figure count as, a line that is in several pull
+   * requests being shared out between them. A floor when one of those has
+   * a cost that leaves requests out.
+   */
+  per_agent_line_usd: number | null;
+  /**
+   * What the agent lines it was opened with cost: their sessions' cost, for
+   * the share of each that those lines are. There when none of them is left
+   * too. Null on one not reported from the moment it was opened, or last
+   * matched before its sessions of then were kept.
+   */
+  opened_usd: number | null;
+  /** Whether a session with lines among those has no cost figure, or one that leaves requests out: both figures of it are then floors. */
+  opened_is_floor: boolean;
+  /** Whether any of that cost is an estimate, or of a session that is unshared (see `sessions_unshared`). */
+  opened_estimated: boolean;
+  /**
+   * What an agent line that survived review cost: `opened_usd` for each of
+   * them still there, those being shared out with other pull requests as the
+   * lines it was opened with were on the whole. Null when none is.
+   */
+  per_surviving_line_usd: number | null;
+}
+
 export interface PullRow {
   repo: string;
   number: number;
@@ -476,6 +537,8 @@ export interface PullRow {
   review_rounds: number;
   files_without_diff: number;
   attribution: PullAttribution;
+  /** Null on a pull request last reported before its sessions were kept. */
+  cost: PullCost | null;
   /** When the Action last reported it. */
   updated_at: string;
   /**
@@ -540,6 +603,28 @@ export interface PullSession {
   session_id: string;
   /** Lines of the pull request, as last reported, put down to this session. */
   lines: number;
+  /** Line hashes the session uploaded: the lines of it that could be matched to any pull request. Null once it has been deleted, or while they are still to be counted after an upgrade. */
+  hashed_lines: number | null;
+  /**
+   * Its cost in this pull request: the session's cost, in the proportion of
+   * `lines` to `hashed_lines`. A line that is also in other pull requests
+   * (but for ones closed without merging) is shared out between them, so
+   * the session is counted once. Null where the session has no cost figure,
+   * or has been deleted, or is `uncounted`.
+   */
+  cost_share_usd: number | null;
+  /**
+   * It has a cost, and what share of it is here is not known yet: after an
+   * upgrade the server counts the line hashes of the sessions it held, and
+   * this one's are still to be counted.
+   */
+  uncounted: boolean;
+  /**
+   * It has lines in other pull requests too, and in one of them which lines
+   * they are was not kept: the same ones, perhaps, counted in each. Its
+   * share here is then an estimate (see `PullCost.sessions_unshared`).
+   */
+  unshared: boolean;
   session: Pick<
     SessionRow,
     "owner_email" | "runtime" | "title" | "started_at" | "active_ms" | "cost_usd" | "cost_source" | "primary_model" | "prompts"
@@ -711,5 +796,33 @@ export interface PullSummary {
     /** Pull requests a cloud agent worked on, and how many of those have no session. */
     cloud_pulls: number;
     cloud_pulls_without_session: number;
+    /**
+     * What the sessions matched to these pull requests cost (see `PullCost`):
+     * the sum of theirs. Null when none has a cost. Those closed
+     * unmerged, whose lines may be in another too, are in no figure of cost
+     * here unless only they are asked for.
+     */
+    cost_usd: number | null;
+    cost_estimated: boolean;
+    /**
+     * Pull requests whose cost is a floor or not known: some session of
+     * theirs has no cost figure or one that leaves requests out, or they
+     * have agent lines and were last reported before their sessions were
+     * kept. `cost_usd` is then a floor.
+     */
+    pulls_with_cost_missing: number;
+    /** Pull requests closed without merging that have a cost, and are left out of the figures here. */
+    pulls_closed_with_cost: number;
+    /**
+     * Over the pull requests reported from the moment they were opened that
+     * have a cost: what the agent lines they were opened with cost
+     * (`opened_usd`), for each of those that survived review. Null when
+     * none did.
+     */
+    per_surviving_line_usd: number | null;
+    /** Whether a session of those lines has no cost figure, or not all of it. */
+    per_surviving_line_is_floor: boolean;
+    /** Whether any of what those lines cost is an estimate. */
+    per_surviving_line_estimated: boolean;
   };
 }
