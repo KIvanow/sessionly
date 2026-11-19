@@ -766,12 +766,17 @@ interface RawChange {
   reason: string | null;
 }
 
+/** The words for a newer Action: its version, and the one it replaced when that one can be read. */
+function actionReason(before: string | null, version: string): string {
+  return before && actionNumbers(before) ? `Action ${version}, was ${before}` : `Action ${version}`;
+}
+
 /**
  * What changed between two reports, and the reason in words. New commits
- * first, then sessions that arrived, then sessions that are gone, then a
- * newer Action, then a session whose line count changed, and otherwise
- * that it was matched again. With no earlier report there is nothing to
- * compare, and no reason.
+ * first, then fewer commits, then sessions that arrived, then sessions that
+ * are gone, then a newer Action, then a session whose line count changed,
+ * and otherwise that it was matched again. With no earlier report there is
+ * nothing to compare, and no reason.
  */
 export function historyChange(now: HistoryFigures, before: HistoryFigures | null): RawChange {
   if (!before) {
@@ -804,13 +809,16 @@ export function historyChange(now: HistoryFigures, before: HistoryFigures | null
   changed.sort(byLines);
 
   const commits = now.commits - before.commits;
+  const dropped = -commits;
   const delta = signed(now.agent_lines - before.agent_lines);
   let reason = "matched again, nothing new";
   if (commits > 0) reason = commits === 1 ? "1 new commit" : `${commits} new commits`;
+  else if (commits < 0) reason = dropped === 1 ? "1 commit removed" : `${dropped} commits removed`;
   else if (added.length > 0) reason = `${sessionsWord(added.length)} uploaded since: ${delta} agent lines`;
   else if (gone.length > 0) reason = `${sessionsWord(gone.length)} no longer matched: ${delta} agent lines`;
-  else if (newerAction(before.reporter_version, now.reporter_version)) reason = "a newer Action";
-  else if (changed.length > 0) reason = `${linesChanged(changed.length)}: ${delta} agent lines`;
+  else if (newerAction(before.reporter_version, now.reporter_version) && now.reporter_version) {
+    reason = actionReason(before.reporter_version, now.reporter_version);
+  } else if (changed.length > 0) reason = `${linesChanged(changed.length)}: ${delta} agent lines`;
 
   return {
     lines_before: before.lines,

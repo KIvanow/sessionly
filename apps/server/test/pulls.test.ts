@@ -1001,10 +1001,18 @@ test("the reason for a change is chosen in a fixed order", () => {
     ] }).reason,
     "2 sessions no longer matched: -4 agent lines",
   );
-  // same sessions, same commits, a newer Action, and the lines moved
-  assert.equal(historyChange(snap(1, 7, 4, [{ id: "s1", lines: 4 }], "0.2.0"), before).reason, "a newer Action");
+  // fewer commits, ahead of a session that arrived, as new commits are
+  assert.equal(historyChange(snap(0, 6, 4, [{ id: "s1", lines: 4 }], "0.1.0"), before).reason, "1 commit removed");
+  assert.equal(
+    historyChange(snap(1, 8, 5, [{ id: "s1", lines: 4 }, { id: "s2", lines: 1 }], "0.1.0"), snap(3, 6, 4, [{ id: "s1", lines: 4 }], "0.1.0")).reason,
+    "2 commits removed",
+  );
+  // same sessions, same commits, a newer Action, and the lines moved: the versions are named
+  assert.equal(historyChange(snap(1, 7, 4, [{ id: "s1", lines: 4 }], "0.2.0"), before).reason, "Action 0.2.0, was 0.1.0");
   // a newer Action also wins when a session's line count changed with it
-  assert.equal(historyChange(snap(1, 7, 5, [{ id: "s1", lines: 5 }], "0.2.0"), before).reason, "a newer Action");
+  assert.equal(historyChange(snap(1, 7, 5, [{ id: "s1", lines: 5 }], "0.2.0"), before).reason, "Action 0.2.0, was 0.1.0");
+  // the one before named no version that can be read
+  assert.equal(historyChange(snap(1, 7, 4, [{ id: "s1", lines: 4 }], "0.2.0"), { ...before, reporter_version: null }).reason, "Action 0.2.0");
   assert.equal(historyChange(snap(1, 7, 4, [{ id: "s1", lines: 4 }], "0.1.0"), before).reason, "matched again, nothing new");
   // an existing session whose line count changed is neither added nor gone
   const shifted = historyChange(snap(1, 6, 5, [{ id: "s1", lines: 5 }], "0.1.0"), before);
@@ -1080,7 +1088,7 @@ test("a pull request keeps a history of its figures and says what moved them", a
   page = await detail(2);
   assert.equal(page.history.length, 2);
   assert.equal(page.history[0].reporter_version, "0.2.0");
-  assert.equal(page.history[0].change.reason, "a newer Action");
+  assert.equal(page.history[0].change.reason, "Action 0.2.0, was 0.1.0");
   assert.deepEqual([page.history[0].lines, page.history[0].agent_lines], [1, 0]);
   assert.equal(page.history[1].reporter_version, "0.1.0");
   assert.equal(page.history[1].change.reason, null);
@@ -1101,7 +1109,7 @@ test("a pull request keeps a history of its figures and says what moved them", a
     event: "synchronize", commits: 1, files: [file("b.ts", 10, 11, 12)], reporter: { name: "sessionly-action", version: "0.3.0" },
   })).status, 200);
   page = await detail(2);
-  assert.equal(page.history[0].change.reason, "a newer Action");
+  assert.equal(page.history[0].change.reason, "Action 0.3.0, was 0.2.0");
   assert.equal(page.history[0].reporter_version, "0.3.0");
   assert.equal(page.history[1].reporter_version, "0.2.0");
 
@@ -1143,6 +1151,13 @@ test("a pull request keeps a history of its figures and says what moved them", a
   );
   assert.equal(page.history[0].change.sessions_added.length, 0);
   assert.equal(page.history[0].change.sessions_gone.length, 0);
+
+  // A rebase that drops commits says so, when nothing else on the ladder moved.
+  assert.equal((await sent(6, { commits: 4, files: [file("f.ts", 40)] })).status, 200);
+  assert.equal((await sent(6, { event: "synchronize", commits: 2, files: [file("f.ts", 40)] })).status, 200);
+  page = await detail(6);
+  assert.equal(page.history[0].change.reason, "2 commits removed");
+  assert.deepEqual([page.history[0].change.commits_before, page.history[0].commits], [4, 2]);
 });
 
 test("two reports of a new pull request at once keep one history row when the figures match", async () => {
@@ -1481,8 +1496,15 @@ test("pull requests and sessions from before the cost was shown have one after t
        ('old-cost', 'github.com/acme/old', 1, 'ann', 'merged', 'opened', 'closed', '[]', '[]', $1::jsonb, $2::jsonb),
        ('old-cost', 'github.com/acme/old', 2, 'ann', 'merged', 'opened', 'closed', '[]', '[]', $1::jsonb, NULL),
        ('old-cost', 'github.com/acme/old', 3, 'ann', 'merged', 'opened', 'closed', '[]', '[]', $1::jsonb, $2::jsonb)`,
-    [attribution, JSON.stringify({ files: [], sessions: [{ machine_id: "m1", source: "claude-code", session_id: "s1", lines: 2 }] })],
+    [attribution, JSON.stringify({
+      files: [],
+      sessions: [
+        { machine_id: "m1", source: "claude-code", session_id: "s1", lines: 2 },
+        { machine_id: "m1", source: "claude-code", session_id: "s0", lines: 0 },
+      ],
+    })],
   );
+  await old.query(`UPDATE pull_requests SET reporter_version = '0.4.0', commits = 7 WHERE org_id = 'old-cost' AND number = 1`);
   await old.close();
 
   const upgraded = await openDb(url);
@@ -1509,6 +1531,20 @@ test("pull requests and sessions from before the cost was shown have one after t
     // and its row says so, where it would have a share
     const page = await (await upgradedApp.request("/api/v1/prs/detail?repo=github.com/acme/old&number=1", { headers: { authorization: `Bearer ${admin}` } })).json() as any;
     assert.deepEqual(page.sessions.map((s: any) => [s.session_id, s.cost_share_usd, s.uncounted]), [["s1", null, true]]);
+    // the first history row is the figures already stored, and the sessions that had lines then
+    const kept = (sessions: { session_id: string; lines: number }[]) => sessions.map((s) => [s.session_id, s.lines]).sort();
+    assert.equal(page.history.length, 1);
+    assert.equal(page.history[0].change.reason, null);
+    assert.equal(page.history[0].event, "closed");
+    assert.equal(page.history[0].reporter_version, "0.4.0");
+    assert.deepEqual([page.history[0].commits, page.history[0].lines, page.history[0].agent_lines], [7, 2, 2]);
+    assert.deepEqual(kept(page.history[0].sessions), [["s1", 2]]);
+    const bare = await (await upgradedApp.request("/api/v1/prs/detail?repo=github.com/acme/old&number=2", { headers: { authorization: `Bearer ${admin}` } })).json() as any;
+    assert.equal(bare.history.length, 1);
+    assert.deepEqual(bare.history[0].sessions, []);
+    const third = await (await upgradedApp.request("/api/v1/prs/detail?repo=github.com/acme/old&number=3", { headers: { authorization: `Bearer ${admin}` } })).json() as any;
+    assert.equal(third.history[0].reporter_version, null);
+    assert.deepEqual(kept(third.history[0].sessions), [["s1", 2]]);
     assert.deepEqual(await countHashedLines(upgraded), { counted: 1, failed: 0 });
     const list = await (await upgradedApp.request("/api/v1/prs?state=merged", { headers: { authorization: `Bearer ${admin}` } })).json() as any;
     const costs = Object.fromEntries(list.pulls.map((p: any) => [p.number, p.cost && [p.cost.usd, p.cost.estimated, p.cost.sessions_unshared, p.cost.opened_usd]]));

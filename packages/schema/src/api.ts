@@ -672,11 +672,12 @@ export interface PullHistoryChange {
   sessions_changed: PullHistorySessionChange[];
   /**
    * Why the figures moved, in a few words, chosen in this order: new
-   * commits (`2 new commits`); sessions uploaded since (`1 session uploaded
-   * since: +17 agent lines`); sessions no longer matched; `a newer Action`;
-   * a session whose line count changed (`1 session's lines changed: +1
-   * agent lines`); otherwise `matched again, nothing new`. Null on the
-   * first report.
+   * commits (`2 new commits`); fewer commits (`2 commits removed`); sessions
+   * uploaded since (`1 session uploaded since: +17 agent lines`); sessions
+   * no longer matched; a newer Action (`Action 0.2.0, was 0.1.0`, or
+   * `Action 0.2.0` when the one before named no version); a session whose
+   * line count changed (`1 session's lines changed: +1 agent lines`);
+   * otherwise `matched again, nothing new`. Null on the first report.
    */
   reason: string | null;
 }

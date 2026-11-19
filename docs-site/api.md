@@ -107,10 +107,12 @@ Each row has `at`, `event` (`opened`, `synchronize`,
 `reporter_version` (the version that produced that row), and `change` against the row before
 it: the lines, agent lines and commits
 before and after, `sessions_added`, `sessions_gone`, `sessions_changed`, and `reason`. The
-reason is, in this order: new commits (`2 new commits`); sessions uploaded since (`1 session
-uploaded since: +17 agent lines`); sessions no longer matched; `a newer Action`; a session
-whose line count changed (`1 session's lines changed: +1 agent lines`); otherwise
-`matched again, nothing new`. The first row's reason is null. A pull request stored before
+reason is, in this order: new commits (`2 new commits`); fewer commits (`2 commits removed`);
+sessions uploaded since (`1 session uploaded since: +17 agent lines`); sessions no longer
+matched; a newer Action (`Action 0.2.0, was 0.1.0`, or `Action 0.2.0` when the one before
+named no version); a session whose line count changed (`1 session's lines changed: +1 agent
+lines`); otherwise `matched again, nothing new`. The first row's reason is null. A pull
+request stored before
 this was kept has one row, from the figures it had then. A report that only brings a newer
 Action is a row of its own, and the row before it keeps the version that produced those figures.
 

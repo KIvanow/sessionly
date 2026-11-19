@@ -147,8 +147,9 @@ a server of version 0.5.0 or older has to be reported once more before it can be
 
 **History.** Under the figures, each time they moved, and when a newer Action reported them
 as they were: when, what prompted the report, the
-figures then, and why (new commits, a session uploaded since, a session no longer matched, a
-newer Action, a session whose lines changed, or that it was matched again and nothing new turned up). A session named there
+figures then, and why (new commits, fewer commits, a session uploaded since, a session no
+longer matched, a newer Action and which version replaced which, a session whose lines
+changed, or that it was matched again and nothing new turned up). A session named there
 links to it. When the agent lines moved, the figure says what they were until this report.
 
 ## How to read it

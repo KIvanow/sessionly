@@ -11,6 +11,8 @@ test("a moved agent figure says what it was, and why", () => {
   assert.equal(figureBecause("1 session uploaded since: +17 agent lines"), "1 session uploaded since");
   assert.equal(figureBecause("1 session's lines changed: +1 agent lines"), "1 session's lines changed");
   assert.equal(figureBecause("2 new commits"), "2 new commits");
+  assert.equal(figureBecause("2 commits removed"), "2 commits removed");
+  assert.equal(figureBecause("Action 0.2.0, was 0.1.0"), "Action 0.2.0, was 0.1.0");
   assert.equal(
     figureShift(history, (iso) => (iso === history[0]!.at ? "17 Nov, 21:00" : `wrong ${iso}`), (n) => String(n)),
     "Was 365 until 17 Nov, 21:00: 1 session uploaded since.",
