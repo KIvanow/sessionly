@@ -115,7 +115,7 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
                   : s.source === "cursor"
                     ? "unknown: Cursor reports usage only to hooks, and they saw none of this session"
                     : s.source === "codex"
-                      ? "unknown: Codex records tokens, not what they cost"
+                      ? "unknown: no tokens on a model with a known price"
                       : "unknown"
             }
           />

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::pricing;
-use crate::session::{Cost, CostSource, ModelUsage};
+use crate::session::{Cost, ModelUsage};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
@@ -248,13 +248,17 @@ pub fn usage(turns: &[Turn], prompts: u64) -> (Vec<ModelUsage>, Option<Cost>) {
         entry.cache_read_tokens += tokens.cache_read;
         // How long Cursor asks for a cache entry to live is not reported.
         entry.cache_write_5m_tokens += tokens.cache_write;
-        match pricing::price_for(&model, 0) {
-            Some(p) => {
-                let cost = (tokens.input as f64 * p.input
-                    + tokens.output as f64 * p.output
-                    + tokens.cache_read as f64 * p.cache_read
-                    + tokens.cache_write as f64 * p.cache_write_5m())
-                    / 1e6;
+        let billed = pricing::Billed {
+            input: tokens.input,
+            output: tokens.output,
+            cache_read: tokens.cache_read,
+            cache_write_short: tokens.cache_write,
+            cache_write_long: 0,
+        };
+        // A turn is many requests: its tokens say nothing of how long any one
+        // prompt was, so the price for a short one is taken.
+        match pricing::price_for(&model, 0).map(|p| p.cost(&billed)) {
+            Some(cost) => {
                 entry.estimated_cost_usd = Some(entry.estimated_cost_usd.unwrap_or(0.0) + cost);
                 total += cost;
             }
@@ -263,17 +267,9 @@ pub fn usage(turns: &[Turn], prompts: u64) -> (Vec<ModelUsage>, Option<Cost>) {
     }
     by_model.sort_by_key(|u| std::cmp::Reverse(u.requests));
     // Tokens alone, all on models without a known price, give no figure.
-    let cost = (covered > unpriced).then_some(Cost {
-        total_usd: total,
-        source: if unpriced > 0 {
-            CostSource::PartialEstimate
-        } else {
-            CostSource::Estimated
-        },
-        transcript_estimate_usd: total,
-        unpriced_requests: unpriced,
-        untracked_usd: None,
+    let cost = (covered > unpriced).then(|| Cost {
         prompts_covered: (covered < prompts).then_some(covered),
+        ..Cost::estimate(total, unpriced)
     });
     (by_model, cost)
 }
@@ -281,6 +277,7 @@ pub fn usage(turns: &[Turn], prompts: u64) -> (Vec<ModelUsage>, Option<Cost>) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::session::CostSource;
     use serde_json::{json, Value};
     use std::io::Write;
 
@@ -513,5 +510,49 @@ pub(crate) mod tests {
         // nothing with a known price, or nothing seen: no figure
         assert_eq!(usage(&turns[2..], 2).1, None);
         assert_eq!(usage(&[], 2), (Vec::new(), None));
+    }
+
+    #[test]
+    fn prices_turns_on_other_models_too() {
+        let turn = |model: &str, tokens: Tokens| Turn {
+            model: Some(model.into()),
+            tokens: Some(tokens),
+            ..Default::default()
+        };
+        let read = Tokens {
+            input: 1_000,
+            output: 100,
+            cache_read: 4_000,
+            cache_write: 0,
+        };
+        let wrote = Tokens {
+            cache_write: 10,
+            ..read
+        };
+        let turns = [
+            turn("gpt-6.1-sol", read),
+            turn("gpt-5.3-codex-high", read),
+            turn("composer-2.5-fast", read),
+            // Cursor lists no cache write price for its own models: at the input price
+            turn("composer-2.5-fast", wrote),
+        ];
+        let (by_model, cost) = usage(&turns, 4);
+        let of = |model: &str| {
+            let u = by_model.iter().find(|u| u.model == model).unwrap();
+            u.estimated_cost_usd.unwrap()
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        // 1000 x $2 + 100 x $10 + 4000 x $0.10
+        assert!(close(of("gpt-6.1-sol"), 3400e-6));
+        // 1000 x $1.75 + 100 x $14 + 4000 x $0.175
+        assert!(close(of("gpt-5.3-codex-high"), 3850e-6));
+        // 1000 x $3 + 100 x $15 + 4000 x $0.50, and the other with 10 x $3 more
+        assert!(close(of("composer-2.5-fast"), 6500e-6 + 6530e-6));
+        let cost = cost.unwrap();
+        assert_eq!(
+            (cost.source, cost.unpriced_requests),
+            (CostSource::Estimated, 0)
+        );
+        assert!(close(cost.total_usd, 20_280e-6));
     }
 }

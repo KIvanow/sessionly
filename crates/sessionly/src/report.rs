@@ -296,7 +296,7 @@ pub fn session(
         None if s.source == crate::paths::CODEX => field(
             &mut out,
             "Cost",
-            "unknown (Codex records tokens, not what they cost)".into(),
+            "unknown (no tokens on a model with a known price)".into(),
         ),
         None => field(&mut out, "Cost", "unknown (no transcript found)".into()),
     }

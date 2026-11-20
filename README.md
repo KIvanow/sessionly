@@ -51,7 +51,8 @@ it measures. Sign in with Google or GitHub to open it; it is read-only. As of 19
 | **Total**   | **21**   | **$594.09** | **56%**       |
 
 21 sessions, 29h 50m active, 480 files changed. 5 of the 21 costs are estimates, and 3 sessions
-have no cost figure: Codex records none, and neither did the Cursor session. One repository and
+have no cost figure: the Codex ones were imported before Sessionly estimated Codex costs from
+their tokens, and the Cursor session reported none. One repository and
 one developer over one week: a record of this work, not a benchmark of the agents.
 
 ## Why Sessionly

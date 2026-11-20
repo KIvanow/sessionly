@@ -13,6 +13,7 @@ anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 rusqlite = { version = "0.42.0", features = ["bundled", "fallible_uint"] }
+zstd = { version = "0.13", default-features = false }
 schemars = { version = "1.2.3", features = ["chrono04"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }

@@ -147,6 +147,25 @@ pub struct Cost {
     pub prompts_covered: Option<u64>,
 }
 
+impl Cost {
+    /// An estimate from token counts: partial when it leaves out requests to
+    /// models without a known price.
+    pub fn estimate(total_usd: f64, unpriced_requests: u64) -> Cost {
+        Cost {
+            total_usd,
+            source: if unpriced_requests > 0 {
+                CostSource::PartialEstimate
+            } else {
+                CostSource::Estimated
+            },
+            transcript_estimate_usd: total_usd,
+            unpriced_requests,
+            untracked_usd: None,
+            prompts_covered: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ModelUsage {

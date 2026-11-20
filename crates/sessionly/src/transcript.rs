@@ -74,21 +74,22 @@ impl Usage {
         self.cache_write_1h += w1;
 
         let prompt = input + cache_read + w5 + w1;
-        match pricing::price_for(model, prompt) {
-            Some(p) => {
+        let billed = pricing::Billed {
+            input,
+            output,
+            cache_read,
+            cache_write_short: w5,
+            cache_write_long: w1,
+        };
+        match pricing::price_for(model, prompt).map(|p| p.cost(&billed)) {
+            Some(cost) => {
                 // Fast mode is billed at 2x the standard rate.
                 let speed = if usage.get("speed").and_then(Value::as_str) == Some("fast") {
                     2.0
                 } else {
                     1.0
                 };
-                let cost = speed
-                    * (input as f64 * p.input
-                        + output as f64 * p.output
-                        + cache_read as f64 * p.cache_read
-                        + w5 as f64 * p.cache_write_5m()
-                        + w1 as f64 * p.cache_write_1h())
-                    / 1e6;
+                let cost = speed * cost;
                 self.cost_usd += cost;
                 Some(cost)
             }
