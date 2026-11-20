@@ -140,7 +140,9 @@ when it was opened.
 reports it, and again when a session that added some of them is uploaded later (the session was
 still going when it was opened, the machine was offline): the server then matches the pull
 requests of its repository that are open or were closed in the last two weeks (and not before
-the session started), that its person committed to, five at most. The page and the history say
+the session started), that its person committed to, five at most: first those that have its lines from an earlier
+upload, then those with most of its lines. An upload whose lines are the ones it had matches
+nothing again. The page and the history say
 so: one row for matching again until the next report, however many uploads it took. The comment on GitHub catches up at the next report. A session
 uploaded to a server of version 0.6.3 or older, or for a pull request closed longer ago, is not
 in the figures until it is matched again: **Match again** on
@@ -175,7 +177,8 @@ links to it. When the agent lines moved, the figure says what they were until th
   session accounts for one line of the pull request.
 - **A common line**, one that three sessions or more added to the same file (an import,
   `display: flex;`), goes only to a session that also wrote a line of the pull request that is
-  not common. Otherwise it would go to an older session that once added it too, while the one
+  not common, or that added every line of a file of the pull request that has nothing but
+  common lines. Otherwise it would go to an older session that once added it too, while the one
   that wrote it is not uploaded yet.
 - **The file has to be the same one.** A session that worked in a worktree (a folder under
   `worktrees/` or `.worktrees/`, or a checkout elsewhere whose path ends with the file's path

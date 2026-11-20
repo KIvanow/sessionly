@@ -118,15 +118,26 @@ export function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[]
         else pool.set(hash, [added]);
       }
     }
+    // Only the pull request's own lines are asked about.
     const common = new Set<string>();
-    for (const [hash, list] of pool) {
-      if (new Set(list.map((added) => added.who)).size >= COMMON_LINE) common.add(hash);
+    for (const hash of new Set(file.hashes)) {
+      const list = pool.get(hash);
+      if (list && new Set(list.map((added) => added.who)).size >= COMMON_LINE) common.add(hash);
     }
     return { pool, common };
   });
   // Each line an agent added accounts for one line of the pull request: the
   // lines that are not common first, and the sessions they show worked on it.
+  // So does a session that added every line of one of its files, common or
+  // not: a file of nothing but imports is still the work of whoever wrote it.
   const shown = new Set<unknown>();
+  files.forEach((file, i) => {
+    const { pool, common } = pools[i]!;
+    const lines = new Set(file.hashes);
+    if (lines.size === 0 || ![...lines].every((hash) => common.has(hash))) return;
+    const each = [...lines].map((hash) => new Set(pool.get(hash)!.map((added) => added.who)));
+    for (const who of each[0]!) if (each.every((whose) => whose.has(who))) shown.add(who);
+  });
   const lines = files.map((file, i) =>
     file.hashes.map((hash) => {
       const { pool, common } = pools[i]!;
@@ -912,7 +923,16 @@ async function recordReport(
   // Matched again after being matched again, and no report between: one row
   // says what it came to. A session still going is uploaded at every turn,
   // and would otherwise push the reports out of what is kept.
-  if (latest?.event === "match" && report.event === "match") {
+  // (A report since, with figures that moved nothing, wrote no row: it is not merged past.)
+  const reported = async () => {
+    const [pull] = await db.query<{ later: boolean }>(
+      `SELECT updated_at > (SELECT at FROM pull_request_reports WHERE org_id = $1 AND id = $4) AS later
+       FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
+      [db.orgId, report.repo, report.number, latest!.id],
+    );
+    return pull?.later === true;
+  };
+  if (latest?.event === "match" && report.event === "match" && !(await reported())) {
     await db.query(
       `UPDATE pull_request_reports SET at = clock_timestamp(), commits = $2, lines = $3, agent_lines = $4, sessions = $5::jsonb, reporter_version = $6
        WHERE org_id = $1 AND id = $7`,
@@ -1239,22 +1259,39 @@ export const MATCH_ON_UPLOAD = 5;
  * The pull requests a session just stored can change the figures of: in its
  * repository, open or closed in the last two weeks and not before it started,
  * committed to by its person (or, for a cloud session, on its branch), with a
- * line it added to the same file. Its lines are often uploaded after the pull
- * request was reported (it is opened while the session goes on): matching
- * these again (`rematchPull`) counts them without waiting for the next
- * report. Run once the session is committed: a report under way is waited
- * for, and either it read the session or its pull request is among these.
+ * line it added to the same file, those with most of its lines first; and
+ * ahead of them, those that have its lines from before, which it may have
+ * fewer of now. Its lines are often uploaded after the pull request was
+ * reported (it is opened while the session goes on): matching these again
+ * (`rematchPull`) counts them without waiting for the next report. Run once
+ * the session is committed: a report under way is waited for, and either it
+ * read the session or its pull request is among these.
  */
 export async function pullsAddedTo(db: OrgDb, key: SessionKey, hashKey?: string): Promise<{ repo: string; number: number }[]> {
-  await holdPullSessions(db);
+  // The session is committed already: what it is can be read before waiting.
   const [s] = await db.query(
     `SELECT repo, started_at, runtime, branch, ${SESSION_EMAIL} AS email, payload->'lines' AS lines FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
     [db.orgId, key.machine_id, key.source, key.session_id],
   );
-  const added = json<{ path?: string; hashes?: string[] }[] | null>(s?.lines) ?? [];
+  if (!s?.repo) return [];
+  const added = json<{ path?: string; hashes?: string[] }[] | null>(s.lines) ?? [];
   const hashes = [...new Set(added.flatMap((lines) => lines.hashes ?? []))];
-  if (!s?.repo || hashes.length === 0) return [];
+  // None at all says nothing of the lines it had (sent without them, as an
+  // older sessionly does): what pull requests have of it stays.
+  if (hashes.length === 0) return [];
+  // Shared: uploads do not wait for each other, only for a report under way.
+  await db.query(`SELECT pg_advisory_xact_lock_shared(hashtext($1))`, [`sessionly-pull-sessions:${db.orgId}`]);
+  const recent = (p = "") => `(${p}state = 'open' OR coalesce(${p}merged_at, ${p}closed_at, ${p}updated_at) >= now() - interval '14 days')`;
+  // Those that have its lines from before: what it has now may be fewer, or other lines.
+  const credited = await db.query(
+    `SELECT p.repo, p.number FROM pull_sessions ps JOIN pull_requests p USING (org_id, repo, number)
+     WHERE ps.org_id = $1 AND ps.machine_id = $2 AND ps.source = $3 AND ps.session_id = $4
+       AND ps.lines > 0 AND p.committers IS NOT NULL AND ${recent("p.")}
+     ORDER BY p.updated_at DESC, p.repo, p.number`,
+    [db.orgId, key.machine_id, key.source, key.session_id],
+  );
+  const found = credited.map((r) => ({ repo: String(r.repo), number: num(r.number) }));
   const started = iso(s.started_at);
   const kept = s.email ? committer(db.orgId, String(s.email), hashKey) : null;
   const branch = s.runtime === "cloud" && s.branch ? String(s.branch) : null;
@@ -1265,7 +1302,7 @@ export async function pullsAddedTo(db: OrgDb, key: SessionKey, hashKey?: string)
     `SELECT repo, number, first_files, last_files FROM pull_requests
      WHERE org_id = $1 AND committers IS NOT NULL
        AND (repo = $2 OR head_repo = $2 OR coalesce(aliases, '[]'::jsonb) ? $2)
-       AND (state = 'open' OR coalesce(merged_at, closed_at, updated_at) >= now() - interval '14 days')
+       AND ${recent()}
        AND ($3::timestamptz IS NULL OR created_at IS NULL OR created_at <= $3::timestamptz + make_interval(days => $4::int))
        AND ($3::timestamptz IS NULL OR coalesce(merged_at, closed_at) IS NULL OR $3::timestamptz <= coalesce(merged_at, closed_at))
        AND (committers = '[]'::jsonb OR ($5::text IS NOT NULL AND committers ? $5::text) OR ($6::text IS NOT NULL AND head_ref = $6::text))
@@ -1274,12 +1311,31 @@ export async function pullsAddedTo(db: OrgDb, key: SessionKey, hashKey?: string)
     [db.orgId, s.repo, started, LOOK_BACK_DAYS, kept, branch, hashes],
   );
   const claims = added.map((lines) => ({ path: lines.path ?? "", hashes: new Set(lines.hashes ?? []) }));
-  const touched = (files: FileHashes[]) =>
-    files.some((file) => claims.some((c) => samePath(c.path, file.path) && file.hashes.some((hash) => c.hashes.has(hash))));
-  return rows
-    .filter((r) => touched(json<FileHashes[]>(r.last_files)) || touched(json<FileHashes[]>(r.first_files)))
-    .slice(0, MATCH_ON_UPLOAD)
-    .map((r) => ({ repo: String(r.repo), number: num(r.number) }));
+  // How many of a pull request's lines it added to the same file: the ones it has most of come first,
+  // and one that shares only an import with it does not take the place of the one it wrote.
+  const overlap = (files: FileHashes[]) =>
+    files.reduce(
+      (sum, file) =>
+        sum + Math.max(0, ...claims.filter((c) => samePath(c.path, file.path)).map((c) => file.hashes.filter((hash) => c.hashes.has(hash)).length)),
+      0,
+    );
+  const there = new Set(found.map((pull) => `${pull.repo}#${pull.number}`));
+  const ranked = rows
+    .map((r) => ({ repo: String(r.repo), number: num(r.number), lines: Math.max(overlap(json<FileHashes[]>(r.last_files)), overlap(json<FileHashes[]>(r.first_files))) }))
+    .filter((pull) => pull.lines > 0 && !there.has(`${pull.repo}#${pull.number}`));
+  // Sorting keeps the order of those with as many: the ones reported last first.
+  found.push(...ranked.sort((x, y) => y.lines - x.lines).map(({ repo, number }) => ({ repo, number })));
+  return found.slice(0, MATCH_ON_UPLOAD);
+}
+
+/** What a session's lines are now, to tell an upload that changed them: a hash of them, or null for none. */
+export async function linesNow(db: OrgDb, key: SessionKey): Promise<string | null> {
+  const [row] = await db.query<{ lines: string | null }>(
+    `SELECT md5((payload->'lines')::text) AS lines FROM sessions
+     WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
+    [db.orgId, key.machine_id, key.source, key.session_id],
+  );
+  return row?.lines ?? null;
 }
 
 /** No more than this many pull requests are matched again in one request. */

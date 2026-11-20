@@ -46,6 +46,7 @@ import {
   listPulls,
   rematchPull,
   rematchPulls,
+  linesNow,
   pullsAddedTo,
   storePull,
   summarizePulls,
@@ -599,6 +600,10 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   api.put("/sessions/:machine/:source/:session", async (c) => {
     const upload = c.get("upload");
     if (!upload) throw new Error("the upload was not checked");
+    const { machine, source, session } = c.req.param();
+    const key = { machine_id: machine, source, session_id: session };
+    // Uploaded again at every turn, mostly with the lines it had: then no pull request has anything new.
+    const before = await linesNow(c.get("db"), key);
     let result: { stored: boolean; excluded?: true };
     try {
       result = await storeUpload(c.get("db"), upload, c.get("principal"));
@@ -606,10 +611,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       if (err instanceof Conflict) return c.json({ error: err.message }, 409);
       throw err;
     }
-    if (result.stored) {
-      const { machine, source, session } = c.req.param();
-      c.set("stored", { machine_id: machine, source, session_id: session });
-    }
+    if (result.stored && (await linesNow(c.get("db"), key)) !== before) c.set("stored", key);
     // Not stored, and not excluded: the server already has more of this cloud session.
     // Excluded: the person stopped the repository, so the session was not kept.
     return c.json(result);
