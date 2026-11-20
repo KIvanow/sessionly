@@ -119,6 +119,11 @@ No source leaves GitHub, and the server sends no hashes out.
 - Files are read fifty at a time, so a pull request of thousands of files takes tens of
   requests to GitHub. A run reads at most 20,000 files; the pull requests left over are still
   due at the next run.
+- **Known limit: a very large pull request is not counted.** The files' lines go to the server in
+  one request, which takes 32 MB at most: about 1.7 million tracked lines in the files the
+  agents changed. Above that the server refuses it, nothing is kept, and each scheduled run
+  reads the files again and warns that the pull request could not be counted. There is no way
+  around it yet.
 
 On the pull request's page the counts are rows of **History** ("30 days after merge: 498 of
 520 agent lines still there"), and the tile **Kept @30d after merge** has the share.
