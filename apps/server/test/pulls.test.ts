@@ -132,6 +132,11 @@ test("a common line goes only to a session that wrote other lines of the pull re
     from("s0", claim("claude-code", "opus-5-5", "main.rs", 0, 7, 8)),
   ];
   assert.deepEqual(attribute(imports, imports, each).now.by, [{ tool: "claude-code", model: "opus-5-5", lines: 2 }]);
+  // a line the file has three times takes a session that added it three times, not three that added it once
+  const thrice = [file("mod.rs", 9, 9, 9)];
+  const once = ["s1", "s2", "s3"].map((id, i) => from(id, claim("grok", "grok-4", "mod.rs", i + 1, 9)));
+  assert.equal(attribute(thrice, thrice, once).now.agent_lines, 0);
+  assert.equal(attribute(thrice, thrice, [...once, from("s0", claim("claude-code", "opus-5-5", "mod.rs", 0, 9, 9, 9))]).now.agent_lines, 3);
 });
 
 test("review survival: the agents' first lines that are still there", () => {

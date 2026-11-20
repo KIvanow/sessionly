@@ -133,10 +133,15 @@ export function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[]
   const shown = new Set<unknown>();
   files.forEach((file, i) => {
     const { pool, common } = pools[i]!;
-    const lines = new Set(file.hashes);
-    if (lines.size === 0 || ![...lines].every((hash) => common.has(hash))) return;
-    const each = [...lines].map((hash) => new Set(pool.get(hash)!.map((added) => added.who)));
-    for (const who of each[0]!) if (each.every((whose) => whose.has(who))) shown.add(who);
+    if (file.hashes.length === 0 || !file.hashes.every((hash) => common.has(hash))) return;
+    // As many times as the file has each line: a line three times takes a session that added it three times.
+    const needed = new Map<string, number>();
+    for (const hash of file.hashes) needed.set(hash, (needed.get(hash) ?? 0) + 1);
+    const times = (who: unknown, hash: string) => pool.get(hash)!.filter((added) => added.who === who).length;
+    const [hash] = needed.keys();
+    for (const who of new Set(pool.get(hash!)!.map((added) => added.who))) {
+      if ([...needed].every(([line, count]) => times(who, line) >= count)) shown.add(who);
+    }
   });
   const lines = files.map((file, i) =>
     file.hashes.map((hash) => {
@@ -1287,7 +1292,7 @@ export async function pullsAddedTo(db: OrgDb, key: SessionKey, hashKey?: string)
   const credited = await db.query(
     `SELECT p.repo, p.number FROM pull_sessions ps JOIN pull_requests p USING (org_id, repo, number)
      WHERE ps.org_id = $1 AND ps.machine_id = $2 AND ps.source = $3 AND ps.session_id = $4
-       AND ps.lines > 0 AND p.committers IS NOT NULL AND ${recent("p.")}
+       AND (ps.lines > 0 OR ps.opened_lines > 0) AND p.committers IS NOT NULL AND ${recent("p.")}
      ORDER BY p.updated_at DESC, p.repo, p.number`,
     [db.orgId, key.machine_id, key.source, key.session_id],
   );
@@ -1314,11 +1319,11 @@ export async function pullsAddedTo(db: OrgDb, key: SessionKey, hashKey?: string)
   // How many of a pull request's lines it added to the same file: the ones it has most of come first,
   // and one that shares only an import with it does not take the place of the one it wrote.
   const overlap = (files: FileHashes[]) =>
-    files.reduce(
-      (sum, file) =>
-        sum + Math.max(0, ...claims.filter((c) => samePath(c.path, file.path)).map((c) => file.hashes.filter((hash) => c.hashes.has(hash)).length)),
-      0,
-    );
+    files.reduce((sum, file) => {
+      // One upload can have a file's lines in several groups, one per model.
+      const written = new Set(claims.filter((c) => samePath(c.path, file.path)).flatMap((c) => [...c.hashes]));
+      return sum + file.hashes.filter((hash) => written.has(hash)).length;
+    }, 0);
   const there = new Set(found.map((pull) => `${pull.repo}#${pull.number}`));
   const ranked = rows
     .map((r) => ({ repo: String(r.repo), number: num(r.number), lines: Math.max(overlap(json<FileHashes[]>(r.last_files)), overlap(json<FileHashes[]>(r.first_files))) }))
