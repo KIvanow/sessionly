@@ -26,7 +26,7 @@ is read from its output and a patch's files from the patch text.
 
 | Read from | Has | Does not have |
 |---|---|---|
-| `~/.codex/sessions/<year>/<month>/<day>/rollout-<time>-<thread>.jsonl` | prompts, tool calls with their outcome and how long they took, files and lines changed, subagents, times, the model of each turn, tokens per model, the Codex version and where it was started from (`cli`, `exec`, `vscode`), the git branch, and the thread's name if it was given one | cost; in the older layout, the lines of a file a patch deleted |
+| `~/.codex/sessions/<year>/<month>/<day>/rollout-<time>-<thread>.jsonl` (or `.jsonl.zst`) | prompts, tool calls with their outcome and how long they took, files and lines changed, subagents, times, the model of each turn, tokens per model, the Codex version and where it was started from (`cli`, `exec`, `vscode`), the git branch, and the thread's name if it was given one | what anything cost; in the older layout, the lines of a file a patch deleted |
 
 - **Tools** are mapped to the common names: a command is Bash, `view_image` is Read,
   `spawn_agent` is Agent, `update_plan` is TodoWrite, and a web search is WebSearch. One patch
@@ -48,12 +48,16 @@ is read from its output and a patch's files from the patch text.
   session of its own, with what was done after the fork; what came before is in the session
   it was forked from and is not counted twice.
 - **A new name** for a thread is picked up at the next import or sync.
-- **There is no cost.** Codex records tokens and nothing about money, and the price table here
-  has Anthropic's models only. A Codex session shows its tokens per model, has no cost figure
-  and adds nothing to cost totals.
+- **Cost is an estimate.** Codex records tokens and nothing about money, so the cost shown
+  (with a `~`) is each model response's tokens at OpenAI's API list prices: cached input at
+  its own price, reasoning as output. That is a measure of the work done, not what a ChatGPT
+  plan bills. A model OpenAI lists no price for has none: a session only on such models has
+  no cost figure, and one that used them beside others has an estimate that says it leaves
+  some requests out.
 - **Tokens are per model response.** Rollouts from versions that kept no record per response
   are counted from the running total instead, each time it grew.
-- A rollout Codex has compressed (`.jsonl.zst`, a feature that is off by default) is not read.
+- A rollout Codex has compressed (`.jsonl.zst`, a feature that is off by default) is read the
+  same as one that is not.
 
 ## Hooks
 

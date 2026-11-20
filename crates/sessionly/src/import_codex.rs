@@ -36,8 +36,14 @@
 //! sessions from different agents can be compared. One `apply_patch` call can
 //! change several files: it becomes one Edit or Write per file.
 //!
-//! What a rollout cannot tell us: what anything cost (Codex records tokens
-//! only), and in the older layout the lines of a file a patch deleted.
+//! A rollout may be compressed (`rollout-….jsonl.zst`): it is read the same.
+//!
+//! Codex records tokens, not what anything cost. The cost is an estimate:
+//! each response's tokens at OpenAI's API list prices (`pricing`), which is
+//! not what a ChatGPT plan bills. A model with no listed price has none.
+//!
+//! What a rollout cannot tell us: in the older layout, the lines of a file a
+//! patch deleted.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -50,15 +56,23 @@ use serde_json::{json, Value};
 
 use crate::import::{edit_result, slim_input, Builder};
 use crate::paths::CODEX;
-use crate::session::ModelUsage;
+use crate::session::{Cost, CostSource, ModelUsage};
 use crate::transcript::{Facts, SubagentFacts};
+
+/// What is between `rollout-` and `.jsonl` (or `.jsonl.zst`) in a rollout's
+/// file name.
+fn stem_of(path: &Path) -> Option<&str> {
+    let name = path.file_name()?.to_str()?;
+    let name = name.strip_prefix("rollout-")?;
+    name.strip_suffix(".jsonl")
+        .or_else(|| name.strip_suffix(".jsonl.zst"))
+}
 
 /// The thread a rollout file belongs to, from its name:
 /// `rollout-2026-11-16T10-00-00-<thread>.jsonl`, or after a revert
-/// `…-<thread>_<rollout>.jsonl`.
+/// `…-<thread>_<rollout>.jsonl`; either may end in `.zst`.
 pub fn thread_id(path: &Path) -> Option<String> {
-    let name = path.file_name()?.to_str()?;
-    let stem = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    let stem = stem_of(path)?;
     // 19 characters of time, then a dash
     let id = stem.get(20..)?.split('_').next()?;
     (!id.is_empty()).then(|| id.to_string())
@@ -79,7 +93,7 @@ struct Origin {
 /// for this only.
 fn origin(path: &Path) -> Option<Origin> {
     let mut line = String::new();
-    BufReader::new(fs::File::open(path).ok()?.take(FIRST_RECORD_LIMIT))
+    BufReader::new(crate::jsonl::open(path).ok()?.take(FIRST_RECORD_LIMIT))
         .read_line(&mut line)
         .ok()?;
     let row: Value = serde_json::from_str(&line).ok()?;
@@ -285,8 +299,7 @@ impl Roots {
 /// Which of a thread's files this is, from its name: the part a revert adds
 /// after `_`, and for a thread's first file the thread itself.
 fn rollout_id(path: &Path) -> Option<String> {
-    let name = path.file_name()?.to_str()?;
-    let stem = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    let stem = stem_of(path)?;
     let id = stem.get(20..)?.rsplit('_').next()?;
     (!id.is_empty()).then(|| id.to_string())
 }
@@ -327,7 +340,7 @@ pub fn files_in(home: &Path) -> Vec<PathBuf> {
 /// still stand: the `history_base` of its first record.
 fn history_base(path: &Path) -> Option<(String, u64)> {
     let mut line = String::new();
-    BufReader::new(fs::File::open(path).ok()?)
+    BufReader::new(crate::jsonl::open(path).ok()?.take(FIRST_RECORD_LIMIT))
         .read_line(&mut line)
         .ok()?;
     let row: Value = serde_json::from_str(&line).ok()?;
@@ -1334,8 +1347,73 @@ fn push_calls(
     }
 }
 
-/// Add `tokens` used on `model` to `usage`.
-fn add_usage(usage: &mut Vec<ModelUsage>, model: Option<&str>, tokens: &Tokens) {
+/// What one response cost at OpenAI's API list prices, or `None` for a model
+/// with no known price. Codex's input count includes what was read from and
+/// written to the cache, and its output count the reasoning: each is billed
+/// once, at its own price.
+fn priced(model: Option<&str>, tokens: &Tokens) -> Option<f64> {
+    if *tokens == Tokens::default() {
+        return Some(0.0);
+    }
+    let price = crate::pricing::price_for(model?, tokens.input)?;
+    price.cost(&crate::pricing::Billed {
+        input: tokens
+            .input
+            .saturating_sub(tokens.cached + tokens.cache_write),
+        output: tokens.output,
+        cache_read: tokens.cached,
+        // Codex does not say which lifetime: the shorter one is the default.
+        cache_write_short: tokens.cache_write,
+        cache_write_long: 0,
+    })
+}
+
+/// What the responses of a session cost, as they are added up.
+#[derive(Default)]
+struct Spent {
+    usd: f64,
+    /// Responses added up.
+    counted: u64,
+    unpriced: u64,
+}
+
+impl Spent {
+    fn add(&mut self, cost: Option<f64>) {
+        self.counted += 1;
+        match cost {
+            Some(usd) => self.usd += usd,
+            None => self.unpriced += 1,
+        }
+    }
+
+    /// An estimate, partial if some responses are on a model with no known
+    /// price, and none when there is no response it can price.
+    fn cost(&self) -> Option<Cost> {
+        (self.counted > self.unpriced).then_some(Cost {
+            total_usd: self.usd,
+            source: if self.unpriced > 0 {
+                CostSource::PartialEstimate
+            } else {
+                CostSource::Estimated
+            },
+            transcript_estimate_usd: self.usd,
+            unpriced_requests: self.unpriced,
+            untracked_usd: None,
+            prompts_covered: None,
+        })
+    }
+}
+
+/// Add `tokens` used on `model` to `usage`, and to `spent` what they cost.
+/// Returns that cost.
+fn add_usage(
+    usage: &mut Vec<ModelUsage>,
+    model: Option<&str>,
+    tokens: &Tokens,
+    spent: &mut Spent,
+) -> Option<f64> {
+    let cost = priced(model, tokens);
+    spent.add(cost);
     let model = model.unwrap_or("unknown");
     let i = usage
         .iter()
@@ -1357,6 +1435,10 @@ fn add_usage(usage: &mut Vec<ModelUsage>, model: Option<&str>, tokens: &Tokens) 
     entry.thinking_tokens += tokens.reasoning;
     entry.cache_read_tokens += tokens.cached;
     entry.cache_write_5m_tokens += tokens.cache_write;
+    if let Some(cost) = cost {
+        entry.estimated_cost_usd = Some(entry.estimated_cost_usd.unwrap_or(0.0) + cost);
+    }
+    cost
 }
 
 /// The names threads were given, from the list Codex keeps beside its
@@ -1430,8 +1512,9 @@ pub fn session(
         out.push(at, "PostCompact", json!({}));
     }
     push_calls(&main, None, &mut out, &mut tool_models);
+    let mut spent = Spent::default();
     for (model, tokens) in &main.responses {
-        add_usage(&mut usage, model.as_deref(), tokens);
+        add_usage(&mut usage, model.as_deref(), tokens, &mut spent);
     }
 
     let mut subagent_facts = Vec::new();
@@ -1458,14 +1541,16 @@ pub fn session(
             description: thread.meta["agent_nickname"].as_str().map(String::from),
             ..Default::default()
         };
+        let mut own = Spent::default();
         for (model, tokens) in &thread.responses {
-            add_usage(&mut usage, model.as_deref(), tokens);
+            own.add(add_usage(&mut usage, model.as_deref(), tokens, &mut spent));
             facts.requests += 1;
             facts.input_tokens += tokens
                 .input
                 .saturating_sub(tokens.cached + tokens.cache_write);
             facts.output_tokens += tokens.output;
         }
+        facts.estimated_cost_usd = (own.counted > own.unpriced).then_some(own.usd);
         subagent_facts.push(facts);
     }
 
@@ -1492,9 +1577,9 @@ pub fn session(
         git_branch: main.meta["git"]["branch"].as_str().map(String::from),
         version: main.meta["cli_version"].as_str().map(String::from),
         entrypoint: entrypoint.map(String::from),
-        // Codex records tokens, not money, and there is no price table for
-        // OpenAI's models here.
-        cost: None,
+        // Codex records tokens, not money: this is what they would cost at
+        // API list prices, not what a ChatGPT plan bills.
+        cost: spent.cost(),
         usage,
         subagents: subagent_facts,
         tool_models,
@@ -1770,8 +1855,7 @@ pub(crate) mod tests {
         assert_eq!(s.subagents[0].tool_calls, 1);
         assert_eq!(s.subagents[0].requests, 1);
 
-        // tokens per model, each response once; no cost
-        assert_eq!(s.cost, None);
+        // tokens per model, each response once
         assert_eq!(s.models, ["gpt-6-luna", "gpt-6-sol"]);
         let luna = &s.usage[0];
         assert_eq!((luna.requests, luna.input_tokens), (2, 100 + 400));
@@ -1786,6 +1870,110 @@ pub(crate) mod tests {
             ),
             (2, 600 + 1600, 800, 100, 40)
         );
+
+        // and what they would cost at API list prices, as an estimate: the
+        // cached input once at its own price, the reasoning within output
+        let close = |a: Option<f64>, b: f64| (a.unwrap() - b).abs() < 1e-12;
+        // 2200 x $2 + 800 x $0.20 + 100 x $10
+        assert!(close(sol.estimated_cost_usd, 5560e-6));
+        // 500 x $0.10 + 800 x $0.01 + 100 x $0.50, the subagent's half of it
+        assert!(close(luna.estimated_cost_usd, 108e-6));
+        assert!(close(s.subagents[0].estimated_cost_usd, 69e-6));
+        let cost = s.cost.unwrap();
+        assert_eq!(cost.source, CostSource::Estimated);
+        assert!(close(Some(cost.total_usd), 5668e-6));
+        assert_eq!(cost.unpriced_requests, 0);
+    }
+
+    #[test]
+    fn a_model_with_no_known_price_stays_unpriced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!(
+            "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{MAIN}.jsonl"
+        ));
+        let turn = |id: &str, model: &str| {
+            row(1, "turn_context", json!({ "turn_id": id, "model": model }))
+        };
+        let mut rows = vec![
+            meta(MAIN, json!({})),
+            event(1, "task_started", json!({ "turn_id": "t1" })),
+            event(1, "user_message", json!({ "message": "hi" })),
+            turn("t1", "gpt-9-nova"),
+            tokens(2, "t1", "r1", MAIN, 1000),
+        ];
+        write(&path, &rows);
+        let (events, facts) = session(&path, &[], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        assert_eq!(s.cost, None);
+        assert_eq!(s.usage[0].estimated_cost_usd, None);
+        assert_eq!(s.usage[0].input_tokens, 600);
+
+        // next to a priced one: an estimate that says it leaves one out
+        rows.extend([
+            event(3, "task_started", json!({ "turn_id": "t2" })),
+            turn("t2", "openai/gpt-6.1-sol-2026-09-30"),
+            tokens(4, "t2", "r2", MAIN, 1000),
+        ]);
+        write(&path, &rows);
+        let (events, facts) = session(&path, &[], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        let cost = s.cost.unwrap();
+        assert_eq!(cost.source, CostSource::PartialEstimate);
+        assert_eq!(cost.unpriced_requests, 1);
+        // 600 x $2 + 400 x $0.10 + 50 x $10
+        assert!((cost.total_usd - 1740e-6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_long_prompt_is_priced_as_one() {
+        let long = Tokens {
+            input: 300_000,
+            cached: 200_000,
+            output: 1_000,
+            ..Default::default()
+        };
+        // 100K x $4 + 200K x $0.20 + 1K x $15
+        let cost = priced(Some("gpt-6.1-sol"), &long).unwrap();
+        assert!((cost - 0.455).abs() < 1e-12);
+        let written = Tokens {
+            input: 1_000,
+            cache_write: 1_000,
+            ..Default::default()
+        };
+        // all of it written to the cache, at the 30-minute price
+        assert!((priced(Some("gpt-6.1-sol"), &written).unwrap() - 0.0025).abs() < 1e-12);
+        // no write price listed
+        assert_eq!(priced(Some("gpt-5.4"), &written), None);
+    }
+
+    #[test]
+    fn a_compressed_rollout_reads_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = sample(dir.path());
+        let child = subagent(dir.path());
+        let (events, facts) =
+            session(&plain, std::slice::from_ref(&child), Some("Add a feature")).unwrap();
+
+        let packed = dir.path().join("packed");
+        let zst = |from: &Path| {
+            let name = format!("{}.zst", from.file_name().unwrap().to_string_lossy());
+            let to = packed.join("sessions/2026/11/16").join(name);
+            fs::create_dir_all(to.parent().unwrap()).unwrap();
+            let level = ruzstd::encoding::CompressionLevel::Fastest;
+            let bytes = ruzstd::encoding::compress_to_vec(fs::File::open(from).unwrap(), level);
+            fs::write(&to, bytes).unwrap();
+            to
+        };
+        let (main_zst, child_zst) = (zst(&plain), zst(&child));
+        assert_eq!(thread_id(&main_zst).as_deref(), Some(MAIN));
+        assert_eq!(rollout_id(&main_zst).as_deref(), Some(MAIN));
+        assert_eq!(root_of(&child_zst).as_deref(), Some(MAIN));
+        assert_eq!(files_in(&packed).len(), 2);
+
+        let (packed_events, packed_facts) =
+            session(&main_zst, &[child_zst], Some("Add a feature")).unwrap();
+        assert_eq!(packed_events, events);
+        assert_eq!(packed_facts, facts);
     }
 
     #[test]

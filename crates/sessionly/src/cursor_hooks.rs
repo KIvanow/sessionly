@@ -248,13 +248,17 @@ pub fn usage(turns: &[Turn], prompts: u64) -> (Vec<ModelUsage>, Option<Cost>) {
         entry.cache_read_tokens += tokens.cache_read;
         // How long Cursor asks for a cache entry to live is not reported.
         entry.cache_write_5m_tokens += tokens.cache_write;
-        match pricing::price_for(&model, 0) {
-            Some(p) => {
-                let cost = (tokens.input as f64 * p.input
-                    + tokens.output as f64 * p.output
-                    + tokens.cache_read as f64 * p.cache_read
-                    + tokens.cache_write as f64 * p.cache_write_5m())
-                    / 1e6;
+        let billed = pricing::Billed {
+            input: tokens.input,
+            output: tokens.output,
+            cache_read: tokens.cache_read,
+            cache_write_short: tokens.cache_write,
+            cache_write_long: 0,
+        };
+        // A turn is many requests: its tokens say nothing of how long any one
+        // prompt was, so the price for a short one is taken.
+        match pricing::price_for(&model, 0).and_then(|p| p.cost(&billed)) {
+            Some(cost) => {
                 entry.estimated_cost_usd = Some(entry.estimated_cost_usd.unwrap_or(0.0) + cost);
                 total += cost;
             }
@@ -513,5 +517,49 @@ pub(crate) mod tests {
         // nothing with a known price, or nothing seen: no figure
         assert_eq!(usage(&turns[2..], 2).1, None);
         assert_eq!(usage(&[], 2), (Vec::new(), None));
+    }
+
+    #[test]
+    fn prices_turns_on_other_models_too() {
+        let turn = |model: &str, tokens: Tokens| Turn {
+            model: Some(model.into()),
+            tokens: Some(tokens),
+            ..Default::default()
+        };
+        let read = Tokens {
+            input: 1_000,
+            output: 100,
+            cache_read: 4_000,
+            cache_write: 0,
+        };
+        let wrote = Tokens {
+            cache_write: 10,
+            ..read
+        };
+        let turns = [
+            turn("gpt-6.1-sol", read),
+            turn("gpt-5.3-codex-high", read),
+            turn("composer-2.5-fast", read),
+            // Cursor lists no cache write price for its own models
+            turn("composer-2.5-fast", wrote),
+        ];
+        let (by_model, cost) = usage(&turns, 4);
+        let of = |model: &str| {
+            let u = by_model.iter().find(|u| u.model == model).unwrap();
+            u.estimated_cost_usd.unwrap()
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        // 1000 x $2 + 100 x $10 + 4000 x $0.10
+        assert!(close(of("gpt-6.1-sol"), 3400e-6));
+        // 1000 x $1.75 + 100 x $14 + 4000 x $0.175
+        assert!(close(of("gpt-5.3-codex-high"), 3850e-6));
+        // 1000 x $3 + 100 x $15 + 4000 x $0.50, the one turn it can price
+        assert!(close(of("composer-2.5-fast"), 6500e-6));
+        let cost = cost.unwrap();
+        assert_eq!(
+            (cost.source, cost.unpriced_requests),
+            (CostSource::PartialEstimate, 1)
+        );
+        assert!(close(cost.total_usd, 13_750e-6));
     }
 }

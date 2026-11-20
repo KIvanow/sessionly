@@ -1,9 +1,12 @@
-//! Anthropic first-party API prices, used to estimate cost when a transcript has
-//! no recorded total (a session that is still running, or one that crashed).
+//! API list prices, used to estimate cost from token counts: for Claude Code
+//! when a transcript has no recorded total (a session that is still running,
+//! or one that crashed), and for Codex and Cursor, which record no cost.
 //!
-//! Prices are USD per million tokens. Cache writes cost 1.25x input (5-minute
-//! TTL) or 2x input (1-hour TTL). Cache reads vary by model. Checked against
-//! Claude Code's own `cost-state` totals.
+//! Prices are USD per million tokens. Anthropic's cache writes cost 1.25x
+//! input (5-minute TTL) or 2x input (1-hour TTL); cache reads vary by model.
+//! Checked against Claude Code's own `cost-state` totals. OpenAI lists its
+//! write prices per model (30-minute and 12-hour lifetimes) and bills
+//! reasoning tokens as output.
 
 /// Per-million-token prices for one model.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -11,26 +14,68 @@ pub struct Price {
     pub input: f64,
     pub output: f64,
     pub cache_read: f64,
+    /// Cache writes with a short lifetime and with a long one. `None` where
+    /// the price list gives no write price.
+    pub cache_write: Option<(f64, f64)>,
+}
+
+/// The tokens of one request, or of several billed alike, each counted once:
+/// `input` is the uncached input only, `output` includes reasoning tokens.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Billed {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    /// Written to a short-lived cache: 5 minutes at Anthropic, 30 at OpenAI.
+    pub cache_write_short: u64,
+    /// Written to a long-lived cache: 1 hour at Anthropic, 12 at OpenAI.
+    pub cache_write_long: u64,
 }
 
 impl Price {
+    /// Anthropic's: cache writes at 1.25x and 2x input.
     const fn new(input: f64, output: f64, cache_read: f64) -> Self {
         Price {
             input,
             output,
             cache_read,
+            cache_write: Some((input * 1.25, input * 2.0)),
         }
     }
-    pub fn cache_write_5m(&self) -> f64 {
-        self.input * 1.25
+
+    /// As a price list gives it: input, cached input, output, and the two
+    /// write prices where it has them.
+    const fn listed(input: f64, cached: f64, output: f64, writes: Option<(f64, f64)>) -> Self {
+        Price {
+            input,
+            output,
+            cache_read: cached,
+            cache_write: writes,
+        }
     }
-    pub fn cache_write_1h(&self) -> f64 {
-        self.input * 2.0
+
+    /// What `tokens` cost in USD, or `None` if they include cache writes and
+    /// there is no write price.
+    pub fn cost(&self, tokens: &Billed) -> Option<f64> {
+        let writes = match (
+            self.cache_write,
+            tokens.cache_write_short + tokens.cache_write_long,
+        ) {
+            (_, 0) => 0.0,
+            (Some((short, long)), _) => {
+                tokens.cache_write_short as f64 * short + tokens.cache_write_long as f64 * long
+            }
+            (None, _) => return None,
+        };
+        let rest = tokens.input as f64 * self.input
+            + tokens.output as f64 * self.output
+            + tokens.cache_read as f64 * self.cache_read;
+        Some((rest + writes) / 1e6)
     }
 }
 
-/// Changes whenever the table below does, so stored estimates can be rebuilt.
-pub const PRICING_VERSION: &str = "2026-10";
+/// Changes whenever the tables below do, so stored estimates can be rebuilt.
+pub const PRICING_VERSION: &str = "2026-11";
 
 /// Prices as of 2026-10 (Anthropic API, first party). Bedrock and Vertex differ.
 const PRICES: &[(&str, Price)] = &[
@@ -56,18 +101,143 @@ const PRICES: &[(&str, Price)] = &[
     ("claude-opus-4", Price::new(15.0, 75.0, 1.50)),
     ("claude-sonnet-4-0", Price::new(3.0, 15.0, 0.30)),
     ("claude-sonnet-4", Price::new(3.0, 15.0, 0.30)),
+    // OpenAI, Standard tier, from https://developers.openai.com/api/docs/pricing
+    // (what platform.openai.com/docs/pricing redirects to), read 2026-11-20:
+    // input, cached input, output, then the 30-minute and 12-hour write
+    // prices. Where the page shows no write price there is none here, and a
+    // request that wrote to the cache stays unpriced. Models the page does not
+    // list (gpt-5.1-codex and the like) have no price.
+    (
+        "gpt-6.2-astra",
+        Price::listed(8.0, 0.40, 40.0, Some((10.0, 20.0))),
+    ),
+    (
+        "gpt-6.2-sol",
+        Price::listed(2.0, 0.10, 10.0, Some((2.50, 5.0))),
+    ),
+    (
+        "gpt-6-astra",
+        Price::listed(10.0, 1.00, 50.0, Some((12.50, 25.0))),
+    ),
+    (
+        "gpt-6.1-sol",
+        Price::listed(2.0, 0.10, 10.0, Some((2.50, 5.0))),
+    ),
+    (
+        "gpt-6.1-terra",
+        Price::listed(1.0, 0.05, 5.0, Some((1.25, 2.50))),
+    ),
+    (
+        "gpt-6-sol",
+        Price::listed(2.0, 0.20, 10.0, Some((2.50, 5.0))),
+    ),
+    (
+        "gpt-6-luna",
+        Price::listed(0.10, 0.01, 0.50, Some((0.125, 0.25))),
+    ),
+    (
+        "gpt-5.6-sol",
+        Price::listed(4.0, 0.40, 20.0, Some((5.0, 10.0))),
+    ),
+    (
+        "gpt-5.6-terra",
+        Price::listed(2.0, 0.20, 12.0, Some((2.50, 5.0))),
+    ),
+    (
+        "gpt-5.6-luna",
+        Price::listed(0.20, 0.02, 1.20, Some((0.25, 0.50))),
+    ),
+    ("gpt-5.5", Price::listed(5.0, 0.50, 30.0, None)),
+    ("gpt-5.4", Price::listed(2.50, 0.25, 15.0, None)),
+    ("gpt-5.4-mini", Price::listed(0.75, 0.075, 4.50, None)),
+    ("gpt-5.4-nano", Price::listed(0.20, 0.02, 1.25, None)),
+    ("gpt-5.3-codex", Price::listed(1.75, 0.175, 14.0, None)),
+    ("gpt-5.2", Price::listed(1.75, 0.175, 14.0, None)),
+    ("gpt-5.1", Price::listed(1.25, 0.125, 10.0, None)),
+    ("gpt-5", Price::listed(1.25, 0.125, 10.0, None)),
+    ("gpt-5-mini", Price::listed(0.25, 0.025, 2.0, None)),
+    ("gpt-5-nano", Price::listed(0.05, 0.005, 0.40, None)),
+    // Cursor's own, from https://cursor.com/docs/models (per million, as
+    // https://cursor.com/blog/composer-2-5 says), read 2026-11-20. The page
+    // gives no cache write price.
+    ("composer-2.5", Price::listed(0.50, 0.20, 2.50, None)),
+    ("composer-2.5-fast", Price::listed(3.0, 0.50, 15.0, None)),
 ];
 
-/// Claude Haiku 5.5 costs more for prompts over 100K tokens ($0.50 / $2.50). The
-/// long-prompt cache read price isn't published; we assume the usual 0.1x input.
-const HAIKU_5_5_LONG: Price = Price::new(0.50, 2.50, 0.05);
-const HAIKU_5_5_LONG_THRESHOLD: u64 = 100_000;
+/// Prices for a request whose prompt is longer than the model's threshold.
+/// Claude Haiku 5.5 over 100K tokens: the long-prompt cache read price isn't
+/// published; we assume the usual 0.1x input. OpenAI's over 272K input tokens,
+/// from the same page as above.
+const LONG_PROMPT: &[(&str, u64, Price)] = &[
+    ("claude-haiku-5-5", 100_000, Price::new(0.50, 2.50, 0.05)),
+    (
+        "gpt-6.2-astra",
+        272_000,
+        Price::listed(16.0, 0.80, 60.0, Some((20.0, 40.0))),
+    ),
+    (
+        "gpt-6.2-sol",
+        272_000,
+        Price::listed(4.0, 0.20, 15.0, Some((5.0, 10.0))),
+    ),
+    (
+        "gpt-6-astra",
+        272_000,
+        Price::listed(20.0, 2.00, 75.0, Some((25.0, 50.0))),
+    ),
+    (
+        "gpt-6.1-sol",
+        272_000,
+        Price::listed(4.0, 0.20, 15.0, Some((5.0, 10.0))),
+    ),
+    (
+        "gpt-6.1-terra",
+        272_000,
+        Price::listed(2.0, 0.10, 7.50, Some((2.50, 5.0))),
+    ),
+    (
+        "gpt-6-sol",
+        272_000,
+        Price::listed(4.0, 0.40, 15.0, Some((5.0, 10.0))),
+    ),
+    (
+        "gpt-6-luna",
+        272_000,
+        Price::listed(0.20, 0.02, 0.75, Some((0.25, 0.50))),
+    ),
+    (
+        "gpt-5.6-sol",
+        272_000,
+        Price::listed(8.0, 0.80, 30.0, Some((10.0, 20.0))),
+    ),
+    (
+        "gpt-5.6-terra",
+        272_000,
+        Price::listed(4.0, 0.40, 18.0, Some((5.0, 10.0))),
+    ),
+    (
+        "gpt-5.6-luna",
+        272_000,
+        Price::listed(0.40, 0.04, 1.80, Some((0.50, 1.00))),
+    ),
+    ("gpt-5.5", 272_000, Price::listed(10.0, 1.00, 45.0, None)),
+    ("gpt-5.4", 272_000, Price::listed(5.0, 0.50, 22.50, None)),
+];
 
-/// Reduce a model id to the name used in the price table. Drops a platform
-/// prefix (`anthropic.`, `us.anthropic.`), a `[1m]` marker, a Bedrock version
-/// suffix (`-v1:0`), and a date snapshot (`-20251001` or `@20251001`).
+/// A reasoning effort some clients add to a model's name (Cursor's
+/// `gpt-5.3-codex-high`). It does not change the price per token.
+const EFFORTS: &[&str] = &["-minimal", "-low", "-medium", "-high", "-xhigh"];
+
+/// Reduce a model id to the name used in the price table. Drops a provider
+/// prefix (`openai/`, `anthropic.`, `us.anthropic.`), a `[1m]` marker, a
+/// Bedrock version suffix (`-v1:0`), a date snapshot (`-20251001`,
+/// `@20251001`, OpenAI's `-2026-03-05`) and a reasoning effort (`-high`).
+/// A `-fast` stays: that is billed differently, or is a model of its own.
 pub fn canonical_model(model: &str) -> &str {
     let mut m = model.trim();
+    if let Some(i) = m.rfind('/') {
+        m = &m[i + 1..];
+    }
     if let Some(i) = m.rfind("anthropic.") {
         m = &m[i + "anthropic.".len()..];
     }
@@ -79,19 +249,41 @@ pub fn canonical_model(model: &str) -> &str {
             m = head;
         }
     }
+    if let Some(effort) = EFFORTS.iter().find(|e| m.ends_with(*e)) {
+        m = &m[..m.len() - effort.len()];
+    }
     if let Some((head, tail)) = m.rsplit_once('-') {
         if tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()) {
             m = head;
         }
     }
+    // -YYYY-MM-DD
+    if let Some(head) = m.len().checked_sub(11).and_then(|i| {
+        let (head, tail) = m.split_at_checked(i)?;
+        let b = tail.as_bytes();
+        let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+        (b[0] == b'-'
+            && b[5] == b'-'
+            && b[8] == b'-'
+            && digits(1..5)
+            && digits(6..8)
+            && digits(9..11))
+        .then_some(head)
+    }) {
+        m = head;
+    }
     m
 }
 
 /// Price for one request, or `None` for a model we don't know.
+/// `prompt_tokens` is all of its input, cached or not.
 pub fn price_for(model: &str, prompt_tokens: u64) -> Option<Price> {
     let model = canonical_model(model);
-    if model == "claude-haiku-5-5" && prompt_tokens > HAIKU_5_5_LONG_THRESHOLD {
-        return Some(HAIKU_5_5_LONG);
+    let long = LONG_PROMPT
+        .iter()
+        .find(|(id, threshold, _)| *id == model && prompt_tokens > *threshold);
+    if let Some((_, _, price)) = long {
+        return Some(*price);
     }
     PRICES
         .iter()
@@ -102,6 +294,10 @@ pub fn price_for(model: &str, prompt_tokens: u64) -> Option<Price> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-12
+    }
 
     #[test]
     fn canonical_model_strips_noise() {
@@ -121,6 +317,7 @@ mod tests {
             "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
             "claude-sonnet-4-5@20250929",
             "claude-sonnet-4-5-20250929",
+            "anthropic/claude-sonnet-4-5",
         ] {
             assert_eq!(canonical_model(id), "claude-sonnet-4-5", "{id}");
             assert!(price_for(id, 0).is_some());
@@ -128,14 +325,104 @@ mod tests {
     }
 
     #[test]
-    fn haiku_5_5_long_prompt_tier() {
+    fn canonical_model_knows_openai_and_codex_ids() {
+        for (id, want) in [
+            ("gpt-6-luna", "gpt-6-luna"),
+            ("gpt-6.1-sol", "gpt-6.1-sol"),
+            ("openai/gpt-6.1-sol", "gpt-6.1-sol"),
+            ("gpt-6.1-sol-2026-09-30", "gpt-6.1-sol"),
+            ("openai/gpt-5.4-2026-03-05", "gpt-5.4"),
+            (" gpt-6-luna ", "gpt-6-luna"),
+            ("gpt-5.3-codex-high", "gpt-5.3-codex"),
+            ("gpt-5.3-codex-xhigh", "gpt-5.3-codex"),
+            ("gpt-5-mini", "gpt-5-mini"),
+            ("composer-2.5-fast", "composer-2.5-fast"),
+            // billed differently: kept, and so unpriced
+            ("gpt-5-high-fast", "gpt-5-high-fast"),
+        ] {
+            assert_eq!(canonical_model(id), want, "{id}");
+        }
+        for id in [
+            "openai/gpt-6.1-sol",
+            "gpt-6-luna-2026-08-01",
+            "gpt-5.3-codex-high",
+        ] {
+            assert!(price_for(id, 0).is_some(), "{id}");
+        }
+        // a dated id whose base is not listed is not taken for another
+        assert!(price_for("gpt-5.1-codex-2026-01-01", 0).is_none());
+        assert!(price_for("gpt-5-high-fast", 0).is_none());
+    }
+
+    #[test]
+    fn openai_prices_per_model() {
+        let p = price_for("gpt-6-luna", 0).unwrap();
+        assert_eq!((p.input, p.cache_read, p.output), (0.10, 0.01, 0.50));
+        assert_eq!(p.cache_write, Some((0.125, 0.25)));
+        let p = price_for("gpt-6.1-sol", 0).unwrap();
+        assert_eq!((p.input, p.cache_read, p.output), (2.0, 0.10, 10.0));
+        let p = price_for("gpt-5.3-codex", 0).unwrap();
+        assert_eq!((p.input, p.cache_read, p.output), (1.75, 0.175, 14.0));
+        let p = price_for("composer-2.5-fast", 0).unwrap();
+        assert_eq!((p.input, p.cache_read, p.output), (3.0, 0.50, 15.0));
+    }
+
+    #[test]
+    fn long_prompts_cost_more() {
         assert_eq!(price_for("claude-haiku-5-5", 1_000).unwrap().input, 0.10);
         assert_eq!(price_for("claude-haiku-5-5", 150_000).unwrap().input, 0.50);
+        assert_eq!(price_for("gpt-6.1-sol", 272_000).unwrap().input, 2.0);
+        let long = price_for("gpt-6.1-sol", 272_001).unwrap();
+        assert_eq!(
+            (long.input, long.cache_read, long.output),
+            (4.0, 0.20, 15.0)
+        );
+        // no long tier listed: the one price
+        assert_eq!(price_for("gpt-5.3-codex", 900_000).unwrap().input, 1.75);
+    }
+
+    #[test]
+    fn cost_counts_each_kind_of_token_at_its_price() {
+        let p = price_for("gpt-6.1-sol", 0).unwrap();
+        let tokens = Billed {
+            input: 1_000_000,
+            output: 100_000,
+            cache_read: 2_000_000,
+            cache_write_short: 10_000,
+            cache_write_long: 1_000,
+        };
+        // 2.00 + 1.00 + 0.20 + 0.025 + 0.005
+        assert!(close(p.cost(&tokens).unwrap(), 3.23));
+        // Anthropic's writes are a multiple of input
+        let opus = price_for("claude-opus-5", 0).unwrap();
+        let writes = Billed {
+            cache_write_short: 1_000_000,
+            cache_write_long: 1_000_000,
+            ..Default::default()
+        };
+        assert!(close(opus.cost(&writes).unwrap(), 6.25 + 10.0));
+    }
+
+    #[test]
+    fn writes_without_a_write_price_are_not_priced() {
+        let p = price_for("gpt-5.4", 0).unwrap();
+        let read_only = Billed {
+            input: 1_000,
+            cache_read: 1_000,
+            ..Default::default()
+        };
+        assert!(p.cost(&read_only).is_some());
+        let wrote = Billed {
+            cache_write_short: 1,
+            ..read_only
+        };
+        assert_eq!(p.cost(&wrote), None);
     }
 
     #[test]
     fn unknown_model_has_no_price() {
-        assert!(price_for("gpt-5", 10).is_none());
+        assert!(price_for("gpt-9", 10).is_none());
+        assert!(price_for("gpt-5.1-codex", 10).is_none());
         assert!(price_for("<synthetic>", 0).is_none());
     }
 }
