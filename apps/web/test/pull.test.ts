@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, matchAll, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web } from "../src/pull.ts";
+import { afterMergeLine, afterMergeTile, byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, matchAll, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web } from "../src/pull.ts";
 
 test("a moved agent figure says what it was, and why", () => {
   const history = [
@@ -218,4 +218,32 @@ test("the cost of several pull requests says what it leaves out", () => {
   // no figure: because nothing was matched, or because what was matched has none
   assert.equal(pullsCostNote({ ...total, cost_usd: null, per_surviving_line_usd: null }), "no session was matched to their lines");
   assert.equal(pullsCostNote({ ...total, cost_usd: null, pulls_with_cost_missing: 1, per_surviving_line_usd: null }), "not known in full for 1 pull request: their sessions have no cost figure, or were not kept at their last report");
+});
+
+test("a count after merging, in plain words", () => {
+  const day = 86_400;
+  const thirty = { checkpoint: "30d" as const, agent_lines: 520, surviving: 498, age_seconds: 30 * day + 60 };
+  const seven = { checkpoint: "7d" as const, agent_lines: 520, surviving: 511, age_seconds: 9 * day };
+  assert.equal(afterMergeLine(thirty), "30 days after merge: 498 of 520 agent lines still there");
+  assert.equal(afterMergeLine(seven), "7 days after merge: 511 of 520 agent lines still there (counted on day 9)");
+  assert.equal(afterMergeLine({ ...seven, agent_lines: 1, surviving: 1, age_seconds: 7 * day }), "7 days after merge: 1 of 1 agent line still there");
+  assert.equal(historyEvent("after_merge_7d"), "7 days after merge");
+  assert.equal(historyEvent("after_merge_30d"), "30 days after merge");
+
+  const share = (part: number, whole: number) => `${Math.round((part / whole) * 100)}%`;
+  const now = Date.parse("2026-12-20T00:00:00Z");
+  assert.deepEqual(afterMergeTile([seven, thirty], null, share), { value: "96%", part: 498 / 520, note: "498 of 520 agent lines; 98% at 7 days" });
+  assert.deepEqual(afterMergeTile([{ ...thirty, age_seconds: 34 * day }], null, share).note, "498 of 520 agent lines, counted on day 34");
+  assert.deepEqual(afterMergeTile([seven], null, share), { value: "–", part: null, note: "not 30 days yet; at 7 days 98%, 511 of 520 agent lines" });
+  assert.equal(afterMergeTile([], "2026-12-17T00:00:00Z", share, String, now).note, "counted 7 and 30 days after it was merged");
+  assert.match(afterMergeTile([], "2026-11-17T00:00:00Z", share, String, now).note, /^not counted: a scheduled run of the Action/);
+});
+
+test("the agent figure's note passes over the counts made after merging", () => {
+  const history = [
+    { at: "t3", agent_lines: 2, change: { reason: null }, after_merge: { checkpoint: "7d" } },
+    { at: "t2", agent_lines: 5, change: { reason: "1 session uploaded since: +1 agent lines" }, after_merge: null },
+    { at: "t1", agent_lines: 4, change: { reason: null } },
+  ];
+  assert.equal(figureShift(history, (iso) => iso, String), "Was 4 until t2: 1 session uploaded since.");
 });

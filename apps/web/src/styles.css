@@ -367,8 +367,16 @@ main > p { margin: 0; }
 .track { display: block; height: 8px; margin: 6px 0 2px; background: var(--track); }
 .track i { display: block; height: 100%; background: var(--blue); }
 .tiles.five { grid-template-columns: repeat(5, 1fr); }
-@media (max-width: 1280px) { .tiles.five { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 1020px) { .tiles, .tiles.five { grid-template-columns: repeat(2, 1fr); } }
+.tiles.six { grid-template-columns: repeat(6, 1fr); }
+@media (max-width: 1280px) { .tiles.five, .tiles.six { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 1020px) { .tiles, .tiles.five, .tiles.six { grid-template-columns: repeat(2, 1fr); } }
+/* A figure at each of a few ages, side by side: the age above, the share below. */
+.ages { display: flex; gap: 14px; margin: 6px 0 0; padding-top: 8px; border-top: 1px solid var(--rule); }
+.ages div { display: grid; gap: 1px; }
+.ages dt { color: var(--muted); font-size: 11px; }
+.ages dd { margin: 0; font-family: var(--mono); font-size: 13px; font-weight: 500; }
+/* What a figure in a table is of, on a line of its own below it. */
+.under { display: block; color: var(--muted); font-family: var(--sans, inherit); font-size: 11px; font-weight: 400; }
 @media (max-width: 860px) { .headline { grid-template-columns: 1fr; } }
 
 /* Tables */

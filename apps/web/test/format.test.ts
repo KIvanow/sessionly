@@ -104,3 +104,31 @@ test("axis ticks are round and cover the maximum", () => {
   const t = f.ticks(2059.68);
   assert.ok(t[t.length - 1]! >= 2059.68 && t.length <= 6, String(t));
 });
+
+test("what was kept at a fixed age, and of how many sessions", () => {
+  const kept = { lines_added: 200, lines_surviving: 182, sessions_reached: 12, sessions_total: 40 };
+  assert.equal(f.keptAt(kept), "91%");
+  assert.equal(f.keptOf(kept), "12 of 40 sessions");
+  // no session has reached the age: a dash, and still how many there are
+  const none = { lines_added: 0, lines_surviving: 0, sessions_reached: 0, sessions_total: 1 };
+  assert.equal(f.keptAt(none), "–");
+  assert.equal(f.keptOf(none), "0 of 1 session");
+  assert.equal(f.keptAt(undefined), "–");
+  assert.equal(f.keptOf(null), "");
+});
+
+test("a session's lines at each age: a dash where it was not measured, and the day where that was late", () => {
+  const day = 86_400;
+  const ages = f.keptAges([
+    { checkpoint: "7d", added: 20, surviving: 15, age_seconds: 7 * day + 3600 },
+    { checkpoint: "1d", added: 20, surviving: 19, age_seconds: 3 * day },
+  ]);
+  assert.deepEqual(ages.map((age) => [age.name, age.kept, age.late, age.lines]), [
+    ["1d", "95%", 3, 20],
+    ["7d", "75%", null, 20],
+    ["30d", "–", null, null],
+  ]);
+  assert.deepEqual(f.keptAges(undefined).map((age) => age.kept), ["–", "–", "–"]);
+  assert.equal(f.takenLate(30 * day, 30), null);
+  assert.equal(f.takenLate(31 * day, 30), 31);
+});

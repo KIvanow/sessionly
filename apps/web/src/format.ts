@@ -1,5 +1,5 @@
 // How numbers, times and names are shown. Pure functions, tested in test/.
-import type { RewriteTotals } from "@sessionly/schema";
+import type { KeptAt, RewriteCheckpoint, RewriteTotals } from "@sessionly/schema";
 
 const whole = new Intl.NumberFormat("en-US");
 
@@ -104,6 +104,52 @@ export function rewriteRate(r: RewriteTotals | null | undefined): number | null 
 /** Share of the agent's lines that are still there. */
 export function linesKept(r: RewriteTotals | null | undefined): number | null {
   return r ? share(r.lines_surviving, r.lines_added) : null;
+}
+
+/**
+ * Share of the agent's lines that were still there at a fixed age, over the
+ * sessions measured at that age: "91%", or a dash when none was.
+ */
+export function keptAt(k: KeptAt | null | undefined): string {
+  return k && k.sessions_reached > 0 ? percent(share(k.lines_surviving, k.lines_added)) : "–";
+}
+
+/** How many sessions that figure is of: "12 of 40 sessions". */
+export function keptOf(k: KeptAt | null | undefined): string {
+  if (!k) return "";
+  return `${count(k.sessions_reached)} of ${count(k.sessions_total)} ${k.sessions_total === 1 ? "session" : "sessions"}`;
+}
+
+/** The ages a measurement is kept at, with each in days and in words. */
+export const KEPT_AGES = [
+  { name: "1d", days: 1, words: "1 day" },
+  { name: "7d", days: 7, words: "7 days" },
+  { name: "30d", days: 30, words: "30 days" },
+] as const;
+
+/** The day a measurement was taken on, when that was a day or more after the age it stands for; else null. */
+export function takenLate(ageSeconds: number, days: number): number | null {
+  const day = Math.floor(ageSeconds / 86_400);
+  return day > days ? day : null;
+}
+
+/**
+ * A session's lines at each fixed age after it ended: the share still
+ * there, or a dash for an age it has not reached or was not measured at,
+ * and the day it was measured on when that was later than the age.
+ */
+export function keptAges(checkpoints: readonly RewriteCheckpoint[] | null | undefined): { name: string; words: string; kept: string; late: number | null; lines: number | null }[] {
+  return KEPT_AGES.map(({ name, days, words }) => {
+    const c = (checkpoints ?? []).find((one) => one.checkpoint === name);
+    if (!c) return { name, words, kept: "–", late: null, lines: null };
+    return {
+      name,
+      words,
+      kept: percent(share(c.surviving ?? 0, c.added ?? 0)),
+      late: takenLate(c.age_seconds ?? 0, days),
+      lines: c.added ?? 0,
+    };
+  });
 }
 
 /** "github.com/acme/web" -> "acme/web"; "~/src/thing" -> "src/thing" */
