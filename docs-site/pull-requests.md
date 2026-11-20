@@ -93,7 +93,7 @@ jobs:
 ```
 
 Put it in the same workflow file as the report, with `if: github.event_name != 'schedule'` on
-the report's job, or in a file of its own. A run started by a schedule does this and reports
+the report's job, or in a file of its own. A run started by a schedule, with no `pr-number`, does this and reports
 no pull request; `after-merge: true` does the same in a run started any other way.
 
 A scheduled run was chosen over a run on every push to the default branch because it is one
@@ -137,7 +137,7 @@ On the pull request's page the counts are rows of **History** ("30 days after me
 | `backfill` | `false` | For a pull request from before the Action was added: first report it as it was when opened, worked out from its commits, so what review changed can still be measured. See [below](#pull-requests-from-before-the-action). |
 | `pr-number` | | The pull request to report, when the workflow was not started by one. Or several: `all` for the latest ones, `20-60` for a range. See [below](#pull-requests-from-before-the-action). |
 | `since` | 90 days ago | With `pr-number: all`, how far back to go: a date such as `2026-01-31`. |
-| `after-merge` | `false` | Count merged pull requests' agent lines again, 7 and 30 days after merging. A run started by a schedule does this without it. See [After merge](#after-merge). |
+| `after-merge` | `false` | Count merged pull requests' agent lines again, 7 and 30 days after merging. A run started by a schedule, with no `pr-number`, does this without it. See [After merge](#after-merge). |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 An input that is on or off takes `true`, `yes`, `on` or `1` for on, in any case; anything else

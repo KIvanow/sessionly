@@ -177,8 +177,13 @@ export async function run(env, { api, deliver = send, server, log = console.log 
   const url = need("SESSIONLY_URL", "the url input");
   const token = need("SESSIONLY_TOKEN", "the token input");
   const repo = need("GITHUB_REPOSITORY", "GITHUB_REPOSITORY");
-  // On a schedule there is no pull request to report: the run is for the merged ones that are due.
-  if (env.GITHUB_EVENT_NAME === "schedule" || on(env.SESSIONLY_AFTER_MERGE)) {
+  // A run started by a schedule that names no pull request has none to report: it is for the
+  // merged ones that are due. One that names some (`pr-number: all`, each night) reports those, as before.
+  const numbered = (env.SESSIONLY_PR_NUMBER ?? "").trim() !== "";
+  if (on(env.SESSIONLY_AFTER_MERGE) && numbered) {
+    throw new Error("the after-merge and pr-number inputs are both set: a run reports pull requests or counts merged ones again, not both. Use two steps.");
+  }
+  if (on(env.SESSIONLY_AFTER_MERGE) || (env.GITHUB_EVENT_NAME === "schedule" && !numbered)) {
     api ??= github(need("SESSIONLY_GITHUB_TOKEN", "the github-token input"), env.GITHUB_API_URL || undefined, env.GITHUB_GRAPHQL_URL || undefined);
     server ??= (method, path, body) => ask(url, token, method, path, body);
     const host = new URL(env.GITHUB_SERVER_URL || "https://github.com").host;

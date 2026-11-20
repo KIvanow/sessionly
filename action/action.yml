@@ -61,7 +61,7 @@ inputs:
       Count merged pull requests' agent lines again on the branch they were
       merged into, 7 and 30 days after: the server says which are due, and
       their files are read as they are on that branch now. A run started by
-      a schedule does this without being told. Needs contents read
+      a schedule does this without being told, unless pr-number is set. Needs contents read
       permission. Reports no pull request and writes on none.
     default: "false"
   fail-on-error:

@@ -58,7 +58,7 @@ shows a warning that the token is missing.
 | `backfill` | `false` | For a pull request from before the Action was added: first report it as it was when opened, worked out from its commits, so what review changed can still be measured. Not possible after a rebase or squash of the branch. |
 | `pr-number` | | The pull request to report, when the workflow was not started by one. Also `all` for the repository's latest, or `20-60` for those numbered from one to the other (see below). |
 | `since` | 90 days ago | With `pr-number: all`, the date from which pull requests are reported, by when they were created. |
-| `after-merge` | `false` | Count merged pull requests' agent lines again on the branch they were merged into, 7 and 30 days after. A run started by a schedule does this without it (see below). |
+| `after-merge` | `false` | Count merged pull requests' agent lines again on the branch they were merged into, 7 and 30 days after. A run started by a schedule, with no `pr-number`, does this without it (see below). |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 Outputs: `lines` (tracked lines the pull request adds) and `agent-lines` (how many a coding
@@ -118,7 +118,7 @@ reported once more, and can be matched again from the dashboard from then on.
 
 ## After merge
 
-A run started by a schedule reports no pull request. It asks the server which merged pull
+A run started by a schedule, with no `pr-number`, reports no pull request. It asks the server which merged pull
 requests have reached 7 or 30 days since merging, reads the files their agent lines are in as
 they are on the branch now, and sends those files' lines as hashes. The server counts how many
 of the agent lines are still there and keeps that as a row of the pull request's history.

@@ -687,6 +687,24 @@ test("on a schedule, merged pull requests that are due are counted again on the 
   assert.deepEqual(none.calls, []);
 });
 
+test("a scheduled run that names pull requests reports them, as it did before", async () => {
+  const env = environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_PR_NUMBER: "7", SESSIONLY_GITHUB_TOKEN: "gh" });
+  writeFileSync(env.GITHUB_EVENT_PATH, JSON.stringify({ schedule: "17 5 * * *" }));
+  const sent = [];
+  const reported = await run(env, {
+    api: fakeGithub(),
+    deliver: async (url, token, report) => (sent.push(report.number), ATTRIBUTION),
+    server: () => assert.fail("nothing is counted after merging"),
+    log() {},
+  });
+  assert.deepEqual([sent, reported.report.event], [[7], "schedule"]);
+  // both asked for at once is said, and neither is done
+  await assert.rejects(
+    run({ ...env, SESSIONLY_AFTER_MERGE: "true" }, { api: fakeGithub(), deliver: () => assert.fail("not reported"), server: () => assert.fail("not counted") }),
+    /after-merge and pr-number inputs are both set/,
+  );
+});
+
 test("a count the server refuses does not stop the rest, and a server that cannot take any stops the run", async () => {
   const due = [1, 2, 3].map((number) => ({ number, base_ref: "main", checkpoints: ["7d"], paths: ["a.ts"] }));
   const env = () => environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_GITHUB_TOKEN: "gh" });
