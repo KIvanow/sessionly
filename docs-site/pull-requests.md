@@ -68,6 +68,59 @@ What to know about the workflow:
 - On GitHub Enterprise Server the Action uses the server's own address and API, as the runner
   gives them.
 
+## After merge
+
+What review left is not the end of it: code is reworked after it is merged too. So a merged
+pull request's agent lines are counted again on the branch it was merged into, **7 days and
+30 days after the merge**. The server holds only hashes and cannot see that branch, so the
+Action does the looking, on a schedule:
+
+```yaml
+on:
+  schedule:
+    - cron: "17 5 * * *"   # once a day
+jobs:
+  after-merge:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read   # to read the files as they are on the branch
+    steps:
+      - uses: KIvanow/sessionly/action@main
+        with:
+          url: https://sessionly.example.com
+          token: ${{ secrets.SESSIONLY_TOKEN }}
+```
+
+Put it in the same workflow file as the report, with `if: github.event_name != 'schedule'` on
+the report's job, or in a file of its own. A run started by a schedule does this and reports
+no pull request; `after-merge: true` does the same in a run started any other way.
+
+A scheduled run was chosen over a run on every push to the default branch because it is one
+run a day whatever the repository's traffic, and it still happens in a week when nothing is
+pushed. A push would start a run for every merge, most of which have nothing due.
+
+Each run asks the server which merged pull requests are due, and for each the files its agent
+lines are in. It reads those files as they are on the branch now and sends their lines as
+hashes; the server counts how many of the pull request's agent lines are in the same files.
+No source leaves GitHub, and the server sends no hashes out.
+
+- **The first count at or after each age is kept, and never changed.** If no run happened on
+  day 7, the next one stands for it and records how old the merge really was.
+- **Nothing is made up for the past.** An age a pull request reached before the server began
+  counting (when it was updated to a version that does, or when its organisation was created) is not counted. One merged 20
+  days before that gets its 30 days and not its 7.
+- **Only lines whose sessions are kept.** The lines of a session deleted since cannot be told
+  from anyone's, and are left out of both numbers.
+- **By file, as the rewrite rate.** A line counts when it is in the same file, anywhere in it.
+  A file that was renamed or deleted has none of its lines left.
+- If the branch it was merged into is gone (others were stacked on it, and it was merged and
+  deleted itself), the repository's default branch is read instead.
+- A run reads at most 800 files. What is left is still due at the next run.
+
+On the pull request's page the counts are rows of **History** ("30 days after merge: 498 of
+520 agent lines still there"), and the tile **Kept @30d after merge** has the share.
+
 ## Inputs
 
 | Input | Default | |
@@ -82,6 +135,7 @@ What to know about the workflow:
 | `backfill` | `false` | For a pull request from before the Action was added: first report it as it was when opened, worked out from its commits, so what review changed can still be measured. See [below](#pull-requests-from-before-the-action). |
 | `pr-number` | | The pull request to report, when the workflow was not started by one. Or several: `all` for the latest ones, `20-60` for a range. See [below](#pull-requests-from-before-the-action). |
 | `since` | 90 days ago | With `pr-number: all`, how far back to go: a date such as `2026-01-31`. |
+| `after-merge` | `false` | Count merged pull requests' agent lines again, 7 and 30 days after merging. A run started by a schedule does this without it. See [After merge](#after-merge). |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 An input that is on or off takes `true`, `yes`, `on` or `1` for on, in any case; anything else
@@ -158,6 +212,7 @@ figures then, and why (new commits, fewer commits, a session uploaded since, a s
 longer matched, a newer Action and which version replaced which, a session whose lines
 changed, or that it was matched again and nothing new turned up). A session named there
 links to it. When the agent lines moved, the figure says what they were until this report.
+The counts [after merge](#after-merge) are rows here too, and stay however many reports follow.
 
 ## How to read it
 
@@ -299,6 +354,10 @@ line without the whitespace at its ends, as the `sessionly` binary makes them).
 For each review and comment: who made it (their GitHub login, and whether that is a bot), when,
 the file and line it is on, a review's outcome, and its link on GitHub, which is what the
 pull request's page in the dashboard leads to. What a review or comment says is never sent.
+
+For a count [after merge](#after-merge): the repository, the pull request's number, and for
+each file the server asked about, its path and a hash of each of its lines as it is on the
+branch now.
 
 Limits: a report has at most 5000 files and 500 commit addresses. Of reviews and comments the
 latest 2000 are kept, and the pull request's page says when there were more. A changed file

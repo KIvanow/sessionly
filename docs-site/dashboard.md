@@ -15,7 +15,8 @@ light or dark as the system is, and serves the same two typefaces itself, from
 
 - **Overview:** total cost (with cost per session and per active hour), sessions, active time,
   prompts, tokens, tool calls and failure rate, files changed, the share of files rewritten
-  since and of agent lines still there; cost per day (per week for long ranges, with a table
+  since and of agent lines kept at 7 days (see [Rewrite rate](rewrite-rate.md#at-1-7-and-30-days));
+  cost per day (per week for long ranges, with a table
   view; choosing a column narrows the page to that day or week); and the same totals by tool,
   person, repository and model. A repository's row names the agents and models that worked in
   it, and opens to compare those agents within it and to list the files they changed: which
@@ -23,7 +24,8 @@ light or dark as the system is, and serves the same two typefaces itself, from
   are still there, and when it was last changed.
 - **Sessions:** a searchable, paged list, 50 to a page.
 - **One session:** cost and tokens per model, prompts with how long each took and how it ended,
-  files changed with how much of each survives, tools, and subagents.
+  files changed with how much of each survives (now, and 1, 7 and 30 days after it ended),
+  tools, and subagents.
 - **Pull requests** (admins): see [Pull requests](pull-requests.md).
 - **Team** (admins): add and remove people where they sign in with Google or GitHub, and create
   and revoke tokens for what cannot sign in: a cloud environment, CI, or a machine set up for
