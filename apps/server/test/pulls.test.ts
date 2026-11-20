@@ -990,6 +990,14 @@ test("an upload matches again the pull requests it adds lines to, and no others"
   assert.deepEqual(await backHistory(), [["opened", 0]]);
   await backed("a.ts", [960]);
   assert.deepEqual(await backHistory(), [["match", 1], ["opened", 0]]);
+  // the same lines, by another model: matched again, and the lines are that model's
+  const sonnet = session("s-back", "claude-code", "claude-sonnet-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: [h(960)] }]);
+  sonnet.session.repo.remote = back;
+  (sonnet.session as Record<string, unknown>).user = { email: "ann@example.com" };
+  assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-back", sonnet)).status, 200);
+  assert.deepEqual((await call(tokens.admin, "GET", `/prs/detail?repo=${back}&number=1`)).body.attribution.now.by, [
+    { tool: "claude-code", model: "claude-sonnet-5-5", lines: 1 },
+  ]);
 
   // looking for them fails: the session is stored all the same
   const broken = repo + "-broken";

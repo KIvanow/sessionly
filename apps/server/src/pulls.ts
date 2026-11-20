@@ -1371,12 +1371,12 @@ export async function pullsAddedTo(db: OrgDb, key: SessionKey, hashKey?: string)
 
 /**
  * What a session's lines are now, and what else decides which pull requests
- * they count in (whose it is, where and when it ran), to tell an upload that
+ * they count in and for whom (whose it is, where and when it ran, its model), to tell an upload that
  * changed any of it: a hash of them, or null for no session.
  */
 export async function matchedBy(db: OrgDb, key: SessionKey): Promise<string | null> {
   const [row] = await db.query<{ by: string | null }>(
-    `SELECT md5(concat_ws(E'\n', (payload->'lines')::text, ${SESSION_EMAIL}, repo, branch, runtime, started_at::text)) AS by FROM sessions
+    `SELECT md5(concat_ws(E'\n', (payload->'lines')::text, ${SESSION_EMAIL}, repo, branch, runtime, started_at::text, primary_model)) AS by FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
     [db.orgId, key.machine_id, key.source, key.session_id],
   );
