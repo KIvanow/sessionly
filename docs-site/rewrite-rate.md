@@ -47,7 +47,8 @@ Those compare like with like.
   nothing was measured then. It still gets the later ages as it reaches them, and the latest
   figure as before.
 - **Age counts from the session's end.** A session that is resumed starts again from its new
-  end, and a checkpoint taken before that is dropped: it was of a session that had not ended.
+  end, and the checkpoints counted from the end it had before are dropped: they were of a
+  session that had not ended. A session with no end recorded has no checkpoints.
 - If the session's directory is gone on the day, no checkpoint is taken then.
 
 A checkpoint is counts and times: how many tracked lines the agent had added, how many were

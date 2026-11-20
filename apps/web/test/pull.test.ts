@@ -235,6 +235,9 @@ test("a count after merging, in plain words", () => {
   assert.deepEqual(afterMergeTile([seven, thirty], null, share), { value: "96%", part: 498 / 520, note: "498 of 520 agent lines; 98% at 7 days" });
   assert.deepEqual(afterMergeTile([{ ...thirty, age_seconds: 34 * day }], null, share).note, "498 of 520 agent lines, counted on day 34");
   assert.deepEqual(afterMergeTile([seven], null, share), { value: "–", part: null, note: "not 30 days yet; at 7 days 98%, 511 of 520 agent lines" });
+  assert.equal(afterMergeTile([seven], "2026-12-08T00:00:00Z", share, String, now).note, "not 30 days yet; at 7 days 98%, 511 of 520 agent lines");
+  // on day 40 it is not waiting for day 30
+  assert.equal(afterMergeTile([seven], "2026-11-10T00:00:00Z", share, String, now).note, "not counted at 30 days; at 7 days 98%, 511 of 520 agent lines");
   assert.equal(afterMergeTile([], "2026-12-17T00:00:00Z", share, String, now).note, "counted 7 and 30 days after it was merged");
   assert.match(afterMergeTile([], "2026-11-17T00:00:00Z", share, String, now).note, /^not counted: a scheduled run of the Action/);
 });

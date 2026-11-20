@@ -24,7 +24,8 @@ light or dark as the system is, and serves the same two typefaces itself, from
   are still there, and when it was last changed.
 - **Sessions:** a searchable, paged list, 50 to a page.
 - **One session:** cost and tokens per model, prompts with how long each took and how it ended,
-  files changed with how much of each survives (now, and 1, 7 and 30 days after it ended),
+  how much of what the agent wrote in the whole session was still there 1, 7 and 30 days after
+  it ended and is there now, files changed with how much of each survives as last measured,
   tools, and subagents.
 - **Pull requests** (admins): see [Pull requests](pull-requests.md).
 - **Team** (admins): add and remove people where they sign in with Google or GitHub, and create

@@ -296,8 +296,12 @@ export function afterMergeTile(
       note: `${of(thirty)}${day > 30 ? `, counted on day ${day}` : ""}${seven ? `; ${share(seven.surviving, seven.agent_lines)} at 7 days` : ""}`,
     };
   }
-  if (seven) return { value: "–", part: null, note: `not 30 days yet; at 7 days ${share(seven.surviving, seven.agent_lines)}, ${of(seven)}` };
   const age = mergedAt ? (now - Date.parse(mergedAt)) / 86_400_000 : NaN;
+  if (seven) {
+    // Past day 30 with no count is not waiting for the day: no run has counted it.
+    const thirtieth = age >= 30 ? "not counted at 30 days" : "not 30 days yet";
+    return { value: "–", part: null, note: `${thirtieth}; at 7 days ${share(seven.surviving, seven.agent_lines)}, ${of(seven)}` };
+  }
   if (age < 7) return { value: "–", part: null, note: "counted 7 and 30 days after it was merged" };
   return { value: "–", part: null, note: "not counted: a scheduled run of the Action does it, for lines whose sessions are kept" };
 }
