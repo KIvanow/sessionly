@@ -249,6 +249,12 @@ test("reports and the counts made after merging are one list by time, and stay t
     timeline(history, counts).map((row) => row.report?.event ?? row.count?.checkpoint),
     ["30d", "match", "7d", "closed"],
   );
+  // at the same moment, the report comes first and the count after it
+  const together = [{ at: "2026-11-20T10:00:00Z", checkpoint: "7d" }, ...counts];
+  assert.deepEqual(
+    timeline(history, together).map((row) => row.report?.event ?? row.count?.checkpoint),
+    ["30d", "match", "7d", "7d", "closed"],
+  );
   assert.deepEqual(timeline(history, undefined).map((row) => row.report?.event), ["match", "closed"]);
   assert.deepEqual(timeline([], []), []);
 });

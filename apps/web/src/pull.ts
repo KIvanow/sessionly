@@ -267,7 +267,7 @@ export function timeline<R extends { at: string }, C extends { at: string }>(
   counts: readonly C[] | null | undefined,
 ): ({ at: string; report: R; count?: undefined } | { at: string; count: C; report?: undefined })[] {
   return [...history.map((report) => ({ at: report.at, report })), ...(counts ?? []).map((count) => ({ at: count.at, count }))].sort(
-    (a, b) => Date.parse(b.at) - Date.parse(a.at) || Number("count" in b) - Number("count" in a),
+    (a, b) => Date.parse(b.at) - Date.parse(a.at) || Number("count" in a) - Number("count" in b),
   );
 }
 
