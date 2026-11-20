@@ -593,6 +593,23 @@ mod tests {
         measure(&mut ledger, ended + days(7)).unwrap();
         assert_eq!(kept(&ledger), [("1d".to_string(), 3, 2)]);
 
+        // Its end read again as later than it was, and still before the
+        // measurement: that was not two days after this end either.
+        session.ended_at = Some(ended + days(6));
+        ledger.upsert(&session, &built_from, &lines).unwrap();
+        assert_eq!(kept(&ledger), []);
+        // With no end known it has no age.
+        session.ended_at = None;
+        ledger.upsert(&session, &built_from, &lines).unwrap();
+        assert_eq!(
+            measure(&mut ledger, ended + days(9)).unwrap().checkpoints,
+            0
+        );
+        session.ended_at = Some(ended + days(5));
+        ledger.upsert(&session, &built_from, &lines).unwrap();
+        measure(&mut ledger, ended + days(7)).unwrap();
+        assert_eq!(kept(&ledger), [("1d".to_string(), 3, 2)]);
+
         // With the directory gone nothing can be said, and nothing is kept.
         let gone = dir.path().join("gone");
         session.repo.as_mut().unwrap().root = gone.to_string_lossy().into_owned();

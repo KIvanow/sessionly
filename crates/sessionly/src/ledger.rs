@@ -127,7 +127,9 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 /// ended (`rewrite::CHECKPOINTS`). A row is written once and never changed:
 /// what was there on day 7 cannot be measured again on day 8. Made apart from
 /// the tables above, so that a change to their layout, which drops them,
-/// leaves these. `checkpoints_since` is when this ledger began keeping them:
+/// leaves these. Each says which end of the session its age was counted
+/// from: one of another end is of a session that went on since, or whose
+/// end was read again, and goes. `checkpoints_since` is when this ledger began keeping them:
 /// an age a session reached before that was not measured then, and is not
 /// made up later.
 const CHECKPOINT_TABLES: &str = "
@@ -139,6 +141,8 @@ CREATE TABLE IF NOT EXISTS rewrite_checkpoints (
     measured_at TEXT NOT NULL,
     -- how long after the session ended it was measured: the age, or more
     age_seconds INTEGER NOT NULL,
+    -- when the session had ended, as the age was counted
+    ended_at    TEXT NOT NULL,
     PRIMARY KEY (session_id, checkpoint)
 );
 CREATE TABLE IF NOT EXISTS checkpoints_since (
@@ -564,15 +568,14 @@ impl Ledger {
              (SELECT path FROM session_files WHERE session_id = ?1 AND added_hashes IS NOT NULL)",
             [&s.session_id],
         )?;
-        // A checkpoint taken before the session ended is of a session that
-        // went on since (it was resumed): its ages count from the new end.
-        if let Some(ended) = s.ended_at {
-            tx.execute(
-                "DELETE FROM rewrite_checkpoints
-                 WHERE session_id = ?1 AND julianday(measured_at) < julianday(?2)",
-                params![s.session_id, ended.to_rfc3339()],
-            )?;
-        }
+        // A checkpoint's age was counted from the end the session had then.
+        // With another end (it was resumed, or more of it was read) that
+        // age is not its age: its ages count from the end it has now.
+        tx.execute(
+            "DELETE FROM rewrite_checkpoints
+             WHERE session_id = ?1 AND ended_at IS NOT ?2",
+            params![s.session_id, s.ended_at.map(|t| t.to_rfc3339())],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -856,7 +859,8 @@ impl Ledger {
     /// Keep what was just measured as the checkpoint of every age the
     /// session has reached and has none for. `measured` is each session
     /// measured now, with its tracked lines and how many are there. Age
-    /// counts from when the session ended. A checkpoint already kept is left
+    /// counts from when the session ended: one with no end known has no
+    /// age, and no checkpoint. A checkpoint already kept is left
     /// as it is, and one whose age came before this ledger kept any is not
     /// made: nothing was measured then. One missed since (the machine was
     /// off that day) is taken now, and says how old the session really was.
@@ -872,11 +876,9 @@ impl Ledger {
         let since = DateTime::parse_from_rfc3339(&since)?.with_timezone(&Utc);
         let mut kept = 0;
         {
-            let mut ended_at = tx.prepare(
-                "SELECT coalesce(ended_at, started_at) FROM sessions WHERE session_id = ?1",
-            )?;
+            let mut ended_at = tx.prepare("SELECT ended_at FROM sessions WHERE session_id = ?1")?;
             let mut insert = tx.prepare(
-                "INSERT OR IGNORE INTO rewrite_checkpoints VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR IGNORE INTO rewrite_checkpoints VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             for (session_id, added, surviving) in measured {
                 if *added == 0 {
@@ -902,7 +904,8 @@ impl Ledger {
                         added,
                         surviving,
                         now.to_rfc3339(),
-                        age
+                        age,
+                        ended.to_rfc3339()
                     ])? as u64;
                 }
             }

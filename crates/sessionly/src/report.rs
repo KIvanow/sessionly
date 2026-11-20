@@ -377,13 +377,6 @@ pub fn session(
             let _ = write!(text, " ({})", details.join(" "));
         }
         field(&mut out, "Rewrite", text);
-        if !checkpoints.is_empty() {
-            field(
-                &mut out,
-                "",
-                format!("still there after it ended: {}", kept_at(checkpoints)),
-            );
-        }
         let session_branch = s.repo.as_ref().and_then(|r| r.branch.as_deref());
         if let (Some(then), Some(now)) = (session_branch, checkout) {
             if then != now && then != "HEAD" {
@@ -396,6 +389,16 @@ pub fn session(
                 );
             }
         }
+    }
+
+    // Kept through a rebuild of the ledger, and when the files are gone: said
+    // whether or not there is a latest measurement above.
+    if !checkpoints.is_empty() {
+        field(
+            &mut out,
+            if rewrite.is_empty() { "Rewrite" } else { "" },
+            format!("still there after it ended: {}", kept_at(checkpoints)),
+        );
     }
 
     if !s.prompts.is_empty() {
@@ -773,6 +776,37 @@ pub fn license(server: &str, state: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checkpoints_are_shown_with_or_without_a_latest_measurement() {
+        use super::{session, RewriteCheckpoint, RewriteRow, Session};
+        let day = 86_400;
+        let at = |name: &str, surviving, age_seconds| RewriteCheckpoint {
+            checkpoint: name.into(),
+            added: 16,
+            surviving,
+            measured_at: None,
+            age_seconds,
+        };
+        let kept = [at("1d", 14, day + 60), at("7d", 5, 9 * day)];
+        let line = "still there after it ended: 1d 88%, 7d 31% (taken on day 9), 30d -";
+        // The ledger was rebuilt and the files are gone: the checkpoints are what is left.
+        let alone = session(&Session::default(), &[], None, &kept);
+        assert!(alone.contains(&format!("Rewrite    {line}")), "{alone}");
+        assert!(!session(&Session::default(), &[], None, &[]).contains("still there"));
+        let row = RewriteRow {
+            session_id: "s".into(),
+            path: "a.rs".into(),
+            added: 16,
+            surviving: 3,
+            file_exists: true,
+            branch: None,
+            head: None,
+        };
+        let both = session(&Session::default(), &[row], None, &kept);
+        assert!(both.contains("added lines still there"), "{both}");
+        assert!(both.contains(&format!("           {line}")), "{both}");
+    }
+
     #[test]
     fn describes_license_states() {
         let state = |status: &str| {
