@@ -218,11 +218,19 @@ links to it. When the agent lines moved, the figure says what they were until th
   whole line's price. Sessions with no cost figure are left out of it, so it reads "at least"
   only when a session's cost leaves out requests. The cost of a line that got through
   review, where that is known, is what the agent's lines the pull request was opened with
-  cost, divided by those that survived. Which lines of each session survived is not kept,
-  so those are taken to be shared with other pull requests as the lines it was opened with
-  were on the whole. A pull request none of whose agent lines survived still says what they
-  cost, and lines that moved from one pull request to another are paid for once between
-  the two. This one reads "at least" when a session of those lines has no cost figure, or
+  cost, divided by those that survived. A line it was opened with together with another
+  pull request costs half in each and counts as half a line in each, and it counts as
+  surviving while either of them keeps it: between them it is one line, paid for once,
+  wherever it ended up. So lines that moved from one pull request to another, or a stack
+  of them that each kept only some, come out as they did for the session that wrote them.
+  The summary of several pull requests divides what their opening lines cost by the lines
+  that survived, each counted once; where that is not how many survived (a line in two of
+  them is in each one's count), the "Agent lines that survived review" tile says what it
+  is beside them, and why. A pull request none of whose agent lines survived has no figure
+  of its own, but what they cost is in the summary's. For a pull request matched before
+  this was kept, which lines of each session survived is not known: those are taken to be
+  shared with other pull requests as the lines it was opened with were on the whole, until
+  it is matched again. This one reads "at least" when a session of those lines has no cost figure, or
   not all of it. Both are marked `~` when the cost they come from is an estimate. A
   session's own share is marked `~` too when it may be counted in another pull request. A
   session that is deleted takes its lines with it: the pull request keeps how many

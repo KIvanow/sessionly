@@ -813,6 +813,10 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('owner', 'admin', 'member', 'viewer'))`,
   `ALTER TABLE tokens DROP CONSTRAINT tokens_role_check`,
   `ALTER TABLE tokens ADD CONSTRAINT tokens_role_check CHECK (role IN ('admin', 'member', 'ci', 'env', 'viewer'))`,
+  // Of what a session's lines a pull request was opened with count as, what
+  // those still there, in any of its pull requests, count as (see `weighKept`
+  // in pulls.ts). Null from before, until the pull request is matched again.
+  `ALTER TABLE pull_sessions ADD COLUMN opened_kept double precision`,
 ];
 
 /**

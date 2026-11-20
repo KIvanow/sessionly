@@ -525,8 +525,9 @@ export interface PullCost {
   opened_estimated: boolean;
   /**
    * What an agent line that survived review cost: `opened_usd` for each of
-   * them still there, those being shared out with other pull requests as the
-   * lines it was opened with were on the whole. Null when none is.
+   * them still there, a line it was opened with together with other pull
+   * requests counting in part, as its cost does, wherever it survived. Null
+   * when none survived in this one.
    */
   per_surviving_line_usd: number | null;
 }
@@ -828,16 +829,17 @@ export interface PullSummary {
     /** Pull requests closed without merging that have a cost, and are left out of the figures here. */
     pulls_closed_with_cost: number;
     /**
-     * What the agent lines that survived review count as, of the pull
-     * requests reported from the moment they were opened that have a cost: a
-     * line also opened in another pull request is part of a line in each, as
-     * its cost is shared out. To two decimals.
+     * The agent lines that survived review of the pull requests reported from
+     * the moment they were opened that have a cost, each counted once: a line
+     * opened in several of them is one line between them, wherever it
+     * survived (`agent_lines_surviving` counts it in each). To two decimals:
+     * a line in a pull request left out of these counts only in part.
      */
-    agent_lines_surviving_weighted: number;
+    agent_lines_surviving_once: number;
     /**
      * Over those pull requests: what the agent lines they were opened with
-     * cost (`opened_usd`), for each line `agent_lines_surviving_weighted`
-     * counts, as on each one's page. Null when none did.
+     * cost (`opened_usd`), for each line `agent_lines_surviving_once` counts.
+     * Null when none did.
      */
     per_surviving_line_usd: number | null;
     /** Whether a session of those lines has no cost figure, or not all of it. */

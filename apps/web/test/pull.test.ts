@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, matchAll, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, survivingWeighted, web } from "../src/pull.ts";
+import { byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, matchAll, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, survivingOnce, web } from "../src/pull.ts";
 
 test("a moved agent figure says what it was, and why", () => {
   const history = [
@@ -204,12 +204,16 @@ test("a session's share of what it cost says what is not sure about it", () => {
   assert.deepEqual(sessionShare({ ...s, cost_share_usd: 0.00004 }), { text: "$0.000040", why: null });
 });
 
-test("the lines a cost per surviving line divides by are shown beside how many survived, with why", () => {
-  const shown = survivingWeighted({ agent_lines_surviving_weighted: 7.25, per_surviving_line_usd: 0.86 });
-  assert.equal(shown?.text, "7.25 weighted");
-  assert.match(shown!.why, /part of a line in each/);
-  // no cost per line, nothing to explain
-  assert.equal(survivingWeighted({ agent_lines_surviving_weighted: 0, per_surviving_line_usd: null }), null);
+test("the lines a cost per surviving line divides by are shown beside how many survived, where they differ, with why", () => {
+  const total = { agent_lines_surviving: 14, agent_lines_surviving_once: 10, per_surviving_line_usd: 0.6 };
+  const shown = survivingOnce(total);
+  assert.equal(shown?.text, "10 counted once for cost");
+  assert.match(shown!.why, /counted once between them/);
+  assert.equal(survivingOnce({ ...total, agent_lines_surviving_once: 7.25 })?.text, "7.25 counted once for cost");
+  // the same: nothing to explain
+  assert.equal(survivingOnce({ ...total, agent_lines_surviving_once: 14 }), null);
+  // no cost per line, likewise
+  assert.equal(survivingOnce({ ...total, per_surviving_line_usd: null }), null);
 });
 
 test("the cost of several pull requests says what it leaves out", () => {

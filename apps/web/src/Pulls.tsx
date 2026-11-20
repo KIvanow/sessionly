@@ -6,7 +6,7 @@ import { average, count, dateTime, modelName, percent, repoName, share, shareOf,
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { costIsFloor, costText, matchAll, nameSome, pullCost, pullHref, pullsCostNote, survivingWeighted, web } from "./pull.ts";
+import { costIsFloor, costText, matchAll, nameSome, pullCost, pullHref, pullsCostNote, survivingOnce, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -127,7 +127,7 @@ export function Pulls({ token, scope, setScope, repos, readOnly = false, onSignO
               value={shareOf(total.agent_lines_surviving, total.opened_agent_lines)}
               part={share(total.agent_lines_surviving, total.opened_agent_lines)}
               note={`${count(total.agent_lines_surviving)} of ${count(total.opened_agent_lines)}, in ${count(total.pulls_from_open)} pull requests reported since they were opened`}
-              aside={survivingWeighted(total)}
+              aside={survivingOnce(total)}
             />
             <Tile
               label="Agent cost"

@@ -108,23 +108,24 @@ export function pullsCostNote(total: {
   return [each, floor ?? "what the matched sessions cost, each for its share of lines", closed].filter(Boolean).join("; ");
 }
 
-const weight = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+const once = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
 
 /**
- * What the lines that survived count as where the cost per line divides by
- * them, beside how many there are, and why the two differ. Null when there is
- * no cost per line to explain.
+ * How many lines that survived the cost per line divides by, each counted
+ * once, and why that is not how many survived: shown only when it is not.
+ * Null too when there is no cost per line to explain.
  */
-export function survivingWeighted(total: {
-  agent_lines_surviving_weighted: number;
+export function survivingOnce(total: {
+  agent_lines_surviving: number;
+  agent_lines_surviving_once: number;
   per_surviving_line_usd: number | null;
 }): { text: string; why: string } | null {
-  if (total.per_surviving_line_usd == null) return null;
+  if (total.per_surviving_line_usd == null || total.agent_lines_surviving_once === total.agent_lines_surviving) return null;
   return {
-    text: `${weight.format(total.agent_lines_surviving_weighted)} weighted`,
+    text: `${once.format(total.agent_lines_surviving_once)} counted once for cost`,
     why:
-      "What the cost per agent line that survived review divides by: those lines in the pull requests that have a cost, " +
-      "a line also opened in another pull request counting as part of a line in each, as its cost is shared out between them.",
+      "What the cost per agent line that survived review divides by. A line opened in more than one pull request is counted once " +
+      "between them, wherever it survived, as its cost is; and only pull requests with a cost are in it.",
   };
 }
 

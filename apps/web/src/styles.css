@@ -363,8 +363,25 @@ main > p { margin: 0; }
   border-bottom: 1px solid var(--rule);
 }
 .tile .value { font-family: var(--mono); font-size: 26px; font-weight: 600; line-height: 1.15; letter-spacing: -0.03em; }
-/* A figure whose meaning is on hover. */
-.explained { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
+/* A figure whose meaning shows on hover, or on focus from a keyboard or a tap. */
+.explained { position: relative; text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
+.explained .explanation {
+  display: none;
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  top: calc(100% + 6px);
+  width: min(280px, 80vw);
+  padding: 8px 12px;
+  background: var(--sheet);
+  color: var(--ink);
+  border: 1.5px solid var(--ink);
+  box-shadow: 4px 4px 0 var(--blue);
+  font-size: 12px;
+  text-decoration: none;
+  white-space: normal;
+}
+.explained:hover .explanation, .explained:focus .explanation { display: block; }
 /* A bar for a share: the track is the whole, the fill the part. */
 .track { display: block; height: 8px; margin: 6px 0 2px; background: var(--track); }
 .track i { display: block; height: 100%; background: var(--blue); }
