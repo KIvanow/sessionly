@@ -137,8 +137,12 @@ state filter. The period goes by when a pull request was merged or closed, or fo
 when it was opened.
 
 **Figures that are behind.** A pull request's lines are matched to sessions when the Action
-reports it, and the last report is usually the one for its merge. A session uploaded after that
-(the machine was offline, the session was still going) is not in the figures. **Match again** on
+reports it, and again when a session that added some of them is uploaded later (the session was
+still going when it was opened, the machine was offline): the server then matches the pull
+requests of its repository that are open or were closed in the last two weeks, five at most, and
+the page and the history say so. The comment on GitHub catches up at the next report. A session
+uploaded to a server of version 0.6.3 or older, or for a pull request closed longer ago, is not
+in the figures until it is matched again: **Match again** on
 a pull request's page, or **Match these to sessions again** above the list, matches the lines as
 last reported against the sessions the server holds now, without asking GitHub; the page says
 when that was last done. What only GitHub knows (reviews, comments, the title, new commits)
@@ -168,6 +172,10 @@ links to it. When the agent lines moved, the figure says what they were until th
   exception: there every session in the repository counts.
 - **A line that several sessions added** goes to the one that started last, and one line of a
   session accounts for one line of the pull request.
+- **A common line**, one that three sessions or more added to the same file (an import,
+  `display: flex;`), goes only to a session that also wrote a line of the pull request that is
+  not common. Otherwise it would go to an older session that once added it too, while the one
+  that wrote it is not uploaded yet.
 - **The file has to be the same one.** A session that worked in a worktree (a folder under
   `worktrees/` or `.worktrees/`, or a checkout elsewhere whose path ends with the file's path
   in the repository) is matched to the repository's file.

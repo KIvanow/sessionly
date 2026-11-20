@@ -46,6 +46,7 @@ import {
   listPulls,
   rematchPull,
   rematchPulls,
+  pullsAddedTo,
   storePull,
   summarizePulls,
   type PullFilters,
@@ -62,6 +63,8 @@ export type Env = {
     /** An upload or a pull request report, already parsed and checked. */
     upload?: Upload;
     report?: PullReport;
+    /** The pull requests an upload just stored can change, to be matched again once it is committed. */
+    rematch?: { repo: string; number: number }[];
   };
 };
 
@@ -397,6 +400,21 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     return c.json(await rematchPulls(each, filters, time(asked.started, "started"), options.hashKey, failed));
   });
 
+  // The pull requests a session just stored adds lines to are matched again
+  // once it is committed, each in a transaction of its own, as above. One
+  // that fails is logged: the session is stored all the same.
+  api.put("/sessions/:machine/:source/:session", async (c, next) => {
+    await next();
+    if (c.res.status !== 200) return;
+    for (const { repo, number } of c.get("rematch") ?? []) {
+      try {
+        await ownerDb.asOrg(c.get("principal").orgId, (db) => rematchPull(db, repo, number, options.hashKey));
+      } catch (err) {
+        failed(err);
+      }
+    }
+  });
+
   // Adding a person puts an organisation in front of them the next time
   // they sign in, on an admin's word, and anyone can be the admin of an
   // organisation they just made. So it is limited per organisation. Taken
@@ -582,6 +600,10 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     } catch (err) {
       if (err instanceof Conflict) return c.json({ error: err.message }, 409);
       throw err;
+    }
+    if (result.stored) {
+      const { machine, source, session } = c.req.param();
+      c.set("rematch", await pullsAddedTo(c.get("db"), { machine_id: machine, source, session_id: session }));
     }
     // Not stored, and not excluded: the server already has more of this cloud session.
     // Excluded: the person stopped the repository, so the session was not kept.

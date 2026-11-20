@@ -229,6 +229,8 @@ test("the figures as text", () => {
   const nearly = { ...ATTRIBUTION, by: [{ tool: "cursor", model: null, lines: 400, surviving: 399 }] };
   assert.match(render(build(), nearly), /399 are still there \(99%\)/);
   assert.match(text, /1 changed files were too large/);
+  // in italics, that what arrives later, and what is common, change them, ahead of how it is counted
+  assert.match(text, /\n_These figures can still change\. [^\n]*not be counted yet[^\n]*such as an import[^\n]*_\n\n<details>/);
   // when it has just been opened there is nothing to compare with yet
   assert.doesNotMatch(render(build({ event: "opened" }), ATTRIBUTION), /still there/);
   const none = { first: { lines: 9, agent_lines: 0 }, now: { lines: 9, agent_lines: 0, by: [] }, by: [] };
@@ -238,6 +240,7 @@ test("the figures as text", () => {
   const empty = { first: { lines: 0, agent_lines: 0 }, now: { lines: 0, agent_lines: 0, by: [] }, by: [] };
   assert.match(render(build(), empty), /adds no lines to track/);
   assert.doesNotMatch(render(build(), empty), /\| Lines added \|/);
+  assert.doesNotMatch(render(build(), empty), /can still change/);
   // a cloud agent's pull request whose session nobody captured says so
   const uncaptured = { ...none, cloud: { agents: ["cursor"], sessions: 0 } };
   assert.match(render(build(), uncaptured), /A cloud agent worked on this pull request \(Cursor\), and no session of it was captured/);

@@ -97,6 +97,33 @@ test("a line counts once per time it was added, for the latest session that adde
   ]);
 });
 
+test("a common line goes only to a session that wrote other lines of the pull request", () => {
+  const from = (id: string, c: Claim): Claim => ({ ...c, session: { machine_id: "m1", source: c.tool, session_id: id } });
+  // line 1 is in three sessions' work on the file: a common one
+  const old = [
+    from("s1", claim("claude-code", "opus-4-8", "a.css", 1, 1)),
+    from("s2", claim("grok", "grok-4", "a.css", 2, 1, 5)),
+    from("s3", claim("cursor", null, "a.css", 3, 1)),
+  ];
+  const pr = [file("a.css", 1, 2, 3)];
+  // the session that wrote it has not been uploaded: none of the older ones is taken to have
+  assert.deepEqual(attribute(pr, pr, old).now, { lines: 3, agent_lines: 0, by: [] });
+  // one that wrote the pull request's other lines has it, though another started later
+  const now = [from("s0", claim("claude-code", "opus-5-5", "a.css", 0, 1, 2, 3)), ...old];
+  assert.deepEqual(attribute(pr, pr, now).now.by, [{ tool: "claude-code", model: "opus-5-5", lines: 3 }]);
+  // and of those that did, the latest
+  const two = [from("s4", claim("codex", null, "a.css", 4, 1, 3)), ...now];
+  assert.deepEqual(attribute(pr, pr, two).now.by, [
+    { tool: "codex", model: null, lines: 2 },
+    { tool: "claude-code", model: "opus-5-5", lines: 1 },
+  ]);
+  // in two sessions' work it is not common yet
+  assert.deepEqual(attribute(pr, pr, old.slice(1)).now.by, [{ tool: "cursor", model: null, lines: 1 }]);
+  // one session's claims on the same file count as one
+  const same = [from("s1", claim("claude-code", "opus", "a.css", 1, 1)), from("s1", claim("claude-code", "haiku", "a.css", 1, 1)), old[1]!];
+  assert.equal(attribute(pr, pr, same).now.agent_lines, 1);
+});
+
 test("review survival: the agents' first lines that are still there", () => {
   const claims = [claim("claude-code", "opus", "a.ts", 1, 1, 2, 3, 4), claim("cursor", "sonnet", "b.ts", 1, 8, 9)];
   const first = [file("a.ts", 1, 2, 3, 4, 70), file("b.ts", 8, 9)];
@@ -808,6 +835,34 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.deepEqual((await call(tokens.admin, "GET", "/prs/summary?repo=acme/before-names")).body.older_actions, []);
 });
 
+test("an upload matches again the pull requests it adds lines to, and no others", async () => {
+  const repo = "github.com/acme/arrives";
+  const sent = (number: number, files: unknown[], more: Record<string, unknown> = {}) =>
+    call(tokens.ci, "PUT", "/prs", report({ repo, number, commit_emails: ["ann@example.com"], files, ...more }));
+  // opened while the session went on: nothing of it is uploaded yet
+  assert.equal((await sent(1, [file("a.ts", 900, 901)])).body.attribution.now.agent_lines, 0);
+  // one with none of its lines, one of another repository, one closed long ago
+  await sent(2, [file("b.ts", 900)]);
+  await call(tokens.ci, "PUT", "/prs", report({ repo: `${repo}-2`, number: 1, commit_emails: ["ann@example.com"], files: [file("a.ts", 900)] }));
+  await sent(3, [file("a.ts", 900)], { state: "merged", event: "closed", merged_at: "2026-10-01T12:00:00Z" });
+  await db.query(`UPDATE pull_requests SET updated_at = now() - interval '30 days' WHERE repo = $1 AND number = 3`, [repo]);
+  const matchedAt = async () =>
+    (await db.query(`SELECT repo, number, matched_at FROM pull_requests WHERE repo LIKE $1 ORDER BY repo, number`, [`${repo}%`])).map(
+      (row) => `${row.repo}#${row.number} ${new Date(row.matched_at as string).getTime()}`,
+    );
+  const before = await matchedAt();
+
+  const s = session("s-arrives", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: [h(900), h(901)] }]);
+  s.session.repo.remote = repo;
+  assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-arrives", s)).status, 200);
+  const one = (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}&number=1`)).body;
+  assert.deepEqual(one.attribution.now.by, [{ tool: "claude-code", model: "claude-opus-5-5", lines: 2 }]);
+  assert.equal(one.history[0].event, "match");
+  // the others are as they were
+  const after = await matchedAt();
+  assert.deepEqual(after.filter((row) => !before.includes(row)).map((row) => row.split(" ")[0]), [`${repo}#1`]);
+});
+
 test("a pull request's lines are matched again when its sessions arrive after its last report", async () => {
   const repo = "github.com/acme/again";
   const upload = (id: string, email: string | null, hashes: string[]) => {
@@ -828,11 +883,12 @@ test("a pull request's lines are matched again when its sessions arrive after it
   const before = await detail(1);
   assert.deepEqual([before.matchable, before.matched_at != null, before.sessions], [true, true, []]);
 
-  // the sessions come after the pull request was closed: no report follows
+  // the sessions come after the pull request was closed: no report follows, and it is matched again as they arrive
   await upload("s-after", null, [h(800), h(801)]);
   // someone else's, with the same line: not a committer of this pull request
   await upload("s-else", "eve@example.com", [h(802)]);
-  assert.equal((await detail(1)).attribution.now.agent_lines, 0);
+  assert.equal((await detail(1)).attribution.now.agent_lines, 2);
+  await db.query(`UPDATE pull_requests SET matched_at = matched_at - interval '1 minute' WHERE repo = $1 AND number = 1`, [repo]);
 
   const again = await call(tokens.admin, "POST", "/prs/match", { repo, number: 1 });
   assert.equal(again.status, 200);
@@ -1051,13 +1107,14 @@ test("a pull request keeps a history of its figures and says what moved them", a
   assert.deepEqual([page.history[0].lines, page.history[0].agent_lines, page.history[0].commits], [2, 0, 1]);
   assert.deepEqual(page.history[0].sessions, []);
 
-  // A session uploaded between reports is named, and the reason says so.
+  // A session uploaded between reports matches it again: it is named, and the reason says so.
+  // The next report finds nothing more.
   assert.equal((await upload("s-new", "a.ts", 1)).status, 200);
   assert.equal((await sent(1, { event: "synchronize", files: [file("a.ts", 1, 2)] })).status, 200);
   page = await detail(1);
   assert.equal(page.history.length, 2);
   const arrived = page.history[0];
-  assert.equal(arrived.event, "synchronize");
+  assert.equal(arrived.event, "match");
   assert.deepEqual(arrived.change.sessions_added.map((s: { session_id: string; lines: number }) => [s.session_id, s.lines]), [["s-new", 1]]);
   assert.equal(arrived.change.sessions_added[0].session.owner_email, "ann@example.com");
   assert.equal(arrived.change.reason, "1 session uploaded since: +1 agent lines");
@@ -1375,20 +1432,16 @@ test("what a pull request's sessions cost it: each for the share of its lines th
   assert.deepEqual([(await of(2)).usd, (await of(2)).opened_usd], [5, null]);
   assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost-4")).body.total.per_surviving_line_usd, 1);
 
-  // a session taken back and sent again: which of its lines the pull request from before had is not known, so
-  // in a new one with the same lines, as in the old, what it cost is an estimate
+  // a session taken back and sent again: the pull request from before is matched again as it arrives, so which of
+  // its lines it has is known once more, and a new one with the same lines shares them with it for sure
   await upload("c-gone", "f.ts", range(4000, 2), { total_usd: 50, source: "recorded" });
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 11, files: [file("f.ts", ...range(4000, 2))] }));
-  for (const number of [3, 11]) {
-    const again = (await detail(number)).cost;
-    // both can be matched again, which is what would say whose lines are whose
-    assert.deepEqual([again.estimated, again.sessions_unshared, again.sessions_unshared_for_good], [true, 1, 0], `#${number}`);
-  }
-  assert.equal((await detail(11)).cost.usd, 25);
-  // so is what the lines it was opened with cost, and the session's own share says so too
+  const three = (await detail(3)).cost;
+  assert.deepEqual([three.sessions_unshared, three.sessions_unshared_for_good], [0, 0]);
   const eleven = await detail(11);
-  assert.deepEqual([eleven.cost.opened_usd, eleven.cost.opened_estimated], [25, true]);
-  assert.deepEqual([eleven.sessions[0].cost_share_usd, eleven.sessions[0].unshared, eleven.sessions[0].uncounted], [25, true, false]);
+  assert.deepEqual([eleven.cost.usd, eleven.cost.estimated, eleven.cost.sessions_unshared], [25, false, 0]);
+  assert.deepEqual([eleven.cost.opened_usd, eleven.cost.opened_estimated], [25, false]);
+  assert.deepEqual([eleven.sessions[0].cost_share_usd, eleven.sessions[0].unshared, eleven.sessions[0].uncounted], [25, false, false]);
 });
 
 test("a share is unsure only for lines not kept in a pull request it is weighed against", async () => {
@@ -1437,13 +1490,14 @@ test("a deleted session's lines count whole in each of its pull requests", async
   assert.equal((await call(tokens.ann, "DELETE", "/sessions/m1/claude-code/c-forgot")).status, 200);
   // which they were is gone: all ten count in each, as for a pull request whose lines were not kept
   assert.deepEqual(await weights(), [[1, 10, 10], [2, 10, 10]]);
-  // sent again: twenty lines' worth between the two, of six dollars, three in each. They may be the
-  // same ten, so it is an estimate, and so is what they were opened with
+  // sent again: both are matched again as it arrives, and which lines they have is known once more.
+  // The same ten in each: five of them, of six dollars, three in each
   assert.equal((await put()).status, 200);
+  assert.deepEqual(await weights(), [[1, 5, 5], [2, 5, 5]]);
   const cost = (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}&number=1`)).body.cost;
   assert.deepEqual(
     [cost.usd, cost.per_agent_line_usd, cost.estimated, cost.sessions_unshared, cost.opened_usd, cost.opened_estimated, cost.per_surviving_line_usd],
-    [3, 0.3, true, 1, 3, true, 0.3],
+    [3, 0.6, false, 0, 3, false, 0.6],
   );
 });
 

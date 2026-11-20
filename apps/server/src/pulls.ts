@@ -78,7 +78,18 @@ function samePath(claimed: string, path: string): boolean {
 
 export type Writer = { tool: string; model: string | null; session?: SessionKey };
 
-/** For each added line of each file, the agent that wrote it, or null. */
+/**
+ * A line this many sessions or more added to the same file is a common one
+ * (an import, `display: flex;`): that a session added it once says little.
+ */
+export const COMMON_LINE = 3;
+
+/**
+ * For each added line of each file, the agent that wrote it, or null. A
+ * common line is put down only to a session that also wrote a line of the
+ * pull request that is not: without that, it would go to whichever older
+ * session last added it, while the one that wrote it has not been uploaded.
+ */
 export function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[][] {
   // Looking only at claims on a file of the same name keeps this quick.
   const byName = new Map<string, Claim[]>();
@@ -88,24 +99,52 @@ export function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[]
     if (list) list.push(claim);
     else byName.set(name, [claim]);
   }
-  return files.map((file) => {
+  // A claim that names no session is a session of its own.
+  const whose = (claim: Claim): unknown =>
+    claim.session ? `${claim.session.machine_id}\n${claim.session.source}\n${claim.session.session_id}` : claim;
+  const pools = files.map((file) => {
     const name = file.path.slice(file.path.lastIndexOf("/") + 1);
     // Per line, who added it: the session that started last comes first.
-    const pool = new Map<string, Writer[]>();
+    const pool = new Map<string, { writer: Writer; who: unknown }[]>();
     const matching = (byName.get(name) ?? [])
       .filter((claim) => samePath(claim.path, file.path))
       .sort((a, b) => b.started - a.started);
     for (const claim of matching) {
+      const who = whose(claim);
       for (const hash of claim.hashes) {
         const list = pool.get(hash);
-        const writer = { tool: claim.tool, model: claim.model, session: claim.session };
-        if (list) list.push(writer);
-        else pool.set(hash, [writer]);
+        const added = { writer: { tool: claim.tool, model: claim.model, session: claim.session }, who };
+        if (list) list.push(added);
+        else pool.set(hash, [added]);
       }
     }
-    // Each line an agent added accounts for one line of the pull request.
-    return file.hashes.map((hash) => pool.get(hash)?.shift() ?? null);
+    const common = new Set<string>();
+    for (const [hash, list] of pool) {
+      if (new Set(list.map((added) => added.who)).size >= COMMON_LINE) common.add(hash);
+    }
+    return { pool, common };
   });
+  // Each line an agent added accounts for one line of the pull request: the
+  // lines that are not common first, and the sessions they show worked on it.
+  const shown = new Set<unknown>();
+  const lines = files.map((file, i) =>
+    file.hashes.map((hash) => {
+      const { pool, common } = pools[i]!;
+      if (common.has(hash)) return null;
+      const added = pool.get(hash)?.shift();
+      if (added) shown.add(added.who);
+      return added?.writer ?? null;
+    }),
+  );
+  return files.map((file, i) =>
+    file.hashes.map((hash, j) => {
+      const { pool, common } = pools[i]!;
+      if (!common.has(hash)) return lines[i]![j]!;
+      const list = pool.get(hash)!;
+      const at = list.findIndex((added) => shown.has(added.who));
+      return at < 0 ? null : list.splice(at, 1)[0]!.writer;
+    }),
+  );
 }
 
 function tally<T extends LinesBy>(rows: Map<string, T>, writer: Writer, make: () => T): T {
@@ -1165,6 +1204,43 @@ export async function rematchPull(
     reporter_version: typeof r.reporter_version === "string" ? r.reporter_version : null,
   });
   return { attribution, matched_at: iso(stored?.matched_at) ?? new Date().toISOString() };
+}
+
+/** No more than this many pull requests are matched again when one session is uploaded: the ones reported last. */
+export const MATCH_ON_UPLOAD = 5;
+
+/**
+ * The pull requests a session just stored can change the figures of: in its
+ * repository, open or closed in the last two weeks, with a line it added to
+ * the same file. Its lines are often uploaded after the pull request was
+ * reported (it is opened while the session goes on): matching these again
+ * (`rematchPull`) counts them without waiting for the next report.
+ */
+export async function pullsAddedTo(db: OrgDb, key: SessionKey): Promise<{ repo: string; number: number }[]> {
+  const [s] = await db.query(
+    `SELECT repo, started_at, payload->'lines' AS lines FROM sessions
+     WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
+    [db.orgId, key.machine_id, key.source, key.session_id],
+  );
+  const added = json<{ path?: string; hashes?: string[] }[] | null>(s?.lines) ?? [];
+  if (!s?.repo || added.length === 0) return [];
+  // Sessions that started longer before a pull request was opened than this are not looked at for it.
+  const rows = await db.query(
+    `SELECT repo, number, first_files, last_files FROM pull_requests
+     WHERE org_id = $1 AND committers IS NOT NULL
+       AND (repo = $2 OR head_repo = $2 OR coalesce(aliases, '[]'::jsonb) ? $2)
+       AND (state = 'open' OR coalesce(merged_at, closed_at, updated_at) >= now() - interval '14 days')
+       AND ($3::timestamptz IS NULL OR created_at IS NULL OR created_at <= $3::timestamptz + interval '${LOOK_BACK_DAYS} days')
+     ORDER BY updated_at DESC LIMIT 50`,
+    [db.orgId, s.repo, iso(s.started_at)],
+  );
+  const claims = added.map((lines) => ({ path: lines.path ?? "", hashes: new Set(lines.hashes ?? []) }));
+  const touched = (files: FileHashes[]) =>
+    files.some((file) => claims.some((c) => samePath(c.path, file.path) && file.hashes.some((hash) => c.hashes.has(hash))));
+  return rows
+    .filter((r) => touched(json<FileHashes[]>(r.last_files)) || touched(json<FileHashes[]>(r.first_files)))
+    .slice(0, MATCH_ON_UPLOAD)
+    .map((r) => ({ repo: String(r.repo), number: num(r.number) }));
 }
 
 /** No more than this many pull requests are matched again in one request. */
