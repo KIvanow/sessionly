@@ -35,6 +35,7 @@ import {
   removeUpload,
   storeUpload,
   summarize,
+  type StoreResult,
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
@@ -46,7 +47,6 @@ import {
   listPulls,
   rematchPull,
   rematchPulls,
-  matchedBy,
   pullsAddedTo,
   storePull,
   summarizePulls,
@@ -602,19 +602,19 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     if (!upload) throw new Error("the upload was not checked");
     const { machine, source, session } = c.req.param();
     const key = { machine_id: machine, source, session_id: session };
-    // Uploaded again at every turn, mostly as it was: then no pull request has anything new.
-    const before = await matchedBy(c.get("db"), key);
-    let result: { stored: boolean; excluded?: true };
+    let result: StoreResult;
     try {
       result = await storeUpload(c.get("db"), upload, c.get("principal"));
     } catch (err) {
       if (err instanceof Conflict) return c.json({ error: err.message }, 409);
       throw err;
     }
-    if (result.stored && (await matchedBy(c.get("db"), key)) !== before) c.set("stored", key);
+    // Uploaded again at every turn, mostly as it was: then no pull request has anything new.
+    if (result.stored && result.changed) c.set("stored", key);
     // Not stored, and not excluded: the server already has more of this cloud session.
     // Excluded: the person stopped the repository, so the session was not kept.
-    return c.json(result);
+    const { changed: _, ...answer } = result;
+    return c.json(answer);
   });
 
   // The uploader takes a session back: its machine no longer has it as one

@@ -329,7 +329,7 @@ test("storing a session and stopping its repository at the same moment: the sess
     (tx) => storeUpload(tx, upload("raced-1", { root: "~/Raced" }), fay),
     (tx) => excludeRepo(tx, fay.email, "~/Raced"),
   );
-  assert.deepEqual(stored, { stored: true });
+  assert.deepEqual(stored, { stored: true, changed: true });
   assert.equal(stopped.sessions_removed, 1);
   assert.equal(await left(fay.email), 0);
 
@@ -349,7 +349,19 @@ test("storing a session and stopping its repository at the same moment: the sess
     (tx) => storeUpload(tx, upload("raced-3", { root: "~/Fine" }), hal),
     (tx) => storeUpload(tx, upload("raced-4", { root: "~/Fine" }), hal),
   );
-  assert.deepEqual(both, [{ stored: true }, { stored: true }]);
+  assert.deepEqual(both, [{ stored: true, changed: true }, { stored: true, changed: true }]);
+
+  // Two uploads of one session: the second waits for the first, and says whether it changed what that one left.
+  const again = await overlapped(
+    (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine" }), hal),
+    (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine" }), hal),
+  );
+  assert.deepEqual(again, [{ stored: true, changed: true }, { stored: true, changed: false }]);
+  const moved = await overlapped(
+    (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine" }), hal),
+    (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine/elsewhere" }), hal),
+  );
+  assert.deepEqual(moved, [{ stored: true, changed: false }, { stored: true, changed: true }]);
 });
 
 test("one organisation's stop does not touch another's sessions", async () => {

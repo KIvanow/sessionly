@@ -14,7 +14,7 @@ import {
 } from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
 import type { OrgDb } from "./db.ts";
-import { holdPullSessions } from "./pulls.ts";
+import { holdPullSessions, matchedBy } from "./pulls.ts";
 
 const UNKNOWN = "(unknown)";
 
@@ -60,7 +60,12 @@ export function ownerOf(upload: Upload, uploader: Principal): string {
  * nothing was stored. An address that belongs to someone who was removed
  * throws `RemovedPerson` instead, and nothing is stored.
  */
-export type StoreResult = { stored: boolean; excluded?: true };
+export type StoreResult = {
+  stored: boolean;
+  excluded?: true;
+  /** Stored, and what decides which pull requests it counts in is not what it was (`matchedBy`). */
+  changed?: boolean;
+};
 
 /**
  * Store one session, replacing an earlier upload of the same session.
@@ -89,6 +94,9 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     await dropOwn(db, key, owner.email, mayRefile, copy);
     return { stored: false, excluded: true };
   }
+  // Read with the row held: another upload of this same session waits for
+  // this one, and compares with what it left. (Uploads of other sessions do not wait.)
+  const before = await matchedBy(db, { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! }, { hold: true });
   const [existing] = await db.query<{ owner_email: string; runtime: string | null; prompts: number }>(
     `SELECT owner_email, runtime, prompts FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
@@ -173,7 +181,8 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     [...Object.values(columns), mayRefile],
   );
   if (stored.length === 0) throw new Conflict("this session was uploaded by someone else");
-  return { stored: true };
+  const after = await matchedBy(db, { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! });
+  return { stored: true, changed: after !== before };
 }
 
 /**
