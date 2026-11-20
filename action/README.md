@@ -109,8 +109,9 @@ updating it to a version that reports more than the one before. It differs from 
   it at all is said as a failure: in a private repository, a `github-token` without access to
   it is answered as if every number were an issue's.
 
-Sessions that were uploaded after a pull request's last report need none of this: the Pull
-requests page of the dashboard matches them without asking GitHub ("Match again"). The one
+Sessions that were uploaded after a pull request's last report need none of this: the server
+matches the pull request again as one arrives that added some of its lines, and the Pull
+requests page of the dashboard does it for any other without asking GitHub ("Match again"). The one
 exception is a pull request last reported to a server of version 0.5.0 or older: it has to be
 reported once more, and can be matched again from the dashboard from then on.
 

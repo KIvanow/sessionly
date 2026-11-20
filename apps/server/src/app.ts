@@ -35,6 +35,7 @@ import {
   removeUpload,
   storeUpload,
   summarize,
+  type StoreResult,
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
@@ -46,6 +47,7 @@ import {
   listPulls,
   rematchPull,
   rematchPulls,
+  pullsAddedTo,
   storePull,
   summarizePulls,
   type PullFilters,
@@ -62,6 +64,8 @@ export type Env = {
     /** An upload or a pull request report, already parsed and checked. */
     upload?: Upload;
     report?: PullReport;
+    /** The session an upload stored: the pull requests it adds lines to are matched again once it is committed. */
+    stored?: { machine_id: string; source: string; session_id: string };
   };
 };
 
@@ -397,6 +401,26 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     return c.json(await rematchPulls(each, filters, time(asked.started, "started"), options.hashKey, failed));
   });
 
+  // The pull requests a session just stored adds lines to are found and
+  // matched again once it is committed, each in a transaction of its own, as
+  // above. What fails is logged: the session is stored all the same.
+  api.put("/sessions/:machine/:source/:session", async (c, next) => {
+    await next();
+    const stored = c.get("stored");
+    if (c.res.status !== 200 || !stored) return;
+    try {
+      for (const { repo, number } of await ownerDb.asOrg(c.get("principal").orgId, (db) => pullsAddedTo(db, stored, options.hashKey))) {
+        try {
+          await ownerDb.asOrg(c.get("principal").orgId, (db) => rematchPull(db, repo, number, options.hashKey, { uploaded: true }));
+        } catch (err) {
+          failed(err);
+        }
+      }
+    } catch (err) {
+      failed(err);
+    }
+  });
+
   // Adding a person puts an organisation in front of them the next time
   // they sign in, on an admin's word, and anyone can be the admin of an
   // organisation they just made. So it is limited per organisation. Taken
@@ -576,16 +600,21 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   api.put("/sessions/:machine/:source/:session", async (c) => {
     const upload = c.get("upload");
     if (!upload) throw new Error("the upload was not checked");
-    let result: { stored: boolean; excluded?: true };
+    const { machine, source, session } = c.req.param();
+    const key = { machine_id: machine, source, session_id: session };
+    let result: StoreResult;
     try {
       result = await storeUpload(c.get("db"), upload, c.get("principal"));
     } catch (err) {
       if (err instanceof Conflict) return c.json({ error: err.message }, 409);
       throw err;
     }
+    // Uploaded again at every turn, mostly as it was: then no pull request has anything new.
+    if (result.stored && result.changed) c.set("stored", key);
     // Not stored, and not excluded: the server already has more of this cloud session.
     // Excluded: the person stopped the repository, so the session was not kept.
-    return c.json(result);
+    const { changed: _, ...answer } = result;
+    return c.json(answer);
   });
 
   // The uploader takes a session back: its machine no longer has it as one

@@ -218,6 +218,18 @@ export function render(report, attribution, server) {
   if (report.files_without_diff > 0) {
     out.push("", `${count(report.files_without_diff)} changed files were too large for GitHub to give a diff for and are not counted.`);
   }
+  // What is uploaded later, and what is common, change these figures: the
+  // reader should know before taking them as the last word.
+  if (now.lines > 0) {
+    out.push(
+      "",
+      "_These figures can still change. A session's lines reach Sessionly when it ends or finishes a turn, so " +
+        "lines an agent wrote after this pull request was opened may not be counted yet: Sessionly counts them " +
+        "as they arrive, and this comment catches up the next time the pull request is reported, as on a push or its merge. A line many sessions have added to " +
+        "the same file, such as an import, counts as an agent's only for a session that wrote other lines of " +
+        "this pull request, or every line of a file of it._",
+    );
+  }
   out.push(
     "",
     "<details>",

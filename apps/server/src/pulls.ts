@@ -78,34 +78,94 @@ function samePath(claimed: string, path: string): boolean {
 
 export type Writer = { tool: string; model: string | null; session?: SessionKey };
 
-/** For each added line of each file, the agent that wrote it, or null. */
+/**
+ * A line this many sessions or more added to the same file is a common one
+ * (an import, `display: flex;`): that a session added it once says little.
+ */
+export const COMMON_LINE = 3;
+
+/**
+ * For each added line of each file, the agent that wrote it, or null. A
+ * common line is put down only to a session that also added a line of the
+ * pull request that is not (whether or not that line went to it), or every
+ * line of a file of it: without that, it would go to whichever older session
+ * last added it, while the one that wrote it has not been uploaded.
+ */
 export function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[][] {
   // Looking only at claims on a file of the same name keeps this quick.
-  const byName = new Map<string, Claim[]>();
-  for (const claim of claims) {
+  // A claim that names no session is a session of its own.
+  const byName = new Map<string, { claim: Claim; who: string }[]>();
+  claims.forEach((claim, i) => {
     const name = claim.path.slice(claim.path.lastIndexOf("/") + 1);
+    const who = claim.session ? `${claim.session.machine_id}\n${claim.session.source}\n${claim.session.session_id}` : `#${i}`;
     const list = byName.get(name);
-    if (list) list.push(claim);
-    else byName.set(name, [claim]);
-  }
-  return files.map((file) => {
+    if (list) list.push({ claim, who });
+    else byName.set(name, [{ claim, who }]);
+  });
+  const pools = files.map((file) => {
     const name = file.path.slice(file.path.lastIndexOf("/") + 1);
     // Per line, who added it: the session that started last comes first.
-    const pool = new Map<string, Writer[]>();
+    const pool = new Map<string, { writer: Writer; who: string }[]>();
     const matching = (byName.get(name) ?? [])
-      .filter((claim) => samePath(claim.path, file.path))
-      .sort((a, b) => b.started - a.started);
-    for (const claim of matching) {
+      .filter(({ claim }) => samePath(claim.path, file.path))
+      .sort((a, b) => b.claim.started - a.claim.started);
+    for (const { claim, who } of matching) {
       for (const hash of claim.hashes) {
         const list = pool.get(hash);
-        const writer = { tool: claim.tool, model: claim.model, session: claim.session };
-        if (list) list.push(writer);
-        else pool.set(hash, [writer]);
+        const added = { writer: { tool: claim.tool, model: claim.model, session: claim.session }, who };
+        if (list) list.push(added);
+        else pool.set(hash, [added]);
       }
     }
-    // Each line an agent added accounts for one line of the pull request.
-    return file.hashes.map((hash) => pool.get(hash)?.shift() ?? null);
+    // Only the pull request's own lines are asked about.
+    const common = new Set<string>();
+    for (const hash of new Set(file.hashes)) {
+      const list = pool.get(hash);
+      if (list && new Set(list.map((added) => added.who)).size >= COMMON_LINE) common.add(hash);
+    }
+    return { pool, common };
   });
+  const shown = creditedWithCommon(files, pools);
+  // Each line an agent added accounts for one line of the pull request, the
+  // session that started last first; a common line only for a session shown.
+  return files.map((file, i) => {
+    const { pool, common } = pools[i]!;
+    return file.hashes.map((hash) => {
+      const list = pool.get(hash);
+      if (!list) return null;
+      const at = common.has(hash) ? list.findIndex((added) => shown.has(added.who)) : 0;
+      return at < 0 || at >= list.length ? null : list.splice(at, 1)[0]!.writer;
+    });
+  });
+}
+
+/**
+ * The sessions a common line can go to: those that added a line of the pull
+ * request that is not common, and those that added every line of one of its
+ * files, common or not (a file of nothing but imports is still the work of
+ * whoever wrote it), as many times as the file has each.
+ */
+function creditedWithCommon(
+  files: FileHashes[],
+  pools: { pool: Map<string, { who: string }[]>; common: Set<string> }[],
+): Set<string> {
+  const shown = new Set<string>();
+  files.forEach((file, i) => {
+    const { pool, common } = pools[i]!;
+    for (const hash of file.hashes) {
+      if (!common.has(hash)) for (const added of pool.get(hash) ?? []) shown.add(added.who);
+    }
+    if (file.hashes.length === 0 || !file.hashes.every((hash) => common.has(hash))) return;
+    // A line three times takes a session that added it three times.
+    const needed = new Map<string, number>();
+    for (const hash of file.hashes) needed.set(hash, (needed.get(hash) ?? 0) + 1);
+    const times = (who: string, hash: string) => pool.get(hash)!.filter((added) => added.who === who).length;
+    const [first] = needed.keys();
+    for (const who of new Set(pool.get(first!)!.map((added) => added.who))) {
+      if ([...needed].every(([line, count]) => times(who, line) >= count)) shown.add(who);
+    }
+  });
+  return shown;
 }
 
 function tally<T extends LinesBy>(rows: Map<string, T>, writer: Writer, make: () => T): T {
@@ -845,13 +905,15 @@ async function recordReport(
   report: HistoryFigures & { repo: string; number: number; event: string },
 ): Promise<void> {
   const [latest] = await db.query<{
+    id: unknown;
+    event: unknown;
     commits: unknown;
     lines: unknown;
     agent_lines: unknown;
     sessions: unknown;
     reporter_version: unknown;
   }>(
-    `SELECT commits, lines, agent_lines, sessions, reporter_version
+    `SELECT id, event, commits, lines, agent_lines, sessions, reporter_version
      FROM pull_request_reports
      WHERE org_id = $1 AND repo = $2 AND number = $3
      ORDER BY at DESC, id DESC
@@ -868,6 +930,45 @@ async function recordReport(
   // Same figures, and not a newer Action: the row already there still says
   // which version produced it.
   if (same && !newerAction(version, report.reporter_version)) return;
+  // Matched again after being matched again, and no report between: one row
+  // says what it came to. A session still going is uploaded at every turn,
+  // and would otherwise push the reports out of what is kept.
+  // (A report since, with figures that moved nothing, wrote no row: it is not merged past.)
+  // pull_requests.updated_at is the report clock: only storePull sets it, and
+  // matching again (rematchPull) or anything else that updates the row must not.
+  const reportedSince = async () => {
+    const [pull] = await db.query<{ later: boolean }>(
+      `SELECT updated_at > (SELECT at FROM pull_request_reports WHERE org_id = $1 AND id = $4) AS later
+       FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
+      [db.orgId, report.repo, report.number, latest!.id],
+    );
+    return pull?.later === true;
+  };
+  if (latest?.event === "match" && report.event === "match" && !(await reportedSince())) {
+    // Back to what the row before it says: then nothing moved, and it goes.
+    const [before] = await db.query<{ commits: unknown; lines: unknown; agent_lines: unknown; sessions: unknown }>(
+      `SELECT commits, lines, agent_lines, sessions FROM pull_request_reports
+       WHERE org_id = $1 AND repo = $2 AND number = $3 AND id <> $4
+       ORDER BY at DESC, id DESC LIMIT 1`,
+      [db.orgId, report.repo, report.number, latest.id],
+    );
+    const back =
+      before != null &&
+      num(before.commits) === report.commits &&
+      num(before.lines) === report.lines &&
+      num(before.agent_lines) === report.agent_lines &&
+      sessionSignature(sessionsOf(before.sessions)) === sessionSignature(report.sessions);
+    if (back) {
+      await db.query(`DELETE FROM pull_request_reports WHERE org_id = $1 AND id = $2`, [db.orgId, latest.id]);
+      return;
+    }
+    await db.query(
+      `UPDATE pull_request_reports SET at = clock_timestamp(), commits = $2, lines = $3, agent_lines = $4, sessions = $5::jsonb, reporter_version = $6
+       WHERE org_id = $1 AND id = $7`,
+      [db.orgId, report.commits, report.lines, report.agent_lines, JSON.stringify(report.sessions.map(picked)), report.reporter_version, latest.id],
+    );
+    return;
+  }
   await db.query(
     `INSERT INTO pull_request_reports
        (org_id, repo, number, event, commits, lines, agent_lines, sessions, reporter_version)
@@ -907,6 +1008,10 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   // row yet to hold: the later one then sees what the earlier left, the state
   // and the lines it was first reported with. Held until the history is written.
   await holdPull(db, report.repo, report.number);
+  // Before the sessions are read: a session stored meanwhile then either is
+  // read here, or is looked for in this pull request once this is committed
+  // (`pullsAddedTo` waits for it).
+  await holdPullSessions(db);
   const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string }>(
     `SELECT first_files, first_event, state FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
     [db.orgId, report.repo, report.number],
@@ -979,7 +1084,7 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
          .filter((name) => !kept.includes(name))
          .map((name) => `${name} = ${set(name)}`)
          .join(", ")},
-       updated_at = clock_timestamp(), matched_at = clock_timestamp()`,
+       updated_at = clock_timestamp(), matched_at = clock_timestamp()`, // the report clock: see recordReport
     Object.values(columns),
   );
   // Closing without merging, or opening again, changes what its lines take from other pull requests.
@@ -1002,7 +1107,10 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
  * Held until the transaction ends by whoever writes which lines of which
  * sessions a pull request has, one at a time in an organisation: two reports
  * that share a session would each miss the other's lines, and a report and
- * the deleting of a session would each miss the other.
+ * the deleting of a session would each miss the other. A report holds it from
+ * before it reads the sessions, so reports in an organisation are matched one
+ * at a time, and looking for what an upload adds lines to (`pullsAddedTo`)
+ * waits for them.
  */
 export async function holdPullSessions(db: OrgDb): Promise<void> {
   await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-pull-sessions:${db.orgId}`]);
@@ -1015,8 +1123,10 @@ export async function holdPullSessions(db: OrgDb): Promise<void> {
  */
 async function keepSessions(db: OrgDb, repo: string, number: number, sessions: Kept[], turned: boolean): Promise<void> {
   // Most reports change none of this (a review, a comment, a push of other
-  // lines): then nothing is written, and nobody waits. The pull request's
-  // own row is held by whoever got here, so these are not changing under it.
+  // lines): then nothing is written. (A report holds the lock below from
+  // before it reads the sessions, `storePull`; matching again takes it here.)
+  // The pull request's own row is held by whoever got here, so these are not
+  // changing under it.
   const had = await db.query(
     `SELECT machine_id, source, session_id, lines, opened_lines, matched, opened_matched FROM pull_sessions
      WHERE org_id = $1 AND repo = $2 AND number = $3`,
@@ -1106,13 +1216,16 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
  * about the pull request changes. Null if there is none under that number;
  * `needs_report` for one last reported before what it is matched by was
  * kept, or kept with another key, which only a new report from the Action
- * brings.
+ * brings. Matched because a session was uploaded (`uploaded`), one kept with
+ * another key is left as it is: a server started with the wrong key must not
+ * undo what every upload meanwhile comes near.
  */
 export async function rematchPull(
   db: OrgDb,
   repo: string,
   number: number,
   key?: string,
+  { uploaded = false }: { uploaded?: boolean } = {},
 ): Promise<PullMatch | "needs_report" | null> {
   await holdPull(db, repo, number);
   // The row is held until this is stored, so that a report arriving meanwhile
@@ -1127,6 +1240,7 @@ export async function rematchPull(
   if (r.committers == null) return "needs_report";
   const kept = json<string[]>(r.committers);
   if (!keptWith(kept, key)) {
+    if (uploaded) return "needs_report";
     // The key is another now: these say nothing any more, and the page should say so.
     await db.query(`UPDATE pull_requests SET committers = NULL WHERE org_id = $1 AND repo = $2 AND number = $3`, [db.orgId, repo, number]);
     return "needs_report";
@@ -1165,6 +1279,135 @@ export async function rematchPull(
     reporter_version: typeof r.reporter_version === "string" ? r.reporter_version : null,
   });
   return { attribution, matched_at: iso(stored?.matched_at) ?? new Date().toISOString() };
+}
+
+/**
+ * No more than this many pull requests are matched again when one session is
+ * uploaded: those it added most lines of, then those reported last. Its lines
+ * are counted here whether common or not (telling which are takes every other
+ * session's claims), so one sharing more boilerplate with it can come first.
+ */
+export const MATCH_ON_UPLOAD = 5;
+
+/**
+ * The pull requests a session just stored can change the figures of: in its
+ * repository, open or closed in the last two weeks and not before it started,
+ * committed to by its person (or, for a cloud session, on its branch), with a
+ * line it added to the same file, those with most of its lines first; and
+ * ahead of them, those that have its lines from before, which it may have
+ * fewer of now. Its lines are often uploaded after the pull request was
+ * reported (it is opened while the session goes on): matching these again
+ * (`rematchPull`) counts them without waiting for the next report. Run once
+ * the session is committed: a report under way is waited for, and either it
+ * read the session or its pull request is among these.
+ */
+export async function pullsAddedTo(db: OrgDb, key: SessionKey, hashKey?: string): Promise<{ repo: string; number: number }[]> {
+  // The session is committed already: what it is can be read before waiting.
+  const [s] = await db.query(
+    `SELECT repo, started_at, runtime, branch, ${SESSION_EMAIL} AS email, payload->'lines' AS lines FROM sessions
+     WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
+    [db.orgId, key.machine_id, key.source, key.session_id],
+  );
+  if (!s?.repo) return [];
+  const added = json<{ path?: string; hashes?: string[] }[] | null>(s.lines) ?? [];
+  const hashes = [...new Set(added.flatMap((lines) => lines.hashes ?? []))];
+  // None at all says nothing of the lines it had (sent without them, as an
+  // older sessionly does): what pull requests have of it stays.
+  if (hashes.length === 0) return [];
+  // Shared: uploads do not wait for each other, only for a report under way.
+  await db.query(`SELECT pg_advisory_xact_lock_shared(hashtext($1))`, [`sessionly-pull-sessions:${db.orgId}`]);
+  const recent = (p = "") => `(${p}state = 'open' OR coalesce(${p}merged_at, ${p}closed_at, ${p}updated_at) >= now() - interval '14 days')`;
+  // Those that have its lines from before: what it has now may be fewer, or other lines.
+  const credited = await db.query(
+    `SELECT p.repo, p.number, p.updated_at, p.first_files, p.last_files, greatest(ps.lines, coalesce(ps.opened_lines, 0)) AS had
+     FROM pull_sessions ps JOIN pull_requests p USING (org_id, repo, number)
+     WHERE ps.org_id = $1 AND ps.machine_id = $2 AND ps.source = $3 AND ps.session_id = $4
+       AND (ps.lines > 0 OR ps.opened_lines > 0) AND p.committers IS NOT NULL AND ${recent("p.")}`,
+    [db.orgId, key.machine_id, key.source, key.session_id],
+  );
+  const started = iso(s.started_at);
+  const kept = s.email ? committer(db.orgId, String(s.email), hashKey) : null;
+  const branch = s.runtime === "cloud" && s.branch ? String(s.branch) : null;
+  // Which have one of its lines is asked of the database, file by file below.
+  const has = (column: string) =>
+    `EXISTS (SELECT 1 FROM jsonb_array_elements(${column}) AS f, jsonb_array_elements_text(f->'hashes') AS h WHERE h = ANY($7::text[]))`;
+  const rows = await db.query(
+    `SELECT repo, number, updated_at, first_files, last_files FROM pull_requests
+     WHERE org_id = $1 AND committers IS NOT NULL
+       AND (repo = $2 OR head_repo = $2 OR coalesce(aliases, '[]'::jsonb) ? $2)
+       AND ${recent()}
+       AND ($3::timestamptz IS NULL OR created_at IS NULL OR created_at <= $3::timestamptz + make_interval(days => $4::int))
+       AND ($3::timestamptz IS NULL OR coalesce(merged_at, closed_at) IS NULL OR $3::timestamptz <= coalesce(merged_at, closed_at))
+       AND (committers = '[]'::jsonb OR ($5::text IS NOT NULL AND committers ? $5::text) OR ($6::text IS NOT NULL AND head_ref = $6::text))
+       AND (${has("last_files")} OR ${has("first_files")})`,
+    [db.orgId, s.repo, started, LOOK_BACK_DAYS, kept, branch, hashes],
+  );
+  // Its lines by path, together whatever model groups they are in, each as
+  // many times as it added it; and per file of a pull request, those of the
+  // paths that are that file, together, once.
+  const byPath = new Map<string, Map<string, number>>();
+  for (const lines of added) {
+    const path = lines.path ?? "";
+    const counts = byPath.get(path) ?? new Map<string, number>();
+    for (const hash of lines.hashes ?? []) counts.set(hash, (counts.get(hash) ?? 0) + 1);
+    byPath.set(path, counts);
+  }
+  const forFile = new Map<string, Map<string, number>>();
+  const writtenIn = (path: string) => {
+    let counts = forFile.get(path);
+    if (!counts) {
+      forFile.set(path, (counts = new Map()));
+      for (const [claimed, each] of byPath) {
+        if (samePath(claimed, path)) for (const [hash, n] of each) counts.set(hash, (counts.get(hash) ?? 0) + n);
+      }
+    }
+    return counts;
+  };
+  // How many of a pull request's lines it added to the same file: a line the
+  // file has twenty times, added once, is one.
+  const overlap = (files: FileHashes[]) =>
+    files.reduce((sum, file) => {
+      const counts = writtenIn(file.path);
+      if (counts.size === 0) return sum;
+      const left = new Map(counts);
+      for (const hash of file.hashes) {
+        const n = left.get(hash) ?? 0;
+        if (n === 0) continue;
+        left.set(hash, n - 1);
+        sum++;
+      }
+      return sum;
+    }, 0);
+  // The ones with most of its lines come first, now or from before (which matching again takes back),
+  // so that one sharing only an import with it does not take the place of the one it wrote; then the
+  // ones reported last.
+  const pulls = new Map<string, { repo: string; number: number; lines: number; at: number }>();
+  for (const r of [...credited, ...rows]) {
+    const id = `${r.repo}#${r.number}`;
+    const lines = Math.max(num(r.had), overlap(json<FileHashes[]>(r.last_files)), overlap(json<FileHashes[]>(r.first_files)));
+    const at = new Date(r.updated_at as string).getTime();
+    const before = pulls.get(id);
+    if (!before || lines > before.lines) pulls.set(id, { repo: String(r.repo), number: num(r.number), lines, at });
+  }
+  const found = [...pulls.values()]
+    .filter((pull) => pull.lines > 0)
+    .sort((x, y) => y.lines - x.lines || y.at - x.at || x.repo.localeCompare(y.repo) || x.number - y.number)
+    .map(({ repo, number }) => ({ repo, number }));
+  return found.slice(0, MATCH_ON_UPLOAD);
+}
+
+/**
+ * What a session's lines are now, and what else decides which pull requests
+ * they count in and for whom (whose it is, where and when it ran, its model), to tell an upload that
+ * changed any of it: a hash of them, or null for no session.
+ */
+export async function matchedBy(db: OrgDb, key: SessionKey, { hold = false }: { hold?: boolean } = {}): Promise<string | null> {
+  const [row] = await db.query<{ by: string | null }>(
+    `SELECT md5(jsonb_build_array(payload->'lines', ${SESSION_EMAIL}, repo, branch, runtime, started_at, primary_model)::text) AS by FROM sessions
+     WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4${hold ? " FOR UPDATE" : ""}`,
+    [db.orgId, key.machine_id, key.source, key.session_id],
+  );
+  return row?.by ?? null;
 }
 
 /** No more than this many pull requests are matched again in one request. */

@@ -97,6 +97,60 @@ test("a line counts once per time it was added, for the latest session that adde
   ]);
 });
 
+test("a common line goes only to a session that wrote other lines of the pull request", () => {
+  const from = (id: string, c: Claim): Claim => ({ ...c, session: { machine_id: "m1", source: c.tool, session_id: id } });
+  // line 1 is in three sessions' work on the file: a common one
+  const old = [
+    from("s1", claim("claude-code", "opus-4-8", "a.css", 1, 1)),
+    from("s2", claim("grok", "grok-4", "a.css", 2, 1, 5)),
+    from("s3", claim("cursor", null, "a.css", 3, 1)),
+  ];
+  const pr = [file("a.css", 1, 2, 3)];
+  // the session that wrote it has not been uploaded: none of the older ones is taken to have
+  assert.deepEqual(attribute(pr, pr, old).now, { lines: 3, agent_lines: 0, by: [] });
+  // one that wrote the pull request's other lines has it, though another started later
+  const now = [from("s0", claim("claude-code", "opus-5-5", "a.css", 0, 1, 2, 3)), ...old];
+  assert.deepEqual(attribute(pr, pr, now).now.by, [{ tool: "claude-code", model: "opus-5-5", lines: 3 }]);
+  // and of those that did, the latest
+  const two = [from("s4", claim("codex", null, "a.css", 4, 1, 3)), ...now];
+  assert.deepEqual(attribute(pr, pr, two).now.by, [
+    { tool: "codex", model: null, lines: 2 },
+    { tool: "claude-code", model: "opus-5-5", lines: 1 },
+  ]);
+  // one that added another of its lines has it though that line went to a later session
+  const ab = [file("b.css", 20, 1)];
+  const lost = [
+    from("A", claim("codex", null, "b.css", 9, 20)),
+    from("B", claim("grok", "grok-4", "b.css", 5, 20, 1)),
+    from("C", claim("cursor", null, "b.css", 3, 1)),
+    from("D", claim("claude-code", "opus-4-8", "b.css", 2, 1)),
+  ];
+  assert.deepEqual(attribute(ab, ab, lost).now.by, [
+    { tool: "codex", model: null, lines: 1 },
+    { tool: "grok", model: "grok-4", lines: 1 },
+  ]);
+  // in two sessions' work it is not common yet
+  assert.deepEqual(attribute(pr, pr, old.slice(1)).now.by, [{ tool: "cursor", model: null, lines: 1 }]);
+  // one session's claims on the same file count as one
+  const same = [from("s1", claim("claude-code", "opus", "a.css", 1, 1)), from("s1", claim("claude-code", "haiku", "a.css", 1, 1)), old[1]!];
+  assert.equal(attribute(pr, pr, same).now.agent_lines, 1);
+  // a file of nothing but common lines is the work of a session that added every one of them
+  const imports = [file("main.rs", 7, 8)];
+  const each = [
+    from("s1", claim("claude-code", "opus-4-8", "main.rs", 1, 7)),
+    from("s2", claim("grok", "grok-4", "main.rs", 2, 7)),
+    from("s3", claim("cursor", null, "main.rs", 3, 8)),
+    from("s4", claim("codex", null, "main.rs", 4, 8)),
+    from("s0", claim("claude-code", "opus-5-5", "main.rs", 0, 7, 8)),
+  ];
+  assert.deepEqual(attribute(imports, imports, each).now.by, [{ tool: "claude-code", model: "opus-5-5", lines: 2 }]);
+  // a line the file has three times takes a session that added it three times, not three that added it once
+  const thrice = [file("mod.rs", 9, 9, 9)];
+  const once = ["s1", "s2", "s3"].map((id, i) => from(id, claim("grok", "grok-4", "mod.rs", i + 1, 9)));
+  assert.equal(attribute(thrice, thrice, once).now.agent_lines, 0);
+  assert.equal(attribute(thrice, thrice, [...once, from("s0", claim("claude-code", "opus-5-5", "mod.rs", 0, 9, 9, 9))]).now.agent_lines, 3);
+});
+
 test("review survival: the agents' first lines that are still there", () => {
   const claims = [claim("claude-code", "opus", "a.ts", 1, 1, 2, 3, 4), claim("cursor", "sonnet", "b.ts", 1, 8, 9)];
   const first = [file("a.ts", 1, 2, 3, 4, 70), file("b.ts", 8, 9)];
@@ -808,6 +862,182 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   assert.deepEqual((await call(tokens.admin, "GET", "/prs/summary?repo=acme/before-names")).body.older_actions, []);
 });
 
+test("an upload matches again the pull requests it adds lines to, and no others", async () => {
+  const repo = "github.com/acme/arrives";
+  const sent = (number: number, files: unknown[], more: Record<string, unknown> = {}) =>
+    call(tokens.ci, "PUT", "/prs", report({ repo, number, commit_emails: ["ann@example.com"], files, ...more }));
+  // opened while the session went on: nothing of it is uploaded yet
+  assert.equal((await sent(1, [file("a.ts", 900, 901)])).body.attribution.now.agent_lines, 0);
+  // one with none of its lines, one of another repository, one closed long ago
+  await sent(2, [file("b.ts", 900)]);
+  await call(tokens.ci, "PUT", "/prs", report({ repo: `${repo}-2`, number: 1, commit_emails: ["ann@example.com"], files: [file("a.ts", 900)] }));
+  await sent(3, [file("a.ts", 900)], { state: "merged", event: "closed", merged_at: "2026-10-01T12:00:00Z" });
+  await db.query(`UPDATE pull_requests SET updated_at = now() - interval '30 days' WHERE repo = $1 AND number = 3`, [repo]);
+  const matchedAt = async () =>
+    (await db.query(`SELECT repo, number, matched_at FROM pull_requests WHERE repo LIKE $1 ORDER BY repo, number`, [`${repo}%`])).map(
+      (row) => `${row.repo}#${row.number} ${new Date(row.matched_at as string).getTime()}`,
+    );
+  const before = await matchedAt();
+
+  const s = session("s-arrives", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: [h(900), h(901)] }]);
+  s.session.repo.remote = repo;
+  assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-arrives", s)).status, 200);
+  const one = (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}&number=1`)).body;
+  assert.deepEqual(one.attribution.now.by, [{ tool: "claude-code", model: "claude-opus-5-5", lines: 2 }]);
+  assert.equal(one.history[0].event, "match");
+  // the others are as they were
+  const after = await matchedAt();
+  assert.deepEqual(after.filter((row) => !before.includes(row)).map((row) => row.split(" ")[0]), [`${repo}#1`]);
+
+  // past more pull requests reported later that have none of its lines
+  const later = repo + "-later";
+  await call(tokens.ci, "PUT", "/prs", report({ repo: later, number: 1, commit_emails: ["ann@example.com"], files: [file("a.ts", 910)] }));
+  await db.query(
+    `INSERT INTO pull_requests (org_id, repo, number, author, state, created_at, first_event, last_event, first_files, last_files, attribution, committers, updated_at)
+     SELECT org_id, repo, 100 + n, author, state, created_at, first_event, last_event, '[]', '[]', attribution, committers, now() + make_interval(secs => n)
+     FROM pull_requests, generate_series(1, 60) AS n WHERE repo = $1 AND number = 1`,
+    [later],
+  );
+  const behind = session("s-later", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: [h(910)] }]);
+  behind.session.repo.remote = later;
+  assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-later", behind)).status, 200);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${later}&number=1`)).body.attribution.now.agent_lines, 1);
+
+  // not someone else's with the same line, nor one closed before the session started
+  const others = repo + "-others";
+  const theirs = (number: number, more: Record<string, unknown>) =>
+    call(tokens.ci, "PUT", "/prs", report({ repo: others, number, files: [file("a.ts", 930)], ...more }));
+  await theirs(1, { commit_emails: ["eve@example.com"] });
+  await theirs(2, { commit_emails: ["ann@example.com"], state: "merged", event: "closed", merged_at: "2026-11-10T10:00:00Z" });
+  await theirs(3, { commit_emails: ["ann@example.com"] });
+  // and one kept with another key is left for its report, not undone
+  await theirs(4, { commit_emails: ["ann@example.com"] });
+  await db.query(`UPDATE pull_requests SET committers = '["00000000.x"]' WHERE repo = $1 AND number = 4`, [others]);
+  const otherMatched = async () =>
+    (await db.query(`SELECT number, matched_at, committers::text AS committers FROM pull_requests WHERE repo = $1 ORDER BY number`, [others])).map(
+      (row) => [Number(row.number), new Date(row.matched_at as string).getTime(), row.committers],
+    );
+  const unmatched = await otherMatched();
+  const hers = (turn: number) => {
+    const one = session("s-hers", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: [h(930)] }]);
+    one.session.repo.remote = others;
+    (one.session as Record<string, unknown>).user = { email: "ann@example.com" };
+    (one.session as Record<string, any>).counts = { prompts: turn };
+    return call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-hers", one);
+  };
+  assert.equal((await hers(1)).status, 200);
+  const matchedNow = await otherMatched();
+  assert.deepEqual(matchedNow.filter((row, i) => row[1] !== unmatched[i]![1]).map((row) => row[0]), [3]);
+  assert.equal(matchedNow[3]![2], '["00000000.x"]');
+  // a session still going is uploaded at each turn: one row says what matching again came to
+  await db.query(`UPDATE sessions SET payload = jsonb_set(payload, '{lines}', '[]') WHERE session_id = 's-hers'`);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo: others, number: 3 })).body.attribution.now.agent_lines, 0);
+  assert.equal((await hers(2)).status, 200);
+  const history = async () =>
+    (await call(tokens.admin, "GET", `/prs/detail?repo=${others}&number=3`)).body.history.map((row: any) => [row.event, row.agent_lines]);
+  assert.deepEqual(await history(), [["match", 1], ["opened", 0]]);
+  // the same lines again match nothing again
+  const before3 = (await otherMatched())[2]![1];
+  assert.equal((await hers(3)).status, 200);
+  assert.equal((await otherMatched())[2]![1], before3);
+  // a report between, though it moved nothing, is not merged past
+  await call(tokens.ci, "PUT", "/prs", report({ repo: others, number: 3, event: "synchronize", commit_emails: ["ann@example.com"], files: [file("a.ts", 930)] }));
+  await db.query(`UPDATE sessions SET payload = jsonb_set(payload, '{lines}', '[]') WHERE session_id = 's-hers'`);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo: others, number: 3 })).status, 200);
+  assert.deepEqual(await history(), [["match", 0], ["match", 1], ["opened", 0]]);
+  // uploaded again without the line: the pull request that had it from before is matched again
+  assert.equal((await hers(4)).status, 200);
+  const without = session("s-hers", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "b.ts", model: null, hashes: [h(931)] }]);
+  without.session.repo.remote = others;
+  (without.session as Record<string, unknown>).user = { email: "ann@example.com" };
+  assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-hers", without)).status, 200);
+  assert.deepEqual((await history()).slice(0, 2), [["match", 0], ["match", 1]]);
+
+  // of more than can be matched at once, the ones with most of its lines
+  const many = repo + "-many";
+  for (let number = 1; number <= 6; number += 1) {
+    const lines = number === 1 ? [940, 941, 942, 943] : [940];
+    await call(tokens.ci, "PUT", "/prs", report({ repo: many, number, commit_emails: ["ann@example.com"], files: [file("a.ts", ...lines)] }));
+  }
+  const wrote = session("s-wrote", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: [940, 941, 942, 943].map(h) }]);
+  wrote.session.repo.remote = many;
+  assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-wrote", wrote)).status, 200);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${many}&number=1`)).body.attribution.now.agent_lines, 4);
+  const left = await db.query(`SELECT number FROM pull_requests WHERE repo = $1 AND matched_at = updated_at ORDER BY number`, [many]);
+  assert.deepEqual(left.map((row) => Number(row.number)), [2]);
+
+  // a line a pull request has many times counts as often as the session added it
+  const often = repo + "-often";
+  for (let number = 1; number <= 5; number += 1) {
+    await call(tokens.ci, "PUT", "/prs", report({ repo: often, number, commit_emails: ["ann@example.com"], files: [file("a.ts", 960, 960, 960, 960, 960)] }));
+  }
+  await call(tokens.ci, "PUT", "/prs", report({ repo: often, number: 6, commit_emails: ["ann@example.com"], files: [file("a.ts", 961, 962)] }));
+  const once = session("s-often", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: [960, 961, 962].map(h) }]);
+  once.session.repo.remote = often;
+  assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-often", once)).status, 200);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${often}&number=6`)).body.attribution.now.agent_lines, 2);
+
+  // five that have one of its lines from before do not keep out a new one with more of them
+  const stack = repo + "-stack";
+  const stacked = (hashes: number[]) => {
+    const one = session("s-stack", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: hashes.map(h) }]);
+    one.session.repo.remote = stack;
+    return call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-stack", one);
+  };
+  await stacked([950]);
+  for (let number = 1; number <= 5; number += 1) {
+    await call(tokens.ci, "PUT", "/prs", report({ repo: stack, number, commit_emails: ["ann@example.com"], files: [file("a.ts", 950)] }));
+  }
+  await call(tokens.ci, "PUT", "/prs", report({ repo: stack, number: 6, commit_emails: ["ann@example.com"], files: [file("a.ts", 951, 952, 953)] }));
+  await stacked([950, 951, 952, 953]);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${stack}&number=6`)).body.attribution.now.agent_lines, 3);
+
+  // matched again back to what the report before it said: no row says it moved
+  const back = repo + "-back";
+  const backed = (path: string, hashes: number[], email = "ann@example.com") => {
+    const one = session("s-back", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path, model: null, hashes: hashes.map(h) }]);
+    one.session.repo.remote = back;
+    (one.session as Record<string, unknown>).user = { email };
+    return call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-back", one);
+  };
+  await call(tokens.ci, "PUT", "/prs", report({ repo: back, number: 1, commit_emails: ["ann@example.com"], files: [file("a.ts", 960)] }));
+  const backHistory = async () =>
+    (await call(tokens.admin, "GET", `/prs/detail?repo=${back}&number=1`)).body.history.map((row: any) => [row.event, row.agent_lines]);
+  await backed("a.ts", [960]);
+  assert.deepEqual(await backHistory(), [["match", 1], ["opened", 0]]);
+  await backed("b.ts", [961]);
+  assert.deepEqual(await backHistory(), [["opened", 0]]);
+
+  // the same lines, now with the address it was committed with: matched again
+  await backed("a.ts", [960], "eve@example.com");
+  assert.deepEqual(await backHistory(), [["opened", 0]]);
+  await backed("a.ts", [960]);
+  assert.deepEqual(await backHistory(), [["match", 1], ["opened", 0]]);
+  // the same lines, by another model: matched again, and the lines are that model's
+  const sonnet = session("s-back", "claude-code", "claude-sonnet-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: [h(960)] }]);
+  sonnet.session.repo.remote = back;
+  (sonnet.session as Record<string, unknown>).user = { email: "ann@example.com" };
+  assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-back", sonnet)).status, 200);
+  assert.deepEqual((await call(tokens.admin, "GET", `/prs/detail?repo=${back}&number=1`)).body.attribution.now.by, [
+    { tool: "claude-code", model: "claude-sonnet-5-5", lines: 1 },
+  ]);
+
+  // looking for them fails: the session is stored all the same
+  const broken = repo + "-broken";
+  await call(tokens.ci, "PUT", "/prs", report({ repo: broken, number: 1, commit_emails: ["ann@example.com"], files: [file("a.ts", 920)] }));
+  await db.query(`UPDATE pull_requests SET last_files = '"not files"' WHERE repo = $1`, [broken]);
+  const kept = session("s-broken", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: [h(920)] }]);
+  kept.session.repo.remote = broken;
+  const quiet = console.error;
+  console.error = () => {};
+  try {
+    assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-broken", kept)).status, 200);
+  } finally {
+    console.error = quiet;
+  }
+  assert.equal((await db.query(`SELECT 1 FROM sessions WHERE session_id = 's-broken'`)).length, 1);
+});
+
 test("a pull request's lines are matched again when its sessions arrive after its last report", async () => {
   const repo = "github.com/acme/again";
   const upload = (id: string, email: string | null, hashes: string[]) => {
@@ -828,11 +1058,12 @@ test("a pull request's lines are matched again when its sessions arrive after it
   const before = await detail(1);
   assert.deepEqual([before.matchable, before.matched_at != null, before.sessions], [true, true, []]);
 
-  // the sessions come after the pull request was closed: no report follows
+  // the sessions come after the pull request was closed: no report follows, and it is matched again as they arrive
   await upload("s-after", null, [h(800), h(801)]);
   // someone else's, with the same line: not a committer of this pull request
   await upload("s-else", "eve@example.com", [h(802)]);
-  assert.equal((await detail(1)).attribution.now.agent_lines, 0);
+  assert.equal((await detail(1)).attribution.now.agent_lines, 2);
+  await db.query(`UPDATE pull_requests SET matched_at = matched_at - interval '1 minute' WHERE repo = $1 AND number = 1`, [repo]);
 
   const again = await call(tokens.admin, "POST", "/prs/match", { repo, number: 1 });
   assert.equal(again.status, 200);
@@ -1051,13 +1282,14 @@ test("a pull request keeps a history of its figures and says what moved them", a
   assert.deepEqual([page.history[0].lines, page.history[0].agent_lines, page.history[0].commits], [2, 0, 1]);
   assert.deepEqual(page.history[0].sessions, []);
 
-  // A session uploaded between reports is named, and the reason says so.
+  // A session uploaded between reports matches it again: it is named, and the reason says so.
+  // The next report finds nothing more.
   assert.equal((await upload("s-new", "a.ts", 1)).status, 200);
   assert.equal((await sent(1, { event: "synchronize", files: [file("a.ts", 1, 2)] })).status, 200);
   page = await detail(1);
   assert.equal(page.history.length, 2);
   const arrived = page.history[0];
-  assert.equal(arrived.event, "synchronize");
+  assert.equal(arrived.event, "match");
   assert.deepEqual(arrived.change.sessions_added.map((s: { session_id: string; lines: number }) => [s.session_id, s.lines]), [["s-new", 1]]);
   assert.equal(arrived.change.sessions_added[0].session.owner_email, "ann@example.com");
   assert.equal(arrived.change.reason, "1 session uploaded since: +1 agent lines");
@@ -1140,9 +1372,10 @@ test("a pull request keeps a history of its figures and says what moved them", a
   // A session already matched, whose line count grew, says so.
   assert.equal((await sent(5, { files: [file("e.ts", 30, 31)] })).status, 200);
   assert.equal((await upload("s-grow", "e.ts", 30)).status, 200);
-  assert.equal((await sent(5, { event: "synchronize", files: [file("e.ts", 30, 31)] })).status, 200);
+  // a report between the two uploads, or both would be told in one row of matching again
+  assert.equal((await sent(5, { event: "synchronize", commits: 2, files: [file("e.ts", 30, 31)] })).status, 200);
   assert.equal((await upload("s-grow", "e.ts", 30, 31)).status, 200);
-  assert.equal((await sent(5, { event: "synchronize", files: [file("e.ts", 30, 31)] })).status, 200);
+  assert.equal((await sent(5, { event: "synchronize", commits: 2, files: [file("e.ts", 30, 31)] })).status, 200);
   page = await detail(5);
   assert.equal(page.history[0].change.reason, "1 session's lines changed: +1 agent lines");
   assert.deepEqual(
@@ -1375,20 +1608,16 @@ test("what a pull request's sessions cost it: each for the share of its lines th
   assert.deepEqual([(await of(2)).usd, (await of(2)).opened_usd], [5, null]);
   assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost-4")).body.total.per_surviving_line_usd, 1);
 
-  // a session taken back and sent again: which of its lines the pull request from before had is not known, so
-  // in a new one with the same lines, as in the old, what it cost is an estimate
+  // a session taken back and sent again: the pull request from before is matched again as it arrives, so which of
+  // its lines it has is known once more, and a new one with the same lines shares them with it for sure
   await upload("c-gone", "f.ts", range(4000, 2), { total_usd: 50, source: "recorded" });
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 11, files: [file("f.ts", ...range(4000, 2))] }));
-  for (const number of [3, 11]) {
-    const again = (await detail(number)).cost;
-    // both can be matched again, which is what would say whose lines are whose
-    assert.deepEqual([again.estimated, again.sessions_unshared, again.sessions_unshared_for_good], [true, 1, 0], `#${number}`);
-  }
-  assert.equal((await detail(11)).cost.usd, 25);
-  // so is what the lines it was opened with cost, and the session's own share says so too
+  const three = (await detail(3)).cost;
+  assert.deepEqual([three.sessions_unshared, three.sessions_unshared_for_good], [0, 0]);
   const eleven = await detail(11);
-  assert.deepEqual([eleven.cost.opened_usd, eleven.cost.opened_estimated], [25, true]);
-  assert.deepEqual([eleven.sessions[0].cost_share_usd, eleven.sessions[0].unshared, eleven.sessions[0].uncounted], [25, true, false]);
+  assert.deepEqual([eleven.cost.usd, eleven.cost.estimated, eleven.cost.sessions_unshared], [25, false, 0]);
+  assert.deepEqual([eleven.cost.opened_usd, eleven.cost.opened_estimated], [25, false]);
+  assert.deepEqual([eleven.sessions[0].cost_share_usd, eleven.sessions[0].unshared, eleven.sessions[0].uncounted], [25, false, false]);
 });
 
 test("a share is unsure only for lines not kept in a pull request it is weighed against", async () => {
@@ -1437,13 +1666,14 @@ test("a deleted session's lines count whole in each of its pull requests", async
   assert.equal((await call(tokens.ann, "DELETE", "/sessions/m1/claude-code/c-forgot")).status, 200);
   // which they were is gone: all ten count in each, as for a pull request whose lines were not kept
   assert.deepEqual(await weights(), [[1, 10, 10], [2, 10, 10]]);
-  // sent again: twenty lines' worth between the two, of six dollars, three in each. They may be the
-  // same ten, so it is an estimate, and so is what they were opened with
+  // sent again: both are matched again as it arrives, and which lines they have is known once more.
+  // The same ten in each: five of them, of six dollars, three in each
   assert.equal((await put()).status, 200);
+  assert.deepEqual(await weights(), [[1, 5, 5], [2, 5, 5]]);
   const cost = (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}&number=1`)).body.cost;
   assert.deepEqual(
     [cost.usd, cost.per_agent_line_usd, cost.estimated, cost.sessions_unshared, cost.opened_usd, cost.opened_estimated, cost.per_surviving_line_usd],
-    [3, 0.3, true, 1, 3, true, 0.3],
+    [3, 0.6, false, 0, 3, false, 0.6],
   );
 });
 

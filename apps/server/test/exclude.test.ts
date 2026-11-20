@@ -6,6 +6,7 @@ import { parseRepo, repoCovered, sessionCovered, type Upload } from "@sessionly/
 import { createApp } from "../src/app.ts";
 import { DEFAULT_ORG, type Principal } from "../src/auth.ts";
 import type { Db, OrgDb } from "../src/db.ts";
+import { matchedBy } from "../src/pulls.ts";
 import { excludeRepo, storeUpload } from "../src/sessions.ts";
 import { newOrg, testDb, tokenFor } from "./helpers.ts";
 
@@ -329,7 +330,7 @@ test("storing a session and stopping its repository at the same moment: the sess
     (tx) => storeUpload(tx, upload("raced-1", { root: "~/Raced" }), fay),
     (tx) => excludeRepo(tx, fay.email, "~/Raced"),
   );
-  assert.deepEqual(stored, { stored: true });
+  assert.deepEqual(stored, { stored: true, changed: true });
   assert.equal(stopped.sessions_removed, 1);
   assert.equal(await left(fay.email), 0);
 
@@ -349,7 +350,32 @@ test("storing a session and stopping its repository at the same moment: the sess
     (tx) => storeUpload(tx, upload("raced-3", { root: "~/Fine" }), hal),
     (tx) => storeUpload(tx, upload("raced-4", { root: "~/Fine" }), hal),
   );
-  assert.deepEqual(both, [{ stored: true }, { stored: true }]);
+  assert.deepEqual(both, [{ stored: true, changed: true }, { stored: true, changed: true }]);
+
+  // Two uploads of one session already stored: the second waits for the first, and says whether it
+  // changed what that one left. Put back as it was before both, it did: the first had changed it.
+  await db.asOrg(DEFAULT_ORG, (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine" }), hal));
+  const back = await overlapped(
+    (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine/elsewhere" }), hal),
+    (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine" }), hal),
+  );
+  assert.deepEqual(back, [{ stored: true, changed: true }, { stored: true, changed: true }]);
+  const same = await overlapped(
+    (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine" }), hal),
+    (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine" }), hal),
+  );
+  assert.deepEqual(same, [{ stored: true, changed: false }, { stored: true, changed: false }]);
+
+  // What tells a change keeps each value in its place: one moved to an empty field next to it is a change.
+  const fingerprint = (set: string) =>
+    db.asOrg(DEFAULT_ORG, async (tx) => {
+      const [row] = await tx.query<{ machine_id: string; source: string }>(
+        `UPDATE sessions SET ${set} WHERE org_id = $1 AND session_id = 'raced-5' RETURNING machine_id, source`,
+        [tx.orgId],
+      );
+      return matchedBy(tx, { machine_id: row!.machine_id, source: row!.source, session_id: "raced-5" });
+    });
+  assert.notEqual(await fingerprint("repo = 'x', branch = NULL"), await fingerprint("repo = NULL, branch = 'x'"));
 });
 
 test("one organisation's stop does not touch another's sessions", async () => {
