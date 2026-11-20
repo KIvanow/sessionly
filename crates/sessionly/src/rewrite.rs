@@ -249,6 +249,8 @@ pub fn measure(ledger: &mut Ledger, now: DateTime<Utc>) -> Result<Report> {
     let mut current: HashMap<String, Option<HashMap<u64, u64>>> = HashMap::new();
     let mut git: HashMap<String, GitState> = HashMap::new();
     let mut rows = Vec::new();
+    // Sessions with a file that could not be measured now.
+    let mut partly: std::collections::HashSet<String> = Default::default();
 
     for target in ledger.rewrite_targets()? {
         let path = match &target.base {
@@ -272,6 +274,7 @@ pub fn measure(ledger: &mut Ledger, now: DateTime<Utc>) -> Result<Report> {
             .is_some_and(|b| Path::new(b).is_dir());
         if lines.is_none() && !base_exists {
             report.unavailable += 1;
+            partly.insert(target.session_id);
             continue;
         }
         let state = target.base.as_ref().map(|base| {
@@ -291,9 +294,12 @@ pub fn measure(ledger: &mut Ledger, now: DateTime<Utc>) -> Result<Report> {
     }
     ledger.store_rewrite(&rows, now)?;
     // Only what was measured just now: a session whose directory is gone has
-    // nothing that can be said of it today.
+    // nothing that can be said of it today. And only a session measured
+    // whole: a checkpoint is of all its lines, and is kept for good, so one
+    // with some files out of reach (it ran in a directory that is gone, and
+    // changed a file elsewhere too) waits for a day when all can be read.
     let mut totals: Vec<(String, u64, u64)> = Vec::new();
-    for row in &rows {
+    for row in rows.iter().filter(|row| !partly.contains(&row.session_id)) {
         match totals.last_mut() {
             Some((id, added, surviving)) if *id == row.session_id => {
                 *added += row.added;
@@ -622,6 +628,40 @@ mod tests {
         let report = measure(&mut ledger, ended + days(13)).unwrap();
         assert_eq!((report.unavailable, report.checkpoints), (1, 0));
         assert_eq!(kept(&ledger).len(), 1);
+    }
+
+    #[test]
+    fn a_session_with_a_file_out_of_reach_has_no_checkpoint_of_the_rest() {
+        let ended = Utc::now();
+        let days = chrono::Duration::days;
+        let (dir, mut ledger, file) = one_session(ended);
+        // It ran in a directory that is gone since, and changed the file here too.
+        let gone = dir.path().join("gone");
+        let built_from = ledger.fingerprint("s1").unwrap().unwrap();
+        let mut session = ledger.get("s1").unwrap().unwrap();
+        session.repo.as_mut().unwrap().root = gone.to_string_lossy().into_owned();
+        let there = session.files[0].clone();
+        let mut lost = there.clone();
+        lost.path = gone.join("b.rs").to_string_lossy().into_owned();
+        session.files = vec![there, lost.clone()];
+        let lines = [
+            FileLines {
+                path: file.to_string_lossy().into_owned(),
+                by_model: vec![(None, hashes(&["one();", "two();", "three();"]))],
+            },
+            FileLines {
+                path: lost.path,
+                by_model: vec![(None, hashes(&["four();", "five();"]))],
+            },
+        ];
+        ledger.upsert(&session, &built_from, &lines).unwrap();
+        // The one file is measured, as before, and is not the session's five lines.
+        let report = measure(&mut ledger, ended + days(8)).unwrap();
+        assert_eq!(
+            (report.measured, report.unavailable, report.checkpoints),
+            (1, 1, 0)
+        );
+        assert!(ledger.checkpoints_of("s1").unwrap().is_empty());
     }
 
     #[test]
