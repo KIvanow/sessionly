@@ -33,6 +33,16 @@ export function addedHashes(patch) {
   return hashes;
 }
 
+/** Hashes of every tracked line of a file, as the sessionly binary reads one to see what is still there. */
+export function fileHashes(text) {
+  const hashes = [];
+  for (const line of text.split("\n")) {
+    const hash = lineHash(line);
+    if (hash) hashes.push(hash);
+  }
+  return hashes;
+}
+
 /** Turn the `ignore` input into a test for paths. */
 export function ignoring(patterns) {
   const tests = patterns

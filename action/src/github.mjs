@@ -20,7 +20,24 @@ export function github(token, apiUrl = "https://api.github.com") {
     }
     return response.status === 204 ? null : response.json();
   };
-  return { request };
+  /** A file as it is on a branch, as text; null if there is none at that path. */
+  const text = async (path) => {
+    const response = await fetch(`${apiUrl}${path}`, {
+      headers: {
+        accept: "application/vnd.github.raw+json",
+        authorization: `Bearer ${token}`,
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "sessionly-action",
+      },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const said = (await response.text()).slice(0, 300);
+      throw Object.assign(new Error(`GitHub answered ${response.status} to GET ${path}: ${said}`), { status: response.status });
+    }
+    return response.text();
+  };
+  return { request, text };
 }
 
 /** Every item of a list GitHub serves in pages. */
@@ -66,6 +83,31 @@ export async function listPulls(api, repo, since, most) {
   } catch {
     return { numbers, more: null };
   }
+}
+
+/** A path as part of an address: each folder and the name encoded, the slashes kept. */
+const inAddress = (path) => path.split("/").map(encodeURIComponent).join("/");
+
+/**
+ * The branch to look for a merged pull request's lines on: the one it was
+ * merged into, or the repository's default branch when that one is gone (a
+ * branch others were stacked on is deleted once it is merged itself).
+ */
+export async function branchFor(api, repo, ref) {
+  if (ref) {
+    try {
+      await api.request("GET", `/repos/${repo}/branches/${inAddress(ref)}`);
+      return ref;
+    } catch (err) {
+      if (err.status !== 404) throw err;
+    }
+  }
+  return (await api.request("GET", `/repos/${repo}`)).default_branch;
+}
+
+/** A file as it is on a branch now, as text; null if it is not there. */
+export function fileOn(api, repo, ref, path) {
+  return api.text(`/repos/${repo}/contents/${inAddress(path)}?ref=${encodeURIComponent(ref)}`);
 }
 
 /** Everything about a pull request that goes into a report. */
