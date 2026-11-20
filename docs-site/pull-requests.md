@@ -101,8 +101,8 @@ run a day whatever the repository's traffic, and it still happens in a week when
 pushed. A push would start a run for every merge, most of which have nothing due.
 
 Each run asks the server which merged pull requests are due, and for each the files its agent
-lines are in. It reads those files as they are on the branch now and sends their lines as
-hashes; the server counts how many of the pull request's agent lines are in the same files.
+lines are in. It reads those files as they are on the branch now, all at the one commit the
+branch is at, and sends their lines as hashes; the server counts how many of the pull request's agent lines are in the same files.
 No source leaves GitHub, and the server sends no hashes out.
 
 - **The first count at or after each age is kept, and never changed.** If no run happened on
@@ -116,7 +116,9 @@ No source leaves GitHub, and the server sends no hashes out.
   A file that was renamed or deleted has none of its lines left.
 - If the branch it was merged into is gone (others were stacked on it, and it was merged and
   deleted itself), the repository's default branch is read instead.
-- A run reads at most 800 files. What is left is still due at the next run.
+- Files are read fifty at a time, so a pull request of thousands of files takes tens of
+  requests to GitHub. A run reads at most 20,000 files; the pull requests left over are still
+  due at the next run.
 
 On the pull request's page the counts are rows of **History** ("30 days after merge: 498 of
 520 agent lines still there"), and the tile **Kept @30d after merge** has the share.

@@ -140,8 +140,9 @@ jobs:
           token: ${{ secrets.SESSIONLY_TOKEN }}
 ```
 
-It needs `contents: read`, writes on no pull request, and reads at most 800 files in a run:
-what is left is due at the next. See
+It needs `contents: read` and writes on no pull request. The files are read fifty at a time,
+all at the commit the branch is at; a run reads at most 20,000, and what is left is due at the
+next. See
 [After merge](../docs-site/pull-requests.md#after-merge) for what is counted and how a missed
 day is handled.
 

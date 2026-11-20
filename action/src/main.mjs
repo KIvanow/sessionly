@@ -2,7 +2,7 @@
 // Sessionly server, and show what it answers.
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { branchFor, fileOn, github, listPulls, readPull, upsertComment } from "./github.mjs";
+import { branchFor, filesAt, github, listPulls, readPull, upsertComment } from "./github.mjs";
 import { fileHashes, ignoring } from "./lines.mjs";
 import { buildReport, MARKER, render, renderAfterMerge, renderMany } from "./report.mjs";
 
@@ -88,10 +88,12 @@ export async function ask(url, token, method, path, body) {
 
 /**
  * No more files than this are read from GitHub in one run of counting after
- * merging: each is a request, and a workflow's token is allowed a thousand
- * an hour. The pull requests left over are still due at the next run.
+ * merging. They are asked for fifty at a time, so this is four hundred
+ * requests of the thousand a workflow's token is allowed in an hour, and one
+ * pull request, of five thousand files at most, is a hundred. The pull
+ * requests left over are still due at the next run.
  */
-export const MOST_FILES = 800;
+export const MOST_FILES = 20_000;
 
 /**
  * Count merged pull requests' agent lines again on the branch they were
@@ -117,7 +119,7 @@ async function runAfterMerge(env, { api, server, repo, host, log, url }) {
   const failed = [];
   let left = MOST_FILES;
   let later = 0;
-  // The same branch for many of them.
+  // The same branch, at the same commit, for many of them.
   const branches = new Map();
   for (const pull of due) {
     // The first is read however many files it has: otherwise it would never be.
@@ -129,13 +131,12 @@ async function runAfterMerge(env, { api, server, repo, host, log, url }) {
     try {
       const asked = pull.base_ref ?? "";
       if (!branches.has(asked)) branches.set(asked, await branchFor(api, repo, pull.base_ref));
-      const branch = branches.get(asked);
-      const files = [];
-      for (const path of pull.paths) {
-        const text = await fileOn(api, repo, branch, path);
-        files.push({ path, hashes: text === null ? [] : fileHashes(text) });
-      }
-      const { stored } = await server("PUT", "/prs/after-merge", { repo: name, number: pull.number, files });
+      // Every file at the one commit the branch was at when it was first looked at.
+      const { branch, sha } = branches.get(asked);
+      const texts = await filesAt(api, repo, sha, pull.paths);
+      const files = pull.paths.map((path) => ({ path, hashes: texts.get(path) == null ? [] : fileHashes(texts.get(path)) }));
+      // Which ages these were read for: one reached since is asked for at the next run.
+      const { stored } = await server("PUT", "/prs/after-merge", { repo: name, number: pull.number, checkpoints: pull.checkpoints, files });
       for (const row of stored ?? []) {
         counted.push({ number: pull.number, branch, ...row });
         const days = row.checkpoint === "7d" ? 7 : 30;
@@ -178,7 +179,7 @@ export async function run(env, { api, deliver = send, server, log = console.log 
   const repo = need("GITHUB_REPOSITORY", "GITHUB_REPOSITORY");
   // On a schedule there is no pull request to report: the run is for the merged ones that are due.
   if (env.GITHUB_EVENT_NAME === "schedule" || on(env.SESSIONLY_AFTER_MERGE)) {
-    api ??= github(need("SESSIONLY_GITHUB_TOKEN", "the github-token input"), env.GITHUB_API_URL || undefined);
+    api ??= github(need("SESSIONLY_GITHUB_TOKEN", "the github-token input"), env.GITHUB_API_URL || undefined, env.GITHUB_GRAPHQL_URL || undefined);
     server ??= (method, path, body) => ask(url, token, method, path, body);
     const host = new URL(env.GITHUB_SERVER_URL || "https://github.com").host;
     return runAfterMerge(env, { api, server, repo, host, log, url });
