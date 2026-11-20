@@ -1,8 +1,8 @@
-import type { PullDetail, PullHistory, PullHistoryNamedSession, PullSession } from "@sessionly/schema";
+import type { PullAfterMerge, PullDetail, PullHistory, PullHistoryNamedSession, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { afterMergeLine, afterMergeTile, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, matchedLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, matchedLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
 import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -117,7 +117,7 @@ export function PullView({
         {afterMerge && <Tile label="Kept @30d after merge" value={afterMerge.value} part={afterMerge.part} note={afterMerge.note} />}
       </section>
 
-      <History history={p.history} />
+      <History history={p.history} counts={p.after_merge} />
 
       {a.now.by.length > 0 && (
         <section className="card" aria-label="By model">
@@ -329,7 +329,8 @@ function agentNote(agentLines: number, lines: number, shift: string | null): str
   return shift ? `${now}. ${shift}` : now;
 }
 
-function History({ history }: { history: PullHistory[] }) {
+function History({ history, counts }: { history: PullHistory[]; counts: PullAfterMerge[] | undefined }) {
+  const rows = timeline(history, counts);
   return (
     <section className="card" aria-label="History">
       <h2>History</h2>
@@ -337,7 +338,7 @@ function History({ history }: { history: PullHistory[] }) {
         Each time the figures moved, and when a newer Action reported them as they were. Once merged, its agent lines are
         counted again on the branch it was merged into, 7 and 30 days after.
       </p>
-      {history.length === 0 ? (
+      {rows.length === 0 ? (
         <p className="muted">No earlier figures were kept.</p>
       ) : (
         <div className="scroll">
@@ -351,19 +352,26 @@ function History({ history }: { history: PullHistory[] }) {
               </tr>
             </thead>
             <tbody>
-              {history.map((entry, i) => (
-                <tr key={`${entry.at} ${i}`}>
-                  <td className="nowrap">{dateTime(entry.at)}</td>
-                  <td className="nowrap">{historyEvent(entry.event)}</td>
-                  <td className="num nowrap">
-                    {count(entry.agent_lines)} of {count(entry.after_merge ? entry.after_merge.agent_lines : entry.lines)}
-                  </td>
-                  <td>
-                    {entry.after_merge ? afterMergeLine(entry.after_merge, count) : (entry.change.reason ?? "–")}
-                    <HistorySessions change={entry.change} />
-                  </td>
-                </tr>
-              ))}
+              {rows.map(({ at, report, count: counted }, i) =>
+                counted ? (
+                  <tr key={`${at} ${i}`}>
+                    <td className="nowrap">{dateTime(at)}</td>
+                    <td className="nowrap">{afterMergeName(counted)}</td>
+                    <td className="num nowrap">{count(counted.surviving)} of {count(counted.agent_lines)}</td>
+                    <td>{afterMergeLine(counted, count)}</td>
+                  </tr>
+                ) : (
+                  <tr key={`${at} ${i}`}>
+                    <td className="nowrap">{dateTime(at)}</td>
+                    <td className="nowrap">{historyEvent(report.event)}</td>
+                    <td className="num nowrap">{count(report.agent_lines)} of {count(report.lines)}</td>
+                    <td>
+                      {report.change.reason ?? "–"}
+                      <HistorySessions change={report.change} />
+                    </td>
+                  </tr>
+                ),
+              )}
             </tbody>
           </table>
         </div>

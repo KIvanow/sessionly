@@ -1767,14 +1767,10 @@ test("a merged pull request's agent lines are counted again on its branch 7 and 
   assert.ok(seven.age_seconds >= 8 * day && seven.age_seconds < 8 * day + 600, String(seven.age_seconds));
 
   let page = await detail(1);
-  assert.deepEqual(page.history.map((row: any) => row.event), ["after_merge_7d", "closed"]);
-  assert.deepEqual(page.history[0].after_merge, seven);
-  assert.deepEqual([page.history[0].agent_lines, page.history[0].change.reason], [2, null]);
-  assert.deepEqual(page.history[0].sessions.map((s: any) => [s.session_id, s.lines]), [["am-1", 2]]);
   assert.deepEqual(page.after_merge, [seven]);
-  // The pull request's own figures are what they were.
+  // The pull request's own figures are what they were, and so is the history of its reports: a count is not one.
   assert.equal(page.attribution.now.agent_lines, 4);
-  assert.equal(page.history[1].after_merge, null);
+  assert.deepEqual(page.history.map((row: any) => [row.event, row.agent_lines]), [["closed", 4]]);
 
   // Counted again with everything back: the count of day 8 stays, and it is not asked for again.
   assert.deepEqual((await count(1, [file("a.ts", 1, 2, 3), file("b.ts", 4)])).body.stored, []);
@@ -1784,13 +1780,9 @@ test("a merged pull request's agent lines are counted again on its branch 7 and 
   // A session uploaded since is compared with the report before it, not with the count on main.
   assert.equal((await upload("am-late", [file("docs.md", 70)])).status, 200);
   page = await detail(1);
-  assert.deepEqual(page.history.map((row: any) => row.event), ["match", "after_merge_7d", "closed"]);
+  assert.deepEqual(page.history.map((row: any) => row.event), ["match", "closed"]);
   assert.equal(page.history[0].change.reason, "1 session uploaded since: +1 agent lines");
   assert.deepEqual([page.history[0].change.agent_lines_before, page.history[0].agent_lines], [4, 5]);
-  // No report can write such a row, or take its place.
-  assert.equal((await merged(1, 8, [file("a.ts", 1, 2, 3, 9), file("b.ts", 4), file("docs.md", 70)], { event: "after_merge_7d", commits: 2 })).status, 200);
-  page = await detail(1);
-  assert.deepEqual(page.history.map((row: any) => row.event), ["unknown", "match", "after_merge_7d", "closed"]);
   assert.deepEqual(page.after_merge, [seven]);
 
   // 31 days after merging, the next age is due: counted of the lines it has now, with the age it really is.
@@ -1809,13 +1801,17 @@ test("a merged pull request's agent lines are counted again on its branch 7 and 
   assert.deepEqual(old.body.stored.map((row: any) => [row.checkpoint, row.agent_lines, row.surviving, Math.floor(row.age_seconds / day)]), [["30d", 2, 2, 40]]);
   assert.deepEqual(await due(), []);
 
-  // Many reports later the counts are still there: they are not among the 50 kept.
+  // Many reports later the counts are still there: they are no part of the 50 reports kept.
   for (let i = 0; i < 52; i++) {
     assert.equal((await merged(3, 40, [file("c.ts", 30, 31)], { commits: 2 + i })).status, 200);
   }
   page = await detail(3);
-  assert.equal(page.history.length, 51);
+  assert.equal(page.history.length, 50);
   assert.deepEqual(page.after_merge.map((row: any) => row.checkpoint), ["30d"]);
+  // Another organisation sees none of them.
+  await newOrg(db, "org-after");
+  assert.deepEqual(await db.asOrg("org-after", (scoped) => scoped.query(`SELECT 1 FROM pull_after_merge`)), []);
+  assert.equal((await db.asOrg("default", (scoped) => scoped.query(`SELECT 1 FROM pull_after_merge WHERE repo = $1`, [repo]))).length, 3);
 });
 
 test("pull requests and sessions from before the cost was shown have one after the upgrade", async (t) => {

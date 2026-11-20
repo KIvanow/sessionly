@@ -39,22 +39,20 @@ import {
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
-import type { PullAfterMergeReport, PullReport, Telemetry } from "@sessionly/schema";
+import type { PullAfterMergeReport, PullDetail, PullReport, Telemetry } from "@sessionly/schema";
 import {
   BadReport,
-  checkAfterMerge,
   checkReport,
   getPull,
   listPulls,
   rematchPull,
   rematchPulls,
   pullsAddedTo,
-  pullsDue,
-  storeAfterMerge,
   storePull,
   summarizePulls,
   type PullFilters,
 } from "./pulls.ts";
+import { afterMergeOf, checkAfterMerge, pullsDue, storeAfterMerge } from "./after-merge.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
 /** A record lists every tool call, so a long session is several megabytes. */
@@ -770,7 +768,8 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     if (!query.repo) throw new BadRequest("repo is required");
     const number = wholeNumber(query.number, 0, 2 ** 31 - 1, "number");
     const pull = await getPull(c.get("db"), query.repo, number);
-    return pull ? c.json(pull) : c.json({ error: "no such pull request" }, 404);
+    if (!pull) return c.json({ error: "no such pull request" }, 404);
+    return c.json({ ...pull, after_merge: await afterMergeOf(c.get("db"), query.repo, number) } satisfies PullDetail);
   });
   // Match one pull request's lines again against the sessions held now.
   // (Several, which the list's filters choose, are matched further up.)

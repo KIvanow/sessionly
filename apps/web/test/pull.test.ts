@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { afterMergeLine, afterMergeTile, byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, matchAll, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web } from "../src/pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, timeline, byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, matchAll, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web } from "../src/pull.ts";
 
 test("a moved agent figure says what it was, and why", () => {
   const history = [
@@ -227,8 +227,8 @@ test("a count after merging, in plain words", () => {
   assert.equal(afterMergeLine(thirty), "30 days after merge: 498 of 520 agent lines still there");
   assert.equal(afterMergeLine(seven), "7 days after merge: 511 of 520 agent lines still there (counted on day 9)");
   assert.equal(afterMergeLine({ ...seven, agent_lines: 1, surviving: 1, age_seconds: 7 * day }), "7 days after merge: 1 of 1 agent line still there");
-  assert.equal(historyEvent("after_merge_7d"), "7 days after merge");
-  assert.equal(historyEvent("after_merge_30d"), "30 days after merge");
+  assert.equal(afterMergeName(seven), "7 days after merge");
+  assert.equal(afterMergeName(thirty), "30 days after merge");
 
   const share = (part: number, whole: number) => `${Math.round((part / whole) * 100)}%`;
   const now = Date.parse("2026-12-20T00:00:00Z");
@@ -242,11 +242,13 @@ test("a count after merging, in plain words", () => {
   assert.match(afterMergeTile([], "2026-11-17T00:00:00Z", share, String, now).note, /^not counted: a scheduled run of the Action/);
 });
 
-test("the agent figure's note passes over the counts made after merging", () => {
-  const history = [
-    { at: "t3", agent_lines: 2, change: { reason: null }, after_merge: { checkpoint: "7d" } },
-    { at: "t2", agent_lines: 5, change: { reason: "1 session uploaded since: +1 agent lines" }, after_merge: null },
-    { at: "t1", agent_lines: 4, change: { reason: null } },
-  ];
-  assert.equal(figureShift(history, (iso) => iso, String), "Was 4 until t2: 1 session uploaded since.");
+test("reports and the counts made after merging are one list by time, and stay two kinds of thing", () => {
+  const history = [{ at: "2026-11-20T10:00:00Z", event: "match" }, { at: "2026-11-01T10:00:00Z", event: "closed" }];
+  const counts = [{ at: "2026-11-08T10:00:00Z", checkpoint: "7d" }, { at: "2026-12-01T10:00:00Z", checkpoint: "30d" }];
+  assert.deepEqual(
+    timeline(history, counts).map((row) => row.report?.event ?? row.count?.checkpoint),
+    ["30d", "match", "7d", "closed"],
+  );
+  assert.deepEqual(timeline(history, undefined).map((row) => row.report?.event), ["match", "closed"]);
+  assert.deepEqual(timeline([], []), []);
 });

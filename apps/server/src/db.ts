@@ -815,17 +815,27 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE tokens ADD CONSTRAINT tokens_role_check CHECK (role IN ('admin', 'member', 'ci', 'env', 'viewer'))`,
   // What a session's rewrite measurement was 1, 7 and 30 days after it ended
   // (an upload's `checkpoints`), by age: {"7d": {added, surviving,
-  // measured_at, age_seconds}}. Counts and times. Beside the payload, so that
+  // measured_at, age_seconds, ended_at}}. Counts and times. Beside the payload, so that
   // a summary does not open it. One kept is not replaced by a later upload.
   `ALTER TABLE sessions ADD COLUMN checkpoints jsonb NOT NULL DEFAULT '{}'`,
   // A merged pull request's agent lines counted again on the branch it was
-  // merged into, 7 and 30 days after: a row of its history, with the event
-  // `after_merge_7d` or `after_merge_30d`, how many lines were looked for and
-  // how old the merge was. One of each, written once.
-  `ALTER TABLE pull_request_reports ADD COLUMN of_agent_lines integer`,
-  `ALTER TABLE pull_request_reports ADD COLUMN age_seconds integer`,
-  `CREATE UNIQUE INDEX pull_request_reports_after_merge ON pull_request_reports (org_id, repo, number, event)
-   WHERE left(event, 12) = 'after_merge_'`,
+  // merged into, 7 and 30 days after: how many were looked for, how many
+  // were there, and how old the merge was. One row for each age, written
+  // once. Apart from the reports of a pull request and their history.
+  `CREATE TABLE pull_after_merge (
+     org_id      text NOT NULL REFERENCES orgs ON DELETE CASCADE,
+     repo        text NOT NULL,
+     number      integer NOT NULL,
+     checkpoint  text NOT NULL CHECK (checkpoint IN ('7d', '30d')),
+     agent_lines integer NOT NULL,
+     surviving   integer NOT NULL,
+     measured_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+     age_seconds integer NOT NULL,
+     PRIMARY KEY (org_id, repo, number, checkpoint),
+     FOREIGN KEY (org_id, repo, number) REFERENCES pull_requests (org_id, repo, number) ON DELETE CASCADE
+   )`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON pull_after_merge`),
+  ...rowLevelSecurity("pull_after_merge"),
   // From when an organisation's pull requests are counted after merging. An
   // age one reached before that was not counted then, and is not made up
   // later. For the organisations already here that is now.

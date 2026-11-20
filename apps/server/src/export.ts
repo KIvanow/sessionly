@@ -117,6 +117,16 @@ const EXPORTED: TableExport[] = [
     cursorOf: (row) => [text(row.id)],
   },
   {
+    // A merged pull request's agent lines as counted on its branch 7 and 30 days after.
+    type: "pull_after_merge",
+    table: "pull_after_merge",
+    columns: "*",
+    order: "repo, number, checkpoint",
+    afterSql: "$2::text IS NULL OR (repo, number, checkpoint) > ($2, $3::integer, $4)",
+    blank: [null, null, null],
+    cursorOf: (row) => [text(row.repo), Number(row.number), text(row.checkpoint)],
+  },
+  {
     type: "repo_exclusion",
     table: "repo_exclusions",
     columns: "org_id, owner_email, repo, created_at",

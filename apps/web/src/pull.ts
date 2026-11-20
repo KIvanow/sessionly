@@ -226,8 +226,6 @@ const HISTORY_EVENTS: Record<string, string> = {
   review_comment: "Commented",
   manual: "Reported by hand",
   match: "Matched again",
-  after_merge_7d: "7 days after merge",
-  after_merge_30d: "30 days after merge",
 };
 
 /** What prompted a report, in the words the history shows. */
@@ -246,20 +244,35 @@ export function figureBecause(reason: string): string {
  * the agent lines are the same as then.
  */
 export function figureShift(
-  history: readonly { at: string; agent_lines: number; change: { reason: string | null }; after_merge?: unknown }[],
+  history: readonly { at: string; agent_lines: number; change: { reason: string | null } }[],
   when: (iso: string) => string,
   amount: (n: number) => string,
 ): string | null {
-  // A count after merging is of the lines on the branch, not of the pull request's own.
-  const reports = history.filter((row) => !row.after_merge);
-  const latest = reports[0];
-  const previous = reports[1];
+  const latest = history[0];
+  const previous = history[1];
   if (!latest?.change.reason || !previous || previous.agent_lines === latest.agent_lines) return null;
   return `Was ${amount(previous.agent_lines)} until ${when(latest.at)}: ${figureBecause(latest.change.reason)}.`;
 }
 
 type AfterMerge = { checkpoint: "7d" | "30d"; agent_lines: number; surviving: number; age_seconds: number };
 const AFTER_DAYS = { "7d": 7, "30d": 30 } as const;
+
+/**
+ * A pull request's reports and the counts made after it was merged, as one
+ * list by time, newest first: two kinds of thing, shown in one table. A
+ * count made at the same moment as a report comes after it.
+ */
+export function timeline<R extends { at: string }, C extends { at: string }>(
+  history: readonly R[],
+  counts: readonly C[] | null | undefined,
+): ({ at: string; report: R; count?: undefined } | { at: string; count: C; report?: undefined })[] {
+  return [...history.map((report) => ({ at: report.at, report })), ...(counts ?? []).map((count) => ({ at: count.at, count }))].sort(
+    (a, b) => Date.parse(b.at) - Date.parse(a.at) || Number("count" in b) - Number("count" in a),
+  );
+}
+
+/** What a count after merging is called in the list: "7 days after merge". */
+export const afterMergeName = (row: Pick<AfterMerge, "checkpoint">): string => `${AFTER_DAYS[row.checkpoint]} days after merge`;
 
 /**
  * A count after merging, in words: "30 days after merge: 498 of 520 agent

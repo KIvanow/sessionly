@@ -726,16 +726,11 @@ export interface PullHistory {
   /**
    * What prompted the report: `opened`, `synchronize`, `review`, `closed`,
    * `manual`, or `match` when the lines were matched again on the server.
-   * `after_merge_7d` and `after_merge_30d` are its agent lines counted again
-   * on the branch it was merged into, that long after (see `after_merge`).
    */
   event: string;
   commits: number;
   lines: number;
-  /** On a row counted after merging: how many of its agent lines were still on the branch. */
   agent_lines: number;
-  /** Set on a row counted after merging, and only there. */
-  after_merge?: PullAfterMerge | null;
   /** The sessions matched then, and how many lines of the pull request each had. */
   sessions: PullHistorySession[];
   /**
