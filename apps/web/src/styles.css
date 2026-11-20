@@ -363,6 +363,8 @@ main > p { margin: 0; }
   border-bottom: 1px solid var(--rule);
 }
 .tile .value { font-family: var(--mono); font-size: 26px; font-weight: 600; line-height: 1.15; letter-spacing: -0.03em; }
+/* A figure whose meaning is on hover. */
+.explained { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
 /* A bar for a share: the track is the whole, the fill the part. */
 .track { display: block; height: 8px; margin: 6px 0 2px; background: var(--track); }
 .track i { display: block; height: 100%; background: var(--blue); }

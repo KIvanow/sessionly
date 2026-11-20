@@ -108,6 +108,26 @@ export function pullsCostNote(total: {
   return [each, floor ?? "what the matched sessions cost, each for its share of lines", closed].filter(Boolean).join("; ");
 }
 
+const weight = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+
+/**
+ * What the lines that survived count as where the cost per line divides by
+ * them, beside how many there are, and why the two differ. Null when there is
+ * no cost per line to explain.
+ */
+export function survivingWeighted(total: {
+  agent_lines_surviving_weighted: number;
+  per_surviving_line_usd: number | null;
+}): { text: string; why: string } | null {
+  if (total.per_surviving_line_usd == null) return null;
+  return {
+    text: `${weight.format(total.agent_lines_surviving_weighted)} weighted`,
+    why:
+      "What the cost per agent line that survived review divides by: those lines in the pull requests that have a cost, " +
+      "a line also opened in another pull request counting as part of a line in each, as its cost is shared out between them.",
+  };
+}
+
 /** Where a pull request's page is: the repository's name has slashes, so it goes in as one part. */
 export function pullHref(p: { repo: string; number: number }): string {
   return `#/pull/${encodeURIComponent(p.repo)}/${p.number}`;

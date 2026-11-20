@@ -156,8 +156,10 @@ export function Tile(props: {
   note?: string;
   /** If the figure is a share of a whole (0 to 1), a bar shows it as well. */
   part?: number | null;
+  /** A figure beside the note, with what it means on hover. */
+  aside?: { text: string; why: string } | null;
 }) {
-  const { label, value, note, part } = props;
+  const { label, value, note, part, aside } = props;
   return (
     <div className="tile">
       <span className="label">{label}</span>
@@ -168,6 +170,13 @@ export function Tile(props: {
         </span>
       )}
       {note && <span className="note">{note}</span>}
+      {aside && (
+        <span className="note">
+          <span className="explained" title={aside.why} tabIndex={0}>
+            {aside.text}
+          </span>
+        </span>
+      )}
     </div>
   );
 }

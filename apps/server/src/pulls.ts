@@ -1661,8 +1661,14 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
   return shares;
 }
 
-/** What a pull request's sessions cost it, from what is known of each now. */
-function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Share[]): PullCost {
+/** What the lines a pull request was opened with cost, unrounded, and what those that survived count as. */
+type Opened = { usd: number; surviving: number };
+
+/**
+ * What a pull request's sessions cost it, from what is known of each now; and
+ * what the summary adds up of it, so that it divides what the page does.
+ */
+function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Share[]): { cost: PullCost; opened: Opened | null } {
   let usd: number | null = null;
   let estimated = false;
   let sessions = 0;
@@ -1725,9 +1731,7 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   // What review left can only be said of a pull request seen from the start,
   // and what it was opened with cost only of one whose sessions then were kept.
   if (!openedKnown || pull.first_event !== "opened" || a.first.agent_lines === 0) opened = null;
-  // The summary divides by this too, so it says what the page does.
-  const kept = opened == null ? null : surviving;
-  return {
+  const cost: PullCost = {
     usd: usd == null ? null : money(usd),
     // A share that may be counted in another pull request too is no more than an estimate.
     estimated: estimated || unshared > 0,
@@ -1741,17 +1745,23 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
     opened_usd: opened == null ? null : money(opened),
     opened_is_floor: opened != null && openedFloor,
     opened_estimated: opened != null && openedEstimated,
-    surviving_weight: kept,
-    per_surviving_line_usd: opened != null && kept != null && kept > 0 ? money(opened / kept) : null,
+    per_surviving_line_usd: opened != null && surviving > 0 ? money(opened / surviving) : null,
   };
+  return { cost, opened: opened == null ? null : { usd: opened, surviving } };
 }
 
 /** Rows as the list and the summary have them: each with what its sessions cost. */
-async function costed(db: OrgDb, rows: Record<string, unknown>[], chosen: { sql: string; params: unknown[] }): Promise<PullRow[]> {
+async function costed(
+  db: OrgDb,
+  rows: Record<string, unknown>[],
+  chosen: { sql: string; params: unknown[] },
+): Promise<{ pull: PullRow; opened: Opened | null }[]> {
   const shares = rows.length > 0 ? await sharesIn(db, chosen) : new Map<string, Share[]>();
   return rows.map((r) => {
     const pull = pullRow(r);
-    return { ...pull, cost: r.detailed === true ? costOf(pull, shares.get(pullKey(pull)) ?? []) : null };
+    if (r.detailed !== true) return { pull, opened: null };
+    const { cost, opened } = costOf(pull, shares.get(pullKey(pull)) ?? []);
+    return { pull: { ...pull, cost }, opened };
   });
 }
 
@@ -1818,7 +1828,7 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
   ]);
   return {
     ...row,
-    cost: shares && costOf(row, shares),
+    cost: shares && costOf(row, shares).cost,
     reporter_current: CURRENT_ACTION,
     repo_reporter_older: reporter?.older ?? false,
     repo_reporter_version: reporter?.version ?? null,
@@ -1936,7 +1946,7 @@ export async function listPulls(
     sql: `SELECT repo, number FROM jsonb_to_recordset($2::jsonb) AS k(repo text, number integer)`,
     params: [db.orgId, JSON.stringify(rows.map((r) => ({ repo: r.repo, number: r.number })))],
   };
-  return { pulls: await costed(db, rows, these), total: num(count?.n) };
+  return { pulls: (await costed(db, rows, these)).map(({ pull }) => pull), total: num(count?.n) };
 }
 
 /** How each agent and model's lines fared in review, over the matching pull requests. */
@@ -1948,7 +1958,8 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
     { sql: `SELECT repo, number FROM pull_requests ${sql}`, params },
   );
   // Of the pull requests seen from the start that have a cost: what the agent
-  // lines they were opened with cost, and how many of those survived review.
+  // lines they were opened with cost, and what those that survived count as,
+  // as each one's page has them.
   const opened = { usd: 0, surviving: 0 };
   const byModel = new Map<string, PullsByModel>();
   const total = {
@@ -1965,6 +1976,7 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
     cost_estimated: false,
     pulls_with_cost_missing: 0,
     pulls_closed_with_cost: 0,
+    agent_lines_surviving_weighted: 0,
     per_surviving_line_usd: null as number | null,
     per_surviving_line_is_floor: false,
     per_surviving_line_estimated: false,
@@ -1982,7 +1994,7 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       review_comments: 0,
       bot_review_comments: 0,
     }));
-  for (const pull of rows) {
+  for (const { pull, opened: its } of rows) {
     const a = pull.attribution;
     total.lines += a.now.lines;
     total.agent_lines += a.now.agent_lines;
@@ -2001,9 +2013,9 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       const floor = pull.cost ? pull.cost.sessions_without_cost + pull.cost.sessions_with_cost_partial > 0 : a.now.agent_lines > 0;
       if (floor) total.pulls_with_cost_missing += 1;
       // One where no line survived is in this too: what its lines cost was spent.
-      if (pull.cost?.opened_usd != null) {
-        opened.usd += pull.cost.opened_usd;
-        opened.surviving += pull.cost.surviving_weight ?? 0;
+      if (pull.cost && its) {
+        opened.usd += its.usd;
+        opened.surviving += its.surviving;
         if (pull.cost.opened_is_floor) total.per_surviving_line_is_floor = true;
         if (pull.cost.opened_estimated) total.per_surviving_line_estimated = true;
       }
@@ -2033,12 +2045,13 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
     }
   }
   if (total.cost_usd != null) total.cost_usd = money(total.cost_usd);
+  total.agent_lines_surviving_weighted = Math.round(opened.surviving * 100) / 100;
   if (opened.surviving > 0) total.per_surviving_line_usd = money(opened.usd / opened.surviving);
   else total.per_surviving_line_is_floor = total.per_surviving_line_estimated = false;
   // Which repositories the filter contains. Each is judged by its most
   // recent report from the Action, or that named no one, and by the last
   // ACTION_WINDOW_DAYS days of those reports.
-  const reporters = await repoReporters(db, [...new Set(rows.map((pull) => pull.repo))]);
+  const reporters = await repoReporters(db, [...new Set(rows.map(({ pull }) => pull.repo))]);
   const older = [...reporters].filter(([, one]) => one.older).map(([repo]) => repo);
   return { by_model: sorted(byModel), older_actions: older.sort(), total };
 }
