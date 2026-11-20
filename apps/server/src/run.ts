@@ -39,7 +39,7 @@ import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type
 import { demoFrom, reportsShownIn } from "./demo.ts";
 import { tidy } from "./limits.ts";
 import { purgeDeletedOrgs } from "./orgs.ts";
-import { weighKeptSome } from "./pulls.ts";
+import { type SessionAt, weighKeptSome } from "./pulls.ts";
 import {
   github,
   google,
@@ -288,7 +288,9 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
         `SELECT DISTINCT org_id FROM pull_sessions WHERE opened_matched IS NOT NULL AND opened_kept IS NULL`,
       );
       for (const { org_id } of orgs) {
-        while ((await db.asOrg(org_id, (tx) => weighKeptSome(tx))) > 0);
+        let after: SessionAt | null = null;
+        do after = await db.asOrg(org_id, (tx) => weighKeptSome(tx, after));
+        while (after);
       }
     })().catch((err) => {
       console.error("weighing pull requests' surviving lines failed:", err);

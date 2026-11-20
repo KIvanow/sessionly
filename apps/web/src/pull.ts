@@ -42,11 +42,15 @@ export function pullCostNote(c: PullCost | null): string {
   ]
     .filter(Boolean)
     .join("; ");
-  // Review replaced every agent line it was opened with: what those cost is in no other figure here.
+  // Review replaced every agent line it was opened with, or every one of a session with a cost: what
+  // those cost is in no other figure here.
+  const left = c.opened_surviving_lines ?? 0;
   const gone =
-    c.opened_usd != null && c.per_surviving_line_usd == null
-      ? `none of the agent lines it was opened with is left: they cost ${opened}${usdOf(c.opened_usd)}`
-      : null;
+    c.opened_usd == null || c.per_surviving_line_usd != null
+      ? null
+      : left === 0
+        ? `none of the agent lines it was opened with is left: they cost ${opened}${usdOf(c.opened_usd)}`
+        : `none of the agent lines it was opened with that have a cost is left: they cost ${opened}${usdOf(c.opened_usd)}; ${count(left)} of sessions with none ${left === 1 ? "is" : "are"}`;
   const partial =
     c.sessions_with_cost_partial > 0
       ? `the cost of ${count(c.sessions_with_cost_partial)} ${c.sessions_with_cost_partial === 1 ? "session leaves" : "sessions leave"} requests out`
@@ -64,7 +68,9 @@ export function pullCostNote(c: PullCost | null): string {
     // A cost that leaves requests out, over all of that session's lines, is a floor for each.
     c.per_agent_line_usd != null ? `${unsure(c.sessions_with_cost_partial > 0, c.estimated)}${usdEach(c.per_agent_line_usd)} per agent line` : null,
     // There when the cost now is not: the lines with a cost went, and ones without stayed.
-    c.per_surviving_line_usd != null ? `${opened}${usdEach(c.per_surviving_line_usd)} per line that survived review` : null,
+    c.per_surviving_line_usd != null
+      ? `${unsure(c.per_surviving_line_is_floor, c.opened_estimated)}${usdEach(c.per_surviving_line_usd)} per line that survived review`
+      : null,
   ];
   return [...each, gone, missing, partial, unshared].filter(Boolean).join("; ");
 }

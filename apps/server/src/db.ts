@@ -859,6 +859,10 @@ const MIGRATIONS: string[] = [
   // those still there, in any of its pull requests, count as (see `weighKept`
   // in pulls.ts). Null from before, until the pull request is matched again.
   `ALTER TABLE pull_sessions ADD COLUMN opened_kept double precision`,
+  // And how many of those lines are still in that pull request itself, a line
+  // as often as both have it: what a session from before these were kept is
+  // taken not to have, of the lines that survived there.
+  `ALTER TABLE pull_sessions ADD COLUMN opened_here integer`,
 ];
 
 /**

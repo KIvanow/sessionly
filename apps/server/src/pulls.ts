@@ -358,6 +358,24 @@ export function weighKept(
   });
 }
 
+/** How many of the lines `opened` has are in `now` too, a line as often as both have it. */
+function keptIn(opened: Lines | null, now: Lines | null): number | null {
+  if (!opened || !now) return null;
+  let kept = 0;
+  for (const [path, hashes] of Object.entries(opened)) {
+    const left = new Map<string, number>();
+    // (A file may be called `constructor`, which every object has already.)
+    for (const hash of Object.hasOwn(now, path) ? now[path]! : []) left.set(hash, (left.get(hash) ?? 0) + 1);
+    for (const hash of hashes) {
+      const n = left.get(hash) ?? 0;
+      if (n === 0) continue;
+      left.set(hash, n - 1);
+      kept += 1;
+    }
+  }
+  return kept;
+}
+
 const FEEDBACK_KINDS = ["review", "inline", "conversation"];
 const REVIEW_STATES = ["approved", "changes_requested", "commented", "dismissed"];
 /** `X.Y.Z`, each number at most 9 digits, or that with a pre-release suffix of at most 50 characters. */
@@ -1215,7 +1233,7 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
   if (touched.length === 0) return;
   const rows = await db.query(
     `SELECT o.repo, o.number, o.machine_id, o.source, o.session_id, o.lines, o.weight, o.matched,
-            o.opened_lines, o.opened_weight, o.opened_matched, o.opened_kept, r.state <> 'closed' AS live,
+            o.opened_lines, o.opened_weight, o.opened_matched, o.opened_kept, o.opened_here, r.state <> 'closed' AS live,
             r.first_event = 'opened' AS from_open
      FROM jsonb_to_recordset($2::jsonb) AS k(machine_id text, source text, session_id text)
      JOIN pull_sessions o ON o.org_id = $1 AND o.machine_id = k.machine_id AND o.source = k.source AND o.session_id = k.session_id
@@ -1248,7 +1266,14 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
       // From before the lines it was opened with were counted: nothing to say of them.
       const then = row.opened_lines == null ? null : (opened.get(row) ?? num(row.opened_lines));
       const still = then == null ? null : (kept.get(row) ?? null);
-      if (same(row.weight, weights[i]!) && unchanged(row.opened_weight, then) && unchanged(row.opened_kept, still)) return;
+      const here = still == null ? null : keptIn(lines(row.opened_matched), lines(row.matched));
+      if (
+        same(row.weight, weights[i]!) &&
+        unchanged(row.opened_weight, then) &&
+        unchanged(row.opened_kept, still) &&
+        unchanged(row.opened_here, here)
+      )
+        return;
       changed.push({
         repo: row.repo,
         number: row.number,
@@ -1258,47 +1283,47 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
         weight: weights[i],
         opened_weight: then,
         opened_kept: still,
+        opened_here: here,
       });
     });
   }
   if (changed.length === 0) return;
   await db.query(
-    `UPDATE pull_sessions o SET weight = c.weight, opened_weight = c.opened_weight, opened_kept = c.opened_kept
+    `UPDATE pull_sessions o SET weight = c.weight, opened_weight = c.opened_weight, opened_kept = c.opened_kept,
+            opened_here = c.opened_here
      FROM jsonb_to_recordset($2::jsonb)
        AS c(repo text, number integer, machine_id text, source text, session_id text, weight double precision,
-            opened_weight double precision, opened_kept double precision)
+            opened_weight double precision, opened_kept double precision, opened_here integer)
      WHERE o.org_id = $1 AND o.repo = c.repo AND o.number = c.number AND o.machine_id = c.machine_id
        AND o.source = c.source AND o.session_id = c.session_id`,
     [db.orgId, JSON.stringify(changed)],
   );
 }
 
+/** A session, as `weighKeptSome` goes through them in order. */
+export type SessionAt = { machine_id: string; source: string; session_id: string };
+
 /**
  * Some of the sessions of pull requests seen from the start that were kept
  * before what their opening lines still there count as was (`opened_kept`),
- * weighed again: one transaction a time, so that the organisation's reports
- * wait for no more than one. How many were; 0 when none is left, or none of
- * these could be.
+ * weighed again: those after `after`, in order, one transaction a time, so
+ * that the organisation's reports wait for no more than one. The last one
+ * taken, for the next call to go on from, or null when none is left. One
+ * that weighing leaves as it was is not met again.
  */
-export async function weighKeptSome(db: OrgDb, atOnce = 50): Promise<number> {
-  const unweighed = `r.first_event = 'opened' AND s.opened_matched IS NOT NULL AND s.opened_kept IS NULL`;
-  const some = await db.query<{ machine_id: string; source: string; session_id: string }>(
+export async function weighKeptSome(db: OrgDb, after: SessionAt | null = null, atOnce = 50): Promise<SessionAt | null> {
+  const some = await db.query<SessionAt>(
     `SELECT DISTINCT s.machine_id, s.source, s.session_id FROM pull_sessions s JOIN pull_requests r USING (org_id, repo, number)
-     WHERE s.org_id = $1 AND ${unweighed} LIMIT $2`,
-    [db.orgId, atOnce],
+     WHERE s.org_id = $1 AND r.first_event = 'opened' AND s.opened_matched IS NOT NULL AND s.opened_kept IS NULL
+       AND ($2::jsonb IS NULL OR (s.machine_id, s.source, s.session_id) >
+             ($2::jsonb->>'machine_id', $2::jsonb->>'source', $2::jsonb->>'session_id'))
+     ORDER BY s.machine_id, s.source, s.session_id LIMIT $3`,
+    [db.orgId, after ? JSON.stringify(after) : null, atOnce],
   );
-  if (some.length === 0) return 0;
+  if (some.length === 0) return null;
   await holdPullSessions(db);
   await weighAgain(db, some);
-  // Ones weighing leaves as they were would be met again for ever.
-  const [left] = await db.query(
-    `SELECT count(*) AS n FROM pull_sessions s JOIN pull_requests r USING (org_id, repo, number)
-     JOIN jsonb_to_recordset($2::jsonb) AS k(machine_id text, source text, session_id text)
-       ON s.machine_id = k.machine_id AND s.source = k.source AND s.session_id = k.session_id
-     WHERE s.org_id = $1 AND ${unweighed}`,
-    [db.orgId, JSON.stringify(some)],
-  );
-  return num(left?.n) > 0 ? 0 : some.length;
+  return some[some.length - 1]!;
 }
 
 /**
@@ -1638,6 +1663,8 @@ interface Share {
   opened_known: boolean;
   /** Of `opened_weight`, what those still there in any of its pull requests count as (see `weighKept`): null for one kept before that was. */
   opened_kept: number | null;
+  /** How many of those lines are still in this pull request: null likewise. */
+  opened_here: number | null;
 }
 
 const pullKey = (p: { repo: unknown; number: unknown }): string => `${p.repo}\n${p.number}`;
@@ -1661,7 +1688,7 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
   const rows = await db.query(
     `WITH mine AS (
        SELECT p.repo, p.number, p.machine_id, p.source, p.session_id, p.lines, p.weight, p.opened_lines, p.opened_weight,
-              p.opened_kept, r.state = 'closed' AS closed
+              p.opened_kept, p.opened_here, r.state = 'closed' AS closed
        FROM (${chosen.sql}) c
        JOIN pull_sessions p ON p.org_id = $1 AND p.repo = c.repo AND p.number = c.number
        JOIN pull_requests r ON r.org_id = p.org_id AND r.repo = p.repo AND r.number = p.number),
@@ -1747,6 +1774,7 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
       opened_usd: cost == null ? null : money(opened > 0 ? (cost * opened) / amongOpened : 0),
       opened_known: row.opened_lines != null,
       opened_kept: row.opened_kept == null ? null : Number(row.opened_kept),
+      opened_here: row.opened_here == null ? null : num(row.opened_here),
     };
     const key = pullKey(row as never);
     if (!shares.has(key)) shares.set(key, []);
@@ -1755,8 +1783,12 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
   return shares;
 }
 
-/** What the lines a pull request was opened with cost, unrounded, and what those that survived count as. */
-type Opened = { usd: number; surviving: number };
+/**
+ * What the lines a pull request was opened with cost, unrounded, what those
+ * that survived count as, and whether a session of them with a cost leaves
+ * requests out.
+ */
+type Opened = { usd: number; surviving: number; floor: boolean };
 
 /**
  * What a pull request's sessions cost it, from what is known of each now; and
@@ -1781,22 +1813,29 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   let openedFloor = false;
   let openedEstimated = false;
   let openedKnown = true;
-  // Those lines, and what they count as, of every session; and of those with
-  // a cost, what the ones still there count as, where every one of them says.
-  let openedLines = 0;
+  // What a line of them that survived cost is said only of the sessions with
+  // a cost: a floor only when one of those leaves requests out.
+  let survivingFloor = false;
+  // Of those with a cost, what the lines still there count as, where the
+  // session says (`opened_kept`). Of the lines still here, how many are of a
+  // session that says; and how many lines the others were opened with, and
+  // what those with a cost count as.
   let kept = 0;
-  let unweighed = 0;
+  let hereSaid = 0;
+  let unsaidLines = 0;
+  let unsaidCosted = 0;
   for (const share of shares) {
     const { lines, cost_share_usd: cost, unshared: unsure, uncounted: later } = share.wrote;
     if (!share.opened_known) openedKnown = false;
     else if (share.opened_lines > 0) {
-      openedLines += share.opened_lines;
+      if (share.opened_kept == null) unsaidLines += share.opened_lines;
+      else hereSaid += share.opened_here ?? 0;
       if (share.opened_usd == null) openedFloor = true;
       else {
         opened = (opened ?? 0) + share.opened_usd;
-        if (share.opened_kept == null) unweighed += share.opened_weight;
+        if (share.opened_kept == null) unsaidCosted += share.opened_weight;
         else kept += share.opened_kept;
-        if (share.partial) openedFloor = true;
+        if (share.partial) openedFloor = survivingFloor = true;
         // Shared out with lines that may be the same ones, it is as unsure as the cost now.
         if (share.estimated || unsure) openedEstimated = true;
       }
@@ -1822,10 +1861,12 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   // line opened in two pull requests is half a line in each, at half a line's
   // cost, and counts as surviving in both while either keeps it: between them
   // it is one line, paid for once, wherever it ended up. Of a session whose
-  // lines were not kept, which of them survived is not known, only how many of
-  // all did here: as many of its lines are taken to have survived.
+  // lines were not kept, which of them survived is not known: of the lines
+  // that survived here, those the others do not account for are taken to be
+  // shared out between such sessions as the lines they were opened with.
   const here = a.by.reduce((sum, by) => sum + by.surviving, 0);
-  const surviving = kept + unweighed * (openedLines > 0 ? here / openedLines : 0);
+  const rest = unsaidLines > 0 ? Math.min(1, Math.max(0, here - hereSaid) / unsaidLines) : 0;
+  const surviving = kept + unsaidCosted * rest;
   // What review left can only be said of a pull request seen from the start,
   // and what it was opened with cost only of one whose sessions then were kept.
   if (!openedKnown || pull.first_event !== "opened" || a.first.agent_lines === 0) opened = null;
@@ -1843,10 +1884,12 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
     opened_usd: opened == null ? null : money(opened),
     opened_is_floor: opened != null && openedFloor,
     opened_estimated: opened != null && openedEstimated,
+    opened_surviving_lines: opened == null ? null : here,
     // Not on the page of one that kept none of them itself, though they survived in another.
     per_surviving_line_usd: opened != null && here > 0 && surviving > 0 ? money(opened / surviving) : null,
+    per_surviving_line_is_floor: opened != null && here > 0 && surviving > 0 && survivingFloor,
   };
-  return { cost, opened: opened == null ? null : { usd: opened, surviving } };
+  return { cost, opened: opened == null ? null : { usd: opened, surviving, floor: survivingFloor } };
 }
 
 /** Rows as the list and the summary have them: each with what its sessions cost. */
@@ -2115,7 +2158,7 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       if (pull.cost && its) {
         opened.usd += its.usd;
         opened.surviving += its.surviving;
-        if (pull.cost.opened_is_floor) total.per_surviving_line_is_floor = true;
+        if (its.floor) total.per_surviving_line_is_floor = true;
         if (pull.cost.opened_estimated) total.per_surviving_line_estimated = true;
       }
     }

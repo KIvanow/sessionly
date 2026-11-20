@@ -394,3 +394,19 @@ test("a path is shown only once a pull request reported where it is shown names 
   await importDemo(p.from, p.to, { repo: REPO, hide: [] });
   assert.deepEqual(await paths(), ["src/a.ts"]);
 });
+
+test("a path hidden later is taken out of what a pull request's surviving lines count as too", async () => {
+  const p = await pair("weighed");
+  assert.equal((await send(p.ann, session("w1", REPO))).status, 200);
+  const files = [{ path: "src/a.ts", hashes: [h(1), h(2), h(3)] }, { path: "notes/SECRET-plan.md", hashes: [h(900)] }];
+  assert.equal((await call(p.ci, "PUT", "/prs", pullOf(1, files))).status, 200);
+  const kept = async () => {
+    const [row] = await db.query<{ opened_kept: unknown }>(`SELECT opened_kept FROM pull_sessions WHERE org_id = $1 AND number = 1`, [p.there]);
+    return Number(row!.opened_kept);
+  };
+  await importDemo(p.from, p.to, { repo: REPO, hide: [] });
+  assert.equal(await kept(), 4);
+  // the note's line goes from what it was opened with and from what survived, though matching again finds the same lines
+  await importDemo(p.from, p.to, { repo: REPO, hide: ["notes"] });
+  assert.equal(await kept(), 3);
+});
