@@ -15,7 +15,8 @@ pub struct Price {
     pub output: f64,
     pub cache_read: f64,
     /// Cache writes with a short lifetime and with a long one. `None` where
-    /// the price list gives no write price.
+    /// the price list gives no write price: what is written is then taken
+    /// to cost what input does, as it would have without the cache.
     pub cache_write: Option<(f64, f64)>,
 }
 
@@ -54,23 +55,15 @@ impl Price {
         }
     }
 
-    /// What `tokens` cost in USD, or `None` if they include cache writes and
-    /// there is no write price.
-    pub fn cost(&self, tokens: &Billed) -> Option<f64> {
-        let writes = match (
-            self.cache_write,
-            tokens.cache_write_short + tokens.cache_write_long,
-        ) {
-            (_, 0) => 0.0,
-            (Some((short, long)), _) => {
-                tokens.cache_write_short as f64 * short + tokens.cache_write_long as f64 * long
-            }
-            (None, _) => return None,
-        };
-        let rest = tokens.input as f64 * self.input
+    /// What `tokens` cost in USD.
+    pub fn cost(&self, tokens: &Billed) -> f64 {
+        let (short, long) = self.cache_write.unwrap_or((self.input, self.input));
+        (tokens.input as f64 * self.input
             + tokens.output as f64 * self.output
-            + tokens.cache_read as f64 * self.cache_read;
-        Some((rest + writes) / 1e6)
+            + tokens.cache_read as f64 * self.cache_read
+            + tokens.cache_write_short as f64 * short
+            + tokens.cache_write_long as f64 * long)
+            / 1e6
     }
 }
 
@@ -392,7 +385,7 @@ mod tests {
             cache_write_long: 1_000,
         };
         // 2.00 + 1.00 + 0.20 + 0.025 + 0.005
-        assert!(close(p.cost(&tokens).unwrap(), 3.23));
+        assert!(close(p.cost(&tokens), 3.23));
         // Anthropic's writes are a multiple of input
         let opus = price_for("claude-opus-5", 0).unwrap();
         let writes = Billed {
@@ -400,23 +393,18 @@ mod tests {
             cache_write_long: 1_000_000,
             ..Default::default()
         };
-        assert!(close(opus.cost(&writes).unwrap(), 6.25 + 10.0));
+        assert!(close(opus.cost(&writes), 6.25 + 10.0));
     }
 
     #[test]
-    fn writes_without_a_write_price_are_not_priced() {
+    fn writes_without_a_write_price_cost_what_input_does() {
         let p = price_for("gpt-5.4", 0).unwrap();
-        let read_only = Billed {
-            input: 1_000,
-            cache_read: 1_000,
+        let wrote = Billed {
+            cache_write_short: 1_000_000,
+            cache_write_long: 1_000_000,
             ..Default::default()
         };
-        assert!(p.cost(&read_only).is_some());
-        let wrote = Billed {
-            cache_write_short: 1,
-            ..read_only
-        };
-        assert_eq!(p.cost(&wrote), None);
+        assert!(close(p.cost(&wrote), 2.50 + 2.50));
     }
 
     #[test]

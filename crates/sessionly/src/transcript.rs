@@ -81,7 +81,7 @@ impl Usage {
             cache_write_short: w5,
             cache_write_long: w1,
         };
-        match pricing::price_for(model, prompt).and_then(|p| p.cost(&billed)) {
+        match pricing::price_for(model, prompt).map(|p| p.cost(&billed)) {
             Some(cost) => {
                 // Fast mode is billed at 2x the standard rate.
                 let speed = if usage.get("speed").and_then(Value::as_str) == Some("fast") {

@@ -50,7 +50,9 @@ is read from its output and a patch's files from the patch text.
 - **A new name** for a thread is picked up at the next import or sync.
 - **Cost is an estimate.** Codex records tokens and nothing about money, so the cost shown
   (with a `~`) is each model response's tokens at OpenAI's API list prices: cached input at
-  its own price, reasoning as output. That is a measure of the work done, not what a ChatGPT
+  its own price, reasoning as output, and input written to the cache at the write price where
+  one is listed, else at the input price. The higher price for a prompt over 272K tokens is
+  taken only where the rollout shows one response was that long. That is a measure of the work done, not what a ChatGPT
   plan bills. A model OpenAI lists no price for has none: a session only on such models has
   no cost figure, and one that used them beside others has an estimate that says it leaves
   some requests out.

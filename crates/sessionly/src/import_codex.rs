@@ -56,7 +56,7 @@ use serde_json::{json, Value};
 
 use crate::import::{edit_result, slim_input, Builder};
 use crate::paths::CODEX;
-use crate::session::{Cost, CostSource, ModelUsage};
+use crate::session::{Cost, ModelUsage};
 use crate::transcript::{Facts, SubagentFacts};
 
 /// What is between `rollout-` and `.jsonl` (or `.jsonl.zst`) in a rollout's
@@ -467,6 +467,10 @@ struct Tokens {
     cache_write: u64,
     output: u64,
     reasoning: u64,
+    /// How long the prompt was, which picks the price tier: that of the one
+    /// response these are of, or 0 where that is not known (several added
+    /// up), which takes the shorter one.
+    prompt: u64,
 }
 
 impl Tokens {
@@ -478,7 +482,14 @@ impl Tokens {
             cache_write: n("cache_write_input_tokens"),
             output: n("output_tokens"),
             reasoning: n("reasoning_output_tokens"),
+            prompt: n("input_tokens"),
         }
+    }
+
+    /// Input read neither from the cache nor written to it: Codex's input
+    /// count includes both.
+    fn uncached(&self) -> u64 {
+        self.input.saturating_sub(self.cached + self.cache_write)
     }
 
     /// What was used since `earlier`, or `None` if a count went down.
@@ -489,6 +500,7 @@ impl Tokens {
             cache_write: self.cache_write.checked_sub(earlier.cache_write)?,
             output: self.output.checked_sub(earlier.output)?,
             reasoning: self.reasoning.checked_sub(earlier.reasoning)?,
+            prompt: 0,
         })
     }
 }
@@ -944,7 +956,12 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
                     if now.is_object() {
                         let now = Tokens::of(now);
                         // A total that went down has started again.
-                        let used = now.since(&total).unwrap_or(now);
+                        let mut used = now.since(&total).unwrap_or(Tokens { prompt: 0, ..now });
+                        // What it grew by is one response's only when it is the last response's.
+                        let last = Tokens::of(&p["info"]["last_token_usage"]);
+                        if (Tokens { prompt: 0, ..last }) == used {
+                            used.prompt = last.prompt;
+                        }
                         if used != Tokens::default() {
                             growth.push((model.clone(), used));
                         }
@@ -1355,17 +1372,15 @@ fn priced(model: Option<&str>, tokens: &Tokens) -> Option<f64> {
     if *tokens == Tokens::default() {
         return Some(0.0);
     }
-    let price = crate::pricing::price_for(model?, tokens.input)?;
-    price.cost(&crate::pricing::Billed {
-        input: tokens
-            .input
-            .saturating_sub(tokens.cached + tokens.cache_write),
+    let price = crate::pricing::price_for(model?, tokens.prompt)?;
+    Some(price.cost(&crate::pricing::Billed {
+        input: tokens.uncached(),
         output: tokens.output,
         cache_read: tokens.cached,
         // Codex does not say which lifetime: the shorter one is the default.
         cache_write_short: tokens.cache_write,
         cache_write_long: 0,
-    })
+    }))
 }
 
 /// What the responses of a session cost, as they are added up.
@@ -1389,18 +1404,7 @@ impl Spent {
     /// An estimate, partial if some responses are on a model with no known
     /// price, and none when there is no response it can price.
     fn cost(&self) -> Option<Cost> {
-        (self.counted > self.unpriced).then_some(Cost {
-            total_usd: self.usd,
-            source: if self.unpriced > 0 {
-                CostSource::PartialEstimate
-            } else {
-                CostSource::Estimated
-            },
-            transcript_estimate_usd: self.usd,
-            unpriced_requests: self.unpriced,
-            untracked_usd: None,
-            prompts_covered: None,
-        })
+        (self.counted > self.unpriced).then(|| Cost::estimate(self.usd, self.unpriced))
     }
 }
 
@@ -1427,10 +1431,7 @@ fn add_usage(
         });
     let entry = &mut usage[i];
     entry.requests += 1;
-    // Codex's input count includes what was read from and written to the cache.
-    entry.input_tokens += tokens
-        .input
-        .saturating_sub(tokens.cached + tokens.cache_write);
+    entry.input_tokens += tokens.uncached();
     entry.output_tokens += tokens.output;
     entry.thinking_tokens += tokens.reasoning;
     entry.cache_read_tokens += tokens.cached;
@@ -1545,12 +1546,10 @@ pub fn session(
         for (model, tokens) in &thread.responses {
             own.add(add_usage(&mut usage, model.as_deref(), tokens, &mut spent));
             facts.requests += 1;
-            facts.input_tokens += tokens
-                .input
-                .saturating_sub(tokens.cached + tokens.cache_write);
+            facts.input_tokens += tokens.uncached();
             facts.output_tokens += tokens.output;
         }
-        facts.estimated_cost_usd = (own.counted > own.unpriced).then_some(own.usd);
+        facts.estimated_cost_usd = own.cost().map(|c| c.total_usd);
         subagent_facts.push(facts);
     }
 
@@ -1590,6 +1589,7 @@ pub fn session(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::session::CostSource;
     use std::io::Write;
 
     pub(crate) const MAIN: &str = "019a8f00-0000-7000-8000-000000000001";
@@ -1930,11 +1930,16 @@ pub(crate) mod tests {
             input: 300_000,
             cached: 200_000,
             output: 1_000,
+            prompt: 300_000,
             ..Default::default()
         };
         // 100K x $4 + 200K x $0.20 + 1K x $15
         let cost = priced(Some("gpt-6.1-sol"), &long).unwrap();
         assert!((cost - 0.455).abs() < 1e-12);
+        // as much over several responses, none of which is known to be that long: the shorter tier
+        let several = Tokens { prompt: 0, ..long };
+        // 100K x $2 + 200K x $0.10 + 1K x $10
+        assert!((priced(Some("gpt-6.1-sol"), &several).unwrap() - 0.23).abs() < 1e-12);
         let written = Tokens {
             input: 1_000,
             cache_write: 1_000,
@@ -1942,8 +1947,8 @@ pub(crate) mod tests {
         };
         // all of it written to the cache, at the 30-minute price
         assert!((priced(Some("gpt-6.1-sol"), &written).unwrap() - 0.0025).abs() < 1e-12);
-        // no write price listed
-        assert_eq!(priced(Some("gpt-5.4"), &written), None);
+        // no write price listed: at the input price
+        assert!((priced(Some("gpt-5.4"), &written).unwrap() - 0.0025).abs() < 1e-12);
     }
 
     #[test]
@@ -1959,8 +1964,7 @@ pub(crate) mod tests {
             let name = format!("{}.zst", from.file_name().unwrap().to_string_lossy());
             let to = packed.join("sessions/2026/11/16").join(name);
             fs::create_dir_all(to.parent().unwrap()).unwrap();
-            let level = ruzstd::encoding::CompressionLevel::Fastest;
-            let bytes = ruzstd::encoding::compress_to_vec(fs::File::open(from).unwrap(), level);
+            let bytes = zstd::encode_all(fs::File::open(from).unwrap(), 1).unwrap();
             fs::write(&to, bytes).unwrap();
             to
         };
@@ -2326,6 +2330,52 @@ pub(crate) mod tests {
             (requests("model-a"), requests("model-b")),
             (Some(1), Some(1))
         );
+    }
+
+    #[test]
+    fn a_running_total_is_priced_long_only_for_one_long_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!(
+            "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{MAIN}.jsonl"
+        ));
+        let count = |second: u32, total: u64, last: Option<u64>| {
+            let mut info = json!({ "total_token_usage": { "input_tokens": total } });
+            if let Some(last) = last {
+                info["last_token_usage"] = json!({ "input_tokens": last });
+            }
+            event(second, "token_count", json!({ "info": info }))
+        };
+        let cost = |counts: Vec<Value>| {
+            let mut rows = vec![
+                meta(MAIN, json!({})),
+                event(1, "user_message", json!({ "message": "go" })),
+                row(
+                    1,
+                    "turn_context",
+                    json!({ "turn_id": "t1", "cwd": "/w", "model": "gpt-6.1-sol" }),
+                ),
+            ];
+            rows.extend(counts);
+            write(&path, &rows);
+            let (events, facts) = session(&path, &[], None).unwrap();
+            let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+            s.cost.unwrap().total_usd
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // one response of 300K: the long tier, at $4
+        assert!(close(cost(vec![count(2, 300_000, Some(300_000))]), 1.2));
+        // two of 150K reported as one step: neither is long, so $2
+        assert!(close(cost(vec![count(2, 300_000, Some(150_000))]), 0.6));
+        // nor is one with no last response to tell it by
+        assert!(close(cost(vec![count(2, 300_000, None)]), 0.6));
+        // after the total starts again, what it holds is not one response's
+        let again = vec![
+            count(2, 100_000, Some(100_000)),
+            count(3, 300_000, Some(200_000)),
+            count(4, 290_000, Some(150_000)),
+        ];
+        // 100K + 200K + 290K, each at $2
+        assert!(close(cost(again), 1.18));
     }
 
     #[test]

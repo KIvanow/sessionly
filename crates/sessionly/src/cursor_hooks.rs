@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::pricing;
-use crate::session::{Cost, CostSource, ModelUsage};
+use crate::session::{Cost, ModelUsage};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
@@ -257,7 +257,7 @@ pub fn usage(turns: &[Turn], prompts: u64) -> (Vec<ModelUsage>, Option<Cost>) {
         };
         // A turn is many requests: its tokens say nothing of how long any one
         // prompt was, so the price for a short one is taken.
-        match pricing::price_for(&model, 0).and_then(|p| p.cost(&billed)) {
+        match pricing::price_for(&model, 0).map(|p| p.cost(&billed)) {
             Some(cost) => {
                 entry.estimated_cost_usd = Some(entry.estimated_cost_usd.unwrap_or(0.0) + cost);
                 total += cost;
@@ -267,17 +267,9 @@ pub fn usage(turns: &[Turn], prompts: u64) -> (Vec<ModelUsage>, Option<Cost>) {
     }
     by_model.sort_by_key(|u| std::cmp::Reverse(u.requests));
     // Tokens alone, all on models without a known price, give no figure.
-    let cost = (covered > unpriced).then_some(Cost {
-        total_usd: total,
-        source: if unpriced > 0 {
-            CostSource::PartialEstimate
-        } else {
-            CostSource::Estimated
-        },
-        transcript_estimate_usd: total,
-        unpriced_requests: unpriced,
-        untracked_usd: None,
+    let cost = (covered > unpriced).then(|| Cost {
         prompts_covered: (covered < prompts).then_some(covered),
+        ..Cost::estimate(total, unpriced)
     });
     (by_model, cost)
 }
@@ -285,6 +277,7 @@ pub fn usage(turns: &[Turn], prompts: u64) -> (Vec<ModelUsage>, Option<Cost>) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::session::CostSource;
     use serde_json::{json, Value};
     use std::io::Write;
 
@@ -540,7 +533,7 @@ pub(crate) mod tests {
             turn("gpt-6.1-sol", read),
             turn("gpt-5.3-codex-high", read),
             turn("composer-2.5-fast", read),
-            // Cursor lists no cache write price for its own models
+            // Cursor lists no cache write price for its own models: at the input price
             turn("composer-2.5-fast", wrote),
         ];
         let (by_model, cost) = usage(&turns, 4);
@@ -553,13 +546,13 @@ pub(crate) mod tests {
         assert!(close(of("gpt-6.1-sol"), 3400e-6));
         // 1000 x $1.75 + 100 x $14 + 4000 x $0.175
         assert!(close(of("gpt-5.3-codex-high"), 3850e-6));
-        // 1000 x $3 + 100 x $15 + 4000 x $0.50, the one turn it can price
-        assert!(close(of("composer-2.5-fast"), 6500e-6));
+        // 1000 x $3 + 100 x $15 + 4000 x $0.50, and the other with 10 x $3 more
+        assert!(close(of("composer-2.5-fast"), 6500e-6 + 6530e-6));
         let cost = cost.unwrap();
         assert_eq!(
             (cost.source, cost.unpriced_requests),
-            (CostSource::PartialEstimate, 1)
+            (CostSource::Estimated, 0)
         );
-        assert!(close(cost.total_usd, 13_750e-6));
+        assert!(close(cost.total_usd, 20_280e-6));
     }
 }
