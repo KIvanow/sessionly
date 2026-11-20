@@ -275,3 +275,68 @@ export function figureShift(
   if (!latest?.change.reason || !previous || previous.agent_lines === latest.agent_lines) return null;
   return `Was ${amount(previous.agent_lines)} until ${when(latest.at)}: ${figureBecause(latest.change.reason)}.`;
 }
+
+type AfterMerge = { checkpoint: "7d" | "30d"; agent_lines: number; surviving: number; age_seconds: number };
+const AFTER_DAYS = { "7d": 7, "30d": 30 } as const;
+
+/**
+ * A pull request's reports and the counts made after it was merged, as one
+ * list by time, newest first: two kinds of thing, shown in one table. A
+ * count made at the same moment as a report comes after it.
+ */
+export function timeline<R extends { at: string }, C extends { at: string }>(
+  history: readonly R[],
+  counts: readonly C[] | null | undefined,
+): ({ at: string; report: R; count?: undefined } | { at: string; count: C; report?: undefined })[] {
+  return [...history.map((report) => ({ at: report.at, report })), ...(counts ?? []).map((count) => ({ at: count.at, count }))].sort(
+    (a, b) => Date.parse(b.at) - Date.parse(a.at) || Number("count" in a) - Number("count" in b),
+  );
+}
+
+/** What a count after merging is called in the list: "7 days after merge". */
+export const afterMergeName = (row: Pick<AfterMerge, "checkpoint">): string => `${AFTER_DAYS[row.checkpoint]} days after merge`;
+
+/**
+ * A count after merging, in words: "30 days after merge: 498 of 520 agent
+ * lines still there". One counted a day or more late says on which day.
+ */
+export function afterMergeLine(row: AfterMerge, amount: (n: number) => string = String): string {
+  const days = AFTER_DAYS[row.checkpoint];
+  const day = Math.floor(row.age_seconds / 86_400);
+  const late = day > days ? ` (counted on day ${day})` : "";
+  return `${days} days after merge: ${amount(row.surviving)} of ${amount(row.agent_lines)} agent ${row.agent_lines === 1 ? "line" : "lines"} still there${late}`;
+}
+
+/**
+ * The tile of a merged pull request's agent lines 30 days on: the share,
+ * and what it is of. Until that count is made, a dash, with the count at 7
+ * days if there is one, or when the first is to come.
+ */
+export function afterMergeTile(
+  rows: readonly AfterMerge[] | null | undefined,
+  mergedAt: string | null,
+  share: (part: number, whole: number) => string,
+  amount: (n: number) => string = String,
+  now: number = Date.now(),
+): { value: string; part: number | null; note: string } {
+  const at = (age: "7d" | "30d") => (rows ?? []).find((row) => row.checkpoint === age);
+  const of = (row: AfterMerge) => `${amount(row.surviving)} of ${amount(row.agent_lines)} agent lines`;
+  const seven = at("7d");
+  const thirty = at("30d");
+  if (thirty) {
+    const day = Math.floor(thirty.age_seconds / 86_400);
+    return {
+      value: share(thirty.surviving, thirty.agent_lines),
+      part: thirty.agent_lines > 0 ? thirty.surviving / thirty.agent_lines : null,
+      note: `${of(thirty)}${day > 30 ? `, counted on day ${day}` : ""}${seven ? `; ${share(seven.surviving, seven.agent_lines)} at 7 days` : ""}`,
+    };
+  }
+  const age = mergedAt ? (now - Date.parse(mergedAt)) / 86_400_000 : NaN;
+  if (seven) {
+    // Past day 30 with no count is not waiting for the day: no run has counted it.
+    const thirtieth = age >= 30 ? "not counted at 30 days" : "not 30 days yet";
+    return { value: "–", part: null, note: `${thirtieth}; at 7 days ${share(seven.surviving, seven.agent_lines)}, ${of(seven)}` };
+  }
+  if (age < 7) return { value: "–", part: null, note: "counted 7 and 30 days after it was merged" };
+  return { value: "–", part: null, note: "not counted: a scheduled run of the Action does it, for lines whose sessions are kept" };
+}

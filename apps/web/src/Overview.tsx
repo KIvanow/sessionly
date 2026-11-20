@@ -3,7 +3,7 @@ import { Fragment, useId, useState, type ReactNode } from "react";
 import { query } from "./api.ts";
 import { scopeParams, type Pick, type Scope } from "./App.tsx";
 import { CostChart } from "./CostChart.tsx";
-import { activeTime, compact, count, dateTime, duration, groupCost, linesKept, modelName, percent, repoName, rewriteRate, share, toolName, usd, usdCompact } from "./format.ts";
+import { activeTime, compact, count, dateTime, duration, groupCost, keptAt, keptOf, linesKept, modelName, percent, repoName, rewriteRate, share, toolName, usd, usdCompact } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { useApi } from "./useApi.ts";
 
@@ -71,7 +71,7 @@ export function Overview({ token, scope, showUsers, onPick, onSignOut }: Props) 
       <CostChart days={byDay.data.groups} picked={scope.pick} onPick={onPick} />
       {/* Worth a table only once there is more than one agent to compare. */}
       {(byTool.data?.groups.length ?? 0) > 1 && (
-        <Breakdown title="By tool" heading="Tool" summary={byTool.data} name={toolName} models />
+        <Breakdown title="By tool" heading="Tool" summary={byTool.data} name={toolName} models kept />
       )}
       {showUsers && <Breakdown title="By person" heading="Person" summary={byUser.data} tools />}
       <Breakdown
@@ -84,7 +84,7 @@ export function Overview({ token, scope, showUsers, onPick, onSignOut }: Props) 
         hint="Open a repository to see the agents that worked in it and the files they changed."
         detail={(g) => <RepoDetail token={token} scope={scope} repo={g.key} tools={g.tools} onSignOut={onSignOut} />}
       />
-      <Breakdown title="By model" heading="Model" summary={byModel.data} name={modelName} />
+      <Breakdown title="By model" heading="Model" summary={byModel.data} name={modelName} kept />
     </>
   );
 }
@@ -139,12 +139,22 @@ function Headline({ total }: { total: Totals }) {
           part={rewriteRate(total.rewrite)}
           note={`${count(total.rewrite.files_rewritten)} of ${count(total.rewrite.files_measured)} measured`}
         />
-        <Tile
-          label="Agent lines still there"
-          value={percent(linesKept(total.rewrite))}
-          part={linesKept(total.rewrite)}
-          note={`of ${compact(total.rewrite.lines_added)} tracked lines`}
-        />
+        {/* At a fixed age the sessions are compared like for like. Until one has reached it, the latest measurement of each. */}
+        {total.kept_7d?.sessions_reached > 0 ? (
+          <Tile
+            label="Agent lines kept at 7 days"
+            value={keptAt(total.kept_7d)}
+            part={share(total.kept_7d.lines_surviving, total.kept_7d.lines_added)}
+            note={`${keptOf(total.kept_7d)} measured then; ${percent(linesKept(total.rewrite))} as last measured`}
+          />
+        ) : (
+          <Tile
+            label="Agent lines still there"
+            value={percent(linesKept(total.rewrite))}
+            part={linesKept(total.rewrite)}
+            note={`of ${compact(total.rewrite.lines_added)} tracked lines, as last measured; none at 7 days yet`}
+          />
+        )}
       </div>
     </section>
   );
@@ -158,6 +168,8 @@ export function Tile(props: {
   part?: number | null;
   /** A figure beside the note, with what it means on hover or focus. */
   aside?: { text: string; why: string } | null;
+  /** Something more under the note. */
+  children?: ReactNode;
 }) {
   const { label, value, note, part, aside } = props;
   const why = useId();
@@ -182,6 +194,7 @@ export function Tile(props: {
           </span>
         </span>
       )}
+      {props.children}
     </div>
   );
 }
@@ -248,6 +261,7 @@ function RepoTools(props: RepoProps) {
             <th scope="col" className="num">Lines</th>
             <th scope="col" className="num">Files rewritten</th>
             <th scope="col" className="num">Lines kept</th>
+            <KeptHeads />
           </tr>
         </thead>
         <tbody>
@@ -267,6 +281,7 @@ function RepoTools(props: RepoProps) {
                   : "–"}
               </td>
               <td className="num">{percent(linesKept(g.rewrite))}</td>
+              <KeptCells group={g} />
             </tr>
           ))}
         </tbody>
@@ -336,6 +351,33 @@ function RepoFiles(props: RepoProps) {
   );
 }
 
+/** The headings of the two columns of what was kept at a fixed age. */
+function KeptHeads() {
+  const title = (days: number) =>
+    `Of the agent's lines, the share still in the files ${days} days after each session ended. ` +
+    "Only sessions measured at that age count, and the line below says how many of the sessions with measured lines that is.";
+  return (
+    <>
+      <th scope="col" className="num" title={title(7)}>Kept @7d</th>
+      <th scope="col" className="num" title={title(30)}>Kept @30d</th>
+    </>
+  );
+}
+
+/** What a group's sessions kept at 7 and at 30 days, each with how many sessions that is of. */
+function KeptCells({ group }: { group: Totals }) {
+  return (
+    <>
+      {[group.kept_7d, group.kept_30d].map((kept, i) => (
+        <td className="num" key={i}>
+          {keptAt(kept)}
+          <span className="under">{keptOf(kept)}</span>
+        </td>
+      ))}
+    </>
+  );
+}
+
 function Breakdown(props: {
   title: string;
   heading: string;
@@ -344,6 +386,8 @@ function Breakdown(props: {
   /** Show the agents, or the models, behind each row. */
   tools?: boolean;
   models?: boolean;
+  /** Show what was kept at 7 and at 30 days: where agents or models are compared. */
+  kept?: boolean;
   /** If given, each row can be opened to show this below it. */
   detail?: (group: Totals) => ReactNode;
   hint?: string;
@@ -396,10 +440,11 @@ function Breakdown(props: {
           : "–"}
       </td>
       <td className="num">{percent(linesKept(g.rewrite))}</td>
+      {props.kept && <KeptCells group={g} />}
     </tr>
     {props.detail && open.has(g.key) && (
       <tr className="detail">
-        <td colSpan={9 + (props.tools ? 1 : 0) + (props.models ? 1 : 0)}>{props.detail(g)}</td>
+        <td colSpan={9 + (props.tools ? 1 : 0) + (props.models ? 1 : 0) + (props.kept ? 2 : 0)}>{props.detail(g)}</td>
       </tr>
     )}
     </Fragment>
@@ -430,6 +475,7 @@ function Breakdown(props: {
               <th scope="col" className="num">Files changed</th>
               <th scope="col" className="num">Files rewritten</th>
               <th scope="col" className="num">Lines kept</th>
+              {props.kept && <KeptHeads />}
             </tr>
           </thead>
           <tbody>{rows.map(row)}</tbody>

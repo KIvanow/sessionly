@@ -1791,6 +1791,124 @@ test("what a session's opening lines still there count as is shared out as they 
   assert.deepEqual(weighKept([{ live: true, matched: null }], [{ live: true, matched: both }]), [null]);
 });
 
+test("a merged pull request's agent lines are counted again on its branch 7 and 30 days after", async () => {
+  const repo = "github.com/acme/after";
+  const q = encodeURIComponent(repo);
+  const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+  const day = 86_400;
+  // The organisation began counting 20 days ago.
+  await db.query(`UPDATE orgs SET after_merge_since = now() - interval '20 days' WHERE id = 'default'`);
+  const upload = (id: string, lines: { path: string; hashes: string[] }[]) => {
+    const s = session(id, "claude-code", "claude-opus-5-5", ago(50), lines.map((l) => ({ ...l, model: null })));
+    s.session.repo.remote = repo;
+    return call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, s);
+  };
+  const merged = (number: number, days: number, files: unknown[], more: Record<string, unknown> = {}) =>
+    call(tokens.ci, "PUT", "/prs", report({ repo, number, state: "merged", event: "closed", base_ref: "main", created_at: ago(days + 2), merged_at: ago(days), files, ...more }));
+  const due = async (token = tokens.ci) => (await call(token, "GET", `/prs/due?repo=${q}`)).body.due;
+  const count = (number: number, files: unknown[], token = tokens.ci, checkpoints: string[] = ["7d", "30d"]) =>
+    call(token, "PUT", "/prs/after-merge", { repo, number, checkpoints, files });
+  const detail = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=${number}`)).body;
+
+  assert.equal((await upload("am-1", [file("a.ts", 1, 2, 3), file("b.ts", 4)])).status, 200);
+  assert.equal((await upload("am-3", [file("c.ts", 30, 31)])).status, 200);
+  // #1 merged 8 days ago, with 4 agent lines in two files, and one line nobody's session wrote.
+  assert.equal((await merged(1, 8, [file("a.ts", 1, 2, 3, 9), file("b.ts", 4), file("docs.md", 70)])).body.attribution.now.agent_lines, 4);
+  // #2 merged 2 days ago: no age reached. #3 merged 40 days ago: it was 7 days old before any were counted.
+  assert.equal((await merged(2, 2, [file("a.ts", 1)])).status, 200);
+  assert.equal((await merged(3, 40, [file("c.ts", 30, 31)])).body.attribution.now.agent_lines, 2);
+  // #4 has no agent lines to look for, and #5 is not merged.
+  assert.equal((await merged(4, 8, [file("docs.md", 71)])).status, 200);
+  assert.equal((await call(tokens.ci, "PUT", "/prs", report({ repo, number: 5, created_at: ago(9), files: [file("c.ts", 30)] }))).status, 200);
+
+  // The longest merged first: which ages, and which files to read. No hashes.
+  assert.deepEqual(await due(), [
+    { number: 3, base_ref: "main", checkpoints: ["30d"], paths: ["c.ts"] },
+    { number: 1, base_ref: "main", checkpoints: ["7d"], paths: ["a.ts", "b.ts"] },
+  ]);
+  assert.deepEqual(await due(tokens.admin), await due());
+  assert.equal((await call(tokens.ann, "GET", `/prs/due?repo=${q}`)).status, 403);
+  assert.equal((await count(1, [], tokens.ann)).status, 403);
+  assert.equal((await call(tokens.ci, "GET", "/prs/due")).status, 400);
+
+  // A file asked for and left out would count as gone: refused, and nothing is kept.
+  const partial = await count(1, [file("a.ts", 1, 2, 3)]);
+  assert.equal(partial.status, 422);
+  assert.match(partial.body.error, /leaves out 1 of the files asked for \(b\.ts\)/);
+  assert.equal((await count(5, [file("c.ts", 30)])).status, 422);
+  assert.equal((await count(99, [])).status, 404);
+  assert.equal((await count(1, [{ path: "a.ts", hashes: ["the line itself"] }])).status, 422);
+  // The ages the files were read for are said, and are the only ones kept.
+  assert.equal((await call(tokens.ci, "PUT", "/prs/after-merge", { repo, number: 1, files: [] })).status, 422);
+  assert.equal((await count(1, [], tokens.ci, ["90d"])).status, 422);
+  assert.deepEqual((await count(1, [file("a.ts", 1), file("b.ts")], tokens.ci, ["30d"])).body.stored, []);
+
+  // On main now: a.ts has two of its three agent lines (one of them twice), and b.ts is gone.
+  const first = await count(1, [file("a.ts", 1, 3, 3, 77), file("b.ts")]);
+  assert.equal(first.status, 200);
+  assert.equal(first.body.stored.length, 1);
+  const seven = first.body.stored[0];
+  assert.deepEqual([seven.checkpoint, seven.agent_lines, seven.surviving], ["7d", 4, 2]);
+  assert.ok(seven.age_seconds >= 8 * day && seven.age_seconds < 8 * day + 600, String(seven.age_seconds));
+
+  let page = await detail(1);
+  assert.deepEqual(page.after_merge, [seven]);
+  // The pull request's own figures are what they were, and so is the history of its reports: a count is not one.
+  assert.equal(page.attribution.now.agent_lines, 4);
+  assert.deepEqual(page.history.map((row: any) => [row.event, row.agent_lines]), [["closed", 4]]);
+
+  // Counted again with everything back: the count of day 8 stays, and it is not asked for again.
+  assert.deepEqual((await count(1, [file("a.ts", 1, 2, 3), file("b.ts", 4)])).body.stored, []);
+  assert.deepEqual((await detail(1)).after_merge, [seven]);
+  assert.deepEqual((await due()).map((pull: any) => pull.number), [3]);
+
+  // A session uploaded since is compared with the report before it, not with the count on main.
+  assert.equal((await upload("am-late", [file("docs.md", 70)])).status, 200);
+  page = await detail(1);
+  assert.deepEqual(page.history.map((row: any) => row.event), ["match", "closed"]);
+  assert.equal(page.history[0].change.reason, "1 session uploaded since: +1 agent lines");
+  assert.deepEqual([page.history[0].change.agent_lines_before, page.history[0].agent_lines], [4, 5]);
+  assert.deepEqual(page.after_merge, [seven]);
+
+  // 31 days after merging, the next age is due: counted of the lines it has now, with the age it really is.
+  await db.query(`UPDATE pull_requests SET merged_at = now() - interval '31 days' WHERE repo = $1 AND number = 1`, [repo]);
+  assert.deepEqual((await due()).find((pull: any) => pull.number === 1), { number: 1, base_ref: "main", checkpoints: ["30d"], paths: ["a.ts", "b.ts", "docs.md"] });
+  // Files read for 7 days, when 30 was not due yet, say nothing of day 30 however late they arrive.
+  assert.deepEqual((await count(1, [file("a.ts"), file("b.ts"), file("docs.md")], tokens.ci, ["7d"])).body.stored, []);
+  const later = await count(1, [file("a.ts", 1), file("b.ts"), file("docs.md", 70)]);
+  const thirty = later.body.stored[0];
+  assert.deepEqual([later.body.stored.length, thirty.checkpoint, thirty.agent_lines, thirty.surviving], [1, "30d", 5, 2]);
+  assert.ok(thirty.age_seconds >= 31 * day);
+  assert.deepEqual((await detail(1)).after_merge, [seven, thirty]);
+
+  // #3 missed nothing it could have had: 30 days only, taken on day 40.
+  const old = await count(3, [file("c.ts", 30, 31)]);
+  assert.deepEqual(old.body.stored.map((row: any) => [row.checkpoint, row.agent_lines, row.surviving, Math.floor(row.age_seconds / day)]), [["30d", 2, 2, 40]]);
+  assert.deepEqual(await due(), []);
+
+  // Many reports later the counts are still there: they are no part of the 50 reports kept.
+  for (let i = 0; i < 52; i++) {
+    assert.equal((await merged(3, 40, [file("c.ts", 30, 31)], { commits: 2 + i })).status, 200);
+  }
+  page = await detail(3);
+  assert.equal(page.history.length, 50);
+  assert.deepEqual(page.after_merge.map((row: any) => row.checkpoint), ["30d"]);
+  // What is looked for is what is counted: the hashes kept, whatever the number of lines beside them says.
+  // (Where a repository is shown, files not shown are taken out of the hashes before it is matched again.)
+  assert.equal((await merged(6, 8, [file("c.ts", 30, 31)])).body.attribution.now.agent_lines, 2);
+  await db.query(`UPDATE pull_sessions SET matched = '{"c.ts": ["${h(30)}"]}' WHERE repo = $1 AND number = 6`, [repo]);
+  assert.deepEqual((await count(6, [file("c.ts", 30, 31)])).body.stored.map((row: any) => [row.agent_lines, row.surviving]), [[1, 1]]);
+  // and one with no hashes kept has nothing to look for
+  assert.equal((await merged(7, 8, [file("c.ts", 30, 31)])).status, 200);
+  await db.query(`UPDATE pull_sessions SET matched = '{}' WHERE repo = $1 AND number = 7`, [repo]);
+  assert.deepEqual(await due(), []);
+  assert.deepEqual((await count(7, [file("c.ts", 30, 31)])).body.stored, []);
+  // Another organisation sees none of them.
+  await newOrg(db, "org-after");
+  assert.deepEqual(await db.asOrg("org-after", (scoped) => scoped.query(`SELECT 1 FROM pull_after_merge`)), []);
+  assert.equal((await db.asOrg("default", (scoped) => scoped.query(`SELECT 1 FROM pull_after_merge WHERE repo = $1`, [repo]))).length, 4);
+});
+
 test("pull requests and sessions from before the cost was shown have one after the upgrade", async (t) => {
   const fresh = await testDbUrl();
   const folder = fresh === "memory://" ? mkdtempSync(join(tmpdir(), "sessionly-cost-")) : undefined;

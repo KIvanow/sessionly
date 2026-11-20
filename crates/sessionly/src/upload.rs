@@ -169,6 +169,7 @@ pub fn build(
         } else {
             Vec::new()
         },
+        checkpoints: ledger.checkpoints_of(&session.session_id)?,
     })
 }
 
@@ -865,7 +866,8 @@ fn url_segment(text: &str) -> String {
 
 /// Hash of a payload's content, used to skip sessions the server already has.
 /// The time of the rewrite measurement is left out: re-measuring with the same
-/// result is not a change.
+/// result is not a change. A checkpoint is in it whole, time and all: it is
+/// written once, so a new one is the only change it brings, and is sent.
 pub fn payload_hash(upload: &Upload) -> String {
     let mut upload = upload.clone();
     if let Some(rewrite) = &mut upload.rewrite {
@@ -1146,6 +1148,7 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
                 ..Default::default()
             }),
             lines: Vec::new(),
+            checkpoints: Vec::new(),
         };
         let before = payload_hash(&upload);
         upload.rewrite.as_mut().unwrap().measured_at = Some(Utc::now());
@@ -1153,6 +1156,102 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
         upload.rewrite.as_mut().unwrap().lines_surviving = 3;
         assert_ne!(payload_hash(&upload), before);
         assert_eq!(before.len(), 64);
+    }
+
+    #[test]
+    fn a_new_checkpoint_is_sent_once_and_none_changes_nothing() {
+        use crate::ledger::Fingerprint;
+        use crate::rewrite::FileLines;
+        use crate::session::{Content, FileTouched, Repo};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.rs");
+        std::fs::write(&file, "one();\ntwo();\n").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let mut ledger = Ledger::open(&dir.path().join("ledger.db")).unwrap();
+        let ended = Utc::now();
+        let session = Session {
+            session_id: "s".into(),
+            ended_at: Some(ended),
+            repo: Some(Repo {
+                root: dir.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            }),
+            files: vec![FileTouched {
+                path: path.clone(),
+                writes: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let lines = [FileLines {
+            path,
+            by_model: vec![(
+                None,
+                ["one();", "two();"]
+                    .iter()
+                    .filter_map(|l| crate::rewrite::line_hash(l))
+                    .collect(),
+            )],
+        }];
+        let built_from = Fingerprint {
+            built_with: "test".into(),
+            raw_bytes: 1,
+            transcript_path: None,
+            transcript_bytes: 0,
+        };
+        ledger.upsert(&session, &built_from, &lines).unwrap();
+        let day = chrono::Duration::days(1);
+        let hash = |ledger: &Ledger| {
+            let upload = build(ledger, &session, Content::Metadata, false).unwrap();
+            (payload_hash(&upload), upload)
+        };
+
+        // Measured before it is a day old: as an older sessionly sent it.
+        crate::rewrite::measure(&mut ledger, ended + day / 2).unwrap();
+        let (young, upload) = hash(&ledger);
+        assert!(upload.checkpoints.is_empty());
+        assert!(!serde_json::to_string(&upload)
+            .unwrap()
+            .contains("checkpoints"));
+
+        // A day old: the checkpoint is new, and that is a change to send.
+        crate::rewrite::measure(&mut ledger, ended + day * 2).unwrap();
+        let (with_one, upload) = hash(&ledger);
+        assert_ne!(with_one, young);
+        let sent = serde_json::to_value(&upload.checkpoints).unwrap();
+        assert_eq!(sent[0]["checkpoint"], "1d");
+        assert_eq!(
+            (&sent[0]["added"], &sent[0]["surviving"]),
+            (&2.into(), &2.into())
+        );
+        assert_eq!(sent[0]["age_seconds"], 2 * 86_400);
+        // counts and times, and nothing else
+        let fields: Vec<&String> = sent[0].as_object().unwrap().keys().collect();
+        assert_eq!(
+            fields,
+            [
+                "checkpoint",
+                "added",
+                "surviving",
+                "measured_at",
+                "age_seconds",
+                "ended_at"
+            ]
+        );
+        // the end it was counted from is the session's own, as a server compares them
+        assert_eq!(
+            sent[0]["ended_at"],
+            serde_json::to_value(&upload.session).unwrap()["ended_at"]
+        );
+
+        // Measured again with nothing new: nothing to send.
+        crate::rewrite::measure(&mut ledger, ended + day * 3).unwrap();
+        assert_eq!(hash(&ledger).0, with_one);
+        // The next age is the next change.
+        crate::rewrite::measure(&mut ledger, ended + day * 7).unwrap();
+        let (with_two, upload) = hash(&ledger);
+        assert_ne!(with_two, with_one);
+        assert_eq!(upload.checkpoints.len(), 2);
     }
 
     #[test]

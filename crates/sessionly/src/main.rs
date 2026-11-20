@@ -509,6 +509,12 @@ fn run(command: Command) -> Result<()> {
                 "Rewrite: {} changed files measured, {} in directories that no longer exist",
                 rewrite.measured, rewrite.unavailable
             );
+            if rewrite.checkpoints > 0 {
+                println!(
+                    "Kept: {} measurements of sessions that reached 1, 7 or 30 days since they ended",
+                    rewrite.checkpoints
+                );
+            }
             println!(
                 "Ledger: {} sessions in {}",
                 ledger.count()?,
@@ -556,9 +562,10 @@ fn run(command: Command) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&record)?);
             } else {
                 let (files, measured_at) = ledger.rewrite_of(&record.session_id)?;
+                let checkpoints = ledger.checkpoints_of(&record.session_id)?;
                 print!(
                     "{}",
-                    report::session(&record, &files, measured_at.as_deref())
+                    report::session(&record, &files, measured_at.as_deref(), &checkpoints)
                 );
             }
         }

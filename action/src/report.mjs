@@ -270,3 +270,26 @@ export function renderMany(reported, server, failed = []) {
   );
   return out.join("\n");
 }
+
+/**
+ * What a run that counted merged pull requests again found, as Markdown for
+ * the run summary: one row for each count.
+ */
+export function renderAfterMerge(counted, server, failed = []) {
+  const home = server ? `${String(server).replace(/\/+$/, "")}/#/pulls` : null;
+  const out = [`### ${home ? `[Sessionly](${home})` : "Sessionly"}`, ""];
+  const not = failed.length > 0 ? ["", `Could not be counted: ${failed.map((n) => `#${n}`).join(", ")}.`] : [];
+  if (counted.length === 0) return [...out, "No merged pull request was due to be counted again.", ...not].join("\n");
+  out.push(
+    "Agent lines still there after merging.",
+    "",
+    "| Pull request | After | Agent lines | Still there | Share |",
+    "|---|---|---:|---:|---:|",
+    ...counted.map(
+      (row) =>
+        `| #${row.number} | ${row.checkpoint === "7d" ? "7 days" : "30 days"} | ${count(row.agent_lines)} | ${count(row.surviving)} | ${percent(row.surviving, row.agent_lines)} |`,
+    ),
+    ...not,
+  );
+  return out.join("\n");
+}

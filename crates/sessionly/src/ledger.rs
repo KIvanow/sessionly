@@ -13,8 +13,8 @@ use rusqlite::types::Value as Sql;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row as SqlRow};
 use serde::Serialize;
 
-use crate::rewrite::{FileLines, REWRITTEN_BELOW};
-use crate::session::Session;
+use crate::rewrite::{FileLines, CHECKPOINTS, REWRITTEN_BELOW};
+use crate::session::{RewriteCheckpoint, Session};
 
 /// Bump to change the table layout; older ledgers are rebuilt on open.
 const DB_VERSION: i64 = 5;
@@ -120,6 +120,34 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     source     TEXT NOT NULL,
     part_of    TEXT NOT NULL,
     PRIMARY KEY (session_id, server)
+);
+";
+
+/// The rewrite measurement of a session as it was at fixed ages after it
+/// ended (`rewrite::CHECKPOINTS`). A row is written once and never changed:
+/// what was there on day 7 cannot be measured again on day 8. Made apart from
+/// the tables above, so that a change to their layout, which drops them,
+/// leaves these. Each says which end of the session its age was counted
+/// from: one of another end is of a session that went on since, or whose
+/// end was read again, and goes. `checkpoints_since` is when this ledger began keeping them:
+/// an age a session reached before that was not measured then, and is not
+/// made up later.
+const CHECKPOINT_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS rewrite_checkpoints (
+    session_id  TEXT NOT NULL,
+    checkpoint  TEXT NOT NULL CHECK (checkpoint IN ('1d', '7d', '30d')),
+    added       INTEGER NOT NULL,
+    surviving   INTEGER NOT NULL,
+    measured_at TEXT NOT NULL,
+    -- how long after the session ended it was measured: the age, or more
+    age_seconds INTEGER NOT NULL,
+    -- when the session had ended, as the age was counted
+    ended_at    TEXT NOT NULL,
+    PRIMARY KEY (session_id, checkpoint)
+);
+CREATE TABLE IF NOT EXISTS checkpoints_since (
+    only_row INTEGER PRIMARY KEY CHECK (only_row = 1),
+    since    TEXT NOT NULL
 );
 ";
 
@@ -414,6 +442,11 @@ impl Ledger {
                 "ALTER TABLE withdrawals ADD COLUMN part_of TEXT NOT NULL DEFAULT ''",
             )?;
         }
+        tx.execute_batch(CHECKPOINT_TABLES)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO checkpoints_since VALUES (1, ?1)",
+            [Utc::now().to_rfc3339()],
+        )?;
         tx.commit()?;
         Ok(Ledger { conn })
     }
@@ -534,6 +567,14 @@ impl Ledger {
             "DELETE FROM rewrite WHERE session_id = ?1 AND path NOT IN
              (SELECT path FROM session_files WHERE session_id = ?1 AND added_hashes IS NOT NULL)",
             [&s.session_id],
+        )?;
+        // A checkpoint's age was counted from the end the session had then.
+        // With another end (it was resumed, or more of it was read) that
+        // age is not its age: its ages count from the end it has now.
+        tx.execute(
+            "DELETE FROM rewrite_checkpoints
+             WHERE session_id = ?1 AND ended_at IS NOT ?2",
+            params![s.session_id, s.ended_at.map(|t| t.to_rfc3339())],
         )?;
         tx.commit()?;
         Ok(())
@@ -671,6 +712,7 @@ impl Ledger {
         }
         let gone = "session_id NOT IN (SELECT session_id FROM keep)";
         tx.execute(&format!("DELETE FROM rewrite WHERE {gone}"), [])?;
+        tx.execute(&format!("DELETE FROM rewrite_checkpoints WHERE {gone}"), [])?;
         tx.execute(&format!("DELETE FROM uploads WHERE {gone}"), [])?;
         let removed = tx.execute(&format!("DELETE FROM sessions WHERE {gone}"), [])?;
         tx.execute_batch("DROP TABLE keep")?;
@@ -692,6 +734,10 @@ impl Ledger {
             [session_id, part_of],
         )?;
         tx.execute("DELETE FROM rewrite WHERE session_id = ?1", [session_id])?;
+        tx.execute(
+            "DELETE FROM rewrite_checkpoints WHERE session_id = ?1",
+            [session_id],
+        )?;
         tx.execute("DELETE FROM uploads WHERE session_id = ?1", [session_id])?;
         let removed = tx.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
         tx.commit()?;
@@ -808,6 +854,98 @@ impl Ledger {
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok((rows, measured_at))
+    }
+
+    /// Keep what was just measured as the checkpoint of every age the
+    /// session has reached and has none for. `measured` is each session
+    /// measured now, with its tracked lines and how many are there. Age
+    /// counts from when the session ended: one with no end known has no
+    /// age, and no checkpoint. A checkpoint already kept is left
+    /// as it is, and one whose age came before this ledger kept any is not
+    /// made: nothing was measured then. One missed since (the machine was
+    /// off that day) is taken now, and says how old the session really was.
+    /// Returns how many were kept.
+    pub fn keep_checkpoints(
+        &mut self,
+        measured: &[(String, u64, u64)],
+        now: DateTime<Utc>,
+    ) -> Result<u64> {
+        let tx = self.conn.transaction()?;
+        let since: String =
+            tx.query_row("SELECT since FROM checkpoints_since", [], |r| r.get(0))?;
+        let since = DateTime::parse_from_rfc3339(&since)?.with_timezone(&Utc);
+        let mut kept = 0;
+        {
+            let mut ended_at = tx.prepare("SELECT ended_at FROM sessions WHERE session_id = ?1")?;
+            let mut insert = tx.prepare(
+                "INSERT OR IGNORE INTO rewrite_checkpoints VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for (session_id, added, surviving) in measured {
+                if *added == 0 {
+                    continue;
+                }
+                let ended: Option<String> = ended_at
+                    .query_row([session_id], |r| r.get(0))
+                    .optional()?
+                    .flatten();
+                let Some(ended) = ended.and_then(|t| DateTime::parse_from_rfc3339(&t).ok()) else {
+                    continue;
+                };
+                let ended = ended.with_timezone(&Utc);
+                let age = (now - ended).num_seconds();
+                for (checkpoint, seconds) in CHECKPOINTS {
+                    let due = ended + chrono::Duration::seconds(seconds);
+                    if age < seconds || due < since {
+                        continue;
+                    }
+                    kept += insert.execute(params![
+                        session_id,
+                        checkpoint,
+                        added,
+                        surviving,
+                        now.to_rfc3339(),
+                        age,
+                        ended.to_rfc3339()
+                    ])? as u64;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(kept)
+    }
+
+    /// The checkpoints kept of a session, the earliest age first.
+    pub fn checkpoints_of(&self, session_id: &str) -> Result<Vec<RewriteCheckpoint>> {
+        let mut query = self.conn.prepare(
+            "SELECT checkpoint, added, surviving, measured_at, age_seconds, ended_at
+             FROM rewrite_checkpoints WHERE session_id = ?1",
+        )?;
+        let mut rows: Vec<RewriteCheckpoint> = query
+            .query_map([session_id], |r| {
+                let measured_at: String = r.get(3)?;
+                let ended_at: String = r.get(5)?;
+                let time = |text: &str| {
+                    DateTime::parse_from_rfc3339(text)
+                        .ok()
+                        .map(|t| t.with_timezone(&Utc))
+                };
+                Ok(RewriteCheckpoint {
+                    checkpoint: r.get(0)?,
+                    added: r.get(1)?,
+                    surviving: r.get(2)?,
+                    measured_at: time(&measured_at),
+                    age_seconds: r.get(4)?,
+                    ended_at: time(&ended_at),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let order = |c: &RewriteCheckpoint| {
+            CHECKPOINTS
+                .iter()
+                .position(|(name, _)| *name == c.checkpoint)
+        };
+        rows.sort_by_key(order);
+        Ok(rows)
     }
 
     /// Sessions matching `filter`, newest first.

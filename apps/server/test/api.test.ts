@@ -383,3 +383,141 @@ test("admins manage tokens; a revoked token stops working", async () => {
   assert.equal((await revoke(cat.id)).status, 404);
   assert.equal((await get(cat.token, "/ping")).status, 401);
 });
+
+test("what was still there 1, 7 and 30 days after a session ended is kept, and summed over the sessions measured then", async () => {
+  const repo = "github.com/acme/kept";
+  const ended = "2026-11-10T10:30:00Z";
+  const days = (n: number) => new Date(Date.parse(ended) + n * 86_400_000).toISOString();
+  /** A checkpoint measured `age` days after the session ended, which it did `from` days after it first had. */
+  const at = (checkpoint: string, surviving: number, age: number, from = 0, more: Record<string, unknown> = {}) => ({
+    checkpoint,
+    added: 20,
+    surviving,
+    measured_at: days(from + age),
+    age_seconds: age * 86_400,
+    ended_at: days(from),
+    ...more,
+  });
+  const send = async (token: string, id: string, checkpoints: unknown[] | undefined, overrides: Record<string, unknown> = {}) => {
+    const body = upload(id, { repo: { root: "~/src/kept", remote: repo }, ...overrides });
+    const response = await put(token, { ...body, checkpoints } as Upload);
+    assert.equal(response.status, 200);
+  };
+  const kept = async (id: string, source = "claude-code") =>
+    ((await get(tokens.admin, `/sessions/machine-1/${source}/${id}`)).body.upload.checkpoints ?? []).map((c: any) => [
+      c.checkpoint,
+      c.surviving,
+      c.age_seconds / 86_400,
+    ]);
+  const byTool = async () => (await get(tokens.admin, `/summary?by=tool&repo_is=${encodeURIComponent(repo)}`)).body;
+
+  // As an older sessionly sends it, and a session not yet a day old: no checkpoint.
+  await send(tokens.ann, "k1", undefined);
+  assert.deepEqual(await kept("k1"), []);
+  const none = (await byTool()).total;
+  assert.deepEqual(none.kept_7d, { lines_added: 0, lines_surviving: 0, sessions_reached: 0, sessions_total: 1 });
+
+  // Day 1 was missed and measured on day 3: kept with the age it really had.
+  await send(tokens.ann, "k1", [at("1d", 19, 3)]);
+  assert.deepEqual(await kept("k1"), [["1d", 19, 3]]);
+  // A later upload brings the next age. What it says of an age already kept is not taken.
+  await send(tokens.ann, "k1", [at("7d", 15, 8), at("1d", 5, 9)]);
+  assert.deepEqual(await kept("k1"), [["1d", 19, 3], ["7d", 15, 8]]);
+  // A machine whose ledger was lost sends none: the ones kept stay.
+  await send(tokens.ann, "k1", undefined);
+  assert.deepEqual(await kept("k1"), [["1d", 19, 3], ["7d", 15, 8]]);
+  // Counts and times are kept, and nothing else sent with one; an age nobody knows is not one.
+  await send(tokens.ann, "k1", [at("30d", 12, 31, 0, { path: "SECRET.rs", text: "SECRET line" }), at("2d", 1, 2), at("90d", 1, 90)]);
+  assert.deepEqual(await kept("k1"), [["1d", 19, 3], ["7d", 15, 8], ["30d", 12, 31]]);
+  const [stored] = await db.query<{ payload: unknown; checkpoints: unknown }>(
+    `SELECT payload, checkpoints FROM sessions WHERE session_id = 'k1'`,
+  );
+  assert.doesNotMatch(JSON.stringify(stored), /SECRET|2d|90d/);
+
+  // Two more sessions: another agent's, measured at 7 days, and one of the same agent that is not that old.
+  await send(tokens.bob, "k2", [at("7d", 4, 7)], { source: "cursor", models: ["gpt-5"] });
+  await send(tokens.ann, "k3", undefined);
+  const summary = await byTool();
+  const tool = (key: string) => summary.groups.find((g: any) => g.key === key);
+  assert.deepEqual(tool("claude-code").kept_7d, { lines_added: 20, lines_surviving: 15, sessions_reached: 1, sessions_total: 2 });
+  assert.deepEqual(tool("claude-code").kept_30d, { lines_added: 20, lines_surviving: 12, sessions_reached: 1, sessions_total: 2 });
+  assert.deepEqual(tool("cursor").kept_7d, { lines_added: 20, lines_surviving: 4, sessions_reached: 1, sessions_total: 1 });
+  // no session of it has reached 30 days
+  assert.deepEqual(tool("cursor").kept_30d, { lines_added: 0, lines_surviving: 0, sessions_reached: 0, sessions_total: 1 });
+  assert.deepEqual(summary.total.kept_7d, { lines_added: 40, lines_surviving: 19, sessions_reached: 2, sessions_total: 3 });
+  assert.deepEqual(summary.total.kept_1d, { lines_added: 20, lines_surviving: 19, sessions_reached: 1, sessions_total: 3 });
+  // the latest measurement is beside them, as before
+  assert.deepEqual(summary.total.rewrite.lines_added, 60);
+  const byModel = (await get(tokens.admin, `/summary?by=model&repo_is=${encodeURIComponent(repo)}`)).body.groups;
+  assert.deepEqual(
+    byModel.map((g: any) => [g.key, g.kept_7d.sessions_reached, g.kept_7d.sessions_total]).sort(),
+    [["claude-opus-5-5", 1, 2], ["gpt-5", 1, 1]],
+  );
+
+  // The session went on until day 10: the checkpoints counted from its first end are of a session
+  // that had not ended, and go, whenever they were measured. Its ages count from the new end.
+  await send(tokens.ann, "k1", [at("1d", 18, 2, 10)], { ended_at: days(10) });
+  assert.deepEqual(await kept("k1"), [["1d", 18, 2]]);
+  // With the end unchanged, one taken late is kept as late as it was; one that says another end is not.
+  await send(tokens.ann, "k1", [at("7d", 14, 9, 10), at("30d", 9, 31, 0)], { ended_at: days(10) });
+  assert.deepEqual(await kept("k1"), [["1d", 18, 2], ["7d", 14, 9]]);
+  // Nor is one measured before the session was as old as the age it is for.
+  await send(tokens.ann, "k1", [at("30d", 9, 29, 10)], { ended_at: days(10) });
+  assert.deepEqual(await kept("k1"), [["1d", 18, 2], ["7d", 14, 9]]);
+
+  // A day's checkpoint taken late, on day 7, and then the end is read again as day 6. The measurement
+  // is a day after that end too, and is still not its checkpoint: it was counted from the other. What
+  // the machine measures next, from this end, is the one kept.
+  await send(tokens.ann, "k-reread", [at("1d", 19, 7)]);
+  assert.deepEqual(await kept("k-reread"), [["1d", 19, 7]]);
+  await send(tokens.ann, "k-reread", [at("1d", 19, 7)], { ended_at: days(6) });
+  assert.deepEqual(await kept("k-reread"), []);
+  await send(tokens.ann, "k-reread", [at("1d", 17, 2, 6)], { ended_at: days(6) });
+  assert.deepEqual(await kept("k-reread"), [["1d", 17, 2]]);
+  // A session with no end has no age, and so no checkpoint: the ones it had go, and none is taken.
+  await send(tokens.ann, "k-reread", [at("1d", 17, 2, 6)], { ended_at: null });
+  assert.deepEqual(await kept("k-reread"), []);
+
+  // Two first uploads of one session at once: each brings a checkpoint, and both are kept.
+  const twice = (checkpoint: unknown) => put(tokens.ann, { ...upload("k-twice", { repo: { root: "~/src/kept", remote: repo } }), checkpoints: [checkpoint] } as Upload);
+  const both = await Promise.all([twice(at("1d", 19, 1)), twice(at("7d", 15, 7))]);
+  assert.deepEqual(both.map((response) => response.status), [200, 200]);
+  assert.deepEqual(await kept("k-twice"), [["1d", 19, 1], ["7d", 15, 7]]);
+});
+
+test("checkpoints a server from before them kept in the payload are summed after the upgrade", async (t) => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { migrationAt } = await import("../src/db.ts");
+  const { testDbUrl } = await import("./helpers.ts");
+  const fresh = await testDbUrl();
+  const folder = fresh === "memory://" ? mkdtempSync(join(tmpdir(), "sessionly-kept-")) : undefined;
+  t.after(() => folder && rmSync(folder, { recursive: true, force: true }));
+  const url = folder ? `file:${join(folder, "db")}` : fresh;
+  const old = await openDb(url, { migrations: migrationAt("ALTER TABLE sessions ADD COLUMN checkpoints") });
+  const ended = "2026-11-10T10:30:00Z";
+  const at = (checkpoint: string, surviving: number, end = ended) => ({ checkpoint, added: 20, surviving, measured_at: "2026-12-11T10:30:00Z", age_seconds: 31 * 86_400, ended_at: end });
+  const payload = (checkpoints: unknown) => JSON.stringify({ session: { ended_at: ended }, checkpoints });
+  await old.query(
+    `INSERT INTO sessions (org_id, machine_id, source, session_id, owner_email, content, rw_lines_added, payload) VALUES
+       ('default', 'm1', 'claude-code', 'with', 'ann@example.com', 'metadata', 20, $1::jsonb),
+       ('default', 'm1', 'claude-code', 'other-end', 'ann@example.com', 'metadata', 20, $2::jsonb),
+       ('default', 'm1', 'claude-code', 'none', 'ann@example.com', 'metadata', 20, '{"session":{}}'),
+       ('default', 'm1', 'claude-code', 'odd', 'ann@example.com', 'metadata', 20, '{"session":{},"checkpoints":"none"}')`,
+    [payload([at("7d", 15), at("30d", 12), at("90d", 1)]), payload([at("7d", 9, "2026-11-01T00:00:00Z")])],
+  );
+  await old.close();
+  const now = await openDb(url);
+  t.after(() => now.close());
+  const upgraded = createApp(now, {});
+  const token = await tokenFor(now, { email: "boss@example.com", role: "admin" });
+  const response = await upgraded.request("/api/v1/summary?by=tool", { headers: auth(token) });
+  const total = ((await response.json()) as any).total;
+  assert.deepEqual(total.kept_7d, { lines_added: 20, lines_surviving: 15, sessions_reached: 1, sessions_total: 4 });
+  assert.deepEqual(total.kept_30d, { lines_added: 20, lines_surviving: 12, sessions_reached: 1, sessions_total: 4 });
+  const [row] = await now.query<{ checkpoints: any }>(`SELECT checkpoints FROM sessions WHERE session_id = 'with'`);
+  const kept = typeof row!.checkpoints === "string" ? JSON.parse(row!.checkpoints) : row!.checkpoints;
+  assert.deepEqual(Object.keys(kept).sort(), ["30d", "7d"]);
+  assert.deepEqual(kept["7d"], { added: 20, surviving: 15, measured_at: "2026-12-11T10:30:00Z", age_seconds: 31 * 86_400, ended_at: ended });
+});

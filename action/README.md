@@ -58,6 +58,7 @@ shows a warning that the token is missing.
 | `backfill` | `false` | For a pull request from before the Action was added: first report it as it was when opened, worked out from its commits, so what review changed can still be measured. Not possible after a rebase or squash of the branch. |
 | `pr-number` | | The pull request to report, when the workflow was not started by one. Also `all` for the repository's latest, or `20-60` for those numbered from one to the other (see below). |
 | `since` | 90 days ago | With `pr-number: all`, the date from which pull requests are reported, by when they were created. |
+| `after-merge` | `false` | Count merged pull requests' agent lines again on the branch they were merged into, 7 and 30 days after. A run started by a schedule, with no `pr-number`, does this without it (see below). |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 Outputs: `lines` (tracked lines the pull request adds) and `agent-lines` (how many a coding
@@ -115,6 +116,37 @@ requests page of the dashboard does it for any other without asking GitHub ("Mat
 exception is a pull request last reported to a server of version 0.5.0 or older: it has to be
 reported once more, and can be matched again from the dashboard from then on.
 
+## After merge
+
+A run started by a schedule, with no `pr-number`, reports no pull request. It asks the server which merged pull
+requests have reached 7 or 30 days since merging, reads the files their agent lines are in as
+they are on the branch now, and sends those files' lines as hashes. The server counts how many
+of the agent lines are still there and keeps that as a row of the pull request's history.
+
+```yaml
+on:
+  schedule:
+    - cron: "17 5 * * *"
+jobs:
+  after-merge:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: KIvanow/sessionly/action@main
+        with:
+          url: https://sessionly.example.com
+          token: ${{ secrets.SESSIONLY_TOKEN }}
+```
+
+It needs `contents: read` and writes on no pull request. The files are read fifty at a time,
+all at the commit the branch is at; a run reads at most 20,000, and what is left is due at the
+next. A pull request whose files hold more lines than fit in one request to the server (32 MB,
+about 1.7 million tracked lines) cannot be counted yet: the run warns of it each time. See
+[After merge](../docs-site/pull-requests.md#after-merge) for what is counted and how a missed
+day is handled.
+
 ## What is sent
 
 To the Sessionly server, for the pull request: repository, number, title, link, who opened it,
@@ -126,6 +158,9 @@ hash of each added line that has a letter or digit.
 For each review and comment: who made it (their GitHub login, and whether that is a bot), when,
 the file and line it is on, a review's outcome, and its link on GitHub, which is what the
 pull request's page in the dashboard leads to. What a review or comment says is never sent.
+
+For a count after merge: the repository, the pull request's number, and for each file the
+server asked about, its path and a hash of each of its lines as it is on the branch now.
 
 The report also says it came from this Action and which version (`reporter`, the version in
 `package.json`). Nothing else, and nothing to anyone else.

@@ -39,7 +39,7 @@ import {
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
-import type { PullReport, Telemetry } from "@sessionly/schema";
+import type { PullAfterMergeReport, PullDetail, PullReport, Telemetry } from "@sessionly/schema";
 import {
   BadReport,
   checkReport,
@@ -52,6 +52,7 @@ import {
   summarizePulls,
   type PullFilters,
 } from "./pulls.ts";
+import { afterMergeOf, checkAfterMerge, pullsDue, storeAfterMerge } from "./after-merge.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
 /** A record lists every tool call, so a long session is several megabytes. */
@@ -64,6 +65,7 @@ export type Env = {
     /** An upload or a pull request report, already parsed and checked. */
     upload?: Upload;
     report?: PullReport;
+    afterMerge?: PullAfterMergeReport;
     /** The session an upload stored: the pull requests it adds lines to are matched again once it is committed. */
     stored?: { machine_id: string; source: string; session_id: string };
   };
@@ -304,9 +306,12 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       const within = await allowed(ownerDb, `token:${principal.tokenId ?? "environment"}`, 60, accounts.ratePerMinute);
       if (!within) return c.json({ error: "too many requests; try again in a minute", code: "rate_limited" }, 429);
     }
-    // A ci token reports pull requests and does nothing else.
+    // A ci token reports pull requests and does nothing else: as they are,
+    // and counted again after merging, which it first asks which are due for.
     if (principal.role === "ci") {
-      const reporting = c.req.method === "PUT" && c.req.path.endsWith("/prs");
+      const reporting =
+        (c.req.method === "PUT" && /\/prs(?:\/after-merge)?$/.test(c.req.path)) ||
+        (c.req.method === "GET" && c.req.path.endsWith("/prs/due"));
       if (!reporting && !c.req.path.endsWith("/ping")) {
         return c.json({ error: "this token only reports pull requests" }, 403);
       }
@@ -386,6 +391,22 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       return c.json({ error: "this organisation shows a repository to others, and the server's setting of what not to show cannot be used: the report is not kept", code: "demo_hide_unusable" }, 503);
     }
     c.set("report", demo ? shownReport(report, demo.hide) : report);
+    await next();
+  });
+
+  // A file's every line, as hashes, for each file asked for: parsed out here too.
+  api.put("/prs/after-merge", async (c, next) => {
+    const role = c.get("principal").role;
+    if (role !== "admin" && role !== "ci") {
+      return c.json({ error: "reporting pull requests needs a ci or admin token" }, 403);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "the body is not JSON" }, 400);
+    }
+    c.set("afterMerge", checkAfterMerge(body));
     await next();
   });
 
@@ -718,6 +739,24 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     if (!report) throw new Error("the report was not checked");
     return c.json({ stored: true, attribution: await storePull(c.get("db"), report, options.hashKey) });
   });
+  // A merged pull request's agent lines counted again on the branch it was
+  // merged into: the Action asks which are due, reads their files there, and
+  // sends those as hashes.
+  const reportersOnly = (p: Principal) => {
+    if (p.role !== "admin" && p.role !== "ci") throw new ApiError(403, "admins_only", "reporting pull requests needs a ci or admin token");
+  };
+  api.get("/prs/due", async (c) => {
+    reportersOnly(c.get("principal"));
+    const repo = c.req.query("repo");
+    if (!repo) throw new BadRequest("repo is required");
+    return c.json({ due: await pullsDue(c.get("db"), repo.replace(/\/+$/, "")) });
+  });
+  api.put("/prs/after-merge", async (c) => {
+    const report = c.get("afterMerge");
+    if (!report) throw new Error("the report was not checked");
+    const stored = await storeAfterMerge(c.get("db"), report);
+    return stored ? c.json({ stored }) : c.json({ error: "no such pull request" }, 404);
+  });
   api.get("/prs/summary", async (c) => {
     readersOnly(c.get("principal"));
     return c.json(await summarizePulls(c.get("db"), pullFilters(c.req.query())));
@@ -729,7 +768,8 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     if (!query.repo) throw new BadRequest("repo is required");
     const number = wholeNumber(query.number, 0, 2 ** 31 - 1, "number");
     const pull = await getPull(c.get("db"), query.repo, number);
-    return pull ? c.json(pull) : c.json({ error: "no such pull request" }, 404);
+    if (!pull) return c.json({ error: "no such pull request" }, 404);
+    return c.json({ ...pull, after_merge: await afterMergeOf(c.get("db"), query.repo, number) } satisfies PullDetail);
   });
   // Match one pull request's lines again against the sessions held now.
   // (Several, which the list's filters choose, are matched further up.)

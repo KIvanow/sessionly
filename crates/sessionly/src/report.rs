@@ -3,8 +3,8 @@
 use std::fmt::Write;
 
 use crate::ledger::{Group, GroupBy, Listed, Rewrite, RewriteRow};
-use crate::rewrite::REWRITTEN_BELOW;
-use crate::session::{Outcome, Session, ToolStatus};
+use crate::rewrite::{CHECKPOINTS, REWRITTEN_BELOW};
+use crate::session::{Outcome, RewriteCheckpoint, Session, ToolStatus};
 use crate::transcript::{CostSource, TranscriptSummary, Usage, UsageByModel};
 
 pub fn transcript(s: &TranscriptSummary) -> String {
@@ -185,9 +185,37 @@ fn short(id: &str) -> &str {
     }
 }
 
+/// What was still there at each fixed age after the session ended:
+/// `1d 96%, 7d 91% (taken on day 9), 30d -`. An age not reached, or not
+/// measured, is a dash; one measured a day or more late says when.
+fn kept_at(checkpoints: &[RewriteCheckpoint]) -> String {
+    CHECKPOINTS
+        .iter()
+        .map(|(name, seconds)| {
+            let Some(c) = checkpoints.iter().find(|c| c.checkpoint == *name) else {
+                return format!("{name} -");
+            };
+            let share = (c.added > 0).then(|| c.surviving as f64 / c.added as f64);
+            let late = c.age_seconds as i64 >= seconds + 86_400;
+            if late {
+                let day = c.age_seconds / 86_400;
+                format!("{name} {} (taken on day {day})", percent(share))
+            } else {
+                format!("{name} {}", percent(share))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// `sessionly show`: one normalized session, with the latest rewrite
-/// measurement of its changed files.
-pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -> String {
+/// measurement of its changed files, and what it was at fixed ages.
+pub fn session(
+    s: &Session,
+    rewrite: &[RewriteRow],
+    measured_at: Option<&str>,
+    checkpoints: &[RewriteCheckpoint],
+) -> String {
     let mut out = String::new();
     let field = |out: &mut String, name: &str, value: String| {
         let _ = writeln!(out, "{name:<10} {value}");
@@ -361,6 +389,16 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
                 );
             }
         }
+    }
+
+    // Kept through a rebuild of the ledger, and when the files are gone: said
+    // whether or not there is a latest measurement above.
+    if !checkpoints.is_empty() {
+        field(
+            &mut out,
+            if rewrite.is_empty() { "Rewrite" } else { "" },
+            format!("still there after it ended: {}", kept_at(checkpoints)),
+        );
     }
 
     if !s.prompts.is_empty() {
@@ -738,6 +776,38 @@ pub fn license(server: &str, state: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checkpoints_are_shown_with_or_without_a_latest_measurement() {
+        use super::{session, RewriteCheckpoint, RewriteRow, Session};
+        let day = 86_400;
+        let at = |name: &str, surviving, age_seconds| RewriteCheckpoint {
+            checkpoint: name.into(),
+            added: 16,
+            surviving,
+            measured_at: None,
+            age_seconds,
+            ended_at: None,
+        };
+        let kept = [at("1d", 14, day + 60), at("7d", 5, 9 * day)];
+        let line = "still there after it ended: 1d 88%, 7d 31% (taken on day 9), 30d -";
+        // The ledger was rebuilt and the files are gone: the checkpoints are what is left.
+        let alone = session(&Session::default(), &[], None, &kept);
+        assert!(alone.contains(&format!("Rewrite    {line}")), "{alone}");
+        assert!(!session(&Session::default(), &[], None, &[]).contains("still there"));
+        let row = RewriteRow {
+            session_id: "s".into(),
+            path: "a.rs".into(),
+            added: 16,
+            surviving: 3,
+            file_exists: true,
+            branch: None,
+            head: None,
+        };
+        let both = session(&Session::default(), &[row], None, &kept);
+        assert!(both.contains("added lines still there"), "{both}");
+        assert!(both.contains(&format!("           {line}")), "{both}");
+    }
+
     #[test]
     fn describes_license_states() {
         let state = |status: &str| {
