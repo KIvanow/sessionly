@@ -55,6 +55,19 @@ impl Price {
         }
     }
 
+    /// OpenAI's price for a long prompt: input, cached input and cache
+    /// writes at twice this, output at 1.5x.
+    fn long(&self) -> Self {
+        Price {
+            input: self.input * 2.0,
+            output: self.output * 1.5,
+            cache_read: self.cache_read * 2.0,
+            cache_write: self
+                .cache_write
+                .map(|(short, long)| (short * 2.0, long * 2.0)),
+        }
+    }
+
     /// What `tokens` cost in USD.
     pub fn cost(&self, tokens: &Billed) -> f64 {
         let (short, long) = self.cache_write.unwrap_or((self.input, self.input));
@@ -157,65 +170,31 @@ const PRICES: &[(&str, Price)] = &[
     ("composer-2.5-fast", Price::listed(3.0, 0.50, 15.0, None)),
 ];
 
-/// Prices for a request whose prompt is longer than the model's threshold.
-/// Claude Haiku 5.5 over 100K tokens: the long-prompt cache read price isn't
-/// published; we assume the usual 0.1x input. OpenAI's over 272K input tokens,
-/// from the same page as above.
-const LONG_PROMPT: &[(&str, u64, Price)] = &[
-    ("claude-haiku-5-5", 100_000, Price::new(0.50, 2.50, 0.05)),
-    (
+/// Claude Haiku 5.5 over 100K prompt tokens: 5x. The long-prompt cache read
+/// price isn't published; we assume the usual 0.1x input.
+const HAIKU_5_5_LONG: (u64, Price) = (100_000, Price::new(0.50, 2.50, 0.05));
+
+/// OpenAI's models with a price for long prompts, from the same page as
+/// above: over 272K input tokens, the whole request costs twice the input,
+/// cached input and cache write prices and 1.5x the output price (see
+/// `Price::long`). The others have one price at any length.
+const OPENAI_LONG: (u64, &[&str]) = (
+    272_000,
+    &[
         "gpt-6.2-astra",
-        272_000,
-        Price::listed(16.0, 0.80, 60.0, Some((20.0, 40.0))),
-    ),
-    (
         "gpt-6.2-sol",
-        272_000,
-        Price::listed(4.0, 0.20, 15.0, Some((5.0, 10.0))),
-    ),
-    (
         "gpt-6-astra",
-        272_000,
-        Price::listed(20.0, 2.00, 75.0, Some((25.0, 50.0))),
-    ),
-    (
         "gpt-6.1-sol",
-        272_000,
-        Price::listed(4.0, 0.20, 15.0, Some((5.0, 10.0))),
-    ),
-    (
         "gpt-6.1-terra",
-        272_000,
-        Price::listed(2.0, 0.10, 7.50, Some((2.50, 5.0))),
-    ),
-    (
         "gpt-6-sol",
-        272_000,
-        Price::listed(4.0, 0.40, 15.0, Some((5.0, 10.0))),
-    ),
-    (
         "gpt-6-luna",
-        272_000,
-        Price::listed(0.20, 0.02, 0.75, Some((0.25, 0.50))),
-    ),
-    (
         "gpt-5.6-sol",
-        272_000,
-        Price::listed(8.0, 0.80, 30.0, Some((10.0, 20.0))),
-    ),
-    (
         "gpt-5.6-terra",
-        272_000,
-        Price::listed(4.0, 0.40, 18.0, Some((5.0, 10.0))),
-    ),
-    (
         "gpt-5.6-luna",
-        272_000,
-        Price::listed(0.40, 0.04, 1.80, Some((0.50, 1.00))),
-    ),
-    ("gpt-5.5", 272_000, Price::listed(10.0, 1.00, 45.0, None)),
-    ("gpt-5.4", 272_000, Price::listed(5.0, 0.50, 22.50, None)),
-];
+        "gpt-5.5",
+        "gpt-5.4",
+    ],
+);
 
 /// A reasoning effort some clients add to a model's name (Cursor's
 /// `gpt-5.3-codex-high`). It does not change the price per token.
@@ -272,16 +251,16 @@ pub fn canonical_model(model: &str) -> &str {
 /// `prompt_tokens` is all of its input, cached or not.
 pub fn price_for(model: &str, prompt_tokens: u64) -> Option<Price> {
     let model = canonical_model(model);
-    let long = LONG_PROMPT
-        .iter()
-        .find(|(id, threshold, _)| *id == model && prompt_tokens > *threshold);
-    if let Some((_, _, price)) = long {
-        return Some(*price);
+    if model == "claude-haiku-5-5" && prompt_tokens > HAIKU_5_5_LONG.0 {
+        return Some(HAIKU_5_5_LONG.1);
     }
-    PRICES
-        .iter()
-        .find(|(id, _)| *id == model)
-        .map(|(_, price)| *price)
+    let (threshold, long) = OPENAI_LONG;
+    let (_, price) = PRICES.iter().find(|(id, _)| *id == model)?;
+    Some(if prompt_tokens > threshold && long.contains(&model) {
+        price.long()
+    } else {
+        *price
+    })
 }
 
 #[cfg(test)]
@@ -372,6 +351,26 @@ mod tests {
         );
         // no long tier listed: the one price
         assert_eq!(price_for("gpt-5.3-codex", 900_000).unwrap().input, 1.75);
+        assert_eq!(price_for("composer-2.5-fast", 900_000).unwrap().input, 3.0);
+    }
+
+    #[test]
+    fn long_prompt_prices_are_those_openai_lists() {
+        // as the page gives them: input, cached input, output, and the two writes
+        let long = |model: &str| {
+            let p = price_for(model, 272_001).unwrap();
+            (p.input, p.cache_read, p.output, p.cache_write)
+        };
+        assert_eq!(
+            long("gpt-6.2-astra"),
+            (16.0, 0.80, 60.0, Some((20.0, 40.0)))
+        );
+        assert_eq!(long("gpt-6-luna"), (0.20, 0.02, 0.75, Some((0.25, 0.50))));
+        assert_eq!(long("gpt-5.4"), (5.0, 0.50, 22.50, None));
+        // every model with a long price has a short one to take it from
+        for model in OPENAI_LONG.1 {
+            assert!(PRICES.iter().any(|(id, _)| id == model), "{model}");
+        }
     }
 
     #[test]
