@@ -20,6 +20,16 @@ const json = <T>(value: unknown): T => (typeof value === "string" ? JSON.parse(v
 /** A session's lines in a pull request: the hashes, by file, as often as they are there. */
 type Lines = Record<string, string[]>;
 
+/**
+ * The sessions (`pull_sessions s`) whose lines in a pull request can be
+ * looked for: those it keeps which lines of. The one rule for which pull
+ * requests are due, which files are read, and what is counted. How many
+ * lines that is, is how many hashes are kept, and not `s.lines`: the two
+ * differ while files not shown have been taken out and it is not matched
+ * again yet (`hidePull` in demo.ts).
+ */
+const KEPT = `(jsonb_typeof(s.matched) = 'object' AND s.matched <> '{}'::jsonb)`;
+
 /** No more pull requests than this are asked for at once: the Action reads each of their files from GitHub. */
 const DUE_AT_ONCE = 50;
 
@@ -48,18 +58,16 @@ const DUE = `
  * the files' own, and the server compares.
  */
 export async function pullsDue(db: OrgDb, repo: string): Promise<PullDue[]> {
-  // Which lines are kept of a session, as a map by file: only its files are read, and of no more pull requests than are answered.
-  const kept = `pull_sessions s WHERE s.org_id = p.org_id AND s.repo = p.repo AND s.number = p.number
-                AND s.lines > 0 AND jsonb_typeof(s.matched) = 'object' AND s.matched <> '{}'::jsonb`;
+  // Only the files' names are read, and of no more pull requests than are answered.
   const rows = await db.query(
     `SELECT d.number, d.base_ref, d.ages,
             (SELECT array_agg(DISTINCT k.path ORDER BY k.path)
-             FROM pull_sessions s, jsonb_object_keys(CASE WHEN jsonb_typeof(s.matched) = 'object' THEN s.matched ELSE '{}'::jsonb END) AS k(path)
-             WHERE s.org_id = $1 AND s.repo = $2 AND s.number = d.number AND s.lines > 0) AS paths
+             FROM pull_sessions s, jsonb_object_keys(CASE WHEN ${KEPT} THEN s.matched ELSE '{}'::jsonb END) AS k(path)
+             WHERE s.org_id = $1 AND s.repo = $2 AND s.number = d.number) AS paths
      FROM (
        SELECT p.number, p.base_ref, p.merged_at, array_agg(c.age ORDER BY c.days) AS ages
        ${DUE}
-         AND EXISTS (SELECT 1 FROM ${kept})
+         AND EXISTS (SELECT 1 FROM pull_sessions s WHERE s.org_id = p.org_id AND s.repo = p.repo AND s.number = p.number AND ${KEPT})
        GROUP BY p.number, p.base_ref, p.merged_at
        ORDER BY p.merged_at, p.number
        LIMIT ${DUE_AT_ONCE}
@@ -169,13 +177,14 @@ export async function storeAfterMerge(db: OrgDb, report: PullAfterMergeReport): 
   );
   if (due.length === 0) return [];
   const rows = await db.query(
-    `SELECT lines, matched FROM pull_sessions
-     WHERE org_id = $1 AND repo = $2 AND number = $3 AND lines > 0 AND matched IS NOT NULL
-     ORDER BY machine_id, source, session_id`,
+    `SELECT s.matched FROM pull_sessions s
+     WHERE s.org_id = $1 AND s.repo = $2 AND s.number = $3 AND ${KEPT}
+     ORDER BY s.machine_id, s.source, s.session_id`,
     [db.orgId, report.repo, report.number],
   );
   const sessions = rows.map((row) => json<Lines>(row.matched));
-  const of = rows.reduce((sum, row) => sum + num(row.lines), 0);
+  // The lines looked for are the ones counted: both from the hashes kept.
+  const of = sessions.reduce((sum, matched) => sum + Object.values(matched).reduce((n, hashes) => n + hashes.length, 0), 0);
   if (of === 0) return [];
   // Every file with agent lines has to be told of: one left out would count as gone.
   const sent = new Set(report.files.map((file) => file.path));

@@ -1808,10 +1808,20 @@ test("a merged pull request's agent lines are counted again on its branch 7 and 
   page = await detail(3);
   assert.equal(page.history.length, 50);
   assert.deepEqual(page.after_merge.map((row: any) => row.checkpoint), ["30d"]);
+  // What is looked for is what is counted: the hashes kept, whatever the number of lines beside them says.
+  // (Where a repository is shown, files not shown are taken out of the hashes before it is matched again.)
+  assert.equal((await merged(6, 8, [file("c.ts", 30, 31)])).body.attribution.now.agent_lines, 2);
+  await db.query(`UPDATE pull_sessions SET matched = '{"c.ts": ["${h(30)}"]}' WHERE repo = $1 AND number = 6`, [repo]);
+  assert.deepEqual((await count(6, [file("c.ts", 30, 31)])).body.stored.map((row: any) => [row.agent_lines, row.surviving]), [[1, 1]]);
+  // and one with no hashes kept has nothing to look for
+  assert.equal((await merged(7, 8, [file("c.ts", 30, 31)])).status, 200);
+  await db.query(`UPDATE pull_sessions SET matched = '{}' WHERE repo = $1 AND number = 7`, [repo]);
+  assert.deepEqual(await due(), []);
+  assert.deepEqual((await count(7, [file("c.ts", 30, 31)])).body.stored, []);
   // Another organisation sees none of them.
   await newOrg(db, "org-after");
   assert.deepEqual(await db.asOrg("org-after", (scoped) => scoped.query(`SELECT 1 FROM pull_after_merge`)), []);
-  assert.equal((await db.asOrg("default", (scoped) => scoped.query(`SELECT 1 FROM pull_after_merge WHERE repo = $1`, [repo]))).length, 3);
+  assert.equal((await db.asOrg("default", (scoped) => scoped.query(`SELECT 1 FROM pull_after_merge WHERE repo = $1`, [repo]))).length, 4);
 });
 
 test("pull requests and sessions from before the cost was shown have one after the upgrade", async (t) => {

@@ -818,6 +818,21 @@ const MIGRATIONS: string[] = [
   // measured_at, age_seconds, ended_at}}. Counts and times. Beside the payload, so that
   // a summary does not open it. One kept is not replaced by a later upload.
   `ALTER TABLE sessions ADD COLUMN checkpoints jsonb NOT NULL DEFAULT '{}'`,
+  // A server from before this kept an upload's checkpoints in the payload
+  // alone, where a machine updated ahead of it sent them: taken from there,
+  // by the rule an upload is stored by (`mergeCheckpoints` in sessions.ts).
+  // Such a session may never be uploaded again.
+  `UPDATE sessions s SET checkpoints = found.kept
+   FROM (
+     SELECT u.org_id, u.machine_id, u.source, u.session_id, jsonb_object_agg(c->>'checkpoint', c - 'checkpoint') AS kept
+     FROM sessions u, jsonb_array_elements(u.payload->'checkpoints') AS c
+     WHERE jsonb_typeof(u.payload->'checkpoints') = 'array'
+       AND c->>'checkpoint' IN ('1d', '7d', '30d')
+       AND c->>'ended_at' IS NOT NULL AND c->>'measured_at' IS NOT NULL
+       AND (c->>'ended_at')::timestamptz = (u.payload #>> '{session,ended_at}')::timestamptz
+     GROUP BY u.org_id, u.machine_id, u.source, u.session_id
+   ) found
+   WHERE s.org_id = found.org_id AND s.machine_id = found.machine_id AND s.source = found.source AND s.session_id = found.session_id`,
   // A merged pull request's agent lines counted again on the branch it was
   // merged into, 7 and 30 days after: how many were looked for, how many
   // were there, and how old the merge was. One row for each age, written

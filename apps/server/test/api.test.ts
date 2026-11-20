@@ -484,3 +484,40 @@ test("what was still there 1, 7 and 30 days after a session ended is kept, and s
   assert.deepEqual(both.map((response) => response.status), [200, 200]);
   assert.deepEqual(await kept("k-twice"), [["1d", 19, 1], ["7d", 15, 7]]);
 });
+
+test("checkpoints a server from before them kept in the payload are summed after the upgrade", async (t) => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { migrationAt } = await import("../src/db.ts");
+  const { testDbUrl } = await import("./helpers.ts");
+  const fresh = await testDbUrl();
+  const folder = fresh === "memory://" ? mkdtempSync(join(tmpdir(), "sessionly-kept-")) : undefined;
+  t.after(() => folder && rmSync(folder, { recursive: true, force: true }));
+  const url = folder ? `file:${join(folder, "db")}` : fresh;
+  const old = await openDb(url, { migrations: migrationAt("ALTER TABLE sessions ADD COLUMN checkpoints") });
+  const ended = "2026-11-10T10:30:00Z";
+  const at = (checkpoint: string, surviving: number, end = ended) => ({ checkpoint, added: 20, surviving, measured_at: "2026-12-11T10:30:00Z", age_seconds: 31 * 86_400, ended_at: end });
+  const payload = (checkpoints: unknown) => JSON.stringify({ session: { ended_at: ended }, checkpoints });
+  await old.query(
+    `INSERT INTO sessions (org_id, machine_id, source, session_id, owner_email, content, rw_lines_added, payload) VALUES
+       ('default', 'm1', 'claude-code', 'with', 'ann@example.com', 'metadata', 20, $1::jsonb),
+       ('default', 'm1', 'claude-code', 'other-end', 'ann@example.com', 'metadata', 20, $2::jsonb),
+       ('default', 'm1', 'claude-code', 'none', 'ann@example.com', 'metadata', 20, '{"session":{}}'),
+       ('default', 'm1', 'claude-code', 'odd', 'ann@example.com', 'metadata', 20, '{"session":{},"checkpoints":"none"}')`,
+    [payload([at("7d", 15), at("30d", 12), at("90d", 1)]), payload([at("7d", 9, "2026-11-01T00:00:00Z")])],
+  );
+  await old.close();
+  const now = await openDb(url);
+  t.after(() => now.close());
+  const upgraded = createApp(now, {});
+  const token = await tokenFor(now, { email: "boss@example.com", role: "admin" });
+  const response = await upgraded.request("/api/v1/summary?by=tool", { headers: auth(token) });
+  const total = ((await response.json()) as any).total;
+  assert.deepEqual(total.kept_7d, { lines_added: 20, lines_surviving: 15, sessions_reached: 1, sessions_total: 4 });
+  assert.deepEqual(total.kept_30d, { lines_added: 20, lines_surviving: 12, sessions_reached: 1, sessions_total: 4 });
+  const [row] = await now.query<{ checkpoints: any }>(`SELECT checkpoints FROM sessions WHERE session_id = 'with'`);
+  const kept = typeof row!.checkpoints === "string" ? JSON.parse(row!.checkpoints) : row!.checkpoints;
+  assert.deepEqual(Object.keys(kept).sort(), ["30d", "7d"]);
+  assert.deepEqual(kept["7d"], { added: 20, surviving: 15, measured_at: "2026-12-11T10:30:00Z", age_seconds: 31 * 86_400, ended_at: ended });
+});
