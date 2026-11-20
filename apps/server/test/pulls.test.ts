@@ -1721,7 +1721,8 @@ test("a merged pull request's agent lines are counted again on its branch 7 and 
   const merged = (number: number, days: number, files: unknown[], more: Record<string, unknown> = {}) =>
     call(tokens.ci, "PUT", "/prs", report({ repo, number, state: "merged", event: "closed", base_ref: "main", created_at: ago(days + 2), merged_at: ago(days), files, ...more }));
   const due = async (token = tokens.ci) => (await call(token, "GET", `/prs/due?repo=${q}`)).body.due;
-  const count = (number: number, files: unknown[], token = tokens.ci) => call(token, "PUT", "/prs/after-merge", { repo, number, files });
+  const count = (number: number, files: unknown[], token = tokens.ci, checkpoints: string[] = ["7d", "30d"]) =>
+    call(token, "PUT", "/prs/after-merge", { repo, number, checkpoints, files });
   const detail = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=${number}`)).body;
 
   assert.equal((await upload("am-1", [file("a.ts", 1, 2, 3), file("b.ts", 4)])).status, 200);
@@ -1752,6 +1753,10 @@ test("a merged pull request's agent lines are counted again on its branch 7 and 
   assert.equal((await count(5, [file("c.ts", 30)])).status, 422);
   assert.equal((await count(99, [])).status, 404);
   assert.equal((await count(1, [{ path: "a.ts", hashes: ["the line itself"] }])).status, 422);
+  // The ages the files were read for are said, and are the only ones kept.
+  assert.equal((await call(tokens.ci, "PUT", "/prs/after-merge", { repo, number: 1, files: [] })).status, 422);
+  assert.equal((await count(1, [], tokens.ci, ["90d"])).status, 422);
+  assert.deepEqual((await count(1, [file("a.ts", 1), file("b.ts")], tokens.ci, ["30d"])).body.stored, []);
 
   // On main now: a.ts has two of its three agent lines (one of them twice), and b.ts is gone.
   const first = await count(1, [file("a.ts", 1, 3, 3, 77), file("b.ts")]);
@@ -1791,6 +1796,8 @@ test("a merged pull request's agent lines are counted again on its branch 7 and 
   // 31 days after merging, the next age is due: counted of the lines it has now, with the age it really is.
   await db.query(`UPDATE pull_requests SET merged_at = now() - interval '31 days' WHERE repo = $1 AND number = 1`, [repo]);
   assert.deepEqual((await due()).find((pull: any) => pull.number === 1), { number: 1, base_ref: "main", checkpoints: ["30d"], paths: ["a.ts", "b.ts", "docs.md"] });
+  // Files read for 7 days, when 30 was not due yet, say nothing of day 30 however late they arrive.
+  assert.deepEqual((await count(1, [file("a.ts"), file("b.ts"), file("docs.md")], tokens.ci, ["7d"])).body.stored, []);
   const later = await count(1, [file("a.ts", 1), file("b.ts"), file("docs.md", 70)]);
   const thirty = later.body.stored[0];
   assert.deepEqual([later.body.stored.length, thirty.checkpoint, thirty.agent_lines, thirty.surviving], [1, "30d", 5, 2]);

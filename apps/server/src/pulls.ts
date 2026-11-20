@@ -1963,28 +1963,31 @@ const DUE = `
  * compares.
  */
 export async function pullsDue(db: OrgDb, repo: string): Promise<PullDue[]> {
+  // Which lines are kept of a session, as a map by file: only its files are read, and of no more pull requests than are answered.
+  const kept = `pull_sessions s WHERE s.org_id = p.org_id AND s.repo = p.repo AND s.number = p.number
+                AND s.lines > 0 AND jsonb_typeof(s.matched) = 'object' AND s.matched <> '{}'::jsonb`;
   const rows = await db.query(
-    `SELECT p.number, p.base_ref, array_agg(c.age ORDER BY c.days) AS ages,
-            (SELECT jsonb_agg(s.matched) FROM pull_sessions s
-             WHERE s.org_id = p.org_id AND s.repo = p.repo AND s.number = p.number AND s.lines > 0 AND s.matched IS NOT NULL) AS matched
-     ${DUE}
-     GROUP BY p.org_id, p.repo, p.number, p.base_ref, p.merged_at
-     ORDER BY p.merged_at, p.number`,
+    `SELECT d.number, d.base_ref, d.ages,
+            (SELECT array_agg(DISTINCT k.path ORDER BY k.path)
+             FROM pull_sessions s, jsonb_object_keys(CASE WHEN jsonb_typeof(s.matched) = 'object' THEN s.matched ELSE '{}'::jsonb END) AS k(path)
+             WHERE s.org_id = $1 AND s.repo = $2 AND s.number = d.number AND s.lines > 0) AS paths
+     FROM (
+       SELECT p.number, p.base_ref, p.merged_at, array_agg(c.age ORDER BY c.days) AS ages
+       ${DUE}
+         AND EXISTS (SELECT 1 FROM ${kept})
+       GROUP BY p.number, p.base_ref, p.merged_at
+       ORDER BY p.merged_at, p.number
+       LIMIT ${DUE_AT_ONCE}
+     ) d
+     ORDER BY d.merged_at, d.number`,
     [db.orgId, repo],
   );
-  const due: PullDue[] = [];
-  for (const row of rows) {
-    const paths = [...new Set((json<Lines[] | null>(row.matched) ?? []).flatMap((lines) => Object.keys(lines)))].sort();
-    if (paths.length === 0) continue;
-    due.push({
-      number: num(row.number),
-      base_ref: (row.base_ref as string) ?? null,
-      checkpoints: (row.ages as AfterMergeAge[]) ?? [],
-      paths,
-    });
-    if (due.length === DUE_AT_ONCE) break;
-  }
-  return due;
+  return rows.map((row) => ({
+    number: num(row.number),
+    base_ref: (row.base_ref as string) ?? null,
+    checkpoints: (row.ages as AfterMergeAge[]) ?? [],
+    paths: (row.paths as string[]) ?? [],
+  }));
 }
 
 /** A count after merging as the Action sends it, checked; throws `BadReport` saying what is wrong with it. */
@@ -2004,9 +2007,14 @@ export function checkAfterMerge(body: unknown): PullAfterMergeReport {
       file.hashes.every((h) => typeof h === "string" && HASH.test(h));
     if (!ok) fail("each file needs a path and hashes of 16 hex digits");
   }
+  const ages = Array.isArray(r.checkpoints) ? r.checkpoints : fail("checkpoints must be a list");
+  if (ages.length === 0 || !ages.every((age) => AFTER_MERGE.some(([name]) => name === age))) {
+    fail(`checkpoints must name the ages asked for: ${AFTER_MERGE.map(([name]) => name).join(" or ")}`);
+  }
   return {
     repo: (r.repo as string).replace(/\/+$/, ""),
     number: r.number as number,
+    checkpoints: [...new Set(ages as AfterMergeAge[])],
     files: (files as FileHashes[]).map((f) => ({ path: f.path, hashes: f.hashes })),
   };
 }
@@ -2043,7 +2051,8 @@ export function stillThere(sessions: (ReportSession & { matched: Lines })[], fil
  * Count a merged pull request's agent lines again, in the files as the
  * Action read them on the branch it was merged into, and keep the count as
  * a row of its history for each age it has reached and has none for
- * (`DUE`). A row once written is never changed: a second report of the same
+ * (`DUE`), of the ages the files were read for: one reached since they were
+ * read is asked for again, and counted from files read then. A row once written is never changed: a second report of the same
  * age writes nothing. The agent lines are those of the sessions whose lines
  * the pull request keeps (`pull_sessions.matched`). Null if there is no such
  * pull request; the rows written, which may be none.
@@ -2058,8 +2067,9 @@ export async function storeAfterMerge(db: OrgDb, report: PullAfterMergeReport): 
   if (!pull) return null;
   if (pull.state !== "merged") throw new BadReport("this pull request is not merged");
   const due = await db.query<{ age: AfterMergeAge; age_seconds: unknown }>(
-    `SELECT c.age, floor(extract(epoch FROM now() - p.merged_at)) AS age_seconds ${DUE} AND p.number = $3 ORDER BY c.days`,
-    [db.orgId, report.repo, report.number],
+    `SELECT c.age, floor(extract(epoch FROM now() - p.merged_at)) AS age_seconds ${DUE} AND p.number = $3 AND c.age = ANY($4::text[])
+     ORDER BY c.days`,
+    [db.orgId, report.repo, report.number, report.checkpoints],
   );
   if (due.length === 0) return [];
   const sessions = await keptLines(db, report.repo, report.number);

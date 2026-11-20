@@ -57,8 +57,9 @@ export function ownerOf(upload: Upload, uploader: Principal): string {
   return uploader.role === "env" && cloud && /^\S+@\S+$/.test(named) ? named : uploader.email;
 }
 
-/** The ages a session's measurement is kept at, the earliest first. */
+/** The ages a session's measurement is kept at, the earliest first, and each in seconds. */
 const CHECKPOINTS = ["1d", "7d", "30d"] as const;
+const AGE_SECONDS: Record<string, number> = { "1d": 86_400, "7d": 7 * 86_400, "30d": 30 * 86_400 };
 
 /** A checkpoint as it is kept: counts and times, and nothing else an upload may carry with one. */
 type Checkpoint = Required<Omit<RewriteCheckpoint, "checkpoint">>;
@@ -68,20 +69,25 @@ type Checkpoint = Required<Omit<RewriteCheckpoint, "checkpoint">>;
  * kept already, and of the ones the upload brings, those there are none for.
  * So one kept is never replaced: a machine whose ledger was lost measures
  * again later, and that is not what was there on the day. Only a session
- * that went on since is different: a checkpoint from before its end, as the
- * upload has it, was of a session that had not ended, and goes.
+ * that went on since is different. A checkpoint's age is counted from the
+ * session's end as the upload has it, whatever age it came with: one from
+ * before that end, or not yet as old as its age by it, was of a session that
+ * had not ended, and goes.
  */
 export function mergeCheckpoints(kept: unknown, upload: Upload): Record<string, Checkpoint> {
   const ended = Date.parse(upload.session?.ended_at ?? "");
   const out: Record<string, Checkpoint> = {};
   const take = (name: unknown, c: Partial<Checkpoint> | null | undefined) => {
     const at = Date.parse(c?.measured_at ?? "");
-    if (!CHECKPOINTS.includes(name as never) || !c || Number.isNaN(at) || at < ended || out[name as string]) return;
+    if (!CHECKPOINTS.includes(name as never) || !c || Number.isNaN(at) || out[name as string]) return;
+    // With no end known, the age it says is all there is to go by.
+    const age = Number.isNaN(ended) ? num(c.age_seconds) : Math.floor((at - ended) / 1000);
+    if (age < AGE_SECONDS[name as string]!) return;
     out[name as string] = {
       added: num(c.added),
       surviving: Math.min(num(c.surviving), num(c.added)),
       measured_at: new Date(at).toISOString(),
-      age_seconds: num(c.age_seconds),
+      age_seconds: age,
     };
   };
   const before = typeof kept === "string" ? JSON.parse(kept) : kept;
@@ -129,6 +135,10 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     await dropOwn(db, key, owner.email, mayRefile, copy);
     return { stored: false, excluded: true };
   }
+  // One upload of a session at a time, its first too, when there is no row
+  // yet to hold: two at once would each find none, and the later would
+  // replace the checkpoints the earlier brought.
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`sessionly-session:${key.join("\n")}`]);
   // Read with the row held: another upload of this same session waits for
   // this one, and compares with what it left. (Uploads of other sessions do not wait.)
   const before = await matchedBy(db, { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! }, { hold: true });

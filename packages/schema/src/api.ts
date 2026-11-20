@@ -777,6 +777,12 @@ export interface PullDue {
 export interface PullAfterMergeReport {
   repo: string;
   number: number;
+  /**
+   * The ages the files were read for: the ones `GET /prs/due` named. Only
+   * these are kept, so an age reached between the reading and the sending is
+   * not counted from files read before it.
+   */
+  checkpoints: ("7d" | "30d")[];
   /** Every path asked for. A file that is gone has no hashes. */
   files: FileHashes[];
 }

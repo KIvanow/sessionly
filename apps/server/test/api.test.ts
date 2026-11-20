@@ -452,7 +452,17 @@ test("what was still there 1, 7 and 30 days after a session ended is kept, and s
     [["claude-opus-5-5", 1, 2], ["gpt-5", 1, 1]],
   );
 
-  // The session went on after day 8: what was measured before its new end was not after it ended.
-  await send(tokens.ann, "k1", [at("1d", 18, 12)], { ended_at: days(10) });
-  assert.deepEqual(await kept("k1"), [["1d", 18, 12], ["30d", 12, 31]]);
+  // The session went on until day 10. What was measured before that was not after it ended, and what
+  // was measured on day 31 was 21 days after it: neither is kept. Day 12 is 2 days after, whatever age it came with.
+  await send(tokens.ann, "k1", [at("1d", 18, 12), at("7d", 16, 15)], { ended_at: days(10) });
+  assert.deepEqual(await kept("k1"), [["1d", 18, 2]]);
+  // With the end unchanged, one taken late is kept as late as it was.
+  await send(tokens.ann, "k1", [at("7d", 14, 19)], { ended_at: days(10) });
+  assert.deepEqual(await kept("k1"), [["1d", 18, 2], ["7d", 14, 9]]);
+
+  // Two first uploads of one session at once: each brings a checkpoint, and both are kept.
+  const twice = (checkpoint: unknown) => put(tokens.ann, { ...upload("k-twice", { repo: { root: "~/src/kept", remote: repo } }), checkpoints: [checkpoint] } as Upload);
+  const both = await Promise.all([twice(at("1d", 19, 1)), twice(at("7d", 15, 7))]);
+  assert.deepEqual(both.map((response) => response.status), [200, 200]);
+  assert.deepEqual(await kept("k-twice"), [["1d", 19, 1], ["7d", 15, 7]]);
 });
