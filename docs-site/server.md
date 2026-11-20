@@ -45,12 +45,14 @@ SESSIONLY_ADMIN_TOKEN=choose-a-long-secret docker compose up -d
 ```
 
 It listens on port 8080 of the machine; `SESSIONLY_PORT` names another. The compose file hands
-the container the admin token and address, the public address, the Google and GitHub settings
-and the two page-count settings, from the environment or from a `.env` file beside it. Other
+the container the admin token and address, the public address, the Google and GitHub settings,
+the two page-count settings and the four `SESSIONLY_DEMO_*` settings (see
+[Server configuration](server-configuration.md#showing-a-repository-in-another-organisation)),
+from the environment or from a `.env` file beside it. Other
 settings (`SESSIONLY_DB_POOL`, `SESSIONLY_RATE_PER_MINUTE` and so on) have to be added to the
 file's `environment:` list to reach the server.
 
-Each release also has an image, `ghcr.io/kivanow/sessionly-server:<version>`. It is the
+Each release also has an image, `ghcr.io/kivanow/sessionly-server:v<version>`. It is the
 [ee server](editions.md), which without a license behaves exactly like the core one.
 
 ## Before anyone else uses it

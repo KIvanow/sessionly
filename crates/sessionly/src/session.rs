@@ -78,9 +78,10 @@ pub struct Session {
     pub counts: Counts,
     pub prompts: Vec<Prompt>,
     pub tool_calls: Vec<ToolCall>,
-    /// Files read or changed through the agent's file tools. What shell
-    /// commands changed is known only for a session in the cloud, where the
-    /// working tree is compared before and after each command.
+    /// Files read or changed through the agent's file tools, and by its shell
+    /// commands: the working tree is compared before and after each command.
+    /// On a person's own machine only what is sure to be the command's is
+    /// counted; in the cloud, everything that changed.
     pub files: Vec<FileTouched>,
     pub subagents: Vec<Subagent>,
     /// Instruction files (CLAUDE.md, rules) loaded into the session.

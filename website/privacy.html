@@ -63,7 +63,7 @@
       <section class="legal">
         <div class="wrap">
           <h1>Privacy Policy</h1>
-          <p class="meta">Effective as of 16 November 2026</p>
+          <p class="meta">Effective as of 20 November 2026</p>
 
           <div class="summary">
             <h2>In short</h2>
@@ -113,9 +113,12 @@
           <p>
             <strong>The software on your machine, and self-hosted installs.</strong> The
             <code>sessionly</code> program stores what it captures in a folder on your own machine
-            (<code>~/.sessionly</code>). It does not report usage, telemetry or account data to me
-            and does not check for updates. Its only network connection is the upload to the
-            server you connect it to with <code>sessionly connect</code>; until you do that,
+            (<code>~/.sessionly</code>). It does not report usage, telemetry or account data to me.
+            Its network connections are the upload to the server you connect it to with
+            <code>sessionly connect</code> and, once connected, a check at most once a day for a
+            newer release on GitHub, which sends no account, machine identifier or session
+            (GitHub sees the address the connection comes from;
+            <code>sessionly settings --update-check off</code> turns it off). Until you connect,
             nothing leaves the machine. If you run the Sessionly server yourself, everything
             described below is stored on your infrastructure, not mine, and license files are
             verified offline. The one exception is the dashboard's page counts, described under
@@ -167,12 +170,13 @@
           </p>
           <ul>
             <li>
-              a random identifier of the machine, which agent ran the session (Claude Code, Cursor
-              or Grok), the session's identifier, and when it started and ended;
+              a random identifier of the machine, which agent ran the session (Claude Code,
+              Cursor, Grok or Codex) and its version, how it was started, the session's
+              identifier, and when it started and ended;
             </li>
             <li>
-              the git user name and email address and the repository's remote address, as set in
-              git on that machine, or, for a session that ran in the cloud, the email address the
+              the git user name and email address, the repository's remote address and the
+              branch name, as set in git on that machine, or, for a session that ran in the cloud, the email address the
               platform gives for the person who started it. They are a label, not a verified
               identity;
             </li>
@@ -184,6 +188,12 @@
               the files the agent read or changed, as paths relative to the repository or to the
               home directory, with lines added and removed;
             </li>
+            <li>
+              the folder the session ran in and the repository's folder, as paths under the home
+              directory (<code>~/&hellip;</code>), and the paths of the instruction files the
+              agent loaded (such as <code>CLAUDE.md</code>);
+            </li>
+            <li>the permission modes the agent ran in;</li>
             <li>models, token counts and cost;</li>
             <li>
               the rewrite measurement: how many of the lines the agent added are still in each
@@ -590,7 +600,7 @@
           <p>
             A ledger of AI coding agent sessions. Open source under Apache-2.0 and
             <a href="https://docs.sessionly.dev/server.html">self-hosted</a>. Claude Code,
-            Cursor, Grok and GitHub are trademarks of their owners; Sessionly is not affiliated
+            Cursor, Grok, Codex and GitHub are trademarks of their owners; Sessionly is not affiliated
             with them.
           </p>
           <p>Email <a href="mailto:support@sessionly.dev">support@sessionly.dev</a>.</p>

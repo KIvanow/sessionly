@@ -33,5 +33,4 @@ Sessions that run in the cloud are captured another way, through hooks a reposit
 | [Cursor's cloud agents](cloud-sessions.md) | prompts, tool calls, files and lines, the model; no tokens and no cost |
 | [Codex's cloud tasks](codex-cloud-tasks.md) | the files and lines each turn changed; no prompts, tool calls, model or cost |
 
-Not read: Cursor's command-line agent (`cursor-agent`), and Codex rollouts that Codex has
-compressed.
+Not read: Cursor's command-line agent (`cursor-agent`).

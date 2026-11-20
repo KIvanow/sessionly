@@ -63,7 +63,7 @@
       <section class="legal">
         <div class="wrap">
           <h1>Security</h1>
-          <p class="meta">Last updated 16 November 2026</p>
+          <p class="meta">Last updated 20 November 2026</p>
 
           <div class="summary">
             <h2>In short</h2>
@@ -80,7 +80,7 @@
               </li>
               <li>
                 The capture hook only observes. It cannot block or change an agent's session, and
-                it never opens the sign-in files of Cursor or Grok.
+                it never opens the sign-in files of Cursor, Grok or Codex.
               </li>
               <li>
                 Access to a server is by token. Tokens are stored as SHA-256 hashes; a member reads
@@ -175,17 +175,21 @@
 
           <h3>Other agents' files</h3>
           <p>
-            Sessions from Cursor and Grok are read from the transcript and session files those
-            agents keep. Their sign-in files are never opened.
+            Sessions from Cursor, Grok and Codex are read from the transcript, session and
+            rollout files those agents keep. Their sign-in files are never opened.
           </p>
 
           <h2>What leaves the machine</h2>
           <p>
-            Nothing, until you run <code>sessionly connect</code>. The program makes one kind of
-            network connection on its own: the upload to the server you connected. It sends no
-            telemetry and does not check for updates. The one other command that reaches the
-            network is <code>sessionly install --repo</code>, which reads a release's checksums
-            from GitHub unless you give it a file. Once connected, before a record is uploaded:
+            Nothing, until you run <code>sessionly connect</code>. The program makes two kinds of
+            network connection on its own: the upload to the server you connected, and, once
+            connected, a question to GitHub at most once a day for the newest release's version.
+            That question sends no account, machine identifier or session; GitHub sees the
+            address it comes from. <code>sessionly settings --update-check off</code> stops it,
+            and the capture hooks never ask. It sends no telemetry. The other commands that reach
+            the network are <code>sessionly update</code>, which downloads a release from GitHub,
+            and <code>sessionly install --repo</code>, which reads a release's checksums from
+            GitHub unless you give it a file. Once connected, before a record is uploaded:
           </p>
           <ul>
             <li>
@@ -196,7 +200,9 @@
             <li>
               <strong>The content level is applied.</strong> The default,
               <code>metadata</code>, sends counts, sizes, timings, tool names, statuses, relative
-              file paths, models, tokens, cost, rewrite figures and the git user and remote. It
+              file paths, models, tokens, cost, rewrite figures, the git user, remote and branch,
+              the working directory and repository folder as <code>~/&hellip;</code> paths, the
+              agent's version, its permission modes and the paths of its instruction files. It
               sends no text from prompts, commands, search patterns, URLs, errors or titles, and
               no content hashes. <code>previews</code>, which you switch on yourself, adds the
               200-character previews and the hashes.
@@ -500,7 +506,7 @@
           <p>
             A ledger of AI coding agent sessions. Open source under Apache-2.0 and
             <a href="https://docs.sessionly.dev/server.html">self-hosted</a>. Claude Code,
-            Cursor, Grok and GitHub are trademarks of their owners; Sessionly is not affiliated
+            Cursor, Grok, Codex and GitHub are trademarks of their owners; Sessionly is not affiliated
             with them.
           </p>
           <p>Email <a href="mailto:support@sessionly.dev">support@sessionly.dev</a>.</p>

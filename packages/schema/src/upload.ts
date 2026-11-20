@@ -129,9 +129,10 @@ export interface Session {
   prompts?: Prompt[];
   tool_calls?: ToolCall[];
   /**
-   * Files read or changed through the agent's file tools. What shell
-   * commands changed is known only for a session in the cloud, where the
-   * working tree is compared before and after each command.
+   * Files read or changed through the agent's file tools, and by its shell
+   * commands: the working tree is compared before and after each command.
+   * On a person's own machine only what is sure to be the command's is
+   * counted; in the cloud, everything that changed.
    */
   files?: FileTouched[];
   subagents?: Subagent[];

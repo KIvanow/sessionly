@@ -200,7 +200,7 @@ scripts/dummy-session.sh      # runs a short real Claude Code session that exerc
 ```
 
 The website ([sessionly.dev](https://sessionly.dev)) is the static pages in [`website/`](website/),
-with no build step and no JavaScript; `python3 -m http.server -d website` previews it. The docs are
+with no build step and one analytics script; `python3 -m http.server -d website` previews it. The docs are
 the Jekyll site in [`docs-site/`](docs-site/); its [README](docs-site/README.md) says how to
 preview them.
 
