@@ -938,6 +938,23 @@ async function recordReport(
     return pull?.later === true;
   };
   if (latest?.event === "match" && report.event === "match" && !(await reported())) {
+    // Back to what the row before it says: then nothing moved, and it goes.
+    const [before] = await db.query<{ commits: unknown; lines: unknown; agent_lines: unknown; sessions: unknown }>(
+      `SELECT commits, lines, agent_lines, sessions FROM pull_request_reports
+       WHERE org_id = $1 AND repo = $2 AND number = $3 AND id <> $4
+       ORDER BY at DESC, id DESC LIMIT 1`,
+      [db.orgId, report.repo, report.number, latest.id],
+    );
+    const back =
+      before != null &&
+      num(before.commits) === report.commits &&
+      num(before.lines) === report.lines &&
+      num(before.agent_lines) === report.agent_lines &&
+      sessionSignature(sessionsOf(before.sessions)) === sessionSignature(report.sessions);
+    if (back) {
+      await db.query(`DELETE FROM pull_request_reports WHERE org_id = $1 AND id = $2`, [db.orgId, latest.id]);
+      return;
+    }
     await db.query(
       `UPDATE pull_request_reports SET at = clock_timestamp(), commits = $2, lines = $3, agent_lines = $4, sessions = $5::jsonb, reporter_version = $6
        WHERE org_id = $1 AND id = $7`,
@@ -1290,13 +1307,12 @@ export async function pullsAddedTo(db: OrgDb, key: SessionKey, hashKey?: string)
   const recent = (p = "") => `(${p}state = 'open' OR coalesce(${p}merged_at, ${p}closed_at, ${p}updated_at) >= now() - interval '14 days')`;
   // Those that have its lines from before: what it has now may be fewer, or other lines.
   const credited = await db.query(
-    `SELECT p.repo, p.number FROM pull_sessions ps JOIN pull_requests p USING (org_id, repo, number)
+    `SELECT p.repo, p.number, p.updated_at, p.first_files, p.last_files, greatest(ps.lines, coalesce(ps.opened_lines, 0)) AS had
+     FROM pull_sessions ps JOIN pull_requests p USING (org_id, repo, number)
      WHERE ps.org_id = $1 AND ps.machine_id = $2 AND ps.source = $3 AND ps.session_id = $4
-       AND (ps.lines > 0 OR ps.opened_lines > 0) AND p.committers IS NOT NULL AND ${recent("p.")}
-     ORDER BY p.updated_at DESC, p.repo, p.number`,
+       AND (ps.lines > 0 OR ps.opened_lines > 0) AND p.committers IS NOT NULL AND ${recent("p.")}`,
     [db.orgId, key.machine_id, key.source, key.session_id],
   );
-  const found = credited.map((r) => ({ repo: String(r.repo), number: num(r.number) }));
   const started = iso(s.started_at);
   const kept = s.email ? committer(db.orgId, String(s.email), hashKey) : null;
   const branch = s.runtime === "cloud" && s.branch ? String(s.branch) : null;
@@ -1304,43 +1320,67 @@ export async function pullsAddedTo(db: OrgDb, key: SessionKey, hashKey?: string)
   const has = (column: string) =>
     `EXISTS (SELECT 1 FROM jsonb_array_elements(${column}) AS f, jsonb_array_elements_text(f->'hashes') AS h WHERE h = ANY($7::text[]))`;
   const rows = await db.query(
-    `SELECT repo, number, first_files, last_files FROM pull_requests
+    `SELECT repo, number, updated_at, first_files, last_files FROM pull_requests
      WHERE org_id = $1 AND committers IS NOT NULL
        AND (repo = $2 OR head_repo = $2 OR coalesce(aliases, '[]'::jsonb) ? $2)
        AND ${recent()}
        AND ($3::timestamptz IS NULL OR created_at IS NULL OR created_at <= $3::timestamptz + make_interval(days => $4::int))
        AND ($3::timestamptz IS NULL OR coalesce(merged_at, closed_at) IS NULL OR $3::timestamptz <= coalesce(merged_at, closed_at))
        AND (committers = '[]'::jsonb OR ($5::text IS NOT NULL AND committers ? $5::text) OR ($6::text IS NOT NULL AND head_ref = $6::text))
-       AND (${has("last_files")} OR ${has("first_files")})
-     ORDER BY updated_at DESC, repo, number`,
+       AND (${has("last_files")} OR ${has("first_files")})`,
     [db.orgId, s.repo, started, LOOK_BACK_DAYS, kept, branch, hashes],
   );
-  const claims = added.map((lines) => ({ path: lines.path ?? "", hashes: new Set(lines.hashes ?? []) }));
-  // How many of a pull request's lines it added to the same file: the ones it has most of come first,
-  // and one that shares only an import with it does not take the place of the one it wrote.
+  // Its lines by path, together whatever model groups they are in; and per
+  // file of a pull request, those of the paths that are that file, once.
+  const byPath = new Map<string, Set<string>>();
+  for (const lines of added) {
+    const path = lines.path ?? "";
+    const set = byPath.get(path) ?? new Set<string>();
+    for (const hash of lines.hashes ?? []) set.add(hash);
+    byPath.set(path, set);
+  }
+  const forFile = new Map<string, Set<string>[]>();
+  const writtenIn = (path: string) => {
+    let sets = forFile.get(path);
+    if (!sets) forFile.set(path, (sets = [...byPath].filter(([claimed]) => samePath(claimed, path)).map(([, set]) => set)));
+    return sets;
+  };
+  // How many of a pull request's lines it added to the same file.
   const overlap = (files: FileHashes[]) =>
     files.reduce((sum, file) => {
-      // One upload can have a file's lines in several groups, one per model.
-      const written = new Set(claims.filter((c) => samePath(c.path, file.path)).flatMap((c) => [...c.hashes]));
-      return sum + file.hashes.filter((hash) => written.has(hash)).length;
+      const sets = writtenIn(file.path);
+      return sets.length ? sum + file.hashes.filter((hash) => sets.some((set) => set.has(hash))).length : sum;
     }, 0);
-  const there = new Set(found.map((pull) => `${pull.repo}#${pull.number}`));
-  const ranked = rows
-    .map((r) => ({ repo: String(r.repo), number: num(r.number), lines: Math.max(overlap(json<FileHashes[]>(r.last_files)), overlap(json<FileHashes[]>(r.first_files))) }))
-    .filter((pull) => pull.lines > 0 && !there.has(`${pull.repo}#${pull.number}`));
-  // Sorting keeps the order of those with as many: the ones reported last first.
-  found.push(...ranked.sort((x, y) => y.lines - x.lines).map(({ repo, number }) => ({ repo, number })));
+  // The ones with most of its lines come first, now or from before (which matching again takes back),
+  // so that one sharing only an import with it does not take the place of the one it wrote; then the
+  // ones reported last.
+  const pulls = new Map<string, { repo: string; number: number; lines: number; at: number }>();
+  for (const r of [...credited, ...rows]) {
+    const id = `${r.repo}#${r.number}`;
+    const lines = Math.max(num(r.had), overlap(json<FileHashes[]>(r.last_files)), overlap(json<FileHashes[]>(r.first_files)));
+    const at = new Date(r.updated_at as string).getTime();
+    const before = pulls.get(id);
+    if (!before || lines > before.lines) pulls.set(id, { repo: String(r.repo), number: num(r.number), lines, at });
+  }
+  const found = [...pulls.values()]
+    .filter((pull) => pull.lines > 0)
+    .sort((x, y) => y.lines - x.lines || y.at - x.at || x.repo.localeCompare(y.repo) || x.number - y.number)
+    .map(({ repo, number }) => ({ repo, number }));
   return found.slice(0, MATCH_ON_UPLOAD);
 }
 
-/** What a session's lines are now, to tell an upload that changed them: a hash of them, or null for none. */
-export async function linesNow(db: OrgDb, key: SessionKey): Promise<string | null> {
-  const [row] = await db.query<{ lines: string | null }>(
-    `SELECT md5((payload->'lines')::text) AS lines FROM sessions
+/**
+ * What a session's lines are now, and what else decides which pull requests
+ * they count in (whose it is, where and when it ran), to tell an upload that
+ * changed any of it: a hash of them, or null for no session.
+ */
+export async function matchedBy(db: OrgDb, key: SessionKey): Promise<string | null> {
+  const [row] = await db.query<{ by: string | null }>(
+    `SELECT md5(concat_ws(E'\n', (payload->'lines')::text, ${SESSION_EMAIL}, repo, branch, runtime, started_at::text)) AS by FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
     [db.orgId, key.machine_id, key.source, key.session_id],
   );
-  return row?.lines ?? null;
+  return row?.by ?? null;
 }
 
 /** No more than this many pull requests are matched again in one request. */

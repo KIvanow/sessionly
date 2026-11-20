@@ -140,9 +140,9 @@ when it was opened.
 reports it, and again when a session that added some of them is uploaded later (the session was
 still going when it was opened, the machine was offline): the server then matches the pull
 requests of its repository that are open or were closed in the last two weeks (and not before
-the session started), that its person committed to, five at most: first those that have its lines from an earlier
-upload, then those with most of its lines. An upload whose lines are the ones it had matches
-nothing again. The page and the history say
+the session started), that its person committed to, five at most: those with most of its lines, now or from an
+earlier upload. An upload that changes none of its lines, nor whose it is or where and when it
+ran, matches nothing again. The page and the history say
 so: one row for matching again until the next report, however many uploads it took. The comment on GitHub catches up at the next report. A session
 uploaded to a server of version 0.6.3 or older, or for a pull request closed longer ago, is not
 in the figures until it is matched again: **Match again** on

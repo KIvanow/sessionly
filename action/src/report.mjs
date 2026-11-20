@@ -227,7 +227,7 @@ export function render(report, attribution, server) {
         "lines an agent wrote after this pull request was opened may not be counted yet: Sessionly counts them " +
         "as they arrive, and this comment catches up the next time the pull request is reported, as on a push or its merge. A line many sessions have added to " +
         "the same file, such as an import, counts as an agent's only for a session that wrote other lines of " +
-        "this pull request._",
+        "this pull request, or every line of a file of it._",
     );
   }
   out.push(

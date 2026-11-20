@@ -954,6 +954,43 @@ test("an upload matches again the pull requests it adds lines to, and no others"
   const left = await db.query(`SELECT number FROM pull_requests WHERE repo = $1 AND matched_at = updated_at ORDER BY number`, [many]);
   assert.deepEqual(left.map((row) => Number(row.number)), [2]);
 
+  // five that have one of its lines from before do not keep out a new one with more of them
+  const stack = repo + "-stack";
+  const stacked = (hashes: number[]) => {
+    const one = session("s-stack", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: hashes.map(h) }]);
+    one.session.repo.remote = stack;
+    return call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-stack", one);
+  };
+  await stacked([950]);
+  for (let number = 1; number <= 5; number += 1) {
+    await call(tokens.ci, "PUT", "/prs", report({ repo: stack, number, commit_emails: ["ann@example.com"], files: [file("a.ts", 950)] }));
+  }
+  await call(tokens.ci, "PUT", "/prs", report({ repo: stack, number: 6, commit_emails: ["ann@example.com"], files: [file("a.ts", 951, 952, 953)] }));
+  await stacked([950, 951, 952, 953]);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${stack}&number=6`)).body.attribution.now.agent_lines, 3);
+
+  // matched again back to what the report before it said: no row says it moved
+  const back = repo + "-back";
+  const backed = (path: string, hashes: number[], email = "ann@example.com") => {
+    const one = session("s-back", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path, model: null, hashes: hashes.map(h) }]);
+    one.session.repo.remote = back;
+    (one.session as Record<string, unknown>).user = { email };
+    return call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-back", one);
+  };
+  await call(tokens.ci, "PUT", "/prs", report({ repo: back, number: 1, commit_emails: ["ann@example.com"], files: [file("a.ts", 960)] }));
+  const backHistory = async () =>
+    (await call(tokens.admin, "GET", `/prs/detail?repo=${back}&number=1`)).body.history.map((row: any) => [row.event, row.agent_lines]);
+  await backed("a.ts", [960]);
+  assert.deepEqual(await backHistory(), [["match", 1], ["opened", 0]]);
+  await backed("b.ts", [961]);
+  assert.deepEqual(await backHistory(), [["opened", 0]]);
+
+  // the same lines, now with the address it was committed with: matched again
+  await backed("a.ts", [960], "eve@example.com");
+  assert.deepEqual(await backHistory(), [["opened", 0]]);
+  await backed("a.ts", [960]);
+  assert.deepEqual(await backHistory(), [["match", 1], ["opened", 0]]);
+
   // looking for them fails: the session is stored all the same
   const broken = repo + "-broken";
   await call(tokens.ci, "PUT", "/prs", report({ repo: broken, number: 1, commit_emails: ["ann@example.com"], files: [file("a.ts", 920)] }));
