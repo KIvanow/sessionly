@@ -1342,26 +1342,41 @@ export async function pullsAddedTo(db: OrgDb, key: SessionKey, hashKey?: string)
        AND (${has("last_files")} OR ${has("first_files")})`,
     [db.orgId, s.repo, started, LOOK_BACK_DAYS, kept, branch, hashes],
   );
-  // Its lines by path, together whatever model groups they are in; and per
-  // file of a pull request, those of the paths that are that file, once.
-  const byPath = new Map<string, Set<string>>();
+  // Its lines by path, together whatever model groups they are in, each as
+  // many times as it added it; and per file of a pull request, those of the
+  // paths that are that file, together, once.
+  const byPath = new Map<string, Map<string, number>>();
   for (const lines of added) {
     const path = lines.path ?? "";
-    const set = byPath.get(path) ?? new Set<string>();
-    for (const hash of lines.hashes ?? []) set.add(hash);
-    byPath.set(path, set);
+    const counts = byPath.get(path) ?? new Map<string, number>();
+    for (const hash of lines.hashes ?? []) counts.set(hash, (counts.get(hash) ?? 0) + 1);
+    byPath.set(path, counts);
   }
-  const forFile = new Map<string, Set<string>[]>();
+  const forFile = new Map<string, Map<string, number>>();
   const writtenIn = (path: string) => {
-    let sets = forFile.get(path);
-    if (!sets) forFile.set(path, (sets = [...byPath].filter(([claimed]) => samePath(claimed, path)).map(([, set]) => set)));
-    return sets;
+    let counts = forFile.get(path);
+    if (!counts) {
+      forFile.set(path, (counts = new Map()));
+      for (const [claimed, each] of byPath) {
+        if (samePath(claimed, path)) for (const [hash, n] of each) counts.set(hash, (counts.get(hash) ?? 0) + n);
+      }
+    }
+    return counts;
   };
-  // How many of a pull request's lines it added to the same file.
+  // How many of a pull request's lines it added to the same file: a line the
+  // file has twenty times, added once, is one.
   const overlap = (files: FileHashes[]) =>
     files.reduce((sum, file) => {
-      const sets = writtenIn(file.path);
-      return sets.length ? sum + file.hashes.filter((hash) => sets.some((set) => set.has(hash))).length : sum;
+      const counts = writtenIn(file.path);
+      if (counts.size === 0) return sum;
+      const left = new Map(counts);
+      for (const hash of file.hashes) {
+        const n = left.get(hash) ?? 0;
+        if (n === 0) continue;
+        left.set(hash, n - 1);
+        sum++;
+      }
+      return sum;
     }, 0);
   // The ones with most of its lines come first, now or from before (which matching again takes back),
   // so that one sharing only an import with it does not take the place of the one it wrote; then the

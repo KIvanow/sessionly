@@ -966,6 +966,17 @@ test("an upload matches again the pull requests it adds lines to, and no others"
   const left = await db.query(`SELECT number FROM pull_requests WHERE repo = $1 AND matched_at = updated_at ORDER BY number`, [many]);
   assert.deepEqual(left.map((row) => Number(row.number)), [2]);
 
+  // a line a pull request has many times counts as often as the session added it
+  const often = repo + "-often";
+  for (let number = 1; number <= 5; number += 1) {
+    await call(tokens.ci, "PUT", "/prs", report({ repo: often, number, commit_emails: ["ann@example.com"], files: [file("a.ts", 960, 960, 960, 960, 960)] }));
+  }
+  await call(tokens.ci, "PUT", "/prs", report({ repo: often, number: 6, commit_emails: ["ann@example.com"], files: [file("a.ts", 961, 962)] }));
+  const once = session("s-often", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: [960, 961, 962].map(h) }]);
+  once.session.repo.remote = often;
+  assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-often", once)).status, 200);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${often}&number=6`)).body.attribution.now.agent_lines, 2);
+
   // five that have one of its lines from before do not keep out a new one with more of them
   const stack = repo + "-stack";
   const stacked = (hashes: number[]) => {
