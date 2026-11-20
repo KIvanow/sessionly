@@ -409,6 +409,10 @@ pub struct RewriteCheckpoint {
     /// How long after the session ended it was measured, which is the age
     /// or more: a machine that was off on the day measures later.
     pub age_seconds: u64,
+    /// When the session had ended, as that age was counted. A checkpoint
+    /// belongs to this end: of a session that has another end now (it went
+    /// on since), it is a checkpoint no more.
+    pub ended_at: Option<DateTime<Utc>>,
 }
 
 /// What the binary sends to a server for one session. Sending the same

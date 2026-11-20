@@ -52,9 +52,11 @@ Those compare like with like.
 - If the session's directory is gone on the day, no checkpoint is taken then.
 
 A checkpoint is counts and times: how many tracked lines the agent had added, how many were
-there, when that was measured and how old the session was. It is uploaded with the session
-and holds no paths and no text. A server keeps the ones it has: an upload that brings
-none, from a machine whose ledger was rebuilt, takes none away.
+there, when that was measured, how old the session was, and the end of the session that age
+was counted from. It is uploaded with the session
+and holds no paths and no text. A server keeps the ones it has, by the same rule
+as the machine: an upload that brings none, from a machine whose ledger was rebuilt, takes none
+away, and one of a session that has another end now drops them.
 
 On the dashboard, **By tool** and **By model** have **Kept @7d** and **Kept @30d** beside
 **Lines kept**. Each counts only the sessions measured at that age and says how many that is,

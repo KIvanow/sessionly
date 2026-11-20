@@ -428,4 +428,10 @@ export interface RewriteCheckpoint {
    * or more: a machine that was off on the day measures later.
    */
   age_seconds?: number;
+  /**
+   * When the session had ended, as that age was counted. A checkpoint
+   * belongs to this end: of a session that has another end now (it went
+   * on since), it is a checkpoint no more.
+   */
+  ended_at?: string | null;
 }

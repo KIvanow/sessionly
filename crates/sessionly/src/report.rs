@@ -786,6 +786,7 @@ mod tests {
             surviving,
             measured_at: None,
             age_seconds,
+            ended_at: None,
         };
         let kept = [at("1d", 14, day + 60), at("7d", 5, 9 * day)];
         let line = "still there after it ended: 1d 88%, 7d 31% (taken on day 9), 30d -";

@@ -917,20 +917,25 @@ impl Ledger {
     /// The checkpoints kept of a session, the earliest age first.
     pub fn checkpoints_of(&self, session_id: &str) -> Result<Vec<RewriteCheckpoint>> {
         let mut query = self.conn.prepare(
-            "SELECT checkpoint, added, surviving, measured_at, age_seconds
+            "SELECT checkpoint, added, surviving, measured_at, age_seconds, ended_at
              FROM rewrite_checkpoints WHERE session_id = ?1",
         )?;
         let mut rows: Vec<RewriteCheckpoint> = query
             .query_map([session_id], |r| {
                 let measured_at: String = r.get(3)?;
+                let ended_at: String = r.get(5)?;
+                let time = |text: &str| {
+                    DateTime::parse_from_rfc3339(text)
+                        .ok()
+                        .map(|t| t.with_timezone(&Utc))
+                };
                 Ok(RewriteCheckpoint {
                     checkpoint: r.get(0)?,
                     added: r.get(1)?,
                     surviving: r.get(2)?,
-                    measured_at: DateTime::parse_from_rfc3339(&measured_at)
-                        .ok()
-                        .map(|t| t.with_timezone(&Utc)),
+                    measured_at: time(&measured_at),
                     age_seconds: r.get(4)?,
+                    ended_at: time(&ended_at),
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;

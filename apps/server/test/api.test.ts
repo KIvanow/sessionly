@@ -388,12 +388,14 @@ test("what was still there 1, 7 and 30 days after a session ended is kept, and s
   const repo = "github.com/acme/kept";
   const ended = "2026-11-10T10:30:00Z";
   const days = (n: number) => new Date(Date.parse(ended) + n * 86_400_000).toISOString();
-  const at = (checkpoint: string, surviving: number, age: number, more: Record<string, unknown> = {}) => ({
+  /** A checkpoint measured `age` days after the session ended, which it did `from` days after it first had. */
+  const at = (checkpoint: string, surviving: number, age: number, from = 0, more: Record<string, unknown> = {}) => ({
     checkpoint,
     added: 20,
     surviving,
-    measured_at: days(age),
+    measured_at: days(from + age),
     age_seconds: age * 86_400,
+    ended_at: days(from),
     ...more,
   });
   const send = async (token: string, id: string, checkpoints: unknown[] | undefined, overrides: Record<string, unknown> = {}) => {
@@ -425,7 +427,7 @@ test("what was still there 1, 7 and 30 days after a session ended is kept, and s
   await send(tokens.ann, "k1", undefined);
   assert.deepEqual(await kept("k1"), [["1d", 19, 3], ["7d", 15, 8]]);
   // Counts and times are kept, and nothing else sent with one; an age nobody knows is not one.
-  await send(tokens.ann, "k1", [at("30d", 12, 31, { path: "SECRET.rs", text: "SECRET line" }), at("2d", 1, 2), at("90d", 1, 90)]);
+  await send(tokens.ann, "k1", [at("30d", 12, 31, 0, { path: "SECRET.rs", text: "SECRET line" }), at("2d", 1, 2), at("90d", 1, 90)]);
   assert.deepEqual(await kept("k1"), [["1d", 19, 3], ["7d", 15, 8], ["30d", 12, 31]]);
   const [stored] = await db.query<{ payload: unknown; checkpoints: unknown }>(
     `SELECT payload, checkpoints FROM sessions WHERE session_id = 'k1'`,
@@ -452,13 +454,29 @@ test("what was still there 1, 7 and 30 days after a session ended is kept, and s
     [["claude-opus-5-5", 1, 2], ["gpt-5", 1, 1]],
   );
 
-  // The session went on until day 10. What was measured before that was not after it ended, and what
-  // was measured on day 31 was 21 days after it: neither is kept. Day 12 is 2 days after, whatever age it came with.
-  await send(tokens.ann, "k1", [at("1d", 18, 12), at("7d", 16, 15)], { ended_at: days(10) });
+  // The session went on until day 10: the checkpoints counted from its first end are of a session
+  // that had not ended, and go, whenever they were measured. Its ages count from the new end.
+  await send(tokens.ann, "k1", [at("1d", 18, 2, 10)], { ended_at: days(10) });
   assert.deepEqual(await kept("k1"), [["1d", 18, 2]]);
-  // With the end unchanged, one taken late is kept as late as it was.
-  await send(tokens.ann, "k1", [at("7d", 14, 19)], { ended_at: days(10) });
+  // With the end unchanged, one taken late is kept as late as it was; one that says another end is not.
+  await send(tokens.ann, "k1", [at("7d", 14, 9, 10), at("30d", 9, 31, 0)], { ended_at: days(10) });
   assert.deepEqual(await kept("k1"), [["1d", 18, 2], ["7d", 14, 9]]);
+  // Nor is one measured before the session was as old as the age it is for.
+  await send(tokens.ann, "k1", [at("30d", 9, 29, 10)], { ended_at: days(10) });
+  assert.deepEqual(await kept("k1"), [["1d", 18, 2], ["7d", 14, 9]]);
+
+  // A day's checkpoint taken late, on day 7, and then the end is read again as day 6. The measurement
+  // is a day after that end too, and is still not its checkpoint: it was counted from the other. What
+  // the machine measures next, from this end, is the one kept.
+  await send(tokens.ann, "k-reread", [at("1d", 19, 7)]);
+  assert.deepEqual(await kept("k-reread"), [["1d", 19, 7]]);
+  await send(tokens.ann, "k-reread", [at("1d", 19, 7)], { ended_at: days(6) });
+  assert.deepEqual(await kept("k-reread"), []);
+  await send(tokens.ann, "k-reread", [at("1d", 17, 2, 6)], { ended_at: days(6) });
+  assert.deepEqual(await kept("k-reread"), [["1d", 17, 2]]);
+  // A session with no end has no age, and so no checkpoint: the ones it had go, and none is taken.
+  await send(tokens.ann, "k-reread", [at("1d", 17, 2, 6)], { ended_at: null });
+  assert.deepEqual(await kept("k-reread"), []);
 
   // Two first uploads of one session at once: each brings a checkpoint, and both are kept.
   const twice = (checkpoint: unknown) => put(tokens.ann, { ...upload("k-twice", { repo: { root: "~/src/kept", remote: repo } }), checkpoints: [checkpoint] } as Upload);

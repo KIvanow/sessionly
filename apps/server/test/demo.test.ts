@@ -86,7 +86,7 @@ function session(id: string, remote: string, lines: number[] = [1, 2, 3]) {
       { path: "src/a.ts", model: "claude-opus-5-5", hashes: lines.map(h) },
       { path: "notes/SECRET-plan.md", model: null, hashes: [h(900)] },
     ],
-    checkpoints: [{ checkpoint: "7d", added: 3, surviving: 2, measured_at: "2026-11-17T10:00:00.000Z", age_seconds: 604_800 }],
+    checkpoints: [{ checkpoint: "7d", added: 3, surviving: 2, measured_at: "2026-11-17T10:00:00.000Z", age_seconds: 604_800, ended_at: "2026-11-10T10:00:00.000Z" }],
   };
 }
 

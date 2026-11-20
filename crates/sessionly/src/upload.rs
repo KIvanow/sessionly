@@ -1234,8 +1234,14 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
                 "added",
                 "surviving",
                 "measured_at",
-                "age_seconds"
+                "age_seconds",
+                "ended_at"
             ]
+        );
+        // the end it was counted from is the session's own, as a server compares them
+        assert_eq!(
+            sent[0]["ended_at"],
+            serde_json::to_value(&upload.session).unwrap()["ended_at"]
         );
 
         // Measured again with nothing new: nothing to send.

@@ -312,6 +312,7 @@ export function shown(upload: Upload, rules: Rules): Upload {
       surviving: c.surviving,
       measured_at: c.measured_at,
       age_seconds: c.age_seconds,
+      ended_at: c.ended_at,
     })),
   };
 }

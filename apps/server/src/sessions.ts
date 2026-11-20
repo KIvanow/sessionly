@@ -65,29 +65,30 @@ const AGE_SECONDS: Record<string, number> = { "1d": 86_400, "7d": 7 * 86_400, "3
 type Checkpoint = Required<Omit<RewriteCheckpoint, "checkpoint">>;
 
 /**
- * The checkpoints a session has once an upload is stored, by age: the ones
- * kept already, and of the ones the upload brings, those there are none for.
- * So one kept is never replaced: a machine whose ledger was lost measures
- * again later, and that is not what was there on the day. Only a session
- * that went on since is different. A checkpoint's age is counted from the
- * session's end as the upload has it, whatever age it came with: one from
- * before that end, or not yet as old as its age by it, was of a session that
- * had not ended, and goes.
+ * The checkpoints a session has once an upload is stored, by age. The rule
+ * is the ledger's (`rewrite_checkpoints` in crates/sessionly/src/ledger.rs):
+ * a checkpoint belongs to the end of the session its age was counted from,
+ * and the first one kept for an age of that end stays. So one kept is never
+ * replaced: a machine whose ledger was lost measures again later, and that
+ * is not what was there on the day. One of another end than the session has
+ * now, kept or brought, is of a session that went on since, and is none; so
+ * a session with no end has none. Of what an upload brings, a measurement
+ * taken before the session was as old as the age it is for is not taken.
  */
 export function mergeCheckpoints(kept: unknown, upload: Upload): Record<string, Checkpoint> {
   const ended = Date.parse(upload.session?.ended_at ?? "");
   const out: Record<string, Checkpoint> = {};
   const take = (name: unknown, c: Partial<Checkpoint> | null | undefined) => {
-    const at = Date.parse(c?.measured_at ?? "");
-    if (!CHECKPOINTS.includes(name as never) || !c || Number.isNaN(at) || out[name as string]) return;
-    // With no end known, the age it says is all there is to go by.
-    const age = Number.isNaN(ended) ? num(c.age_seconds) : Math.floor((at - ended) / 1000);
-    if (age < AGE_SECONDS[name as string]!) return;
+    if (!CHECKPOINTS.includes(name as never) || !c || out[name as string]) return;
+    if (Date.parse(c.ended_at ?? "") !== ended) return;
+    const at = Date.parse(c.measured_at ?? "");
+    if (Number.isNaN(at) || at - ended < AGE_SECONDS[name as string]! * 1000) return;
     out[name as string] = {
       added: num(c.added),
       surviving: Math.min(num(c.surviving), num(c.added)),
       measured_at: new Date(at).toISOString(),
-      age_seconds: age,
+      age_seconds: num(c.age_seconds),
+      ended_at: new Date(ended).toISOString(),
     };
   };
   const before = typeof kept === "string" ? JSON.parse(kept) : kept;
