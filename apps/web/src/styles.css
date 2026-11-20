@@ -341,6 +341,9 @@ main > p { margin: 0; }
 }
 .hero .facts { margin: 0; padding-top: 12px; border-top: 1px solid var(--ink); gap: 6px 16px; }
 .hero .facts dd { text-align: right; font-family: var(--mono); font-size: 14px; font-weight: 500; }
+/* Where the cost went: the names are long, so they wrap and the amounts keep to one line. */
+.hero .facts.where { grid-template-columns: 1fr max-content; }
+.hero .facts.where dd { white-space: nowrap; }
 .hero .note { padding-top: 10px; border-top: 1px solid var(--rule); }
 .note { color: var(--muted); font-size: 13px; }
 .note:empty { display: none; }
@@ -369,6 +372,8 @@ main > p { margin: 0; }
 .explained > span:first-child { text-decoration: underline dotted; text-underline-offset: 3px; }
 .explained .explanation { display: none; margin-top: 6px; padding-left: 8px; border-left: 2px solid var(--blue); color: var(--muted); }
 .explained:hover .explanation, .explained:focus .explanation { display: block; }
+/* Under a label in small capitals, what it means is said in ordinary words. */
+.facts dt .explanation { font: 400 13px/1.45 var(--sans); letter-spacing: 0; text-transform: none; }
 /* A bar for a share: the track is the whole, the fill the part. */
 .track { display: block; height: 8px; margin: 6px 0 2px; background: var(--track); }
 .track i { display: block; height: 100%; background: var(--blue); }

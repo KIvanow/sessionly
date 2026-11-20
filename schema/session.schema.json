@@ -398,6 +398,13 @@
           "format": "uint64",
           "minimum": 0,
           "default": null
+        },
+        "by_branch": {
+          "description": "`total_usd` by the branch that was checked out when it was spent,\nwhere the agent says which with every response (Claude Code): a\nserver then counts for a pull request only what was spent on its\nbranch. Shared out as the estimates of the responses on each branch\nare; a branch of null is the responses that named none. Left out\nwhere that is not known, and of a session in the cloud, whose\nsandbox holds the one branch.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BranchCost"
+          }
         }
       }
     },
@@ -430,6 +437,24 @@
           "const": "unknown"
         }
       ]
+    },
+    "BranchCost": {
+      "description": "What a session spent while one branch was checked out.",
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "usd": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        }
+      }
     },
     "ModelUsage": {
       "type": "object",

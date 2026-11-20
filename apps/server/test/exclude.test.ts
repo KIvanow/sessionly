@@ -330,7 +330,7 @@ test("storing a session and stopping its repository at the same moment: the sess
     (tx) => storeUpload(tx, upload("raced-1", { root: "~/Raced" }), fay),
     (tx) => excludeRepo(tx, fay.email, "~/Raced"),
   );
-  assert.deepEqual(stored, { stored: true, changed: true });
+  assert.deepEqual(stored, { stored: true, changed: true, spent: true });
   assert.equal(stopped.sessions_removed, 1);
   assert.equal(await left(fay.email), 0);
 
@@ -350,7 +350,7 @@ test("storing a session and stopping its repository at the same moment: the sess
     (tx) => storeUpload(tx, upload("raced-3", { root: "~/Fine" }), hal),
     (tx) => storeUpload(tx, upload("raced-4", { root: "~/Fine" }), hal),
   );
-  assert.deepEqual(both, [{ stored: true, changed: true }, { stored: true, changed: true }]);
+  assert.deepEqual(both, [{ stored: true, changed: true, spent: true }, { stored: true, changed: true, spent: true }]);
 
   // Two uploads of one session already stored: the second waits for the first, and says whether it
   // changed what that one left. Put back as it was before both, it did: the first had changed it.
@@ -359,12 +359,12 @@ test("storing a session and stopping its repository at the same moment: the sess
     (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine/elsewhere" }), hal),
     (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine" }), hal),
   );
-  assert.deepEqual(back, [{ stored: true, changed: true }, { stored: true, changed: true }]);
+  assert.deepEqual(back, [{ stored: true, changed: true, spent: false }, { stored: true, changed: true, spent: false }]);
   const same = await overlapped(
     (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine" }), hal),
     (tx) => storeUpload(tx, upload("raced-5", { root: "~/Fine" }), hal),
   );
-  assert.deepEqual(same, [{ stored: true, changed: false }, { stored: true, changed: false }]);
+  assert.deepEqual(same, [{ stored: true, changed: false, spent: false }, { stored: true, changed: false, spent: false }]);
 
   // What tells a change keeps each value in its place: one moved to an empty field next to it is a change.
   const fingerprint = (set: string) =>

@@ -102,6 +102,12 @@ fn add_local_context(
     facts: Option<&Facts>,
     runtime: Option<&crate::runtime::Seen>,
 ) {
+    // A sandbox holds one session and the one branch its agent makes for the
+    // work: all of what it spent is that branch's, the turns before it was
+    // made too.
+    if let (Some(_), Some(cost)) = (runtime, session.cost.as_mut()) {
+        cost.by_branch.clear();
+    }
     if let Some(cwd) = session.cwd.as_deref().map(Path::new) {
         if let Some(root) = crate::git::repo_root(cwd) {
             let recorded = facts.and_then(|f| f.git_branch.clone());

@@ -145,6 +145,23 @@ pub struct Cost {
     /// none for turns that ran before the hooks were installed. Null when the
     /// figure covers the whole session.
     pub prompts_covered: Option<u64>,
+    /// `total_usd` by the branch that was checked out when it was spent,
+    /// where the agent says which with every response (Claude Code): a
+    /// server then counts for a pull request only what was spent on its
+    /// branch. Shared out as the estimates of the responses on each branch
+    /// are; a branch of null is the responses that named none. Left out
+    /// where that is not known, and of a session in the cloud, whose
+    /// sandbox holds the one branch.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub by_branch: Vec<BranchCost>,
+}
+
+/// What a session spent while one branch was checked out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct BranchCost {
+    pub branch: Option<String>,
+    pub usd: f64,
 }
 
 impl Cost {
@@ -162,6 +179,7 @@ impl Cost {
             unpriced_requests,
             untracked_usd: None,
             prompts_covered: None,
+            by_branch: Vec::new(),
         }
     }
 }

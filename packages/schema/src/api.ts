@@ -172,6 +172,17 @@ export interface Totals {
   sessions_without_cost: number;
   /** Sessions whose cost is an estimate, or includes one. */
   sessions_with_estimated_cost: number;
+  /**
+   * `cost_usd` by where the work went, every dollar in one of the three:
+   * charged to pull requests that are merged or open (see `PullCost`), to
+   * ones closed without merging, or to none. The last is the sessions whose
+   * work has not reached a pull request: exploration, abandoned branches,
+   * work whose pull request is not open yet, and what a session spent on
+   * another branch than its pull request's. The three add up to `cost_usd`.
+   */
+  in_pr_usd: number;
+  closed_unmerged_usd: number;
+  not_in_pr_usd: number;
   active_ms: number;
   prompts: number;
   tool_calls: number;
@@ -492,17 +503,24 @@ export interface PullCloud {
 }
 
 /**
- * What the sessions matched to a pull request cost, each counted for the
- * share of its lines that are in the pull request. It is the cost of those
- * sessions and not of the pull request's whole making: lines that are not
- * put down to a session carry none.
+ * What was spent on a pull request: all of what the sessions that
+ * contributed lines to it cost, whether or not those lines are still in it.
+ * A session is charged to the pull requests it contributed lines to, split
+ * between them by the lines it contributed to each at any time, at its
+ * opening or in a later push. Review taking lines out does not lower it.
+ * Where the agent says which branch each turn ran on (Claude Code), only
+ * what was spent on the pull request's branch counts; a session of another
+ * agent counts whole when the one branch it names is the pull request's, so
+ * other work it did on that branch is charged here too. It is the cost of
+ * those sessions and not of the pull request's whole making: lines that are
+ * not put down to a session carry none.
  */
 export interface PullCost {
-  /** The sum of the sessions' shares. Null when none of them has a cost figure, or there are none. */
+  /** Everything spent on it, review rounds included: the sum of what its sessions are charged here. Null when none of them has a cost figure, or there are none. */
   usd: number | null;
-  /** Whether any of those shares is of a cost that is estimated, wholly or in part. */
+  /** Whether any of those charges is of a cost that is estimated, wholly or in part. */
   estimated: boolean;
-  /** Sessions with lines in it, and how many of those have no cost figure or were deleted: `usd` is then a floor. */
+  /** Sessions that contributed lines to it, now or once, and how many of those have no cost figure or were deleted: `usd` is then a floor. */
   sessions: number;
   sessions_without_cost: number;
   /** How many of them have a cost that leaves requests out (to models without a known price): `usd` is then a floor too. */
@@ -520,24 +538,32 @@ export interface PullCost {
    */
   sessions_unshared_for_good: number;
   /**
-   * How many of those without a cost here have one, whose share is not known
-   * yet: after an upgrade the server counts the line hashes of the sessions
-   * it held, and until it has, what part of one is in a pull request cannot
+   * How many of those without a cost here have one, whose charge is not
+   * known yet: after an upgrade the server charges the sessions it held to
+   * their pull requests, and until it has, what one is charged here cannot
    * be said. Counted among `sessions_without_cost`.
    */
   sessions_uncounted: number;
   /**
-   * What an agent line of it cost: `usd` for what the lines of the sessions
-   * that have a cost figure count as, a line that is in several pull
-   * requests being shared out between them. A floor when one of those has
-   * a cost that leaves requests out.
+   * How many of them have lines here and are charged nothing: what they
+   * spent was spent on another branch than this pull request's. They are in
+   * no figure of cost here.
+   */
+  sessions_off_branch: number;
+  /**
+   * What an agent line of it cost: `usd` for what the lines it has now of
+   * the sessions charged count as, a line that is in several pull requests
+   * being shared out between them. Null when it has none of theirs now. A
+   * floor when one of those has a cost that leaves requests out.
    */
   per_agent_line_usd: number | null;
   /**
-   * What the agent lines it was opened with cost: their sessions' cost, for
-   * the share of each that those lines are. There when none of them is left
-   * too. Null on one not reported from the moment it was opened, or last
-   * matched before its sessions of then were kept.
+   * What its first version cost: what the sessions with lines among those it
+   * was opened with are charged here, all of it. Never more than `usd`: a
+   * session that only pushed review fixes is in that and not in this. There
+   * when none of those lines is left too. Null on one not reported from the
+   * moment it was opened, or last matched before its sessions of then were
+   * kept.
    */
   opened_usd: number | null;
   /** Whether a session with lines among those has no cost figure, or one that leaves requests out: `opened_usd` is then a floor. */
@@ -550,7 +576,8 @@ export interface PullCost {
    * What an agent line that survived review cost: `opened_usd` for each of
    * them still there, a line it was opened with together with other pull
    * requests counting in part, as its cost does, wherever it survived. Of
-   * the sessions with a cost only. Null when none of those survived in this one.
+   * the sessions with a cost only. Review taking lines out raises it, and
+   * lowers no cost. Null when none of those survived in this one.
    */
   per_surviving_line_usd: number | null;
   /** Whether a session with a cost among those leaves requests out: `per_surviving_line_usd` is then a floor. */
@@ -633,37 +660,47 @@ export interface PullFile {
 }
 
 /**
- * A session that wrote lines of a pull request. What is known of the session
- * is null once it has been deleted.
+ * A session that contributed lines to a pull request: ones it has now, or
+ * ones review has taken out since. What is known of the session is null once
+ * it has been deleted.
  */
 export interface PullSession {
   machine_id: string;
   source: string;
   session_id: string;
-  /** Lines of the pull request, as last reported, put down to this session. */
+  /** Lines of the pull request, as last reported, put down to this session. None when review took them all out. */
   lines: number;
+  /** Lines it contributed to the pull request at any time: those, the ones it was opened with, and ones of a push between that are gone since. What its cost is split by. */
+  contributed_lines: number;
   /** Line hashes the session uploaded: the lines of it that could be matched to any pull request. Null once it has been deleted, or while they are still to be counted after an upgrade. */
   hashed_lines: number | null;
   /**
-   * Its cost in this pull request: the session's cost, in the proportion of
-   * `lines` to `hashed_lines`. A line that is also in other pull requests
-   * (but for ones closed without merging) is shared out between them, so
-   * the session is counted once. Null where the session has no cost figure,
-   * or has been deleted, or is `uncounted`.
+   * What it is charged in this pull request: all of what it spent on the
+   * pull request's branch, or its share of that by `contributed_lines` when
+   * it contributed to other pull requests too (a line in several being
+   * shared out between them). It does not shrink when lines are taken out.
+   * Nothing for one that is `off_branch`. Null where the session has no
+   * cost figure, or has been deleted, or is `uncounted`.
    */
   cost_share_usd: number | null;
   /**
-   * It has a cost, and what share of it is here is not known yet: after an
-   * upgrade the server counts the line hashes of the sessions it held, and
-   * this one's are still to be counted.
+   * It has a cost, and what it is charged here is not known yet: after an
+   * upgrade the server charges the sessions it held to their pull requests,
+   * and has not come to this one.
    */
   uncounted: boolean;
   /**
-   * It has lines in other pull requests too, and in one of them which lines
-   * they are was not kept: the same ones, perhaps, counted in each. Its
-   * share here is then an estimate (see `PullCost.sessions_unshared`).
+   * It contributed to other pull requests too, and in one of them which
+   * lines they are was not kept: the same ones, perhaps, counted in each.
+   * Its share here is then an estimate (see `PullCost.sessions_unshared`).
    */
   unshared: boolean;
+  /**
+   * What it spent was spent on another branch than this pull request's: its
+   * turns name their branches and none is this one (Claude Code), or the
+   * one branch the session names is another. It is charged nothing here.
+   */
+  off_branch: boolean;
   session: Pick<
     SessionRow,
     "owner_email" | "runtime" | "title" | "started_at" | "active_ms" | "cost_usd" | "cost_source" | "primary_model" | "prompts"
@@ -880,10 +917,10 @@ export interface PullSummary {
     cloud_pulls: number;
     cloud_pulls_without_session: number;
     /**
-     * What the sessions matched to these pull requests cost (see `PullCost`):
-     * the sum of theirs. Null when none has a cost. Those closed
-     * unmerged, whose lines may be in another too, are in no figure of cost
-     * here unless only they are asked for.
+     * What was spent on these pull requests (see `PullCost`): the sum of
+     * theirs. Null when none has a cost. Those closed unmerged are in no
+     * figure of cost here unless only they are asked for: what was spent on
+     * them did not get merged.
      */
     cost_usd: number | null;
     cost_estimated: boolean;

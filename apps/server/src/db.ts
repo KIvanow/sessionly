@@ -863,6 +863,21 @@ const MIGRATIONS: string[] = [
   // as often as both have it: what a session from before these were kept is
   // taken not to have, of the lines that survived there.
   `ALTER TABLE pull_sessions ADD COLUMN opened_here integer`,
+  // What a session contributed to a pull request at any time: the lines it
+  // has there now, those the pull request was first reported with, and those
+  // it had at a report between that are gone since, as the hashes by file.
+  // It only grows (see `keepSessions` in pulls.ts): what the session is
+  // charged there (`charged_usd`, see `charge`) is split by it, so review
+  // taking lines out does not make a pull request cheaper. `off_branch` is
+  // for one whose money was spent on another branch than the pull request's,
+  // and that is charged nothing there. `contributed_lines` is null from
+  // before, until the server has charged the sessions it held (run.ts);
+  // `contributed` is null for one whose lines were not kept, and past a
+  // session that was deleted, with its charge.
+  `ALTER TABLE pull_sessions ADD COLUMN contributed jsonb`,
+  `ALTER TABLE pull_sessions ADD COLUMN contributed_lines integer`,
+  `ALTER TABLE pull_sessions ADD COLUMN charged_usd double precision`,
+  `ALTER TABLE pull_sessions ADD COLUMN off_branch boolean NOT NULL DEFAULT false`,
 ];
 
 /**

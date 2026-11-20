@@ -38,11 +38,17 @@ export function pullCostNote(c: PullCost | null): string {
         ? `none of the agent lines it was opened with is left: they cost ${opened}${usdOf(c.opened_usd)}`
         : `none of the agent lines it was opened with that have a cost is left: they cost ${opened}${usdOf(c.opened_usd)}; ${count(left)} of sessions with none ${left === 1 ? "is" : "are"}`;
   if (c.sessions === 0) return gone ?? "no session was matched to its lines";
+  // What its first version cost, where review rounds cost more since: the rest of the cost is theirs.
+  const first =
+    c.usd != null && c.opened_usd != null && c.opened_usd < c.usd ? `${opened}${usdOf(c.opened_usd)} of it for its first version, the rest in review` : null;
   const without = c.sessions_without_cost - c.sessions_uncounted;
   const missing = [
     without > 0 ? `${count(without)} of ${count(c.sessions)} ${c.sessions === 1 ? "session" : "sessions"} ${without === 1 ? "has" : "have"} no cost figure` : null,
     c.sessions_uncounted > 0
       ? `the share of ${count(c.sessions_uncounted)} ${c.sessions_uncounted === 1 ? "session is" : "sessions is"} still being worked out since the upgrade`
+      : null,
+    c.sessions_off_branch > 0
+      ? `${count(c.sessions_off_branch)} ${c.sessions_off_branch === 1 ? "session" : "sessions"} ran on another branch, and ${c.sessions_off_branch === 1 ? "is" : "are"} not charged here`
       : null,
   ]
     .filter(Boolean)
@@ -68,7 +74,7 @@ export function pullCostNote(c: PullCost | null): string {
       ? `${unsure(c.per_surviving_line_is_floor, c.opened_estimated)}${usdEach(c.per_surviving_line_usd)} per line that survived review`
       : null,
   ];
-  return [...each, gone, missing, partial, unshared].filter(Boolean).join("; ");
+  return [...each, first, gone, missing, partial, unshared].filter(Boolean).join("; ");
 }
 
 /**
@@ -76,8 +82,9 @@ export function pullCostNote(c: PullCost | null): string {
  * estimate, null where there is none, and why, where the figure alone does
  * not say.
  */
-export function sessionShare(s: Pick<PullSession, "cost_share_usd" | "uncounted" | "unshared" | "session">): { text: string | null; why: string | null } {
+export function sessionShare(s: Pick<PullSession, "cost_share_usd" | "uncounted" | "unshared" | "off_branch" | "session">): { text: string | null; why: string | null } {
   if (s.uncounted) return { text: null, why: "its share is still being worked out since the upgrade" };
+  if (s.off_branch) return { text: null, why: "what it spent was spent on another branch than this pull request's: it is not charged here" };
   if (!s.session || s.cost_share_usd == null) return { text: null, why: null };
   const estimated = s.session.cost_source !== "recorded" || s.unshared;
   return {
@@ -107,7 +114,7 @@ export function pullsCostNote(total: {
     const why = floor ? `${floor}: their sessions have no cost figure, or were not kept at their last report` : null;
     return [each, why, closed].filter(Boolean).join("; ") || "no session was matched to their lines";
   }
-  return [each, floor ?? "what the matched sessions cost, each for its share of lines", closed].filter(Boolean).join("; ");
+  return [each, floor ?? "what the sessions that gave them lines cost, review rounds included", closed].filter(Boolean).join("; ");
 }
 
 const once = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });

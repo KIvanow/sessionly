@@ -315,8 +315,8 @@ test("one repository's sessions are copied into another organisation, and copied
   assert.equal((await call(demo.ci, "PUT", "/prs", report)).body.attribution.now.agent_lines, 0);
 
   assert.deepEqual(await copy(), { copied: 2, skipped: 0, removed: 0, matched: 1, failed: 0 });
-  // only that repository's, and the pull request's lines are theirs now, at what they cost: s1 hashed 4
-  // lines, 3 of them in the pull request, so $6 x 3/4, as where it was uploaded, though one of the 4 is not shown
+  // only that repository's, and the pull request's lines are theirs now, at what was spent on it: all
+  // of the $6 that s1 cost, as where it was uploaded
   assert.deepEqual(await shownIds(), ["s1", "s2"]);
   // what was still there at 7 days comes with each, and is summed as where it was uploaded
   const keptAt = async (token: string) => (await call(token, "GET", `/summary?by=tool&repo_is=${encodeURIComponent(REPO)}`)).body.total.kept_7d;
@@ -324,7 +324,7 @@ test("one repository's sessions are copied into another organisation, and copied
   assert.deepEqual(await keptAt(demo.admin), await keptAt(work.admin));
   assert.deepEqual((await call(demo.admin, "GET", "/sessions/m1/claude-code/s1")).body.upload.checkpoints, session("s1", REPO).checkpoints);
   const pull = (await call(demo.admin, "GET", `/prs/detail?repo=${REPO}&number=1`)).body;
-  assert.deepEqual([pull.attribution.now.agent_lines, pull.cost.usd, pull.sessions[0].session.owner_email], [3, 4.5, "ann@example.com"]);
+  assert.deepEqual([pull.attribution.now.agent_lines, pull.cost.usd, pull.sessions[0].session.owner_email], [3, 6, "ann@example.com"]);
   // nothing of what was typed or run is in anything the organisation it is shown in answers, or keeps
   for (const path of ["/sessions", "/sessions/m1/claude-code/s1", "/files", "/summary?by=repo", "/filters", `/prs/detail?repo=${REPO}&number=1`]) {
     const answer = await call(demo.admin, "GET", path);
@@ -357,6 +357,31 @@ test("one repository's sessions are copied into another organisation, and copied
   // a name that matches none of its sessions changes nothing
   await assert.rejects(copy(["notes"], "github.com/acme/typo"), /no sessions of github\.com\/acme\/typo/);
   assert.deepEqual(await shownIds(), ["own", "s2"]);
+});
+
+test("what a copied session gave a pull request is kept through the next import, and goes with the session", async () => {
+  const p = await pair("gave");
+  assert.equal((await send(p.ann, session("g1", REPO))).status, 200);
+  const importIt = () => importDemo(p.from, p.to, { repo: REPO, hide: [] });
+  // review fixes of the session's, pushed after the pull request was opened and taken out again since
+  const pushed = (hashes: number[], event: string) => call(p.ci, "PUT", "/prs", pullOf(1, [{ path: "src/a.ts", hashes: hashes.map(h) }], { event }));
+  await pushed([50], "opened");
+  assert.equal((await importIt()).copied, 1);
+  assert.equal((await pushed([50, 1, 2], "synchronize")).body.attribution.now.agent_lines, 2);
+  assert.equal((await pushed([50], "synchronize")).body.attribution.now.agent_lines, 0);
+  const spent = async () => {
+    const pull = (await call(p.admin, "GET", `/prs/detail?repo=${REPO}&number=1`)).body;
+    return [pull.cost.usd, pull.sessions.map((s: any) => [s.session_id, s.lines, s.contributed_lines])];
+  };
+  assert.deepEqual(await spent(), [6, [["g1", 0, 2]]]);
+  // the copy is made anew: its lines are in no report any more, and it is charged as it was
+  assert.equal((await importIt()).copied, 1);
+  assert.deepEqual(await spent(), [6, [["g1", 0, 2]]]);
+  // taken back where it was uploaded, it goes from the pull request with what it was charged
+  assert.equal((await call(p.ann, "DELETE", "/sessions/m1/claude-code/g1")).status, 200);
+  assert.equal((await send(p.ann, session("g2", REPO, [9]))).status, 200);
+  assert.deepEqual(await importIt(), { copied: 1, skipped: 0, removed: 1, matched: 1, failed: 0 });
+  assert.deepEqual(await spent(), [null, []]);
 });
 
 test("a session by the same name uploaded where it is shown is never replaced, nor removed, by an import", async () => {

@@ -39,7 +39,7 @@ import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type
 import { demoFrom, reportsShownIn } from "./demo.ts";
 import { tidy } from "./limits.ts";
 import { purgeDeletedOrgs } from "./orgs.ts";
-import { type SessionAt, weighKeptSome } from "./pulls.ts";
+import { type SessionAt, UNWEIGHED, weighKeptSome } from "./pulls.ts";
 import {
   github,
   google,
@@ -280,12 +280,13 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   counting();
 
   // Pull requests' sessions kept before what their opening lines still there
-  // count as was: weighed now, beside the requests, so that no figure stays
-  // measured the old way. What failed is tried again later.
+  // count as was, or before what each contributed and is charged was: weighed
+  // and charged now, beside the requests, so that no figure stays measured
+  // the old way. What failed is tried again later.
   const weighing = () =>
     void (async () => {
       const orgs = await db.query<{ org_id: string }>(
-        `SELECT DISTINCT org_id FROM pull_sessions WHERE opened_matched IS NOT NULL AND opened_kept IS NULL`,
+        `SELECT DISTINCT s.org_id FROM pull_sessions s JOIN pull_requests r USING (org_id, repo, number) WHERE ${UNWEIGHED}`,
       );
       for (const { org_id } of orgs) {
         let after: SessionAt | null = null;

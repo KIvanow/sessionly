@@ -189,6 +189,10 @@ pub struct Cost {
     /// total minus our estimate for that run, never negative). `None` when it
     /// can't be worked out: no recorded total, or a model without a known price.
     pub untracked_usd: Option<f64>,
+    /// `total_usd` by the branch checked out when it was spent, in name
+    /// order (see `session::Cost::by_branch`). Empty when no response has
+    /// an estimate to share it out by.
+    pub by_branch: Vec<session::BranchCost>,
 }
 
 /// One API response, as needed to place it inside or outside the recorded run.
@@ -197,6 +201,8 @@ struct Message {
     at: Option<DateTime<Utc>>,
     /// `None` if the model has no known price.
     cost: Option<f64>,
+    /// The branch its row names: the one checked out when it was made.
+    branch: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -257,6 +263,7 @@ impl TranscriptSummary {
                 transcript_estimate_usd: transcript,
                 unpriced_requests: total.unpriced_requests,
                 untracked_usd: None,
+                by_branch: self.by_branch(transcript),
             };
         };
         // A message without a timestamp can't be placed, so it counts as part
@@ -273,8 +280,9 @@ impl TranscriptSummary {
         let run_estimate = transcript - outside_cost;
         let run_unpriced = total.unpriced_requests - outside_unpriced;
         let recorded_wins = rec.total_cost_usd + CENT_FRACTION >= run_estimate;
+        let total_usd = outside_cost + rec.total_cost_usd.max(run_estimate);
         Cost {
-            total_usd: outside_cost + rec.total_cost_usd.max(run_estimate),
+            total_usd,
             source: if outside.is_empty() && recorded_wins {
                 CostSource::Recorded
             } else {
@@ -284,7 +292,33 @@ impl TranscriptSummary {
             unpriced_requests: outside_unpriced,
             untracked_usd: (run_unpriced == 0)
                 .then(|| (rec.total_cost_usd - run_estimate).max(0.0)),
+            by_branch: self.by_branch(total_usd),
         }
+    }
+
+    /// `total_usd` shared out between the branches the responses were made
+    /// on, as their estimates are: what the agent recorded beyond them is
+    /// spread the same way. A response on a model without a known price
+    /// adds nothing to its branch's share.
+    fn by_branch(&self, total_usd: f64) -> Vec<session::BranchCost> {
+        let mut estimates: BTreeMap<Option<&str>, f64> = BTreeMap::new();
+        for message in &self.messages {
+            if let Some(cost) = message.cost {
+                *estimates.entry(message.branch.as_deref()).or_default() += cost;
+            }
+        }
+        let all: f64 = estimates.values().sum();
+        if all <= 0.0 {
+            return Vec::new();
+        }
+        estimates
+            .into_iter()
+            .map(|(branch, estimate)| session::BranchCost {
+                branch: branch.map(String::from),
+                // To a millionth of a dollar: the same transcript gives the same upload.
+                usd: (total_usd * estimate / all * 1e6).round() / 1e6,
+            })
+            .collect()
     }
 
     pub fn duration_ms(&self) -> Option<i64> {
@@ -324,6 +358,7 @@ impl TranscriptSummary {
                 unpriced_requests: cost.unpriced_requests,
                 untracked_usd: cost.untracked_usd,
                 prompts_covered: None,
+                by_branch: cost.by_branch,
             }),
             usage,
             subagents: self
@@ -499,6 +534,15 @@ pub fn parse(path: &Path) -> Result<TranscriptSummary> {
     Ok(summary)
 }
 
+/// One API response as a transcript file has it: when its first row was
+/// written and on which branch, and the usage of its latest row.
+struct Response {
+    at: Option<DateTime<Utc>>,
+    model: String,
+    usage: Value,
+    branch: Option<String>,
+}
+
 /// Read one transcript file into `summary` and return its usage per model.
 fn scan(
     path: &Path,
@@ -506,8 +550,8 @@ fn scan(
     seen: &mut HashSet<String>,
     is_main: bool,
 ) -> Result<UsageByModel> {
-    // (first timestamp, model, usage of the latest row), in order of first appearance
-    let mut responses: Vec<(Option<DateTime<Utc>>, String, Value)> = Vec::new();
+    // in order of first appearance
+    let mut responses: Vec<Response> = Vec::new();
     let mut by_id: HashMap<String, usize> = HashMap::new();
     let mut latest: Option<DateTime<Utc>> = None;
 
@@ -558,11 +602,16 @@ fn scan(
                 };
                 match by_id.get(id) {
                     // a later row of the same response: its usage supersedes
-                    Some(&i) => responses[i].2 = usage.clone(),
+                    Some(&i) => responses[i].usage = usage.clone(),
                     None if seen.insert(id.to_string()) => {
                         by_id.insert(id.to_string(), responses.len());
                         let model = message["model"].as_str().unwrap_or("unknown");
-                        responses.push((row_ts, model.to_string(), usage.clone()));
+                        responses.push(Response {
+                            at: row_ts,
+                            model: model.to_string(),
+                            usage: usage.clone(),
+                            branch: text("gitBranch"),
+                        });
                     }
                     None => {} // already counted from another file
                 }
@@ -592,12 +641,16 @@ fn scan(
     summary.skipped_lines += skipped;
 
     let mut usage = UsageByModel::new();
-    for (at, model, tokens) in responses {
+    for response in responses {
         let cost = usage
-            .entry(model.clone())
+            .entry(response.model.clone())
             .or_default()
-            .add_message(&model, &tokens);
-        summary.messages.push(Message { at, cost });
+            .add_message(&response.model, &response.usage);
+        summary.messages.push(Message {
+            at: response.at,
+            cost,
+            branch: response.branch,
+        });
     }
     Ok(usage)
 }
@@ -873,6 +926,65 @@ mod tests {
         assert_eq!(cost.source, CostSource::RecordedAndEstimated);
         // 9.0 covers the first opus message; haiku and the new opus are outside
         assert!(close(cost.total_usd, 9.0 + HAIKU + OPUS));
+    }
+
+    #[test]
+    fn cost_is_shared_out_by_the_branch_of_each_response() {
+        let (_dir, path) = fixture();
+        // The fixture's two responses are on main. A third is made after the
+        // work moved to a branch, and the recorded total covers all three.
+        let mut on_branch = assistant(
+            "m9",
+            "claude-opus-5-5",
+            usage(10, 100, 1_000_000, 0, 1_000_000),
+            "2026-11-13T10:02:00.000Z",
+        );
+        on_branch["gitBranch"] = json!("feat");
+        append(&path, &on_branch);
+        let estimated = parse(&path).unwrap().cost();
+        let shares = |cost: &Cost| -> Vec<(Option<String>, f64)> {
+            cost.by_branch
+                .iter()
+                .map(|b| (b.branch.clone(), b.usd))
+                .collect()
+        };
+        let by = shares(&estimated);
+        assert_eq!(by.len(), 2, "in name order: {by:?}");
+        assert_eq!(by[0].0.as_deref(), Some("feat"));
+        assert!((by[0].1 - OPUS).abs() < 1e-6);
+        assert_eq!(by[1].0.as_deref(), Some("main"));
+        assert!((by[1].1 - OPUS - HAIKU).abs() < 1e-6);
+
+        // What the agent recorded beyond the estimates is spread the same way.
+        append(&path, &cost_state(30.0, Some("2026-11-13T09:59:00Z")));
+        let recorded = parse(&path).unwrap().cost();
+        assert!(close(recorded.total_usd, 30.0));
+        let by = shares(&recorded);
+        let all = 2.0 * OPUS + HAIKU;
+        assert!((by[0].1 - 30.0 * OPUS / all).abs() < 1e-6);
+        assert!((by[0].1 + by[1].1 - 30.0).abs() < 1e-5);
+        assert_eq!(
+            parse(&path).unwrap().facts().cost.unwrap().by_branch,
+            recorded.by_branch
+        );
+    }
+
+    #[test]
+    fn a_response_without_a_branch_is_shared_out_under_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut row = assistant(
+            "m1",
+            "claude-opus-5-5",
+            usage(10, 100, 1_000_000, 0, 1_000_000),
+            "2026-11-13T10:00:01.000Z",
+        );
+        row.as_object_mut().unwrap().remove("gitBranch");
+        write_jsonl(&path, &[row]);
+        let cost = parse(&path).unwrap().cost();
+        assert_eq!(cost.by_branch.len(), 1);
+        assert_eq!(cost.by_branch[0].branch, None);
+        assert!(close(cost.by_branch[0].usd, OPUS));
     }
 
     #[test]

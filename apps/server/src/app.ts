@@ -45,6 +45,7 @@ import {
   checkReport,
   getPull,
   listPulls,
+  chargeSession,
   rematchPull,
   rematchPulls,
   pullsAddedTo,
@@ -68,6 +69,8 @@ export type Env = {
     afterMerge?: PullAfterMergeReport;
     /** The session an upload stored: the pull requests it adds lines to are matched again once it is committed. */
     stored?: { machine_id: string; source: string; session_id: string };
+    /** And one it stored with another cost, or other branches: its pull requests are charged again then too. */
+    spent?: { machine_id: string; source: string; session_id: string };
   };
 };
 
@@ -428,7 +431,18 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   api.put("/sessions/:machine/:source/:session", async (c, next) => {
     await next();
     const stored = c.get("stored");
-    if (c.res.status !== 200 || !stored) return;
+    const spent = c.get("spent");
+    if (c.res.status !== 200) return;
+    // What it cost, or where, is another: its pull requests are charged again, whether or not
+    // any of them has other lines of it now.
+    if (spent) {
+      try {
+        await ownerDb.asOrg(c.get("principal").orgId, (db) => chargeSession(db, spent));
+      } catch (err) {
+        failed(err);
+      }
+    }
+    if (!stored) return;
     try {
       for (const { repo, number } of await ownerDb.asOrg(c.get("principal").orgId, (db) => pullsAddedTo(db, stored, options.hashKey))) {
         try {
@@ -632,9 +646,10 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     }
     // Uploaded again at every turn, mostly as it was: then no pull request has anything new.
     if (result.stored && result.changed) c.set("stored", key);
+    if (result.stored && result.spent) c.set("spent", key);
     // Not stored, and not excluded: the server already has more of this cloud session.
     // Excluded: the person stopped the repository, so the session was not kept.
-    const { changed: _, ...answer } = result;
+    const { changed: _, spent: __, ...answer } = result;
     return c.json(answer);
   });
 

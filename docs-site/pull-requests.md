@@ -262,52 +262,74 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
   uploaded for its branch. If no session was captured for it, the page says so next to it: its
   lines then count as not an agent's, which is wrong in a way worth knowing about.
   [`sessionly install --repo`](cloud-sessions.md) in the repository fixes it for later ones.
-- **Agent cost** is what the sessions matched to a pull request cost, each counted for its
-  share: the session's cost times its lines in the pull request, divided by all the lines the
-  session uploaded hashes of. A session that wrote into three pull requests is split between
-  them and counted once, and what it spent on work that reached no pull request is in none.
-  A line that is in several pull requests (one stacked on another, a release of what was
-  merged before) is shared out between them, so it is still counted once; a pull request
-  closed without merging takes nothing from the others, and its own cost is left out of the
-  figures above the list unless only closed ones are shown; the tile says how many were. Which lines those are is kept from
-  a report or a **Match again** made with this version on: until then, a pull request from
-  before counts all its lines as its own, its cost is marked as an estimate where a session
-  of it has lines in other pull requests, and what the lines it was opened with cost is not
-  known. For a while after the upgrade the server is still counting the line hashes of the
-  sessions it held, and a pull request of one not counted yet says so in place of a cost.
-  Divided by what the lines of the sessions that have a cost figure count as, it gives the
-  cost of an agent line: a line that is in two pull requests is half a line in each, at a
-  whole line's price. Sessions with no cost figure are left out of it, so it reads "at least"
-  only when a session's cost leaves out requests. The cost of a line that got through
-  review, where that is known, is what the agent's lines the pull request was opened with
-  cost, divided by those that survived. A line it was opened with together with another
-  pull request costs half in each and counts as half a line in each, and it counts as
-  surviving while either of them keeps it: between them it is one line, paid for once,
-  wherever it ended up. So lines that moved from one pull request to another, or a stack
-  of them that each kept only some, come out as they did for the session that wrote them.
-  The summary of several pull requests divides what their opening lines cost by the lines
-  that survived, each counted once; where that is not how many survived (a line in two of
-  them is in each one's count), the "Agent lines that survived review" tile says what it
-  is beside them, and why. Like the cost of an agent line, it is of the sessions that have
-  a cost figure: their lines on both sides of it. A pull request none of whose agent lines
-  of such a session survived has no figure of its own, and says how many of the others'
-  did; what those lines cost is in the summary's. For a session kept before which of its
-  lines survived was, the server works that out once when it starts; until then, of the
-  lines that survived, those the other sessions do not account for are taken to be its own
-  as far as the lines it was opened with go. What the opening lines cost reads "at least"
-  when a session of them has no cost figure, or not all of it; what a line of them that
-  survived cost only when a session with a cost leaves out requests. Both are marked `~`
-  when the cost they come from is an estimate. A
-  session's own share is marked `~` too when it may be counted in another pull request. A
-  session that is deleted takes its lines with it: the pull request keeps how many
-  it had, not which. Three things to read with it. It is **the cost of the matched
-  sessions, not of making the pull request**: lines that are not an agent's carry none. It
-  is **a floor** when a session has no cost figure, has one that leaves out requests to
-  models without a known price, or was deleted since, and then reads "at least"; the total
-  above the list is one too when a pull request with agent lines was last reported before
-  its sessions were kept. And it is **an estimate**, marked `~`, when any of
-  those sessions' costs is. The figure is worked out when the page is read, from what the
-  sessions cost now. The Action's comment does not show it.
+- **Agent cost** is what was spent getting the pull request to where it is, not what the lines
+  it still has cost. Every session that gave it lines at any time, when it was opened or in a
+  later push, is charged to it, and stays charged when review takes those lines out again: a
+  $10 session all of whose lines went in review still cost the pull request $10. So the cost
+  does not shrink during review, rewrites on the way to a few lines are in it, and so is a
+  session that only pushed review fixes.
+  - **Two figures.** The headline is everything spent, review rounds included. Under it,
+    where they differ, is what the **first version** cost: what the sessions with lines among
+    those the pull request was opened with are charged. A session that only pushed fixes
+    afterwards is in the first figure and not in the second. A session that both opened it and
+    fixed it up is in the second whole: the two are told apart by session, not by push.
+  - **A session in several pull requests** is split between them by the lines it gave each,
+    and counted once: six lines in one and four in another is $6 and $4 of a $10 session. A
+    line that is in several (one stacked on another, a release of what was merged before) is
+    shared out between them. The split does not move when review removes lines, nor when one
+    of them is merged or closed: it moves only when the session gives a pull request more
+    lines, is uploaded with another cost, or is deleted.
+  - **Only what was spent on the pull request's branch counts**, where that is known.
+    Claude Code says which branch was checked out at every turn, so only those turns count:
+    what the same session spent on another branch is that branch's pull request's, or no
+    one's. Codex, Grok and a Cursor cloud agent name one branch for a whole session (a
+    local Cursor session names none): the **whole session** is charged when that branch is
+    the pull request's, or when either side names no branch, and nothing when it is another
+    branch. **This is a known limit**: for those agents, other work done on the same branch
+    in the same session is charged to the pull request too. A session whose lines are in
+    the pull request and whose money was spent on another branch is listed with "on another
+    branch" in place of a cost, and the tile says how many there are. A Claude Code session
+    uploaded before turns were kept by branch counts by the branch it began on, until its
+    machine uploads it again.
+  - **The cost of a line.** Divided by the agent lines the pull request has now (of the
+    sessions that have a cost figure, a line that is in two pull requests being half a line
+    in each), the cost gives the cost of an agent line. The **cost of a line that got through
+    review** is what the first version cost, divided by the lines of it that survived. Review
+    removing lines lowers no cost: it leaves fewer lines to divide by, so this figure goes up.
+    That is the sign of money that bought less. When no line of the first version is left
+    there is no figure, and the tile says what those lines cost. A line that was opened in
+    two pull requests is paid for in part by each and counts as that part of a line in each,
+    and it counts as surviving while either keeps it: between them it is one line, paid for
+    once, wherever it ended up. The summary of several pull requests divides what their first
+    versions cost by the lines of them that survived, each counted once, which is the same
+    sum each page does; where that is not how many survived (a line in two of them is in
+    each one's count), the "Agent lines that survived review" tile says what it is beside
+    them, and why.
+  - **What a session gave a pull request** is kept on the server as the hashes of those
+    lines, and only grows. There is no history of pushes: a line that is in neither the
+    first report nor the latest stays with the session it was last put down to. A line that
+    is still in either follows the matching, so one put down to an older session before the
+    session that wrote it was uploaded moves to that one when it arrives, and its charge with
+    it. Pull requests from before this was kept are charged once after the upgrade, from the
+    lines they have now and the lines they were opened with: lines that came and went
+    between those were never kept, so a session that gave only such lines is not in them.
+    Their costs are not frozen at what they were: they are worked out again under this rule,
+    and for a while a pull request not charged yet says so in place of a cost.
+  - **Where the figures above the list stop.** A pull request closed without merging keeps
+    its cost on its own page and is left out of the figures above the list, unless only
+    closed ones are shown; the tile says how many were. The [Overview](dashboard.md) puts
+    the same money in three places: pull requests that are merged or open, ones closed
+    without merging, and no pull request at all.
+  - **Three things to read with it.** It is **the cost of the matched sessions, not of
+    making the pull request**: lines that are not an agent's carry none. It is **a floor**
+    when a session has no cost figure, has one that leaves out requests to models without a
+    known price, or was deleted since, and then reads "at least"; the total above the list
+    is one too when a pull request with agent lines was last reported before its sessions
+    were kept. And it is **an estimate**, marked `~`, when any of those sessions' costs is,
+    or when a session is split with a pull request that did not keep which lines are whose
+    (**Match again** there settles it). A session that is deleted takes its lines and its
+    charge with it, from every pull request it was in: the pull request keeps how many lines
+    it had, not which. The Action's comment does not show the cost.
 - **By model is a description, not a ranking.** Harder work goes to stronger models, a pull
   request with two models counts under both, and a handful of pull requests says little.
 - The model is known per line for Claude Code, and for Cursor turns the hooks saw; otherwise
