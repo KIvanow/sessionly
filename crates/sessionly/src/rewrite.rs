@@ -29,6 +29,11 @@ use crate::ledger::{Ledger, RewriteRow};
 /// A file counts as rewritten when less than this share of the agent's lines survive.
 pub const REWRITTEN_BELOW: f64 = 0.5;
 
+/// The ages after a session ended at which its measurement is kept for good,
+/// with each in seconds: what was there after a day, a week and a month.
+pub const CHECKPOINTS: [(&str, i64); 3] =
+    [("1d", 86_400), ("7d", 7 * 86_400), ("30d", 30 * 86_400)];
+
 /// Files larger than this are not read for measuring.
 const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -207,6 +212,9 @@ pub struct Report {
     pub measured: u64,
     /// Session files skipped because their directory no longer exists.
     pub unavailable: u64,
+    /// Checkpoints kept: sessions that reached 1, 7 or 30 days since they
+    /// ended and were measured now.
+    pub checkpoints: u64,
 }
 
 struct GitState {
@@ -234,7 +242,8 @@ fn git_state(dir: &Path) -> GitState {
 /// Measure every changed file of every session against the files on disk and
 /// store the result. A file that is gone counts as fully rewritten, unless the
 /// whole directory the session ran in is gone: then nothing can be said and
-/// the previous measurement, if any, is kept.
+/// the previous measurement, if any, is kept. What was measured is also kept
+/// as the checkpoint of each age a session has reached (`CHECKPOINTS`).
 pub fn measure(ledger: &mut Ledger, now: DateTime<Utc>) -> Result<Report> {
     let mut report = Report::default();
     let mut current: HashMap<String, Option<HashMap<u64, u64>>> = HashMap::new();
@@ -281,6 +290,19 @@ pub fn measure(ledger: &mut Ledger, now: DateTime<Utc>) -> Result<Report> {
         report.measured += 1;
     }
     ledger.store_rewrite(&rows, now)?;
+    // Only what was measured just now: a session whose directory is gone has
+    // nothing that can be said of it today.
+    let mut totals: Vec<(String, u64, u64)> = Vec::new();
+    for row in &rows {
+        match totals.last_mut() {
+            Some((id, added, surviving)) if *id == row.session_id => {
+                *added += row.added;
+                *surviving += row.surviving;
+            }
+            _ => totals.push((row.session_id.clone(), row.added, row.surviving)),
+        }
+    }
+    report.checkpoints = ledger.keep_checkpoints(&totals, now)?;
     Ok(report)
 }
 
@@ -425,6 +447,164 @@ mod tests {
             post("/r/b.rs", json!({}), patch(&["-temp();"])),
         ];
         assert!(added_lines(&undone).is_empty());
+    }
+
+    /// A ledger with one session that ended at `ended` and added three lines
+    /// to a file that is on disk, and the file.
+    fn one_session(ended: DateTime<Utc>) -> (tempfile::TempDir, Ledger, std::path::PathBuf) {
+        use crate::ledger::Fingerprint;
+        use crate::session::{FileTouched, Repo, Session};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.rs");
+        fs::write(&file, "one();\ntwo();\nthree();\n").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let mut ledger = Ledger::open(&dir.path().join("ledger.db")).unwrap();
+        let session = Session {
+            session_id: "s1".into(),
+            source: "claude-code".into(),
+            ended_at: Some(ended),
+            repo: Some(Repo {
+                root: dir.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            }),
+            files: vec![FileTouched {
+                path: path.clone(),
+                writes: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let lines = [FileLines {
+            path,
+            by_model: vec![(None, hashes(&["one();", "two();", "three();"]))],
+        }];
+        let built_from = Fingerprint {
+            built_with: "test".into(),
+            raw_bytes: 1,
+            transcript_path: None,
+            transcript_bytes: 0,
+        };
+        ledger.upsert(&session, &built_from, &lines).unwrap();
+        (dir, ledger, file)
+    }
+
+    /// The checkpoints of the session as (age, surviving, days old when taken).
+    fn kept(ledger: &Ledger) -> Vec<(String, u64, u64)> {
+        ledger
+            .checkpoints_of("s1")
+            .unwrap()
+            .into_iter()
+            .map(|c| {
+                assert_eq!(c.added, 3);
+                (c.checkpoint, c.surviving, c.age_seconds / 86_400)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn keeps_what_was_there_at_one_seven_and_thirty_days() {
+        let ended = Utc::now();
+        let (_dir, mut ledger, file) = one_session(ended);
+        let hours = chrono::Duration::hours;
+        let days = chrono::Duration::days;
+        let now = |ledger: &Ledger| ledger.rewrite_of("s1").unwrap().0[0].surviving;
+
+        // Two hours old: measured, and no age reached yet.
+        assert_eq!(
+            measure(&mut ledger, ended + hours(2)).unwrap().checkpoints,
+            0
+        );
+        assert_eq!((kept(&ledger), now(&ledger)), (vec![], 3));
+
+        // Day 1 was missed. The measurement on day 3 stands for it, and says so.
+        fs::write(&file, "one();\ntwo();\n").unwrap();
+        assert_eq!(
+            measure(&mut ledger, ended + days(3)).unwrap().checkpoints,
+            1
+        );
+        assert_eq!(kept(&ledger), [("1d".to_string(), 2, 3)]);
+
+        fs::write(&file, "one();\n").unwrap();
+        measure(&mut ledger, ended + days(8)).unwrap();
+        assert_eq!(
+            kept(&ledger),
+            [("1d".to_string(), 2, 3), ("7d".to_string(), 1, 8)]
+        );
+
+        measure(&mut ledger, ended + days(31)).unwrap();
+        let all = [
+            ("1d".to_string(), 2, 3),
+            ("7d".to_string(), 1, 8),
+            ("30d".to_string(), 1, 31),
+        ];
+        assert_eq!(kept(&ledger), all);
+        let at = ledger.checkpoints_of("s1").unwrap()[2].measured_at;
+        assert_eq!(at, Some(ended + days(31)));
+
+        // Measuring again changes what is there now, and no checkpoint.
+        fs::write(&file, "nothing of it\n").unwrap();
+        assert_eq!(
+            measure(&mut ledger, ended + days(40)).unwrap().checkpoints,
+            0
+        );
+        assert_eq!((kept(&ledger), now(&ledger)), (all.to_vec(), 0));
+    }
+
+    #[test]
+    fn an_age_reached_before_checkpoints_were_kept_is_not_made_up() {
+        // The session was 20 days old when this ledger began keeping them.
+        let began = Utc::now();
+        let days = chrono::Duration::days;
+        let (dir, mut ledger, file) = one_session(began - days(20));
+        measure(&mut ledger, began + chrono::Duration::hours(1)).unwrap();
+        assert_eq!(kept(&ledger), []);
+        // Thirty days is still to come, and is kept when it does.
+        measure(&mut ledger, began + days(11)).unwrap();
+        assert_eq!(kept(&ledger), [("30d".to_string(), 3, 31)]);
+        // Opening the ledger again does not begin again.
+        drop(ledger);
+        let mut ledger = Ledger::open(&dir.path().join("ledger.db")).unwrap();
+        fs::remove_file(&file).unwrap();
+        measure(&mut ledger, began + days(12)).unwrap();
+        assert_eq!(kept(&ledger), [("30d".to_string(), 3, 31)]);
+    }
+
+    #[test]
+    fn a_session_that_went_on_is_aged_from_its_new_end() {
+        let ended = Utc::now();
+        let days = chrono::Duration::days;
+        let (dir, mut ledger, _file) = one_session(ended);
+        measure(&mut ledger, ended + days(2)).unwrap();
+        assert_eq!(kept(&ledger), [("1d".to_string(), 3, 2)]);
+
+        // Storing it again as it is keeps the checkpoint.
+        let built_from = ledger.fingerprint("s1").unwrap().unwrap();
+        let lines = ledger.lines_of("s1").unwrap();
+        let mut session = ledger.get("s1").unwrap().unwrap();
+        ledger.upsert(&session, &built_from, &lines).unwrap();
+        assert_eq!(kept(&ledger).len(), 1);
+
+        // Resumed on day 5: what was measured on day 2 was not after its end.
+        session.ended_at = Some(ended + days(5));
+        ledger.upsert(&session, &built_from, &lines).unwrap();
+        assert_eq!(kept(&ledger), []);
+        measure(&mut ledger, ended + days(5) + chrono::Duration::hours(3)).unwrap();
+        assert_eq!(kept(&ledger), []);
+        measure(&mut ledger, ended + days(7)).unwrap();
+        assert_eq!(kept(&ledger), [("1d".to_string(), 3, 2)]);
+
+        // With the directory gone nothing can be said, and nothing is kept.
+        let gone = dir.path().join("gone");
+        session.repo.as_mut().unwrap().root = gone.to_string_lossy().into_owned();
+        session.files[0].path = gone.join("a.rs").to_string_lossy().into_owned();
+        let moved = [FileLines {
+            path: session.files[0].path.clone(),
+            by_model: vec![(None, hashes(&["one();", "two();", "three();"]))],
+        }];
+        ledger.upsert(&session, &built_from, &moved).unwrap();
+        let report = measure(&mut ledger, ended + days(13)).unwrap();
+        assert_eq!((report.unavailable, report.checkpoints), (1, 0));
+        assert_eq!(kept(&ledger).len(), 1);
     }
 
     #[test]

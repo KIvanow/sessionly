@@ -3,8 +3,8 @@
 use std::fmt::Write;
 
 use crate::ledger::{Group, GroupBy, Listed, Rewrite, RewriteRow};
-use crate::rewrite::REWRITTEN_BELOW;
-use crate::session::{Outcome, Session, ToolStatus};
+use crate::rewrite::{CHECKPOINTS, REWRITTEN_BELOW};
+use crate::session::{Outcome, RewriteCheckpoint, Session, ToolStatus};
 use crate::transcript::{CostSource, TranscriptSummary, Usage, UsageByModel};
 
 pub fn transcript(s: &TranscriptSummary) -> String {
@@ -185,9 +185,37 @@ fn short(id: &str) -> &str {
     }
 }
 
+/// What was still there at each fixed age after the session ended:
+/// `1d 96%, 7d 91% (taken on day 9), 30d -`. An age not reached, or not
+/// measured, is a dash; one measured a day or more late says when.
+fn kept_at(checkpoints: &[RewriteCheckpoint]) -> String {
+    CHECKPOINTS
+        .iter()
+        .map(|(name, seconds)| {
+            let Some(c) = checkpoints.iter().find(|c| c.checkpoint == *name) else {
+                return format!("{name} -");
+            };
+            let share = (c.added > 0).then(|| c.surviving as f64 / c.added as f64);
+            let late = c.age_seconds as i64 >= seconds + 86_400;
+            if late {
+                let day = c.age_seconds / 86_400;
+                format!("{name} {} (taken on day {day})", percent(share))
+            } else {
+                format!("{name} {}", percent(share))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// `sessionly show`: one normalized session, with the latest rewrite
-/// measurement of its changed files.
-pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -> String {
+/// measurement of its changed files, and what it was at fixed ages.
+pub fn session(
+    s: &Session,
+    rewrite: &[RewriteRow],
+    measured_at: Option<&str>,
+    checkpoints: &[RewriteCheckpoint],
+) -> String {
     let mut out = String::new();
     let field = |out: &mut String, name: &str, value: String| {
         let _ = writeln!(out, "{name:<10} {value}");
@@ -349,6 +377,13 @@ pub fn session(s: &Session, rewrite: &[RewriteRow], measured_at: Option<&str>) -
             let _ = write!(text, " ({})", details.join(" "));
         }
         field(&mut out, "Rewrite", text);
+        if !checkpoints.is_empty() {
+            field(
+                &mut out,
+                "",
+                format!("still there after it ended: {}", kept_at(checkpoints)),
+            );
+        }
         let session_branch = s.repo.as_ref().and_then(|r| r.branch.as_deref());
         if let (Some(then), Some(now)) = (session_branch, checkout) {
             if then != now && then != "HEAD" {

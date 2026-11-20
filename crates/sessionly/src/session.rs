@@ -393,6 +393,24 @@ pub struct RewriteFile {
     pub exists: bool,
 }
 
+/// How much of a session's changes was still in the files at a fixed age
+/// after it ended: the first measurement taken at or after that age. Counts
+/// and times only. Once taken it is kept as it is.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct RewriteCheckpoint {
+    /// The age it is for: `1d`, `7d` or `30d` after the session ended.
+    pub checkpoint: String,
+    /// Lines the agent added that are tracked, when this was measured.
+    pub added: u64,
+    /// How many of them were in the files then.
+    pub surviving: u64,
+    pub measured_at: Option<DateTime<Utc>>,
+    /// How long after the session ended it was measured, which is the age
+    /// or more: a machine that was off on the day measures later.
+    pub age_seconds: u64,
+}
+
 /// What the binary sends to a server for one session. Sending the same
 /// session again replaces what the server has: the key is
 /// (`session.machine_id`, `session.source`, `session.session_id`).
@@ -410,6 +428,11 @@ pub struct Upload {
     /// (`sessionly settings --line-hashes on`); empty otherwise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lines: Vec<AddedLines>,
+    /// The rewrite measurement as it was 1, 7 and 30 days after the session
+    /// ended, for each of those ages it has reached and was measured at.
+    /// Left out while there is none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<RewriteCheckpoint>,
 }
 
 /// Lines an agent added to one file with one model. A line is hashed without
