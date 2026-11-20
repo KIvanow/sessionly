@@ -2,9 +2,9 @@
 // Sessionly server, and show what it answers.
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { github, listPulls, readPull, upsertComment } from "./github.mjs";
-import { ignoring } from "./lines.mjs";
-import { buildReport, MARKER, render, renderMany } from "./report.mjs";
+import { branchFor, filesAt, github, listPulls, readPull, upsertComment } from "./github.mjs";
+import { fileHashes, ignoring } from "./lines.mjs";
+import { buildReport, MARKER, render, renderAfterMerge, renderMany } from "./report.mjs";
 
 const on = (value) => /^(true|yes|on|1)$/i.test((value ?? "").trim());
 
@@ -72,11 +72,104 @@ export async function send(url, token, report) {
   return body.attribution;
 }
 
+/** Ask the server something, or tell it; what it answers. A refusal is an error with its status. */
+export async function ask(url, token, method, path, body) {
+  const response = await fetch(`${url.replace(/\/+$/, "")}/api/v1${path}`, {
+    method,
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "user-agent": "sessionly-action" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const answer = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw Object.assign(new Error(`the Sessionly server answered ${response.status}: ${answer.error ?? "no reason given"}`), { status: response.status });
+  }
+  return answer;
+}
+
 /**
- * One run. `env` is the process environment; `api` and `deliver` can be
- * replaced, which is how the tests run it without a network.
+ * No more files than this are read from GitHub in one run of counting after
+ * merging. They are asked for fifty at a time, so this is four hundred
+ * requests of the thousand a workflow's token is allowed in an hour, and one
+ * pull request, of five thousand files at most, is a hundred. The pull
+ * requests left over are still due at the next run.
  */
-export async function run(env, { api, deliver = send, log = console.log } = {}) {
+export const MOST_FILES = 20_000;
+
+/**
+ * Count merged pull requests' agent lines again on the branch they were
+ * merged into, 7 and 30 days after: the server says which are due and which
+ * files to read, the files are read as they are on that branch now, and
+ * their lines go back as hashes. A scheduled run does this, and so does the
+ * `after-merge` input. Nothing is written on any pull request.
+ */
+async function runAfterMerge(env, { api, server, repo, host, log, url }) {
+  const name = `${host}/${repo}`;
+  let due;
+  try {
+    due = (await server("GET", `/prs/due?repo=${encodeURIComponent(name)}`)).due;
+  } catch (err) {
+    // A server from before this has no such address, and tells a ci token so.
+    if (err.status === 403 || err.status === 404) {
+      throw new Error(`the Sessionly server does not count pull requests after merging (${err.message}): it is from before that, and needs updating`);
+    }
+    throw err;
+  }
+  if (!Array.isArray(due)) throw new Error("the Sessionly server did not say which pull requests are due");
+  const counted = [];
+  const failed = [];
+  let left = MOST_FILES;
+  let later = 0;
+  // The same branch, at the same commit, for many of them.
+  const branches = new Map();
+  for (const pull of due) {
+    // The first is read however many files it has: otherwise it would never be.
+    if (pull.paths.length > left && left < MOST_FILES) {
+      later += 1;
+      continue;
+    }
+    left -= pull.paths.length;
+    try {
+      const asked = pull.base_ref ?? "";
+      if (!branches.has(asked)) branches.set(asked, await branchFor(api, repo, pull.base_ref));
+      // Every file at the one commit the branch was at when it was first looked at.
+      const { branch, sha } = branches.get(asked);
+      const texts = await filesAt(api, repo, sha, pull.paths);
+      const files = pull.paths.map((path) => ({ path, hashes: texts.get(path) == null ? [] : fileHashes(texts.get(path)) }));
+      // Which ages these were read for: one reached since is asked for at the next run.
+      const { stored } = await server("PUT", "/prs/after-merge", { repo: name, number: pull.number, checkpoints: pull.checkpoints, files });
+      for (const row of stored ?? []) {
+        counted.push({ number: pull.number, branch, ...row });
+        const days = row.checkpoint === "7d" ? 7 : 30;
+        log(`#${pull.number}: ${row.surviving} of ${row.agent_lines} agent lines are still on ${branch}, ${days} days after it was merged.`);
+      }
+    } catch (err) {
+      const why = String(err.message ?? err).replace(/\r?\n/g, " ");
+      // What the server says of one count is about that one. Anything else, from it or from GitHub, the next would meet too.
+      const aboutThisOne = err.status === 422 || err.status === 404 || err.status === 400 || err.status === 413;
+      if (!aboutThisOne) throw new Error(`${why}: #${pull.number} and the ones after it were not counted`);
+      failed.push(pull.number);
+      log(`::warning title=Sessionly::#${pull.number} could not be counted (${why}). It is tried again at the next run.`);
+    }
+  }
+  if (later > 0) {
+    log(`::warning title=Sessionly::${later} more pull ${later === 1 ? "request is" : "requests are"} due and left for the next run: at most ${MOST_FILES} files are read at once.`);
+  }
+  const pulls = new Set(counted.map((row) => row.number)).size;
+  log(`Counted ${pulls === 0 ? "no" : pulls} merged pull ${pulls === 1 ? "request" : "requests"} of ${repo} again.`);
+  if (on(env.SESSIONLY_SUMMARY ?? "true") && env.GITHUB_STEP_SUMMARY) {
+    appendFileSync(env.GITHUB_STEP_SUMMARY, `${renderAfterMerge(counted, url, failed)}\n`);
+  }
+  if (failed.length > 0) {
+    throw new Error(`${failed.length} merged pull requests could not be counted: ${failed.map((n) => `#${n}`).join(", ")}`);
+  }
+  return { counted, later };
+}
+
+/**
+ * One run. `env` is the process environment; `api`, `deliver` and `server`
+ * can be replaced, which is how the tests run it without a network.
+ */
+export async function run(env, { api, deliver = send, server, log = console.log } = {}) {
   const need = (name, what) => {
     if (!env[name]) throw new Error(`${what} is missing`);
     return env[name];
@@ -84,6 +177,18 @@ export async function run(env, { api, deliver = send, log = console.log } = {}) 
   const url = need("SESSIONLY_URL", "the url input");
   const token = need("SESSIONLY_TOKEN", "the token input");
   const repo = need("GITHUB_REPOSITORY", "GITHUB_REPOSITORY");
+  // A run started by a schedule that names no pull request has none to report: it is for the
+  // merged ones that are due. One that names some (`pr-number: all`, each night) reports those, as before.
+  const numbered = (env.SESSIONLY_PR_NUMBER ?? "").trim() !== "";
+  if (on(env.SESSIONLY_AFTER_MERGE) && numbered) {
+    throw new Error("the after-merge and pr-number inputs are both set: a run reports pull requests or counts merged ones again, not both. Use two steps.");
+  }
+  if (on(env.SESSIONLY_AFTER_MERGE) || (env.GITHUB_EVENT_NAME === "schedule" && !numbered)) {
+    api ??= github(need("SESSIONLY_GITHUB_TOKEN", "the github-token input"), env.GITHUB_API_URL || undefined, env.GITHUB_GRAPHQL_URL || undefined);
+    server ??= (method, path, body) => ask(url, token, method, path, body);
+    const host = new URL(env.GITHUB_SERVER_URL || "https://github.com").host;
+    return runAfterMerge(env, { api, server, repo, host, log, url });
+  }
   const payload = env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")) : {};
   const which = wanted(env.SESSIONLY_PR_NUMBER || payload.pull_request?.number || payload.number);
   if (!which) {

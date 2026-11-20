@@ -20,7 +20,9 @@ set in the environment, as in a [cloud sandbox](cloud-sessions.md), an upload fo
 instead, and `export --content` shows that level.
 
 The payload ([schema/upload.schema.json](https://github.com/KIvanow/sessionly/blob/main/schema/upload.schema.json)) is the session record plus
-the latest rewrite measurement. Before a record leaves the machine:
+the latest rewrite measurement, and that measurement as it was 1, 7 and 30 days after the
+session ended (`checkpoints`: counts and times, see [Rewrite rate](rewrite-rate.md#at-1-7-and-30-days)).
+Before a record leaves the machine:
 
 - **Paths are made relative:** to the repository for files inside it, otherwise to the home
   directory (`~/…`). No absolute path under your home directory is sent.

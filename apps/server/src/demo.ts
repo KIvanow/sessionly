@@ -305,6 +305,15 @@ export function shown(upload: Upload, rules: Rules): Upload {
     },
     rewrite: rewriteOf(upload.rewrite, rules, cloud),
     lines: linesShown(upload.lines ?? [], rules),
+    // Counts and times of the whole session, as its cost is: of no file by name.
+    checkpoints: upload.checkpoints?.map((c) => ({
+      checkpoint: c.checkpoint,
+      added: c.added,
+      surviving: c.surviving,
+      measured_at: c.measured_at,
+      age_seconds: c.age_seconds,
+      ended_at: c.ended_at,
+    })),
   };
 }
 

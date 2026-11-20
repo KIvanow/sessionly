@@ -27,6 +27,12 @@ export interface Upload {
    * (`sessionly settings --line-hashes on`); empty otherwise.
    */
   lines?: AddedLines[];
+  /**
+   * The rewrite measurement as it was 1, 7 and 30 days after the session
+   * ended, for each of those ages it has reached and was measured at.
+   * Left out while there is none.
+   */
+  checkpoints?: RewriteCheckpoint[];
 }
 export interface Session {
   /**
@@ -397,4 +403,35 @@ export interface AddedLines {
    * First 8 bytes of each line's SHA-256, as 16 hex digits.
    */
   hashes?: string[];
+}
+/**
+ * How much of a session's changes was still in the files at a fixed age
+ * after it ended: the first measurement taken at or after that age. Counts
+ * and times only. Once taken it is kept as it is.
+ */
+export interface RewriteCheckpoint {
+  /**
+   * The age it is for: `1d`, `7d` or `30d` after the session ended.
+   */
+  checkpoint?: string;
+  /**
+   * Lines the agent added that are tracked, when this was measured.
+   */
+  added?: number;
+  /**
+   * How many of them were in the files then.
+   */
+  surviving?: number;
+  measured_at?: string | null;
+  /**
+   * How long after the session ended it was measured, which is the age
+   * or more: a machine that was off on the day measures later.
+   */
+  age_seconds?: number;
+  /**
+   * When the session had ended, as that age was counted. A checkpoint
+   * belongs to this end: of a session that has another end now (it went
+   * on since), it is a checkpoint no more.
+   */
+  ended_at?: string | null;
 }

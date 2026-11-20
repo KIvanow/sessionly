@@ -1,5 +1,5 @@
 import type { SessionDetail } from "@sessionly/schema";
-import { compact, cost, count, dateTime, duration, percent, repoName, share, toolName, usd } from "./format.ts";
+import { compact, cost, count, dateTime, duration, keptAges, percent, repoName, share, toolName, usd } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
 import { useApi } from "./useApi.ts";
@@ -11,6 +11,9 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
   if (!found.data) return <Loader />;
   const s = found.data.upload.session ?? {};
   const rewrite = found.data.upload.rewrite ?? null;
+  // What was there 1, 7 and 30 days after it ended, beside what is there now.
+  const ages = keptAges(found.data.upload.checkpoints);
+  const measuredAt = ages.filter((age) => age.lines != null);
   const counts = s.counts ?? {};
   const hasText = s.content === "previews";
   // Cursor records the end of only some turns: its absence says nothing.
@@ -66,7 +69,20 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
             value={percent(share(rewrite.lines_surviving ?? 0, rewrite.lines_added ?? 0))}
             part={share(rewrite.lines_surviving ?? 0, rewrite.lines_added ?? 0)}
             note={`of ${count(rewrite.lines_added ?? 0)} tracked lines`}
-          />
+          >
+            <dl className="ages" aria-label="Still there after the session ended">
+              {ages.map((age) => (
+                <div key={age.name} title={age.lines == null ? `Not measured ${age.words} after it ended` : age.late ? `Measured on day ${age.late}` : undefined}>
+                  <dt>{age.name}</dt>
+                  <dd>{age.kept}</dd>
+                </div>
+              ))}
+              <div>
+                <dt>now</dt>
+                <dd>{percent(share(rewrite.lines_surviving ?? 0, rewrite.lines_added ?? 0))}</dd>
+              </div>
+            </dl>
+          </Tile>
         ) : (
           <Tile
             label="Lines"
@@ -116,6 +132,14 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
             <Fact
               label="Rewritten since"
               value={`${count(rewrite.files_rewritten ?? 0)} of ${count(rewrite.files_measured ?? 0)} changed files; ${percent(share(rewrite.lines_surviving ?? 0, rewrite.lines_added ?? 0))} of the agent's lines still there (measured ${dateTime(rewrite.measured_at)}${rewrite.branch ? ` on ${rewrite.branch}` : ""})`}
+            />
+          )}
+          {measuredAt.length > 0 && (
+            <Fact
+              label="After it ended"
+              value={measuredAt
+                .map((age) => `${age.words}: ${age.kept} of ${count(age.lines ?? 0)} lines still there${age.late ? ` (measured on day ${age.late})` : ""}`)
+                .join("; ")}
             />
           )}
           <Fact label="Captured" value={`from ${s.captured_by === "transcript" ? "the transcript" : "hooks"}, uploaded as ${s.content}`} />

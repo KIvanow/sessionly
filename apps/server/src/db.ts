@@ -813,6 +813,48 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('owner', 'admin', 'member', 'viewer'))`,
   `ALTER TABLE tokens DROP CONSTRAINT tokens_role_check`,
   `ALTER TABLE tokens ADD CONSTRAINT tokens_role_check CHECK (role IN ('admin', 'member', 'ci', 'env', 'viewer'))`,
+  // What a session's rewrite measurement was 1, 7 and 30 days after it ended
+  // (an upload's `checkpoints`), by age: {"7d": {added, surviving,
+  // measured_at, age_seconds, ended_at}}. Counts and times. Beside the payload, so that
+  // a summary does not open it. One kept is not replaced by a later upload.
+  `ALTER TABLE sessions ADD COLUMN checkpoints jsonb NOT NULL DEFAULT '{}'`,
+  // A server from before this kept an upload's checkpoints in the payload
+  // alone, where a machine updated ahead of it sent them: taken from there,
+  // by the rule an upload is stored by (`mergeCheckpoints` in sessions.ts).
+  // Such a session may never be uploaded again.
+  `UPDATE sessions s SET checkpoints = found.kept
+   FROM (
+     SELECT u.org_id, u.machine_id, u.source, u.session_id, jsonb_object_agg(c->>'checkpoint', c - 'checkpoint') AS kept
+     FROM sessions u, jsonb_array_elements(u.payload->'checkpoints') AS c
+     WHERE jsonb_typeof(u.payload->'checkpoints') = 'array'
+       AND c->>'checkpoint' IN ('1d', '7d', '30d')
+       AND c->>'ended_at' IS NOT NULL AND c->>'measured_at' IS NOT NULL
+       AND (c->>'ended_at')::timestamptz = (u.payload #>> '{session,ended_at}')::timestamptz
+     GROUP BY u.org_id, u.machine_id, u.source, u.session_id
+   ) found
+   WHERE s.org_id = found.org_id AND s.machine_id = found.machine_id AND s.source = found.source AND s.session_id = found.session_id`,
+  // A merged pull request's agent lines counted again on the branch it was
+  // merged into, 7 and 30 days after: how many were looked for, how many
+  // were there, and how old the merge was. One row for each age, written
+  // once. Apart from the reports of a pull request and their history.
+  `CREATE TABLE pull_after_merge (
+     org_id      text NOT NULL REFERENCES orgs ON DELETE CASCADE,
+     repo        text NOT NULL,
+     number      integer NOT NULL,
+     checkpoint  text NOT NULL CHECK (checkpoint IN ('7d', '30d')),
+     agent_lines integer NOT NULL,
+     surviving   integer NOT NULL,
+     measured_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+     age_seconds integer NOT NULL,
+     PRIMARY KEY (org_id, repo, number, checkpoint),
+     FOREIGN KEY (org_id, repo, number) REFERENCES pull_requests (org_id, repo, number) ON DELETE CASCADE
+   )`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON pull_after_merge`),
+  ...rowLevelSecurity("pull_after_merge"),
+  // From when an organisation's pull requests are counted after merging. An
+  // age one reached before that was not counted then, and is not made up
+  // later. For the organisations already here that is now.
+  `ALTER TABLE orgs ADD COLUMN after_merge_since timestamptz NOT NULL DEFAULT now()`,
 ];
 
 /**

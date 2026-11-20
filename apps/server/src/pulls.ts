@@ -36,9 +36,9 @@ export const CURRENT_ACTION = "0.2.0";
 
 /** Sessions that started longer than this before a pull request was opened are not looked at. */
 const LOOK_BACK_DAYS = 90;
-const MAX_FILES = 5000;
+export const MAX_FILES = 5000;
 const MAX_FEEDBACK = 2000;
-const HASH = /^[0-9a-f]{16}$/;
+export const HASH = /^[0-9a-f]{16}$/;
 
 const num = (value: unknown): number => (value == null ? 0 : Number(value));
 const iso = (value: unknown): string | null =>
@@ -1795,7 +1795,7 @@ function pullRow(r: Record<string, unknown>): PullRow {
  * lines, and its reviews and comments. Null if none was reported under that
  * number.
  */
-export async function getPull(db: OrgDb, repo: string, number: number): Promise<PullDetail | null> {
+export async function getPull(db: OrgDb, repo: string, number: number): Promise<Omit<PullDetail, "after_merge"> | null> {
   const [r] = await db.query(
     `SELECT ${ROW_COLUMNS}, draft, head_ref, base_ref, closed_at, detail, feedback, feedback_total
      FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,

@@ -78,6 +78,13 @@
       "items": {
         "$ref": "#/$defs/AddedLines"
       }
+    },
+    "checkpoints": {
+      "description": "The rewrite measurement as it was 1, 7 and 30 days after the session\nended, for each of those ages it has reached and was measured at.\nLeft out while there is none.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RewriteCheckpoint"
+      }
     }
   },
   "$defs": {
@@ -1126,6 +1133,55 @@
             "type": "string"
           },
           "default": []
+        }
+      }
+    },
+    "RewriteCheckpoint": {
+      "description": "How much of a session's changes was still in the files at a fixed age\nafter it ended: the first measurement taken at or after that age. Counts\nand times only. Once taken it is kept as it is.",
+      "type": "object",
+      "properties": {
+        "checkpoint": {
+          "description": "The age it is for: `1d`, `7d` or `30d` after the session ended.",
+          "type": "string",
+          "default": ""
+        },
+        "added": {
+          "description": "Lines the agent added that are tracked, when this was measured.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "surviving": {
+          "description": "How many of them were in the files then.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "measured_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "age_seconds": {
+          "description": "How long after the session ended it was measured, which is the age\nor more: a machine that was off on the day measures later.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "ended_at": {
+          "description": "When the session had ended, as that age was counted. A checkpoint\nbelongs to this end: of a session that has another end now (it went\non since), it is a checkpoint no more.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
         }
       }
     }

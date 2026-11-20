@@ -4,9 +4,9 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { all, github } from "../src/github.mjs";
-import { addedHashes, ignoring, lineHash } from "../src/lines.mjs";
-import { eventName, MOST_AT_ONCE, run, send, wanted, whenOpened } from "../src/main.mjs";
+import { all, branchFor, fileOn, filesAt, FILES_AT_ONCE, github } from "../src/github.mjs";
+import { addedHashes, fileHashes, ignoring, lineHash } from "../src/lines.mjs";
+import { ask, eventName, MOST_AT_ONCE, MOST_FILES, run, send, wanted, whenOpened } from "../src/main.mjs";
 import { buildReport, feedbackOf, MARKER, render, reviewRounds } from "../src/report.mjs";
 
 const ACTION_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
@@ -592,19 +592,187 @@ test("no more are reported at once than GitHub allows for, and the run says how 
   assert.ok(!limited.calls.some(([, path]) => /\/pulls\/1[5-7]$/.test(path)), "asked on after the limit");
 });
 
+/** A file GitHub will not answer whole among others. */
+const TOO_LARGE = "large();\n";
+
+/** GitHub with files on branches, and a server that says which merged pull requests are due. */
+function afterMerge({ due, branches = { main: {} }, refuse = {} }) {
+  const calls = [];
+  const sent = [];
+  const api = {
+    calls,
+    request: async (method, path) => {
+      calls.push(`${method} ${path}`);
+      const branch = /\/branches\/(.+)$/.exec(path)?.[1];
+      if (branch !== undefined) {
+        if (branches[decodeURIComponent(branch)]) return { commit: { sha: `sha-of-${decodeURIComponent(branch)}` } };
+        throw Object.assign(new Error(`GitHub answered 404 to GET ${path}: Branch not found`), { status: 404 });
+      }
+      return { default_branch: "main" };
+    },
+    text: async (path) => {
+      calls.push(`TEXT ${path}`);
+      const [, file, ref] = /\/contents\/(.+)\?ref=sha-of-(.+)$/.exec(path);
+      return branches[decodeURIComponent(ref)]?.[decodeURIComponent(file)] ?? null;
+    },
+    // Each file asked for as `<commit>:<path>`, many in one question.
+    graphql: async (query, variables) => {
+      const asked = Object.entries(variables).filter(([key]) => /^e\d+$/.test(key));
+      calls.push(`GRAPHQL ${asked.map(([, at]) => at).join(" ")}`);
+      const repository = {};
+      for (const [key, at] of asked) {
+        const [, branch, file] = /^sha-of-([^:]+):(.+)$/.exec(at);
+        const text = branches[branch]?.[file];
+        repository[`f${key.slice(1)}`] = text === undefined ? null : text === TOO_LARGE ? { text: "cut", isTruncated: true, isBinary: false } : { text, isTruncated: false, isBinary: false };
+      }
+      return { repository };
+    },
+  };
+  const server = async (method, path, body) => {
+    if (method === "GET") return { due };
+    sent.push(body);
+    if (refuse[body.number]) throw Object.assign(new Error(`the Sessionly server answered ${refuse[body.number]}: no`), { status: refuse[body.number] });
+    // As the server would: every age it was asked for, with a count made up from what was sent.
+    const there = body.files.reduce((sum, f) => sum + f.hashes.length, 0);
+    return { stored: due.find((pull) => pull.number === body.number).checkpoints.map((checkpoint) => ({ checkpoint, agent_lines: 10, surviving: there, age_seconds: 1 })) };
+  };
+  return { api, server, sent, calls };
+}
+
+test("a file's tracked lines are hashed as the lines of a patch are", () => {
+  assert.deepEqual(fileHashes("fn main() {\r\n    one();\n\n}\n  two();  "), [lineHash("fn main() {"), lineHash("one();"), lineHash("two();")]);
+  assert.deepEqual(fileHashes(""), []);
+});
+
+test("on a schedule, merged pull requests that are due are counted again on the branch they were merged into", async () => {
+  const due = [
+    { number: 3, base_ref: "main", checkpoints: ["30d"], paths: ["src/a b.ts", "gone.ts"] },
+    // merged into a branch that was merged itself and deleted: looked for on the default branch
+    { number: 9, base_ref: "stack/base", checkpoints: ["7d", "30d"], paths: ["lib/c.ts"] },
+  ];
+  const world = afterMerge({ due, branches: { main: { "src/a b.ts": "one();\ntwo();\n}\n", "lib/c.ts": "three();\n" } } });
+  const env = environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_GITHUB_TOKEN: "gh" });
+  writeFileSync(env.GITHUB_EVENT_PATH, JSON.stringify({ schedule: "17 5 * * *" }));
+  const logged = [];
+  const { counted } = await run(env, { api: world.api, server: world.server, log: (line) => logged.push(line), deliver: () => assert.fail("no pull request is reported") });
+
+  // each file as it is on the branch now, as hashes; one that is gone has none
+  // and the ages the files were read for go with them
+  assert.deepEqual(world.sent, [
+    { repo: "github.com/acme/web", number: 3, checkpoints: ["30d"], files: [{ path: "src/a b.ts", hashes: [lineHash("one();"), lineHash("two();")] }, { path: "gone.ts", hashes: [] }] },
+    { repo: "github.com/acme/web", number: 9, checkpoints: ["7d", "30d"], files: [{ path: "lib/c.ts", hashes: [lineHash("three();")] }] },
+  ]);
+  // every file at the commit the branch was at, not at wherever the branch is by then
+  assert.deepEqual(world.calls, [
+    "GET /repos/acme/web/branches/main",
+    "GRAPHQL sha-of-main:src/a b.ts sha-of-main:gone.ts",
+    "GET /repos/acme/web/branches/stack/base",
+    "GET /repos/acme/web",
+    "GET /repos/acme/web/branches/main",
+    "GRAPHQL sha-of-main:lib/c.ts",
+  ]);
+  assert.deepEqual(counted.map((row) => [row.number, row.checkpoint, row.surviving]), [[3, "30d", 2], [9, "7d", 1], [9, "30d", 1]]);
+  assert.ok(logged.includes("#3: 2 of 10 agent lines are still on main, 30 days after it was merged."));
+  assert.ok(logged.includes("Counted 2 merged pull requests of acme/web again."));
+  const summary = readFileSync(env.GITHUB_STEP_SUMMARY, "utf8");
+  assert.match(summary, /\| #9 \| 7 days \| 10 \| 1 \| 10% \|/);
+  // nothing is written on a pull request, and nothing to the outputs
+  assert.equal(readFileSync(env.GITHUB_OUTPUT, "utf8"), "");
+
+  // with nothing due the run says so, and the input does the same without a schedule
+  const none = afterMerge({ due: [] });
+  const quiet = environment({ SESSIONLY_AFTER_MERGE: "true", SESSIONLY_GITHUB_TOKEN: "gh" });
+  assert.deepEqual((await run(quiet, { ...none, log() {} })).counted, []);
+  assert.match(readFileSync(quiet.GITHUB_STEP_SUMMARY, "utf8"), /No merged pull request was due/);
+  assert.deepEqual(none.calls, []);
+});
+
+test("a scheduled run that names pull requests reports them, as it did before", async () => {
+  const env = environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_PR_NUMBER: "7", SESSIONLY_GITHUB_TOKEN: "gh" });
+  writeFileSync(env.GITHUB_EVENT_PATH, JSON.stringify({ schedule: "17 5 * * *" }));
+  const sent = [];
+  const reported = await run(env, {
+    api: fakeGithub(),
+    deliver: async (url, token, report) => (sent.push(report.number), ATTRIBUTION),
+    server: () => assert.fail("nothing is counted after merging"),
+    log() {},
+  });
+  assert.deepEqual([sent, reported.report.event], [[7], "schedule"]);
+  // both asked for at once is said, and neither is done
+  await assert.rejects(
+    run({ ...env, SESSIONLY_AFTER_MERGE: "true" }, { api: fakeGithub(), deliver: () => assert.fail("not reported"), server: () => assert.fail("not counted") }),
+    /after-merge and pr-number inputs are both set/,
+  );
+});
+
+test("a count the server refuses does not stop the rest, and a server that cannot take any stops the run", async () => {
+  const due = [1, 2, 3].map((number) => ({ number, base_ref: "main", checkpoints: ["7d"], paths: ["a.ts"] }));
+  const env = () => environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_GITHUB_TOKEN: "gh" });
+  const logged = [];
+  const one = afterMerge({ due, refuse: { 2: 422 } });
+  await assert.rejects(run(env(), { ...one, log: (line) => logged.push(line) }), /1 merged pull requests could not be counted: #2/);
+  assert.deepEqual(one.sent.map((body) => body.number), [1, 2, 3]);
+  assert.match(logged.join("\n"), /#2 could not be counted .*tried again at the next run/);
+
+  const down = afterMerge({ due, refuse: { 2: 503 } });
+  await assert.rejects(run(env(), { ...down, log() {} }), /answered 503: no: #2 and the ones after it were not counted/);
+  assert.deepEqual(down.sent.map((body) => body.number), [1, 2]);
+
+  // a server from before this refuses the question itself
+  const old = { api: one.api, server: async () => { throw Object.assign(new Error("the Sessionly server answered 403: this token only reports pull requests"), { status: 403 }); } };
+  await assert.rejects(run(env(), { ...old, log() {} }), /does not count pull requests after merging .*needs updating/);
+
+  // no more files are read at once than GitHub allows for: the rest are due at the next run
+  const many = [
+    { number: 1, base_ref: "main", checkpoints: ["7d"], paths: Array.from({ length: MOST_FILES - 1 }, (_, i) => `f${i}.ts`) },
+    { number: 2, base_ref: "main", checkpoints: ["7d"], paths: ["a.ts", "b.ts"] },
+    { number: 3, base_ref: "main", checkpoints: ["7d"], paths: ["a.ts"] },
+  ];
+  const large = afterMerge({ due: many });
+  const said = [];
+  const { later } = await run(env(), { ...large, log: (line) => said.push(line) });
+  assert.deepEqual([large.sent.map((body) => body.number), later], [[1, 3], 1]);
+  assert.match(said.join("\n"), /1 more pull request is due and left for the next run/);
+  // and they are asked for many at a time: a pull request of thousands of files is tens of requests
+  assert.equal(large.calls.filter((call) => call.startsWith("GRAPHQL")).length, Math.ceil((MOST_FILES - 1) / FILES_AT_ONCE) + 1);
+});
+
+test("files are read many at a time at one commit, and one too large for that on its own", async () => {
+  const paths = Array.from({ length: FILES_AT_ONCE + 2 }, (_, i) => `f${i}.ts`);
+  const files = Object.fromEntries(paths.map((path, i) => [path, `line${i}();\n`]));
+  files["f1.ts"] = TOO_LARGE;
+  delete files["f3.ts"];
+  const { api, calls } = afterMerge({ due: [], branches: { main: files } });
+  const texts = await filesAt(api, "acme/web", "sha-of-main", paths);
+  assert.deepEqual([...texts.keys()], paths);
+  assert.deepEqual([texts.get("f0.ts"), texts.get("f1.ts"), texts.get("f3.ts"), texts.get(`f${FILES_AT_ONCE + 1}.ts`)], ["line0();\n", TOO_LARGE, null, `line${FILES_AT_ONCE + 1}();\n`]);
+  assert.deepEqual(calls.map((call) => call.split(" ")[0]), ["GRAPHQL", "TEXT", "GRAPHQL"]);
+  assert.equal(calls[1], "TEXT /repos/acme/web/contents/f1.ts?ref=sha-of-main");
+  // a folder where the file was, and a file that is not text
+  const odd = { graphql: async () => ({ repository: { f0: {}, f1: { text: null, isTruncated: false, isBinary: true } } }) };
+  assert.deepEqual([...(await filesAt(odd, "acme/web", "sha", ["dir", "logo.png"]))], [["dir", null], ["logo.png", ""]]);
+});
+
 test("over the network: pages from GitHub, and the server's answer or refusal", async () => {
   const seen = [];
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
-      seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body });
+      seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, accept: req.headers.accept, body });
       const reply = (status, data) => {
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(data));
       };
       const page = Number(new URL(req.url, "http://x").searchParams.get("page"));
       if (req.url.startsWith("/list")) return reply(200, Array.from({ length: page === 1 ? 100 : 3 }, (_, i) => ({ i })));
+      if (req.url.startsWith("/repos/acme/web/contents/src/")) return res.writeHead(200, { "content-type": "application/vnd.github.raw+json" }).end("one();\n");
+      if (req.url === "/repos/acme/web/branches/main") return reply(200, { name: "main", commit: { sha: "abc123" } });
+      if (req.url === "/repos/acme/web/branches/trunk") return reply(200, { name: "trunk", commit: { sha: "def456" } });
+      if (req.url === "/graphql") return reply(200, { data: { repository: { f0: null } } });
+      if (req.url === "/graphql-down") return reply(200, { errors: [{ message: "rate limited" }] });
+      if (req.url === "/repos/acme/web") return reply(200, { default_branch: "trunk" });
+      if (req.url.startsWith("/api/v1/prs/due")) return req.headers.authorization === "Bearer good" ? reply(200, { due: [] }) : reply(403, { error: "no" });
       if (req.url === "/api/v1/prs" && req.headers.authorization === "Bearer good") return reply(200, { stored: true, attribution: ATTRIBUTION });
       if (req.url === "/api/v1/prs") return reply(403, { error: "reporting pull requests needs a ci or admin token" });
       reply(404, { message: "Not Found" });
@@ -618,6 +786,22 @@ test("over the network: pages from GitHub, and the server's answer or refusal", 
     assert.deepEqual(seen.map((s) => s.url), ["/list?state=all&per_page=100&page=1", "/list?state=all&per_page=100&page=2"]);
     assert.equal(seen[0].auth, "Bearer gh-token");
     await assert.rejects(api.request("GET", "/missing"), /GitHub answered 404 to GET \/missing/);
+
+    // a file as text, one that is not there, and the branch to read it on
+    assert.equal(await fileOn(api, "acme/web", "main", "src/a b.ts"), "one();\n");
+    assert.equal(seen.at(-1).url, "/repos/acme/web/contents/src/a%20b.ts?ref=main");
+    assert.equal(seen.at(-1).accept, "application/vnd.github.raw+json");
+    assert.equal(await fileOn(api, "acme/web", "main", "gone.ts"), null);
+    assert.deepEqual(await branchFor(api, "acme/web", "main"), { branch: "main", sha: "abc123" });
+    assert.deepEqual(await branchFor(api, "acme/web", "deleted"), { branch: "trunk", sha: "def456" });
+    assert.deepEqual(await branchFor(api, "acme/web", null), { branch: "trunk", sha: "def456" });
+    // many files in one question, and a refusal said
+    assert.deepEqual(await api.graphql("query { x }", { e0: "abc123:a.ts" }), { repository: { f0: null } });
+    assert.equal(JSON.parse(seen.at(-1).body).variables.e0, "abc123:a.ts");
+    await assert.rejects(github("gh-token", base, `${base}/graphql-down`).graphql("query { x }", {}), /GraphQL query: rate limited/);
+    // the server asked and told
+    assert.deepEqual(await ask(`${base}/`, "good", "GET", "/prs/due?repo=github.com%2Facme%2Fweb"), { due: [] });
+    await assert.rejects(ask(base, "bad", "GET", "/prs/due?repo=x"), (err) => err.status === 403);
 
     assert.deepEqual(await send(`${base}/`, "good", build()), ATTRIBUTION);
     assert.equal(JSON.parse(seen.at(-1).body).number, 7);

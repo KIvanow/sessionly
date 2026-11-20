@@ -1,7 +1,7 @@
 // The few GitHub REST calls the Action needs, with the built-in fetch.
 
-/** `request(method, path, body)` against GitHub's API at `apiUrl`. */
-export function github(token, apiUrl = "https://api.github.com") {
+/** `request(method, path, body)` against GitHub's API at `apiUrl`, and `graphql(query, variables)` against the one at `graphqlUrl`. */
+export function github(token, apiUrl = "https://api.github.com", graphqlUrl = `${apiUrl}/graphql`) {
   const request = async (method, path, body) => {
     const response = await fetch(`${apiUrl}${path}`, {
       method,
@@ -20,7 +20,38 @@ export function github(token, apiUrl = "https://api.github.com") {
     }
     return response.status === 204 ? null : response.json();
   };
-  return { request };
+  /** A file as it is on a branch, as text; null if there is none at that path. */
+  const text = async (path) => {
+    const response = await fetch(`${apiUrl}${path}`, {
+      headers: {
+        accept: "application/vnd.github.raw+json",
+        authorization: `Bearer ${token}`,
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "sessionly-action",
+      },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const said = (await response.text()).slice(0, 300);
+      throw Object.assign(new Error(`GitHub answered ${response.status} to GET ${path}: ${said}`), { status: response.status });
+    }
+    return response.text();
+  };
+  /** One question of GitHub's GraphQL API; what it answers under `data`. */
+  const graphql = async (query, variables) => {
+    const response = await fetch(graphqlUrl, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "user-agent": "sessionly-action" },
+      body: JSON.stringify({ query, variables }),
+    });
+    const answer = await response.json().catch(() => ({}));
+    if (!response.ok || answer.errors?.length || !answer.data) {
+      const said = String(answer.errors?.[0]?.message ?? answer.message ?? "no reason given").slice(0, 300);
+      throw Object.assign(new Error(`GitHub answered ${response.status} to a GraphQL query: ${said}`), { status: response.status });
+    }
+    return answer.data;
+  };
+  return { request, text, graphql };
 }
 
 /** Every item of a list GitHub serves in pages. */
@@ -66,6 +97,65 @@ export async function listPulls(api, repo, since, most) {
   } catch {
     return { numbers, more: null };
   }
+}
+
+/** A path as part of an address: each folder and the name encoded, the slashes kept. */
+const inAddress = (path) => path.split("/").map(encodeURIComponent).join("/");
+
+/**
+ * The branch to look for a merged pull request's lines on, and the commit it
+ * is at now: the one it was merged into, or the repository's default branch
+ * when that one is gone (a branch others were stacked on is deleted once it
+ * is merged itself). The files are then all read at that commit, so that a
+ * push in between does not make a count of two states of the branch.
+ */
+export async function branchFor(api, repo, ref) {
+  const at = async (branch) => ({ branch, sha: (await api.request("GET", `/repos/${repo}/branches/${inAddress(branch)}`)).commit.sha });
+  if (ref) {
+    try {
+      return await at(ref);
+    } catch (err) {
+      if (err.status !== 404) throw err;
+    }
+  }
+  return at((await api.request("GET", `/repos/${repo}`)).default_branch);
+}
+
+/** A file as it is at a commit, as text; null if it is not there. */
+export function fileOn(api, repo, sha, path) {
+  return api.text(`/repos/${repo}/contents/${inAddress(path)}?ref=${encodeURIComponent(sha)}`);
+}
+
+/** How many files one question asks GitHub for. */
+export const FILES_AT_ONCE = 50;
+
+/**
+ * Files as they are at a commit, as text by path; null for one that is not
+ * there, and nothing for one that is not text. Asked for many at a time, so
+ * that a pull request of thousands of files takes tens of requests and not
+ * thousands: a workflow's token is allowed a thousand an hour. A file too
+ * large to be answered that way is read on its own.
+ */
+export async function filesAt(api, repo, sha, paths) {
+  const [owner, name] = repo.split("/");
+  const texts = new Map();
+  for (let from = 0; from < paths.length; from += FILES_AT_ONCE) {
+    const some = paths.slice(from, from + FILES_AT_ONCE);
+    const query =
+      `query($owner: String!, $name: String!, ${some.map((_, i) => `$e${i}: String!`).join(", ")}) { repository(owner: $owner, name: $name) { ` +
+      some.map((_, i) => `f${i}: object(expression: $e${i}) { ... on Blob { text isTruncated isBinary } }`).join(" ") +
+      " } }";
+    const variables = { owner, name, ...Object.fromEntries(some.map((path, i) => [`e${i}`, `${sha}:${path}`])) };
+    const found = (await api.graphql(query, variables)).repository ?? {};
+    for (const [i, path] of some.entries()) {
+      const file = found[`f${i}`];
+      // Nothing there, or a folder where the file was.
+      if (!file || file.isBinary === undefined) texts.set(path, null);
+      else if (file.isTruncated) texts.set(path, await fileOn(api, repo, sha, path));
+      else texts.set(path, file.isBinary ? "" : (file.text ?? ""));
+    }
+  }
+  return texts;
 }
 
 /** Everything about a pull request that goes into a report. */

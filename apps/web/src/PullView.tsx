@@ -1,8 +1,8 @@
-import type { PullDetail, PullHistory, PullHistoryNamedSession, PullSession } from "@sessionly/schema";
+import type { PullAfterMerge, PullDetail, PullHistory, PullHistoryNamedSession, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, matchedLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, matchedLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
 import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -50,6 +50,8 @@ export function PullView({
   const surviving = a.by.reduce((sum, by) => sum + by.surviving, 0);
   const fromOpen = p.first_event === "opened" && a.first.agent_lines > 0;
   const github = web(p.url);
+  // What became of its agent lines on the branch it was merged into.
+  const afterMerge = p.state === "merged" && a.now.agent_lines > 0 ? afterMergeTile(p.after_merge, p.merged_at, shareOf, count) : null;
   const state = p.state === "merged" ? `merged${p.merged_at ? ` ${dateTime(p.merged_at)}` : ""}` : p.state === "closed" ? `closed${p.closed_at ? ` ${dateTime(p.closed_at)}` : ""}` : p.draft ? "open, a draft" : "open";
   // Comments on the diff, per file: where review looked.
   const comments = new Map<string, number>();
@@ -86,7 +88,7 @@ export function PullView({
         repoOlder={p.repo_reporter_older}
         older={p.reporter_older}
       />
-      <section className="tiles five" aria-label="Totals">
+      <section className={`tiles ${afterMerge ? "six" : "five"}`} aria-label="Totals">
         <Tile label="Lines added" value={count(a.now.lines)} note={`in ${count(p.commits)} ${p.commits === 1 ? "commit" : "commits"}`} />
         <Tile
           label="Written by agents"
@@ -112,9 +114,10 @@ export function PullView({
           note={`${count(p.review_comments)} by people, ${count(p.bot_review_comments)} by bots, in ${count(p.review_rounds)} ${p.review_rounds === 1 ? "round" : "rounds"} of review`}
         />
         <Tile label="Agent cost" value={pullCost(p.cost)} note={pullCostNote(p.cost)} />
+        {afterMerge && <Tile label="Kept @30d after merge" value={afterMerge.value} part={afterMerge.part} note={afterMerge.note} />}
       </section>
 
-      <History history={p.history} />
+      <History history={p.history} counts={p.after_merge} />
 
       {a.now.by.length > 0 && (
         <section className="card" aria-label="By model">
@@ -326,12 +329,16 @@ function agentNote(agentLines: number, lines: number, shift: string | null): str
   return shift ? `${now}. ${shift}` : now;
 }
 
-function History({ history }: { history: PullHistory[] }) {
+function History({ history, counts }: { history: PullHistory[]; counts: PullAfterMerge[] | undefined }) {
+  const rows = timeline(history, counts);
   return (
     <section className="card" aria-label="History">
       <h2>History</h2>
-      <p className="muted hint">Each time the figures moved, and when a newer Action reported them as they were.</p>
-      {history.length === 0 ? (
+      <p className="muted hint">
+        Each time the figures moved, and when a newer Action reported them as they were. Once merged, its agent lines are
+        counted again on the branch it was merged into, 7 and 30 days after.
+      </p>
+      {rows.length === 0 ? (
         <p className="muted">No earlier figures were kept.</p>
       ) : (
         <div className="scroll">
@@ -345,17 +352,26 @@ function History({ history }: { history: PullHistory[] }) {
               </tr>
             </thead>
             <tbody>
-              {history.map((entry, i) => (
-                <tr key={`${entry.at} ${i}`}>
-                  <td className="nowrap">{dateTime(entry.at)}</td>
-                  <td className="nowrap">{historyEvent(entry.event)}</td>
-                  <td className="num nowrap">{count(entry.agent_lines)} of {count(entry.lines)}</td>
-                  <td>
-                    {entry.change.reason ?? "–"}
-                    <HistorySessions change={entry.change} />
-                  </td>
-                </tr>
-              ))}
+              {rows.map(({ at, report, count: counted }, i) =>
+                counted ? (
+                  <tr key={`${at} ${i}`}>
+                    <td className="nowrap">{dateTime(at)}</td>
+                    <td className="nowrap">{afterMergeName(counted)}</td>
+                    <td className="num nowrap">{count(counted.surviving)} of {count(counted.agent_lines)}</td>
+                    <td>{afterMergeLine(counted, count)}</td>
+                  </tr>
+                ) : (
+                  <tr key={`${at} ${i}`}>
+                    <td className="nowrap">{dateTime(at)}</td>
+                    <td className="nowrap">{historyEvent(report.event)}</td>
+                    <td className="num nowrap">{count(report.agent_lines)} of {count(report.lines)}</td>
+                    <td>
+                      {report.change.reason ?? "–"}
+                      <HistorySessions change={report.change} />
+                    </td>
+                  </tr>
+                ),
+              )}
             </tbody>
           </table>
         </div>
