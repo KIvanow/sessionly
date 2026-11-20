@@ -861,6 +861,35 @@ test("an upload matches again the pull requests it adds lines to, and no others"
   // the others are as they were
   const after = await matchedAt();
   assert.deepEqual(after.filter((row) => !before.includes(row)).map((row) => row.split(" ")[0]), [`${repo}#1`]);
+
+  // past more pull requests reported later that have none of its lines
+  const later = repo + "-later";
+  await call(tokens.ci, "PUT", "/prs", report({ repo: later, number: 1, commit_emails: ["ann@example.com"], files: [file("a.ts", 910)] }));
+  await db.query(
+    `INSERT INTO pull_requests (org_id, repo, number, author, state, created_at, first_event, last_event, first_files, last_files, attribution, committers, updated_at)
+     SELECT org_id, repo, 100 + n, author, state, created_at, first_event, last_event, '[]', '[]', attribution, committers, now() + make_interval(secs => n)
+     FROM pull_requests, generate_series(1, 60) AS n WHERE repo = $1 AND number = 1`,
+    [later],
+  );
+  const behind = session("s-later", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: [h(910)] }]);
+  behind.session.repo.remote = later;
+  assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-later", behind)).status, 200);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${later}&number=1`)).body.attribution.now.agent_lines, 1);
+
+  // looking for them fails: the session is stored all the same
+  const broken = repo + "-broken";
+  await call(tokens.ci, "PUT", "/prs", report({ repo: broken, number: 1, commit_emails: ["ann@example.com"], files: [file("a.ts", 920)] }));
+  await db.query(`UPDATE pull_requests SET last_files = '"not files"' WHERE repo = $1`, [broken]);
+  const kept = session("s-broken", "claude-code", "claude-opus-5-5", "2026-11-10T11:00:00Z", [{ path: "a.ts", model: null, hashes: [h(920)] }]);
+  kept.session.repo.remote = broken;
+  const quiet = console.error;
+  console.error = () => {};
+  try {
+    assert.equal((await call(tokens.ann, "PUT", "/sessions/m1/claude-code/s-broken", kept)).status, 200);
+  } finally {
+    console.error = quiet;
+  }
+  assert.equal((await db.query(`SELECT 1 FROM sessions WHERE session_id = 's-broken'`)).length, 1);
 });
 
 test("a pull request's lines are matched again when its sessions arrive after its last report", async () => {

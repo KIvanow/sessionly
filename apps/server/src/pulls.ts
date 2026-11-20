@@ -946,6 +946,10 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   // row yet to hold: the later one then sees what the earlier left, the state
   // and the lines it was first reported with. Held until the history is written.
   await holdPull(db, report.repo, report.number);
+  // Before the sessions are read: a session stored meanwhile then either is
+  // read here, or is looked for in this pull request once this is committed
+  // (`pullsAddedTo` waits for it).
+  await holdPullSessions(db);
   const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string }>(
     `SELECT first_files, first_event, state FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
     [db.orgId, report.repo, report.number],
@@ -1208,15 +1212,20 @@ export async function rematchPull(
 
 /** No more than this many pull requests are matched again when one session is uploaded: the ones reported last. */
 export const MATCH_ON_UPLOAD = 5;
+/** The pull requests looked through at a time for those. */
+const PAGE = 50;
 
 /**
  * The pull requests a session just stored can change the figures of: in its
  * repository, open or closed in the last two weeks, with a line it added to
  * the same file. Its lines are often uploaded after the pull request was
  * reported (it is opened while the session goes on): matching these again
- * (`rematchPull`) counts them without waiting for the next report.
+ * (`rematchPull`) counts them without waiting for the next report. Run once
+ * the session is committed: a report under way is waited for, and either it
+ * read the session or its pull request is among these.
  */
 export async function pullsAddedTo(db: OrgDb, key: SessionKey): Promise<{ repo: string; number: number }[]> {
+  await holdPullSessions(db);
   const [s] = await db.query(
     `SELECT repo, started_at, payload->'lines' AS lines FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
@@ -1224,23 +1233,30 @@ export async function pullsAddedTo(db: OrgDb, key: SessionKey): Promise<{ repo: 
   );
   const added = json<{ path?: string; hashes?: string[] }[] | null>(s?.lines) ?? [];
   if (!s?.repo || added.length === 0) return [];
-  // Sessions that started longer before a pull request was opened than this are not looked at for it.
-  const rows = await db.query(
-    `SELECT repo, number, first_files, last_files FROM pull_requests
-     WHERE org_id = $1 AND committers IS NOT NULL
-       AND (repo = $2 OR head_repo = $2 OR coalesce(aliases, '[]'::jsonb) ? $2)
-       AND (state = 'open' OR coalesce(merged_at, closed_at, updated_at) >= now() - interval '14 days')
-       AND ($3::timestamptz IS NULL OR created_at IS NULL OR created_at <= $3::timestamptz + interval '${LOOK_BACK_DAYS} days')
-     ORDER BY updated_at DESC LIMIT 50`,
-    [db.orgId, s.repo, iso(s.started_at)],
-  );
   const claims = added.map((lines) => ({ path: lines.path ?? "", hashes: new Set(lines.hashes ?? []) }));
   const touched = (files: FileHashes[]) =>
     files.some((file) => claims.some((c) => samePath(c.path, file.path) && file.hashes.some((hash) => c.hashes.has(hash))));
-  return rows
-    .filter((r) => touched(json<FileHashes[]>(r.last_files)) || touched(json<FileHashes[]>(r.first_files)))
-    .slice(0, MATCH_ON_UPLOAD)
-    .map((r) => ({ repo: String(r.repo), number: num(r.number) }));
+  const found: { repo: string; number: number }[] = [];
+  // A page at a time, the ones reported last first, until enough have its lines.
+  for (let offset = 0; found.length < MATCH_ON_UPLOAD; offset += PAGE) {
+    // Sessions that started longer before a pull request was opened than LOOK_BACK_DAYS are not looked at for it.
+    const rows = await db.query(
+      `SELECT repo, number, first_files, last_files FROM pull_requests
+       WHERE org_id = $1 AND committers IS NOT NULL
+         AND (repo = $2 OR head_repo = $2 OR coalesce(aliases, '[]'::jsonb) ? $2)
+         AND (state = 'open' OR coalesce(merged_at, closed_at, updated_at) >= now() - interval '14 days')
+         AND ($3::timestamptz IS NULL OR created_at IS NULL OR created_at <= $3::timestamptz + make_interval(days => $4::int))
+       ORDER BY updated_at DESC, repo, number LIMIT $5::int OFFSET $6::int`,
+      [db.orgId, s.repo, iso(s.started_at), LOOK_BACK_DAYS, PAGE, offset],
+    );
+    for (const r of rows) {
+      if (found.length < MATCH_ON_UPLOAD && (touched(json<FileHashes[]>(r.last_files)) || touched(json<FileHashes[]>(r.first_files)))) {
+        found.push({ repo: String(r.repo), number: num(r.number) });
+      }
+    }
+    if (rows.length < PAGE) break;
+  }
+  return found;
 }
 
 /** No more than this many pull requests are matched again in one request. */
