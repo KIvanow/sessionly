@@ -139,8 +139,9 @@ when it was opened.
 **Figures that are behind.** A pull request's lines are matched to sessions when the Action
 reports it, and again when a session that added some of them is uploaded later (the session was
 still going when it was opened, the machine was offline): the server then matches the pull
-requests of its repository that are open or were closed in the last two weeks, five at most, and
-the page and the history say so. The comment on GitHub catches up at the next report. A session
+requests of its repository that are open or were closed in the last two weeks (and not before
+the session started), that its person committed to, five at most. The page and the history say
+so: one row for matching again until the next report, however many uploads it took. The comment on GitHub catches up at the next report. A session
 uploaded to a server of version 0.6.3 or older, or for a pull request closed longer ago, is not
 in the figures until it is matched again: **Match again** on
 a pull request's page, or **Match these to sessions again** above the list, matches the lines as

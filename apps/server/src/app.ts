@@ -408,9 +408,9 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const stored = c.get("stored");
     if (c.res.status !== 200 || !stored) return;
     try {
-      for (const { repo, number } of await ownerDb.asOrg(c.get("principal").orgId, (db) => pullsAddedTo(db, stored))) {
+      for (const { repo, number } of await ownerDb.asOrg(c.get("principal").orgId, (db) => pullsAddedTo(db, stored, options.hashKey))) {
         try {
-          await ownerDb.asOrg(c.get("principal").orgId, (db) => rematchPull(db, repo, number, options.hashKey));
+          await ownerDb.asOrg(c.get("principal").orgId, (db) => rematchPull(db, repo, number, options.hashKey, { uploaded: true }));
         } catch (err) {
           failed(err);
         }
