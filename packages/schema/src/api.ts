@@ -524,9 +524,14 @@ export interface PullCost {
   /** Whether any of that cost is an estimate, or of a session that is unshared (see `sessions_unshared`). */
   opened_estimated: boolean;
   /**
-   * What an agent line that survived review cost: `opened_usd` for each of
-   * them still there, those being shared out with other pull requests as the
-   * lines it was opened with were on the whole. Null when none is.
+   * What the agent lines it was opened with that survived review count as:
+   * those still there, shared out with other pull requests as the lines it
+   * was opened with were on the whole. Null when `opened_usd` is.
+   */
+  surviving_weight: number | null;
+  /**
+   * What an agent line that survived review cost: `opened_usd` over
+   * `surviving_weight`. Null when none is.
    */
   per_surviving_line_usd: number | null;
 }
@@ -830,8 +835,8 @@ export interface PullSummary {
     /**
      * Over the pull requests reported from the moment they were opened that
      * have a cost: what the agent lines they were opened with cost
-     * (`opened_usd`), for each of those that survived review. Null when
-     * none did.
+     * (`opened_usd`), for what those that survived review count as
+     * (`surviving_weight`), as on each one's page. Null when none did.
      */
     per_surviving_line_usd: number | null;
     /** Whether a session of those lines has no cost figure, or not all of it. */

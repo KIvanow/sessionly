@@ -1725,6 +1725,8 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   // What review left can only be said of a pull request seen from the start,
   // and what it was opened with cost only of one whose sessions then were kept.
   if (!openedKnown || pull.first_event !== "opened" || a.first.agent_lines === 0) opened = null;
+  // The summary divides by this too, so it says what the page does.
+  const kept = opened == null ? null : surviving;
   return {
     usd: usd == null ? null : money(usd),
     // A share that may be counted in another pull request too is no more than an estimate.
@@ -1739,7 +1741,8 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
     opened_usd: opened == null ? null : money(opened),
     opened_is_floor: opened != null && openedFloor,
     opened_estimated: opened != null && openedEstimated,
-    per_surviving_line_usd: opened != null && surviving > 0 ? money(opened / surviving) : null,
+    surviving_weight: kept,
+    per_surviving_line_usd: opened != null && kept != null && kept > 0 ? money(opened / kept) : null,
   };
 }
 
@@ -2000,7 +2003,7 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       // One where no line survived is in this too: what its lines cost was spent.
       if (pull.cost?.opened_usd != null) {
         opened.usd += pull.cost.opened_usd;
-        opened.surviving += a.by.reduce((sum, by) => sum + by.surviving, 0);
+        opened.surviving += pull.cost.surviving_weight ?? 0;
         if (pull.cost.opened_is_floor) total.per_surviving_line_is_floor = true;
         if (pull.cost.opened_estimated) total.per_surviving_line_estimated = true;
       }
