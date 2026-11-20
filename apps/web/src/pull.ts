@@ -124,8 +124,9 @@ export function survivingOnce(total: {
   return {
     text: `${once.format(total.agent_lines_surviving_once)} counted once for cost`,
     why:
-      "What the cost per agent line that survived review divides by. A line opened in more than one pull request is counted once " +
-      "between them, wherever it survived, as its cost is; and only pull requests with a cost are in it.",
+      "What the cost per agent line that survived review divides by. A line opened in more than one pull request counts in part in " +
+      "each, as its cost does, and survives in all of them while any one keeps it: fewer than the count beside it where those " +
+      "pull requests are all here, more where only some are. Only pull requests with a cost are in it.",
   };
 }
 

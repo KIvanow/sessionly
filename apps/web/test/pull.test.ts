@@ -208,7 +208,9 @@ test("the lines a cost per surviving line divides by are shown beside how many s
   const total = { agent_lines_surviving: 14, agent_lines_surviving_once: 10, per_surviving_line_usd: 0.6 };
   const shown = survivingOnce(total);
   assert.equal(shown?.text, "10 counted once for cost");
-  assert.match(shown!.why, /counted once between them/);
+  assert.match(shown!.why, /survives in all of them while any one keeps it/);
+  // and why it can be more than the count beside it
+  assert.match(shown!.why, /more where only some are/);
   assert.equal(survivingOnce({ ...total, agent_lines_surviving_once: 7.25 })?.text, "7.25 counted once for cost");
   // the same: nothing to explain
   assert.equal(survivingOnce({ ...total, agent_lines_surviving_once: 14 }), null);

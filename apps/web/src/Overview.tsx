@@ -175,7 +175,7 @@ export function Tile(props: {
         <span className="note">
           {/* Focusable, so that a keyboard or a tap opens what it means too. */}
           <span className="explained" tabIndex={0} aria-describedby={why}>
-            {aside.text}
+            <span>{aside.text}</span>
             <span className="explanation" role="tooltip" id={why}>
               {aside.why}
             </span>

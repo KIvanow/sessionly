@@ -6,8 +6,9 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countHashedLines, migrationAt, openDb, type Db } from "../src/db.ts";
+import { DEFAULT_ORG } from "../src/auth.ts";
 import { newOrg, testDb, testDbUrl, tokenFor } from "./helpers.ts";
-import { attribute, breakdown, CURRENT_ACTION, type Claim, historyChange, MATCH_AT_ONCE, olderAction, UNKNOWN_REPORTER, weigh, weighKept, writers } from "../src/pulls.ts";
+import { attribute, breakdown, CURRENT_ACTION, type Claim, historyChange, MATCH_AT_ONCE, olderAction, UNKNOWN_REPORTER, weigh, weighKept, weighKeptSome, writers } from "../src/pulls.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
 const h = (n: number) => n.toString(16).padStart(16, "0");
@@ -1663,12 +1664,29 @@ test("a line opened in two pull requests survives once between them, wherever it
   const whole = await summary("repo=acme/halves-solo");
   assert.deepEqual([whole.per_surviving_line_usd, whole.agent_lines_surviving, whole.agent_lines_surviving_once], [0.8, 5, 5]);
 
-  // kept before which lines survived was: shared out as the lines were opened, until matched again
+  // kept before which lines survived was: as many of its lines as of all of them survived there, until weighed again
   await db.query(`UPDATE pull_sessions SET opened_kept = NULL WHERE repo = $1`, [repo]);
   assert.equal((await cost(1)).per_surviving_line_usd, 1.5);
-  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 1 })).status, 200);
-  assert.equal((await cost(1)).per_surviving_line_usd, 0.6);
-  assert.equal((await cost(2)).per_surviving_line_usd, 0.6);
+  // which the server does once, as it starts, and matching again does too
+  assert.equal(await db.asOrg(DEFAULT_ORG, (tx) => weighKeptSome(tx)), 1);
+  assert.equal(await db.asOrg(DEFAULT_ORG, (tx) => weighKeptSome(tx)), 0);
+  assert.deepEqual([(await cost(1)).per_surviving_line_usd, (await cost(2)).per_surviving_line_usd], [0.6, 0.6]);
+  await db.query(`UPDATE pull_sessions SET opened_kept = NULL WHERE repo = $1 AND number = 2`, [repo]);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 2 })).status, 200);
+  const [weighed] = await db.query(`SELECT opened_kept FROM pull_sessions WHERE repo = $1 AND number = 2`, [repo]);
+  assert.equal(Number(weighed!.opened_kept), 5);
+
+  // a pull request not seen from the start (a release of what was merged) keeps lines that went in
+  // review elsewhere: they did not survive there, and it is never weighed for it
+  const release = `${repo}-release`;
+  await upload("c-release", "r.ts", range(300, 4), 4, release);
+  await call(tokens.ci, "PUT", "/prs", report({ repo: release, number: 1, files: [file("r.ts", ...range(300, 4))] }));
+  await call(tokens.ci, "PUT", "/prs", report({ repo: release, number: 1, event: "synchronize", files: [file("r.ts", ...range(300, 2))] }));
+  await call(tokens.ci, "PUT", "/prs", report({ repo: release, number: 2, event: "synchronize", files: [file("r.ts", ...range(300, 4))] }));
+  assert.equal((await cost(1, release)).per_surviving_line_usd, 2);
+  const unweighed = await db.query(`SELECT number FROM pull_sessions WHERE repo = $1 AND opened_kept IS NULL`, [release]);
+  assert.deepEqual(unweighed.map((row) => Number(row.number)), [2]);
+  assert.equal(await db.asOrg(DEFAULT_ORG, (tx) => weighKeptSome(tx)), 0);
 });
 
 test("a share is unsure only for lines not kept in a pull request it is weighed against", async () => {
@@ -1765,6 +1783,10 @@ test("what a session's opening lines still there count as is shared out as they 
   assert.deepEqual(kept, [1.5, 1.5]);
   // one copy of the line it had twice is left: that copy is one line between them
   assert.deepEqual(weighKept(opened, [{ live: true, matched: { "a.ts": [h(2)] } }, { live: true, matched: {} }]), [0.5, 0.5]);
+  // opened twice in one and once in the other, one copy left: one line between them, in proportion
+  const uneven = [{ live: true, matched: { "a.ts": [h(3), h(3)] } }, { live: true, matched: { "a.ts": [h(3)] } }];
+  const one = weighKept(uneven, [{ live: true, matched: {} }, { live: true, matched: { "a.ts": [h(3)] } }]);
+  assert.deepEqual(one.map((n) => Math.round(n! * 1e9) / 1e9), [Math.round((2 / 3) * 1e9) / 1e9, Math.round((1 / 3) * 1e9) / 1e9]);
   // and one whose lines were not kept says nothing
   assert.deepEqual(weighKept([{ live: true, matched: null }], [{ live: true, matched: both }]), [null]);
 });
