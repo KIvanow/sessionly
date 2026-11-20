@@ -142,7 +142,8 @@ jobs:
 
 It needs `contents: read` and writes on no pull request. The files are read fifty at a time,
 all at the commit the branch is at; a run reads at most 20,000, and what is left is due at the
-next. See
+next. A pull request whose files hold more lines than fit in one request to the server (32 MB,
+about 1.7 million tracked lines) cannot be counted yet: the run warns of it each time. See
 [After merge](../docs-site/pull-requests.md#after-merge) for what is counted and how a missed
 day is handled.
 
