@@ -813,6 +813,23 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('owner', 'admin', 'member', 'viewer'))`,
   `ALTER TABLE tokens DROP CONSTRAINT tokens_role_check`,
   `ALTER TABLE tokens ADD CONSTRAINT tokens_role_check CHECK (role IN ('admin', 'member', 'ci', 'env', 'viewer'))`,
+  // What a session's rewrite measurement was 1, 7 and 30 days after it ended
+  // (an upload's `checkpoints`), by age: {"7d": {added, surviving,
+  // measured_at, age_seconds}}. Counts and times. Beside the payload, so that
+  // a summary does not open it. One kept is not replaced by a later upload.
+  `ALTER TABLE sessions ADD COLUMN checkpoints jsonb NOT NULL DEFAULT '{}'`,
+  // A merged pull request's agent lines counted again on the branch it was
+  // merged into, 7 and 30 days after: a row of its history, with the event
+  // `after_merge_7d` or `after_merge_30d`, how many lines were looked for and
+  // how old the merge was. One of each, written once.
+  `ALTER TABLE pull_request_reports ADD COLUMN of_agent_lines integer`,
+  `ALTER TABLE pull_request_reports ADD COLUMN age_seconds integer`,
+  `CREATE UNIQUE INDEX pull_request_reports_after_merge ON pull_request_reports (org_id, repo, number, event)
+   WHERE left(event, 12) = 'after_merge_'`,
+  // From when an organisation's pull requests are counted after merging. An
+  // age one reached before that was not counted then, and is not made up
+  // later. For the organisations already here that is now.
+  `ALTER TABLE orgs ADD COLUMN after_merge_since timestamptz NOT NULL DEFAULT now()`,
 ];
 
 /**

@@ -148,6 +148,22 @@ export interface RewriteTotals {
   lines_surviving: number;
 }
 
+/**
+ * How much of what the agent wrote was still in the files at a fixed age
+ * after each session ended, over the sessions measured at that age. A
+ * session is measured at an age by the first sync at or after it, so a
+ * session that is younger, or was not synced since, is not among them.
+ */
+export interface KeptAt {
+  /** Tracked lines those sessions added, and how many were there at that age. */
+  lines_added: number;
+  lines_surviving: number;
+  /** Sessions measured at that age. */
+  sessions_reached: number;
+  /** Sessions with measured lines at all: what `sessions_reached` is out of. */
+  sessions_total: number;
+}
+
 export interface Totals {
   key: string;
   sessions: number;
@@ -169,7 +185,12 @@ export interface Totals {
   tools: string[];
   /** The main model of each session, in name order. Agents that record none add nothing. */
   models: string[];
+  /** As last measured, whenever that was: a session that just ended and one from last month together. */
   rewrite: RewriteTotals;
+  /** As measured 1, 7 and 30 days after each session ended. */
+  kept_1d: KeptAt;
+  kept_7d: KeptAt;
+  kept_30d: KeptAt;
 }
 
 /** `runtime` groups by where sessions ran: `local` or `cloud`. */
@@ -705,11 +726,16 @@ export interface PullHistory {
   /**
    * What prompted the report: `opened`, `synchronize`, `review`, `closed`,
    * `manual`, or `match` when the lines were matched again on the server.
+   * `after_merge_7d` and `after_merge_30d` are its agent lines counted again
+   * on the branch it was merged into, that long after (see `after_merge`).
    */
   event: string;
   commits: number;
   lines: number;
+  /** On a row counted after merging: how many of its agent lines were still on the branch. */
   agent_lines: number;
+  /** Set on a row counted after merging, and only there. */
+  after_merge?: PullAfterMerge | null;
   /** The sessions matched then, and how many lines of the pull request each had. */
   sessions: PullHistorySession[];
   /**
@@ -718,6 +744,41 @@ export interface PullHistory {
    */
   reporter_version: string | null;
   change: PullHistoryChange;
+}
+
+/**
+ * A merged pull request's agent lines counted again on the branch it was
+ * merged into, 7 or 30 days after: the first count at or after that age.
+ * Once made it is kept as it is.
+ */
+export interface PullAfterMerge {
+  checkpoint: "7d" | "30d";
+  /** The agent lines it was merged with, of the sessions whose lines are kept. */
+  agent_lines: number;
+  /** How many of them were in the same files on that branch. */
+  surviving: number;
+  /** When they were counted, and how long after merging that was: the age, or more. */
+  at: string;
+  age_seconds: number;
+}
+
+/** A merged pull request the Action is asked to count again (`GET /prs/due`). */
+export interface PullDue {
+  number: number;
+  /** The branch it was merged into. */
+  base_ref: string | null;
+  /** The ages it has reached and has no count for. */
+  checkpoints: ("7d" | "30d")[];
+  /** The files its agent lines are in: the ones to read on that branch. */
+  paths: string[];
+}
+
+/** What counting again takes (`PUT /prs/after-merge`): those files as they are on the branch now, as hashes. */
+export interface PullAfterMergeReport {
+  repo: string;
+  number: number;
+  /** Every path asked for. A file that is gone has no hashes. */
+  files: FileHashes[];
 }
 
 /**
@@ -756,6 +817,8 @@ export interface PullDetail extends PullRow {
   reporter_current: string;
   /** Earlier figures, newest first, each with what changed against the one before it. */
   history: PullHistory[];
+  /** Its agent lines 7 and 30 days after merging, the earlier first: those counted so far. */
+  after_merge: PullAfterMerge[];
 }
 
 export interface PullList {

@@ -5,10 +5,13 @@
 import type {
   FileHashes,
   LinesBy,
+  PullAfterMerge,
+  PullAfterMergeReport,
   PullAttribution,
   PullCost,
   PullCloud,
   PullDetail,
+  PullDue,
   PullFeedback,
   PullFile,
   PullHistory,
@@ -547,7 +550,8 @@ export function checkReport(body: unknown): PullReport {
     created_at: when("created_at", true)!,
     merged_at: when("merged_at", false),
     closed_at: when("closed_at", false),
-    event: optional("event") ?? "unknown",
+    // The rows counted after merging are the server's own to write.
+    event: (optional("event") ?? "unknown").replace(/^after_merge_.*/, "unknown"),
     commits: whole("commits"),
     reviews: whole("reviews"),
     changes_requested: whole("changes_requested"),
@@ -755,6 +759,20 @@ async function match(
 const HISTORY_KEPT = 50;
 
 /**
+ * The ages after merging at which a pull request's agent lines are counted
+ * again on the branch it was merged into, in days.
+ */
+export const AFTER_MERGE = [
+  ["7d", 7],
+  ["30d", 30],
+] as const;
+type AfterMergeAge = (typeof AFTER_MERGE)[number][0];
+const afterMergeEvent = (age: string): string => `after_merge_${age}`;
+/** A history row counted after merging: kept for good, and not one of the figures a report is compared with. */
+const AFTER_MERGE_ROW = `left(event, 12) = 'after_merge_'`;
+const FIGURES = `NOT (${AFTER_MERGE_ROW})`;
+
+/**
  * One request stores or matches a pull request at a time, its first too,
  * when there is no row yet to hold. The later one then sees what the earlier
  * left. The same lock a report takes, so a rematch waits for it.
@@ -915,7 +933,7 @@ async function recordReport(
   }>(
     `SELECT id, event, commits, lines, agent_lines, sessions, reporter_version
      FROM pull_request_reports
-     WHERE org_id = $1 AND repo = $2 AND number = $3
+     WHERE org_id = $1 AND repo = $2 AND number = $3 AND ${FIGURES}
      ORDER BY at DESC, id DESC
      LIMIT 1`,
     [db.orgId, report.repo, report.number],
@@ -948,7 +966,7 @@ async function recordReport(
     // Back to what the row before it says: then nothing moved, and it goes.
     const [before] = await db.query<{ commits: unknown; lines: unknown; agent_lines: unknown; sessions: unknown }>(
       `SELECT commits, lines, agent_lines, sessions FROM pull_request_reports
-       WHERE org_id = $1 AND repo = $2 AND number = $3 AND id <> $4
+       WHERE org_id = $1 AND repo = $2 AND number = $3 AND id <> $4 AND ${FIGURES}
        ORDER BY at DESC, id DESC LIMIT 1`,
       [db.orgId, report.repo, report.number, latest.id],
     );
@@ -987,10 +1005,10 @@ async function recordReport(
   );
   await db.query(
     `DELETE FROM pull_request_reports
-     WHERE org_id = $1 AND repo = $2 AND number = $3
+     WHERE org_id = $1 AND repo = $2 AND number = $3 AND ${FIGURES}
        AND id NOT IN (
          SELECT id FROM pull_request_reports
-         WHERE org_id = $1 AND repo = $2 AND number = $3
+         WHERE org_id = $1 AND repo = $2 AND number = $3 AND ${FIGURES}
          ORDER BY at DESC, id DESC
          LIMIT ${HISTORY_KEPT}
        )`,
@@ -1828,19 +1846,22 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
     feedback: r.feedback == null ? null : json<PullFeedback[]>(r.feedback),
     feedback_total: r.feedback == null || r.feedback_total == null ? null : num(r.feedback_total),
     history,
+    after_merge: history
+      .flatMap((row) => (row.after_merge ? [row.after_merge] : []))
+      .sort((a, b) => a.age_seconds - b.age_seconds || a.checkpoint.localeCompare(b.checkpoint, undefined, { numeric: true })),
   };
 }
 
 /** The pull request's history, newest first, each with what changed against the one before it. */
 async function pullHistory(db: OrgDb, repo: string, number: number): Promise<PullHistory[]> {
   const rows = await db.query(
-    `SELECT at, event, commits, lines, agent_lines, sessions, reporter_version
+    `SELECT at, event, commits, lines, agent_lines, sessions, reporter_version, of_agent_lines, age_seconds
      FROM pull_request_reports
      WHERE org_id = $1 AND repo = $2 AND number = $3
      ORDER BY at DESC, id DESC`,
     [db.orgId, repo, number],
   );
-  const snaps: (HistoryFigures & { at: string; event: string })[] = rows.map((row) => ({
+  const snaps: (HistoryFigures & { at: string; event: string; after_merge: PullAfterMerge | null })[] = rows.map((row) => ({
     at: iso(row.at) ?? "",
     event: String(row.event),
     commits: num(row.commits),
@@ -1848,8 +1869,14 @@ async function pullHistory(db: OrgDb, repo: string, number: number): Promise<Pul
     agent_lines: num(row.agent_lines),
     sessions: sessionsOf(row.sessions),
     reporter_version: typeof row.reporter_version === "string" ? row.reporter_version : null,
+    after_merge: afterMergeOf(row),
   }));
-  const changes = snaps.map((snap, i) => historyChange(snap, snaps[i + 1] ?? null));
+  // A count after merging is of other lines than a report's (those on the
+  // branch, not those of the pull request): each report is compared with the
+  // report before it, whatever was counted in between.
+  const reports = snaps.filter((snap) => !snap.after_merge);
+  const compared = new Map(reports.map((snap, i) => [snap, historyChange(snap, reports[i + 1] ?? null)]));
+  const changes = snaps.map((snap) => compared.get(snap) ?? historyChange(snap, null));
   const named = changes.flatMap((change) => [...change.sessions_added, ...change.sessions_gone, ...change.sessions_changed]);
   const known = new Map((await withSessions(db, named)).map((s) => [sessionKey(s), s.session]));
   const name = (s: ReportSession): PullHistoryNamedSession => ({ ...s, session: known.get(sessionKey(s)) ?? null });
@@ -1863,6 +1890,7 @@ async function pullHistory(db: OrgDb, repo: string, number: number): Promise<Pul
       agent_lines: snap.agent_lines,
       sessions: snap.sessions,
       reporter_version: snap.reporter_version,
+      after_merge: snap.after_merge,
       change: {
         lines_before: change.lines_before,
         agent_lines_before: change.agent_lines_before,
@@ -1874,6 +1902,203 @@ async function pullHistory(db: OrgDb, repo: string, number: number): Promise<Pul
       },
     };
   });
+}
+
+/** What a history row counted after merging says, or null for any other row. */
+function afterMergeOf(row: Record<string, unknown>): PullAfterMerge | null {
+  const age = AFTER_MERGE.find(([name]) => row.event === afterMergeEvent(name))?.[0];
+  if (!age) return null;
+  return {
+    checkpoint: age,
+    agent_lines: num(row.of_agent_lines),
+    surviving: num(row.agent_lines),
+    at: iso(row.at) ?? "",
+    age_seconds: num(row.age_seconds),
+  };
+}
+
+/** A session's lines in a pull request, where which lines they are is kept. */
+async function keptLines(db: OrgDb, repo: string, number: number): Promise<(ReportSession & { matched: Lines })[]> {
+  const rows = await db.query(
+    `SELECT machine_id, source, session_id, lines, matched FROM pull_sessions
+     WHERE org_id = $1 AND repo = $2 AND number = $3 AND lines > 0 AND matched IS NOT NULL
+     ORDER BY machine_id, source, session_id`,
+    [db.orgId, repo, number],
+  );
+  return rows.map((row) => ({
+    machine_id: String(row.machine_id),
+    source: String(row.source),
+    session_id: String(row.session_id),
+    lines: num(row.lines),
+    matched: json<Lines>(row.matched),
+  }));
+}
+
+/** No more pull requests than this are asked for at once: the Action reads each of their files from GitHub. */
+const DUE_AT_ONCE = 50;
+
+/**
+ * The ages a merged pull request has reached and has no count for. An age
+ * it reached before its organisation counted any (`after_merge_since`) is
+ * not among them: nothing was counted then, and what is on the branch today
+ * is not what was there that day. One missed since is, and its row says how
+ * old the merge really was.
+ */
+const DUE = `
+  FROM pull_requests p
+  JOIN orgs o ON o.id = p.org_id
+  CROSS JOIN (VALUES ${AFTER_MERGE.map(([name, days]) => `('${name}', ${days})`).join(", ")}) AS c(age, days)
+  WHERE p.org_id = $1 AND p.repo = $2 AND p.state = 'merged' AND p.merged_at IS NOT NULL
+    AND p.merged_at + make_interval(days => c.days) <= now()
+    AND p.merged_at + make_interval(days => c.days) >= o.after_merge_since
+    AND NOT EXISTS (SELECT 1 FROM pull_request_reports r
+                    WHERE r.org_id = p.org_id AND r.repo = p.repo AND r.number = p.number AND r.event = 'after_merge_' || c.age)`;
+
+/**
+ * The merged pull requests of a repository whose agent lines are to be
+ * counted again on the branch they were merged into, the longest merged
+ * first: which ages each has reached, and which files to read. One with no
+ * agent lines whose sessions are kept has nothing to count, and is not asked
+ * for. No line hashes: the Action sends the files' own, and the server
+ * compares.
+ */
+export async function pullsDue(db: OrgDb, repo: string): Promise<PullDue[]> {
+  const rows = await db.query(
+    `SELECT p.number, p.base_ref, array_agg(c.age ORDER BY c.days) AS ages,
+            (SELECT jsonb_agg(s.matched) FROM pull_sessions s
+             WHERE s.org_id = p.org_id AND s.repo = p.repo AND s.number = p.number AND s.lines > 0 AND s.matched IS NOT NULL) AS matched
+     ${DUE}
+     GROUP BY p.org_id, p.repo, p.number, p.base_ref, p.merged_at
+     ORDER BY p.merged_at, p.number`,
+    [db.orgId, repo],
+  );
+  const due: PullDue[] = [];
+  for (const row of rows) {
+    const paths = [...new Set((json<Lines[] | null>(row.matched) ?? []).flatMap((lines) => Object.keys(lines)))].sort();
+    if (paths.length === 0) continue;
+    due.push({
+      number: num(row.number),
+      base_ref: (row.base_ref as string) ?? null,
+      checkpoints: (row.ages as AfterMergeAge[]) ?? [],
+      paths,
+    });
+    if (due.length === DUE_AT_ONCE) break;
+  }
+  return due;
+}
+
+/** A count after merging as the Action sends it, checked; throws `BadReport` saying what is wrong with it. */
+export function checkAfterMerge(body: unknown): PullAfterMergeReport {
+  const r = body as Record<string, unknown>;
+  const fail = (what: string): never => {
+    throw new BadReport(what);
+  };
+  if (!r || typeof r !== "object") fail("the report is not an object");
+  if (typeof r.repo !== "string" || r.repo === "") fail("repo is required");
+  if (!Number.isInteger(r.number) || (r.number as number) < 1) fail("number must be a pull request number");
+  const files = Array.isArray(r.files) ? r.files : fail("files must be a list");
+  if (files.length > MAX_FILES) fail(`a report can list at most ${MAX_FILES} files`);
+  for (const file of files as Record<string, unknown>[]) {
+    const ok =
+      file && typeof file.path === "string" && file.path !== "" && Array.isArray(file.hashes) &&
+      file.hashes.every((h) => typeof h === "string" && HASH.test(h));
+    if (!ok) fail("each file needs a path and hashes of 16 hex digits");
+  }
+  return {
+    repo: (r.repo as string).replace(/\/+$/, ""),
+    number: r.number as number,
+    files: (files as FileHashes[]).map((f) => ({ path: f.path, hashes: f.hashes })),
+  };
+}
+
+/**
+ * How many of each session's lines are in the files as they are now: a line
+ * of a file counts for one line an agent added to it, as in the rewrite
+ * rate. A file that is not among `files` has none of them.
+ */
+export function stillThere(sessions: (ReportSession & { matched: Lines })[], files: FileHashes[]): ReportSession[] {
+  const left = new Map<string, Map<string, number>>();
+  for (const file of files) {
+    const counts = left.get(file.path) ?? new Map<string, number>();
+    for (const hash of file.hashes) counts.set(hash, (counts.get(hash) ?? 0) + 1);
+    left.set(file.path, counts);
+  }
+  return sessions.map((s) => {
+    let lines = 0;
+    for (const [path, hashes] of Object.entries(s.matched)) {
+      const counts = left.get(path);
+      if (!counts) continue;
+      for (const hash of hashes) {
+        const n = counts.get(hash) ?? 0;
+        if (n === 0) continue;
+        counts.set(hash, n - 1);
+        lines += 1;
+      }
+    }
+    return { machine_id: s.machine_id, source: s.source, session_id: s.session_id, lines };
+  });
+}
+
+/**
+ * Count a merged pull request's agent lines again, in the files as the
+ * Action read them on the branch it was merged into, and keep the count as
+ * a row of its history for each age it has reached and has none for
+ * (`DUE`). A row once written is never changed: a second report of the same
+ * age writes nothing. The agent lines are those of the sessions whose lines
+ * the pull request keeps (`pull_sessions.matched`). Null if there is no such
+ * pull request; the rows written, which may be none.
+ */
+export async function storeAfterMerge(db: OrgDb, report: PullAfterMergeReport): Promise<PullAfterMerge[] | null> {
+  await holdPull(db, report.repo, report.number);
+  const [pull] = await db.query(
+    `SELECT state, commits, attribution, reporter_version FROM pull_requests
+     WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
+    [db.orgId, report.repo, report.number],
+  );
+  if (!pull) return null;
+  if (pull.state !== "merged") throw new BadReport("this pull request is not merged");
+  const due = await db.query<{ age: AfterMergeAge; age_seconds: unknown }>(
+    `SELECT c.age, floor(extract(epoch FROM now() - p.merged_at)) AS age_seconds ${DUE} AND p.number = $3 ORDER BY c.days`,
+    [db.orgId, report.repo, report.number],
+  );
+  if (due.length === 0) return [];
+  const sessions = await keptLines(db, report.repo, report.number);
+  const of = sessions.reduce((sum, s) => sum + s.lines, 0);
+  if (of === 0) return [];
+  // Every file with agent lines has to be told of: one left out would count as gone.
+  const sent = new Set(report.files.map((file) => file.path));
+  const missing = [...new Set(sessions.flatMap((s) => Object.keys(s.matched)))].filter((path) => !sent.has(path));
+  if (missing.length > 0) {
+    throw new BadReport(`the report leaves out ${missing.length} of the files asked for (${missing[0]}): ask again which are due`);
+  }
+  const there = stillThere(sessions, report.files);
+  const surviving = there.reduce((sum, s) => sum + s.lines, 0);
+  const written: PullAfterMerge[] = [];
+  for (const { age, age_seconds } of due) {
+    const [row] = await db.query(
+      `INSERT INTO pull_request_reports
+         (org_id, repo, number, event, commits, lines, agent_lines, sessions, reporter_version, of_agent_lines, age_seconds)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
+       ON CONFLICT (org_id, repo, number, event) WHERE ${AFTER_MERGE_ROW} DO NOTHING
+       RETURNING at, event, agent_lines, of_agent_lines, age_seconds`,
+      [
+        db.orgId,
+        report.repo,
+        report.number,
+        afterMergeEvent(age),
+        num(pull.commits),
+        num(json<PullAttribution>(pull.attribution).now.lines),
+        surviving,
+        JSON.stringify(there.filter((s) => s.lines > 0)),
+        typeof pull.reporter_version === "string" ? pull.reporter_version : null,
+        of,
+        num(age_seconds),
+      ],
+    );
+    const kept = row && afterMergeOf(row);
+    if (kept) written.push(kept);
+  }
+  return written;
 }
 
 /** What is known now of the sessions a history row names. */

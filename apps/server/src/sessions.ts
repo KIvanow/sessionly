@@ -6,6 +6,8 @@ import {
   type FileRow,
   type GroupBy,
   type HeldSessions,
+  type KeptAt,
+  type RewriteCheckpoint,
   type Session,
   type SessionPlace,
   type SessionRow,
@@ -55,6 +57,39 @@ export function ownerOf(upload: Upload, uploader: Principal): string {
   return uploader.role === "env" && cloud && /^\S+@\S+$/.test(named) ? named : uploader.email;
 }
 
+/** The ages a session's measurement is kept at, the earliest first. */
+const CHECKPOINTS = ["1d", "7d", "30d"] as const;
+
+/** A checkpoint as it is kept: counts and times, and nothing else an upload may carry with one. */
+type Checkpoint = Required<Omit<RewriteCheckpoint, "checkpoint">>;
+
+/**
+ * The checkpoints a session has once an upload is stored, by age: the ones
+ * kept already, and of the ones the upload brings, those there are none for.
+ * So one kept is never replaced: a machine whose ledger was lost measures
+ * again later, and that is not what was there on the day. Only a session
+ * that went on since is different: a checkpoint from before its end, as the
+ * upload has it, was of a session that had not ended, and goes.
+ */
+export function mergeCheckpoints(kept: unknown, upload: Upload): Record<string, Checkpoint> {
+  const ended = Date.parse(upload.session?.ended_at ?? "");
+  const out: Record<string, Checkpoint> = {};
+  const take = (name: unknown, c: Partial<Checkpoint> | null | undefined) => {
+    const at = Date.parse(c?.measured_at ?? "");
+    if (!CHECKPOINTS.includes(name as never) || !c || Number.isNaN(at) || at < ended || out[name as string]) return;
+    out[name as string] = {
+      added: num(c.added),
+      surviving: Math.min(num(c.surviving), num(c.added)),
+      measured_at: new Date(at).toISOString(),
+      age_seconds: num(c.age_seconds),
+    };
+  };
+  const before = typeof kept === "string" ? JSON.parse(kept) : kept;
+  for (const [name, c] of Object.entries((before ?? {}) as Record<string, Checkpoint>)) take(name, c);
+  for (const c of upload.checkpoints ?? []) take(c.checkpoint, c);
+  return out;
+}
+
 /**
  * What storing an upload did. `excluded` means the repository is stopped, so
  * nothing was stored. An address that belongs to someone who was removed
@@ -97,8 +132,8 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   // Read with the row held: another upload of this same session waits for
   // this one, and compares with what it left. (Uploads of other sessions do not wait.)
   const before = await matchedBy(db, { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! }, { hold: true });
-  const [existing] = await db.query<{ owner_email: string; runtime: string | null; prompts: number }>(
-    `SELECT owner_email, runtime, prompts FROM sessions
+  const [existing] = await db.query<{ owner_email: string; runtime: string | null; prompts: number; checkpoints: unknown }>(
+    `SELECT owner_email, runtime, prompts, checkpoints FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
     key,
   );
@@ -115,6 +150,11 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   }
   const usage = s.usage ?? [];
   const rewrite = upload.rewrite ?? null;
+  // Kept in the payload too, which is what the session's page reads and what a copy is made from (demo.ts).
+  const checkpoints = mergeCheckpoints(existing?.checkpoints, upload);
+  const { checkpoints: _sent, ...rest } = upload;
+  const kept = CHECKPOINTS.filter((name) => checkpoints[name]).map((name) => ({ checkpoint: name, ...checkpoints[name]! }));
+  const payload: Upload = kept.length ? { ...rest, checkpoints: kept } : rest;
   const columns: Record<string, unknown> = {
     org_id: db.orgId,
     machine_id: s.machine_id,
@@ -158,12 +198,13 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     rw_lines_added: rewrite?.lines_added ?? null,
     rw_lines_surviving: rewrite?.lines_surviving ?? null,
     rw_measured_at: rewrite?.measured_at ?? null,
-    payload: JSON.stringify(upload),
+    checkpoints: JSON.stringify(checkpoints),
+    payload: JSON.stringify(payload),
     // A copy made by `importDemo` (demo.ts). Any other upload of the session makes it its uploader's.
     copied: copy,
   };
   const names = Object.keys(columns);
-  const casts: Record<string, string> = { models: "::jsonb", payload: "::jsonb" };
+  const casts: Record<string, string> = { models: "::jsonb", payload: "::jsonb", checkpoints: "::jsonb" };
   const placeholders = names.map((name, i) => `$${i + 1}${casts[name] ?? ""}`);
   const updates = names
     .filter((name) => !["org_id", "machine_id", "source", "session_id"].includes(name))
@@ -462,9 +503,22 @@ const TOTAL_COLUMNS = `
   jsonb_agg(DISTINCT source) AS tools,
   jsonb_agg(DISTINCT primary_model) FILTER (WHERE primary_model IS NOT NULL) AS models,
   sum(rw_files_measured) AS rw_files_measured, sum(rw_files_rewritten) AS rw_files_rewritten,
-  sum(rw_lines_added) AS rw_lines_added, sum(rw_lines_surviving) AS rw_lines_surviving`;
+  sum(rw_lines_added) AS rw_lines_added, sum(rw_lines_surviving) AS rw_lines_surviving,
+  count(*) FILTER (WHERE rw_lines_added > 0 OR checkpoints <> '{}'::jsonb) AS ck_sessions,
+  ${CHECKPOINTS.map(
+    (age) => `count(*) FILTER (WHERE checkpoints ? '${age}') AS ck_${age}_sessions,
+  sum((checkpoints #>> '{${age},added}')::double precision) AS ck_${age}_added,
+  sum((checkpoints #>> '{${age},surviving}')::double precision) AS ck_${age}_surviving`,
+  ).join(",\n  ")}`;
 
 function totals(row: Record<string, unknown>): Totals {
+  // Out of the sessions with measured lines: one with none has nothing to keep at any age.
+  const kept = (age: (typeof CHECKPOINTS)[number]): KeptAt => ({
+    lines_added: num(row[`ck_${age}_added`]),
+    lines_surviving: num(row[`ck_${age}_surviving`]),
+    sessions_reached: num(row[`ck_${age}_sessions`]),
+    sessions_total: num(row.ck_sessions),
+  });
   return {
     key: String(row.key),
     sessions: num(row.sessions),
@@ -488,6 +542,9 @@ function totals(row: Record<string, unknown>): Totals {
       lines_added: num(row.rw_lines_added),
       lines_surviving: num(row.rw_lines_surviving),
     },
+    kept_1d: kept("1d"),
+    kept_7d: kept("7d"),
+    kept_30d: kept("30d"),
   };
 }
 

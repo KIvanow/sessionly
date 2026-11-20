@@ -86,6 +86,7 @@ function session(id: string, remote: string, lines: number[] = [1, 2, 3]) {
       { path: "src/a.ts", model: "claude-opus-5-5", hashes: lines.map(h) },
       { path: "notes/SECRET-plan.md", model: null, hashes: [h(900)] },
     ],
+    checkpoints: [{ checkpoint: "7d", added: 3, surviving: 2, measured_at: "2026-11-17T10:00:00.000Z", age_seconds: 604_800 }],
   };
 }
 
@@ -317,6 +318,11 @@ test("one repository's sessions are copied into another organisation, and copied
   // only that repository's, and the pull request's lines are theirs now, at what they cost: s1 hashed 4
   // lines, 3 of them in the pull request, so $6 x 3/4, as where it was uploaded, though one of the 4 is not shown
   assert.deepEqual(await shownIds(), ["s1", "s2"]);
+  // what was still there at 7 days comes with each, and is summed as where it was uploaded
+  const keptAt = async (token: string) => (await call(token, "GET", `/summary?by=tool&repo_is=${encodeURIComponent(REPO)}`)).body.total.kept_7d;
+  assert.deepEqual(await keptAt(demo.admin), { lines_added: 6, lines_surviving: 4, sessions_reached: 2, sessions_total: 2 });
+  assert.deepEqual(await keptAt(demo.admin), await keptAt(work.admin));
+  assert.deepEqual((await call(demo.admin, "GET", "/sessions/m1/claude-code/s1")).body.upload.checkpoints, session("s1", REPO).checkpoints);
   const pull = (await call(demo.admin, "GET", `/prs/detail?repo=${REPO}&number=1`)).body;
   assert.deepEqual([pull.attribution.now.agent_lines, pull.cost.usd, pull.sessions[0].session.owner_email], [3, 4.5, "ann@example.com"]);
   // nothing of what was typed or run is in anything the organisation it is shown in answers, or keeps
