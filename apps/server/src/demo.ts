@@ -392,8 +392,10 @@ async function hidePull(db: OrgDb, repo: string, number: number, hide: string[],
     const opened = s.opened_matched == null ? null : jsonOf<Record<string, string[]>>(s.opened_matched);
     if (same(matched, matchedShown(matched, hide)) && same(opened, matchedShown(opened, hide))) continue;
     changed = true;
+    // What its opening lines still there count as was of the lines taken out too: it is weighed
+    // again when the pull request is matched again, as it is next (`keepSessions`).
     await db.query(
-      `UPDATE pull_sessions SET matched = $7::jsonb, opened_matched = $8::jsonb
+      `UPDATE pull_sessions SET matched = $7::jsonb, opened_matched = $8::jsonb, opened_kept = NULL, opened_here = NULL
        WHERE org_id = $1 AND repo = $2 AND number = $3 AND machine_id = $4 AND source = $5 AND session_id = $6`,
       [db.orgId, repo, number, s.machine_id, s.source, s.session_id, jsonOrNull(matchedShown(matched, hide)), jsonOrNull(matchedShown(opened, hide))],
     );

@@ -39,6 +39,7 @@ import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type
 import { demoFrom, reportsShownIn } from "./demo.ts";
 import { tidy } from "./limits.ts";
 import { purgeDeletedOrgs } from "./orgs.ts";
+import { type SessionAt, weighKeptSome } from "./pulls.ts";
 import {
   github,
   google,
@@ -277,6 +278,25 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
         if (again) setTimeout(counting, 10 * 60_000).unref();
       });
   counting();
+
+  // Pull requests' sessions kept before what their opening lines still there
+  // count as was: weighed now, beside the requests, so that no figure stays
+  // measured the old way. What failed is tried again later.
+  const weighing = () =>
+    void (async () => {
+      const orgs = await db.query<{ org_id: string }>(
+        `SELECT DISTINCT org_id FROM pull_sessions WHERE opened_matched IS NOT NULL AND opened_kept IS NULL`,
+      );
+      for (const { org_id } of orgs) {
+        let after: SessionAt | null = null;
+        do after = await db.asOrg(org_id, (tx) => weighKeptSome(tx, after));
+        while (after);
+      }
+    })().catch((err) => {
+      console.error("weighing pull requests' surviving lines failed:", err);
+      setTimeout(weighing, 10 * 60_000).unref();
+    });
+  weighing();
 
   const port = Number(process.env.PORT ?? 8080);
   const hostname = process.env.HOST ?? "127.0.0.1";

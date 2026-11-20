@@ -288,6 +288,23 @@ export function breakdown(now: FileHashes[], lines: (Writer | null)[][]): { file
  * were not kept (`matched` null) counts all of them.
  */
 export function weigh(rows: { live: boolean; lines: number; matched: Lines | null }[]): number[] {
+  const { counted, pooled } = linesOf(rows);
+  return rows.map((row, i) => {
+    const counts = counted[i];
+    if (!counts) return row.lines;
+    const all = pooled(row);
+    let weight = 0;
+    for (const [line, n] of counts) weight += (n * all.get(line)!.most) / all.get(line)!.sum;
+    return weight;
+  });
+}
+
+/**
+ * Each row's lines, counted, and for each line how often it is there in all
+ * of them together and in the one that has it most: of the rows not closed
+ * for one that is not, of all of them for one that is (see `weigh`).
+ */
+function linesOf(rows: { live: boolean; matched: Lines | null }[]) {
   const counted = rows.map((row) => {
     if (!row.matched) return null;
     const counts = new Map<string, number>();
@@ -296,7 +313,6 @@ export function weigh(rows: { live: boolean; lines: number; matched: Lines | nul
     }
     return counts;
   });
-  // For each line: how often it is there in all of them together, and in the one that has it most.
   const among = (which: (row: { live: boolean }) => boolean) => {
     const all = new Map<string, { sum: number; most: number }>();
     counted.forEach((counts, i) => {
@@ -310,14 +326,54 @@ export function weigh(rows: { live: boolean; lines: number; matched: Lines | nul
   };
   const live = among((row) => row.live);
   const every = among(() => true);
-  return rows.map((row, i) => {
+  return { counted, pooled: (row: { live: boolean }) => (row.live ? live : every) };
+}
+
+/**
+ * Of what a session's lines that pull requests were opened with count as
+ * (`weigh`, of `opened`), what those still there count as: there in any of
+ * the pull requests it has lines in now (`now`), not only the one it was
+ * opened in. So a line opened in two counts once between them as long as one
+ * of them keeps it, wherever it ended up; a line opened more often than it
+ * is still there counts for those copies only, shared out in proportion.
+ * Null for one whose lines were not kept.
+ */
+export function weighKept(
+  opened: { live: boolean; matched: Lines | null }[],
+  now: { live: boolean; matched: Lines | null }[],
+): (number | null)[] {
+  const { counted, pooled } = linesOf(opened);
+  const there = linesOf(now).pooled;
+  return opened.map((row, i) => {
     const counts = counted[i];
-    if (!counts) return row.lines;
-    const all = row.live ? live : every;
+    if (!counts) return null;
+    const all = pooled(row);
+    const kept = there(row);
     let weight = 0;
-    for (const [line, n] of counts) weight += (n * all.get(line)!.most) / all.get(line)!.sum;
+    for (const [line, n] of counts) {
+      const { sum, most } = all.get(line)!;
+      weight += (n * Math.min(kept.get(line)?.most ?? 0, most)) / sum;
+    }
     return weight;
   });
+}
+
+/** How many of the lines `opened` has are in `now` too, a line as often as both have it. */
+function keptIn(opened: Lines | null, now: Lines | null): number | null {
+  if (!opened || !now) return null;
+  let kept = 0;
+  for (const [path, hashes] of Object.entries(opened)) {
+    const left = new Map<string, number>();
+    // (A file may be called `constructor`, which every object has already.)
+    for (const hash of Object.hasOwn(now, path) ? now[path]! : []) left.set(hash, (left.get(hash) ?? 0) + 1);
+    for (const hash of hashes) {
+      const n = left.get(hash) ?? 0;
+      if (n === 0) continue;
+      left.set(hash, n - 1);
+      kept += 1;
+    }
+  }
+  return kept;
 }
 
 const FEEDBACK_KINDS = ["review", "inline", "conversation"];
@@ -1128,8 +1184,10 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   // The pull request's own row is held by whoever got here, so these are not
   // changing under it.
   const had = await db.query(
-    `SELECT machine_id, source, session_id, lines, opened_lines, matched, opened_matched FROM pull_sessions
-     WHERE org_id = $1 AND repo = $2 AND number = $3`,
+    `SELECT s.machine_id, s.source, s.session_id, s.lines, s.opened_lines, s.matched, s.opened_matched,
+            r.first_event = 'opened' AND s.opened_matched IS NOT NULL AND s.opened_kept IS NULL AS unweighed
+     FROM pull_sessions s JOIN pull_requests r USING (org_id, repo, number)
+     WHERE s.org_id = $1 AND s.repo = $2 AND s.number = $3`,
     [db.orgId, repo, number],
   );
   const files = (kept: unknown) => {
@@ -1139,7 +1197,9 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   const said = (s: { lines: unknown; opened_lines: unknown; matched: unknown; opened_matched: unknown }) =>
     JSON.stringify([s.lines == null ? null : num(s.lines), s.opened_lines == null ? null : num(s.opened_lines), files(s.matched), files(s.opened_matched)]);
   const was = new Map(had.map((row) => [sessionKey(row as never), said(row as never)]));
-  if (!turned && was.size === sessions.length && sessions.every((s) => was.get(sessionKey(s)) === said(s))) return;
+  // (One kept before what its opening lines still there count as was, is weighed again.)
+  const unweighed = had.some((row) => row.unweighed === true);
+  if (!turned && !unweighed && was.size === sessions.length && sessions.every((s) => was.get(sessionKey(s)) === said(s))) return;
   await holdPullSessions(db);
   const before = await db.query(
     `DELETE FROM pull_sessions WHERE org_id = $1 AND repo = $2 AND number = $3 RETURNING machine_id, source, session_id`,
@@ -1161,15 +1221,24 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
     );
   }
   const touched = new Map([...before, ...sessions].map((s) => [sessionKey(s as never), { machine_id: s.machine_id, source: s.source, session_id: s.session_id }]));
-  if (touched.size === 0) return;
+  await weighAgain(db, [...touched.values()]);
+}
+
+/**
+ * What these sessions' lines count as in every pull request they have lines
+ * in, worked out again from what is kept of them (see `weigh` and
+ * `weighKept`). The caller holds `holdPullSessions`.
+ */
+async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unknown; session_id: unknown }[]): Promise<void> {
+  if (touched.length === 0) return;
   const rows = await db.query(
     `SELECT o.repo, o.number, o.machine_id, o.source, o.session_id, o.lines, o.weight, o.matched,
-            o.opened_lines, o.opened_weight, o.opened_matched, r.state <> 'closed' AS live,
+            o.opened_lines, o.opened_weight, o.opened_matched, o.opened_kept, o.opened_here, r.state <> 'closed' AS live,
             r.first_event = 'opened' AS from_open
      FROM jsonb_to_recordset($2::jsonb) AS k(machine_id text, source text, session_id text)
      JOIN pull_sessions o ON o.org_id = $1 AND o.machine_id = k.machine_id AND o.source = k.source AND o.session_id = k.session_id
      JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number`,
-    [db.orgId, JSON.stringify([...touched.values()])],
+    [db.orgId, JSON.stringify(touched)],
   );
   const bySession = new Map<string, typeof rows>();
   for (const row of rows) {
@@ -1187,27 +1256,74 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
     // Only between those seen from the start: of another, what it was first
     // reported with says nothing, and it takes nothing from them.
     const fromOpen = its.filter((row) => row.from_open === true);
-    const opened = new Map(
-      weigh(fromOpen.map((row) => ({ live: row.live === true, lines: num(row.opened_lines), matched: lines(row.opened_matched) }))).map(
-        (weight, i) => [fromOpen[i]!, weight],
-      ),
-    );
+    const openedWith = fromOpen.map((row) => ({ live: row.live === true, lines: num(row.opened_lines), matched: lines(row.opened_matched) }));
+    const opened = new Map(weigh(openedWith).map((weight, i) => [fromOpen[i]!, weight]));
+    // And of those, what the ones still there, in any of them, count as.
+    const keptWith = weighKept(openedWith, fromOpen.map((row) => ({ live: row.live === true, matched: lines(row.matched) })));
+    const kept = new Map(keptWith.map((weight, i) => [fromOpen[i]!, weight]));
+    const unchanged = (stored: unknown, now: number | null) => (now == null ? stored == null : same(stored, now));
     its.forEach((row, i) => {
       // From before the lines it was opened with were counted: nothing to say of them.
       const then = row.opened_lines == null ? null : (opened.get(row) ?? num(row.opened_lines));
-      if (same(row.weight, weights[i]!) && (then == null ? row.opened_weight == null : same(row.opened_weight, then))) return;
-      changed.push({ repo: row.repo, number: row.number, machine_id: row.machine_id, source: row.source, session_id: row.session_id, weight: weights[i], opened_weight: then });
+      const still = then == null ? null : (kept.get(row) ?? null);
+      const here = still == null ? null : keptIn(lines(row.opened_matched), lines(row.matched));
+      if (
+        same(row.weight, weights[i]!) &&
+        unchanged(row.opened_weight, then) &&
+        unchanged(row.opened_kept, still) &&
+        unchanged(row.opened_here, here)
+      )
+        return;
+      changed.push({
+        repo: row.repo,
+        number: row.number,
+        machine_id: row.machine_id,
+        source: row.source,
+        session_id: row.session_id,
+        weight: weights[i],
+        opened_weight: then,
+        opened_kept: still,
+        opened_here: here,
+      });
     });
   }
   if (changed.length === 0) return;
   await db.query(
-    `UPDATE pull_sessions o SET weight = c.weight, opened_weight = c.opened_weight
+    `UPDATE pull_sessions o SET weight = c.weight, opened_weight = c.opened_weight, opened_kept = c.opened_kept,
+            opened_here = c.opened_here
      FROM jsonb_to_recordset($2::jsonb)
-       AS c(repo text, number integer, machine_id text, source text, session_id text, weight double precision, opened_weight double precision)
+       AS c(repo text, number integer, machine_id text, source text, session_id text, weight double precision,
+            opened_weight double precision, opened_kept double precision, opened_here integer)
      WHERE o.org_id = $1 AND o.repo = c.repo AND o.number = c.number AND o.machine_id = c.machine_id
        AND o.source = c.source AND o.session_id = c.session_id`,
     [db.orgId, JSON.stringify(changed)],
   );
+}
+
+/** A session, as `weighKeptSome` goes through them in order. */
+export type SessionAt = { machine_id: string; source: string; session_id: string };
+
+/**
+ * Some of the sessions of pull requests seen from the start that were kept
+ * before what their opening lines still there count as was (`opened_kept`),
+ * weighed again: those after `after`, in order, one transaction a time, so
+ * that the organisation's reports wait for no more than one. The last one
+ * taken, for the next call to go on from, or null when none is left. One
+ * that weighing leaves as it was is not met again.
+ */
+export async function weighKeptSome(db: OrgDb, after: SessionAt | null = null, atOnce = 50): Promise<SessionAt | null> {
+  const some = await db.query<SessionAt>(
+    `SELECT DISTINCT s.machine_id, s.source, s.session_id FROM pull_sessions s JOIN pull_requests r USING (org_id, repo, number)
+     WHERE s.org_id = $1 AND r.first_event = 'opened' AND s.opened_matched IS NOT NULL AND s.opened_kept IS NULL
+       AND ($2::jsonb IS NULL OR (s.machine_id, s.source, s.session_id) >
+             ($2::jsonb->>'machine_id', $2::jsonb->>'source', $2::jsonb->>'session_id'))
+     ORDER BY s.machine_id, s.source, s.session_id LIMIT $3`,
+    [db.orgId, after ? JSON.stringify(after) : null, atOnce],
+  );
+  if (some.length === 0) return null;
+  await holdPullSessions(db);
+  await weighAgain(db, some);
+  return some[some.length - 1]!;
 }
 
 /**
@@ -1545,6 +1661,10 @@ interface Share {
   opened_weight: number;
   opened_usd: number | null;
   opened_known: boolean;
+  /** Of `opened_weight`, what those still there in any of its pull requests count as (see `weighKept`): null for one kept before that was. */
+  opened_kept: number | null;
+  /** How many of those lines are still in this pull request: null likewise. */
+  opened_here: number | null;
 }
 
 const pullKey = (p: { repo: unknown; number: unknown }): string => `${p.repo}\n${p.number}`;
@@ -1568,7 +1688,7 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
   const rows = await db.query(
     `WITH mine AS (
        SELECT p.repo, p.number, p.machine_id, p.source, p.session_id, p.lines, p.weight, p.opened_lines, p.opened_weight,
-              r.state = 'closed' AS closed
+              p.opened_kept, p.opened_here, r.state = 'closed' AS closed
        FROM (${chosen.sql}) c
        JOIN pull_sessions p ON p.org_id = $1 AND p.repo = c.repo AND p.number = c.number
        JOIN pull_requests r ON r.org_id = p.org_id AND r.repo = p.repo AND r.number = p.number),
@@ -1653,6 +1773,8 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
       opened_weight: opened,
       opened_usd: cost == null ? null : money(opened > 0 ? (cost * opened) / amongOpened : 0),
       opened_known: row.opened_lines != null,
+      opened_kept: row.opened_kept == null ? null : Number(row.opened_kept),
+      opened_here: row.opened_here == null ? null : num(row.opened_here),
     };
     const key = pullKey(row as never);
     if (!shares.has(key)) shares.set(key, []);
@@ -1661,8 +1783,18 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
   return shares;
 }
 
-/** What a pull request's sessions cost it, from what is known of each now. */
-function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Share[]): PullCost {
+/**
+ * What the lines a pull request was opened with cost, unrounded, what those
+ * that survived count as, and whether a session of them with a cost leaves
+ * requests out.
+ */
+type Opened = { usd: number; surviving: number; floor: boolean };
+
+/**
+ * What a pull request's sessions cost it, from what is known of each now; and
+ * what the summary adds up of it, so that it divides what the page does.
+ */
+function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Share[]): { cost: PullCost; opened: Opened | null } {
   let usd: number | null = null;
   let estimated = false;
   let sessions = 0;
@@ -1681,19 +1813,29 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   let openedFloor = false;
   let openedEstimated = false;
   let openedKnown = true;
-  // Those lines, and what they count as, of every session.
-  let openedLines = 0;
-  let openedWeight = 0;
+  // What a line of them that survived cost is said only of the sessions with
+  // a cost: a floor only when one of those leaves requests out.
+  let survivingFloor = false;
+  // Of those with a cost, what the lines still there count as, where the
+  // session says (`opened_kept`). Of the lines still here, how many are of a
+  // session that says; and how many lines the others were opened with, and
+  // what those with a cost count as.
+  let kept = 0;
+  let hereSaid = 0;
+  let unsaidLines = 0;
+  let unsaidCosted = 0;
   for (const share of shares) {
     const { lines, cost_share_usd: cost, unshared: unsure, uncounted: later } = share.wrote;
     if (!share.opened_known) openedKnown = false;
     else if (share.opened_lines > 0) {
-      openedLines += share.opened_lines;
-      openedWeight += share.opened_weight;
+      if (share.opened_kept == null) unsaidLines += share.opened_lines;
+      else hereSaid += share.opened_here ?? 0;
       if (share.opened_usd == null) openedFloor = true;
       else {
         opened = (opened ?? 0) + share.opened_usd;
-        if (share.partial) openedFloor = true;
+        if (share.opened_kept == null) unsaidCosted += share.opened_weight;
+        else kept += share.opened_kept;
+        if (share.partial) openedFloor = survivingFloor = true;
         // Shared out with lines that may be the same ones, it is as unsure as the cost now.
         if (share.estimated || unsure) openedEstimated = true;
       }
@@ -1715,17 +1857,20 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   }
   const a = pull.attribution;
   const each = usd != null && costed > 0 ? usd / costed : null;
-  // What the lines that survived count as, of what they were opened with: which
-  // of each session's lines survived is not kept, only how many of all did. So
-  // they are taken to be shared out with other pull requests as those lines
-  // were on the whole, which is so when all of them or none are. A surviving
-  // line then costs what a line did, and not half of it where it was opened
-  // in two pull requests.
-  const surviving = a.by.reduce((sum, by) => sum + by.surviving, 0) * (openedLines > 0 ? openedWeight / openedLines : 1);
+  // What the lines that survived count as, of what they were opened with. A
+  // line opened in two pull requests is half a line in each, at half a line's
+  // cost, and counts as surviving in both while either keeps it: between them
+  // it is one line, paid for once, wherever it ended up. Of a session whose
+  // lines were not kept, which of them survived is not known: of the lines
+  // that survived here, those the others do not account for are taken to be
+  // shared out between such sessions as the lines they were opened with.
+  const here = a.by.reduce((sum, by) => sum + by.surviving, 0);
+  const rest = unsaidLines > 0 ? Math.min(1, Math.max(0, here - hereSaid) / unsaidLines) : 0;
+  const surviving = kept + unsaidCosted * rest;
   // What review left can only be said of a pull request seen from the start,
   // and what it was opened with cost only of one whose sessions then were kept.
   if (!openedKnown || pull.first_event !== "opened" || a.first.agent_lines === 0) opened = null;
-  return {
+  const cost: PullCost = {
     usd: usd == null ? null : money(usd),
     // A share that may be counted in another pull request too is no more than an estimate.
     estimated: estimated || unshared > 0,
@@ -1739,16 +1884,26 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
     opened_usd: opened == null ? null : money(opened),
     opened_is_floor: opened != null && openedFloor,
     opened_estimated: opened != null && openedEstimated,
-    per_surviving_line_usd: opened != null && surviving > 0 ? money(opened / surviving) : null,
+    opened_surviving_lines: opened == null ? null : here,
+    // Not on the page of one that kept none of them itself, though they survived in another.
+    per_surviving_line_usd: opened != null && here > 0 && surviving > 0 ? money(opened / surviving) : null,
+    per_surviving_line_is_floor: opened != null && here > 0 && surviving > 0 && survivingFloor,
   };
+  return { cost, opened: opened == null ? null : { usd: opened, surviving, floor: survivingFloor } };
 }
 
 /** Rows as the list and the summary have them: each with what its sessions cost. */
-async function costed(db: OrgDb, rows: Record<string, unknown>[], chosen: { sql: string; params: unknown[] }): Promise<PullRow[]> {
+async function costed(
+  db: OrgDb,
+  rows: Record<string, unknown>[],
+  chosen: { sql: string; params: unknown[] },
+): Promise<{ pull: PullRow; opened: Opened | null }[]> {
   const shares = rows.length > 0 ? await sharesIn(db, chosen) : new Map<string, Share[]>();
   return rows.map((r) => {
     const pull = pullRow(r);
-    return { ...pull, cost: r.detailed === true ? costOf(pull, shares.get(pullKey(pull)) ?? []) : null };
+    if (r.detailed !== true) return { pull, opened: null };
+    const { cost, opened } = costOf(pull, shares.get(pullKey(pull)) ?? []);
+    return { pull: { ...pull, cost }, opened };
   });
 }
 
@@ -1815,7 +1970,7 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
   ]);
   return {
     ...row,
-    cost: shares && costOf(row, shares),
+    cost: shares && costOf(row, shares).cost,
     reporter_current: CURRENT_ACTION,
     repo_reporter_older: reporter?.older ?? false,
     repo_reporter_version: reporter?.version ?? null,
@@ -1933,7 +2088,7 @@ export async function listPulls(
     sql: `SELECT repo, number FROM jsonb_to_recordset($2::jsonb) AS k(repo text, number integer)`,
     params: [db.orgId, JSON.stringify(rows.map((r) => ({ repo: r.repo, number: r.number })))],
   };
-  return { pulls: await costed(db, rows, these), total: num(count?.n) };
+  return { pulls: (await costed(db, rows, these)).map(({ pull }) => pull), total: num(count?.n) };
 }
 
 /** How each agent and model's lines fared in review, over the matching pull requests. */
@@ -1945,7 +2100,8 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
     { sql: `SELECT repo, number FROM pull_requests ${sql}`, params },
   );
   // Of the pull requests seen from the start that have a cost: what the agent
-  // lines they were opened with cost, and how many of those survived review.
+  // lines they were opened with cost, and what those that survived count as,
+  // as each one's page has them.
   const opened = { usd: 0, surviving: 0 };
   const byModel = new Map<string, PullsByModel>();
   const total = {
@@ -1962,6 +2118,7 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
     cost_estimated: false,
     pulls_with_cost_missing: 0,
     pulls_closed_with_cost: 0,
+    agent_lines_surviving_once: 0,
     per_surviving_line_usd: null as number | null,
     per_surviving_line_is_floor: false,
     per_surviving_line_estimated: false,
@@ -1979,7 +2136,7 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       review_comments: 0,
       bot_review_comments: 0,
     }));
-  for (const pull of rows) {
+  for (const { pull, opened: its } of rows) {
     const a = pull.attribution;
     total.lines += a.now.lines;
     total.agent_lines += a.now.agent_lines;
@@ -1998,10 +2155,10 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       const floor = pull.cost ? pull.cost.sessions_without_cost + pull.cost.sessions_with_cost_partial > 0 : a.now.agent_lines > 0;
       if (floor) total.pulls_with_cost_missing += 1;
       // One where no line survived is in this too: what its lines cost was spent.
-      if (pull.cost?.opened_usd != null) {
-        opened.usd += pull.cost.opened_usd;
-        opened.surviving += a.by.reduce((sum, by) => sum + by.surviving, 0);
-        if (pull.cost.opened_is_floor) total.per_surviving_line_is_floor = true;
+      if (pull.cost && its) {
+        opened.usd += its.usd;
+        opened.surviving += its.surviving;
+        if (its.floor) total.per_surviving_line_is_floor = true;
         if (pull.cost.opened_estimated) total.per_surviving_line_estimated = true;
       }
     }
@@ -2030,12 +2187,13 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
     }
   }
   if (total.cost_usd != null) total.cost_usd = money(total.cost_usd);
+  total.agent_lines_surviving_once = Math.round(opened.surviving * 100) / 100;
   if (opened.surviving > 0) total.per_surviving_line_usd = money(opened.usd / opened.surviving);
   else total.per_surviving_line_is_floor = total.per_surviving_line_estimated = false;
   // Which repositories the filter contains. Each is judged by its most
   // recent report from the Action, or that named no one, and by the last
   // ACTION_WINDOW_DAYS days of those reports.
-  const reporters = await repoReporters(db, [...new Set(rows.map((pull) => pull.repo))]);
+  const reporters = await repoReporters(db, [...new Set(rows.map(({ pull }) => pull.repo))]);
   const older = [...reporters].filter(([, one]) => one.older).map(([repo]) => repo);
   return { by_model: sorted(byModel), older_actions: older.sort(), total };
 }

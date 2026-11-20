@@ -540,16 +540,21 @@ export interface PullCost {
    * matched before its sessions of then were kept.
    */
   opened_usd: number | null;
-  /** Whether a session with lines among those has no cost figure, or one that leaves requests out: both figures of it are then floors. */
+  /** Whether a session with lines among those has no cost figure, or one that leaves requests out: `opened_usd` is then a floor. */
   opened_is_floor: boolean;
   /** Whether any of that cost is an estimate, or of a session that is unshared (see `sessions_unshared`). */
   opened_estimated: boolean;
+  /** How many of the agent lines it was opened with are still in it, whoever's session wrote them. Null where `opened_usd` is. */
+  opened_surviving_lines: number | null;
   /**
    * What an agent line that survived review cost: `opened_usd` for each of
-   * them still there, those being shared out with other pull requests as the
-   * lines it was opened with were on the whole. Null when none is.
+   * them still there, a line it was opened with together with other pull
+   * requests counting in part, as its cost does, wherever it survived. Of
+   * the sessions with a cost only. Null when none of those survived in this one.
    */
   per_surviving_line_usd: number | null;
+  /** Whether a session with a cost among those leaves requests out: `per_surviving_line_usd` is then a floor. */
+  per_surviving_line_is_floor: boolean;
 }
 
 export interface PullRow {
@@ -892,13 +897,20 @@ export interface PullSummary {
     /** Pull requests closed without merging that have a cost, and are left out of the figures here. */
     pulls_closed_with_cost: number;
     /**
-     * Over the pull requests reported from the moment they were opened that
-     * have a cost: what the agent lines they were opened with cost
-     * (`opened_usd`), for each of those that survived review. Null when
-     * none did.
+     * The agent lines that survived review of the pull requests reported from
+     * the moment they were opened that have a cost, each counted once: a line
+     * opened in several of them is one line between them, wherever it
+     * survived (`agent_lines_surviving` counts it in each). To two decimals:
+     * a line in a pull request left out of these counts only in part.
+     */
+    agent_lines_surviving_once: number;
+    /**
+     * Over those pull requests: what the agent lines they were opened with
+     * cost (`opened_usd`), for each line `agent_lines_surviving_once` counts.
+     * Null when none did.
      */
     per_surviving_line_usd: number | null;
-    /** Whether a session of those lines has no cost figure, or not all of it. */
+    /** Whether the cost of a session of those lines leaves requests out. */
     per_surviving_line_is_floor: boolean;
     /** Whether any of what those lines cost is an estimate. */
     per_surviving_line_estimated: boolean;

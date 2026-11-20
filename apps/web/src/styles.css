@@ -363,6 +363,12 @@ main > p { margin: 0; }
   border-bottom: 1px solid var(--rule);
 }
 .tile .value { font-family: var(--mono); font-size: 26px; font-weight: 600; line-height: 1.15; letter-spacing: -0.03em; }
+/* A figure whose meaning shows on hover, or on focus from a keyboard or a tap:
+   below it, inside the tile, which cuts off anything that runs past its edge. */
+.explained { cursor: help; }
+.explained > span:first-child { text-decoration: underline dotted; text-underline-offset: 3px; }
+.explained .explanation { display: none; margin-top: 6px; padding-left: 8px; border-left: 2px solid var(--blue); color: var(--muted); }
+.explained:hover .explanation, .explained:focus .explanation { display: block; }
 /* A bar for a share: the track is the whole, the fill the part. */
 .track { display: block; height: 8px; margin: 6px 0 2px; background: var(--track); }
 .track i { display: block; height: 100%; background: var(--blue); }

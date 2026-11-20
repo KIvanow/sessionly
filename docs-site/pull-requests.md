@@ -280,12 +280,24 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
   whole line's price. Sessions with no cost figure are left out of it, so it reads "at least"
   only when a session's cost leaves out requests. The cost of a line that got through
   review, where that is known, is what the agent's lines the pull request was opened with
-  cost, divided by those that survived. Which lines of each session survived is not kept,
-  so those are taken to be shared with other pull requests as the lines it was opened with
-  were on the whole. A pull request none of whose agent lines survived still says what they
-  cost, and lines that moved from one pull request to another are paid for once between
-  the two. This one reads "at least" when a session of those lines has no cost figure, or
-  not all of it. Both are marked `~` when the cost they come from is an estimate. A
+  cost, divided by those that survived. A line it was opened with together with another
+  pull request costs half in each and counts as half a line in each, and it counts as
+  surviving while either of them keeps it: between them it is one line, paid for once,
+  wherever it ended up. So lines that moved from one pull request to another, or a stack
+  of them that each kept only some, come out as they did for the session that wrote them.
+  The summary of several pull requests divides what their opening lines cost by the lines
+  that survived, each counted once; where that is not how many survived (a line in two of
+  them is in each one's count), the "Agent lines that survived review" tile says what it
+  is beside them, and why. Like the cost of an agent line, it is of the sessions that have
+  a cost figure: their lines on both sides of it. A pull request none of whose agent lines
+  of such a session survived has no figure of its own, and says how many of the others'
+  did; what those lines cost is in the summary's. For a session kept before which of its
+  lines survived was, the server works that out once when it starts; until then, of the
+  lines that survived, those the other sessions do not account for are taken to be its own
+  as far as the lines it was opened with go. What the opening lines cost reads "at least"
+  when a session of them has no cost figure, or not all of it; what a line of them that
+  survived cost only when a session with a cost leaves out requests. Both are marked `~`
+  when the cost they come from is an estimate. A
   session's own share is marked `~` too when it may be counted in another pull request. A
   session that is deleted takes its lines with it: the pull request keeps how many
   it had, not which. Three things to read with it. It is **the cost of the matched

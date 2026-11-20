@@ -28,11 +28,16 @@ export function pullCost(c: Pick<PullCost, "usd" | "estimated" | "sessions_witho
 export function pullCostNote(c: PullCost | null): string {
   if (!c) return "not known: its sessions were not kept at its last report";
   const opened = unsure(c.opened_is_floor, c.opened_estimated);
-  if (c.sessions === 0) {
-    return c.opened_usd != null
-      ? `none of the agent lines it was opened with is left: they cost ${opened}${usdOf(c.opened_usd)}`
-      : "no session was matched to its lines";
-  }
+  // Review replaced every agent line it was opened with, or every one of a session with a cost: what
+  // those cost is in no other figure here.
+  const left = c.opened_surviving_lines ?? 0;
+  const gone =
+    c.opened_usd == null || c.per_surviving_line_usd != null
+      ? null
+      : left === 0
+        ? `none of the agent lines it was opened with is left: they cost ${opened}${usdOf(c.opened_usd)}`
+        : `none of the agent lines it was opened with that have a cost is left: they cost ${opened}${usdOf(c.opened_usd)}; ${count(left)} of sessions with none ${left === 1 ? "is" : "are"}`;
+  if (c.sessions === 0) return gone ?? "no session was matched to its lines";
   const without = c.sessions_without_cost - c.sessions_uncounted;
   const missing = [
     without > 0 ? `${count(without)} of ${count(c.sessions)} ${c.sessions === 1 ? "session" : "sessions"} ${without === 1 ? "has" : "have"} no cost figure` : null,
@@ -42,11 +47,6 @@ export function pullCostNote(c: PullCost | null): string {
   ]
     .filter(Boolean)
     .join("; ");
-  // Review replaced every agent line it was opened with: what those cost is in no other figure here.
-  const gone =
-    c.opened_usd != null && c.per_surviving_line_usd == null
-      ? `none of the agent lines it was opened with is left: they cost ${opened}${usdOf(c.opened_usd)}`
-      : null;
   const partial =
     c.sessions_with_cost_partial > 0
       ? `the cost of ${count(c.sessions_with_cost_partial)} ${c.sessions_with_cost_partial === 1 ? "session leaves" : "sessions leave"} requests out`
@@ -64,7 +64,9 @@ export function pullCostNote(c: PullCost | null): string {
     // A cost that leaves requests out, over all of that session's lines, is a floor for each.
     c.per_agent_line_usd != null ? `${unsure(c.sessions_with_cost_partial > 0, c.estimated)}${usdEach(c.per_agent_line_usd)} per agent line` : null,
     // There when the cost now is not: the lines with a cost went, and ones without stayed.
-    c.per_surviving_line_usd != null ? `${opened}${usdEach(c.per_surviving_line_usd)} per line that survived review` : null,
+    c.per_surviving_line_usd != null
+      ? `${unsure(c.per_surviving_line_is_floor, c.opened_estimated)}${usdEach(c.per_surviving_line_usd)} per line that survived review`
+      : null,
   ];
   return [...each, gone, missing, partial, unshared].filter(Boolean).join("; ");
 }
@@ -106,6 +108,28 @@ export function pullsCostNote(total: {
     return [each, why, closed].filter(Boolean).join("; ") || "no session was matched to their lines";
   }
   return [each, floor ?? "what the matched sessions cost, each for its share of lines", closed].filter(Boolean).join("; ");
+}
+
+const once = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+
+/**
+ * How many lines that survived the cost per line divides by, each counted
+ * once, and why that is not how many survived: shown only when it is not.
+ * Null too when there is no cost per line to explain.
+ */
+export function survivingOnce(total: {
+  agent_lines_surviving: number;
+  agent_lines_surviving_once: number;
+  per_surviving_line_usd: number | null;
+}): { text: string; why: string } | null {
+  if (total.per_surviving_line_usd == null || total.agent_lines_surviving_once === total.agent_lines_surviving) return null;
+  return {
+    text: `${once.format(total.agent_lines_surviving_once)} counted once for cost`,
+    why:
+      "What the cost per agent line that survived review divides by. A line opened in more than one pull request counts in part in " +
+      "each, as its cost does, and survives in all of them while any one keeps it: fewer than the count beside it where those " +
+      "pull requests are all here, more where only some are. Only pull requests with a cost are in it.",
+  };
 }
 
 /** Where a pull request's page is: the repository's name has slashes, so it goes in as one part. */

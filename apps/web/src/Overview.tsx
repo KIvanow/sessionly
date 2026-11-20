@@ -1,5 +1,5 @@
 import type { FileList, GroupBy, Summary, Totals } from "@sessionly/schema";
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, useId, useState, type ReactNode } from "react";
 import { query } from "./api.ts";
 import { scopeParams, type Pick, type Scope } from "./App.tsx";
 import { CostChart } from "./CostChart.tsx";
@@ -166,10 +166,13 @@ export function Tile(props: {
   note?: string;
   /** If the figure is a share of a whole (0 to 1), a bar shows it as well. */
   part?: number | null;
+  /** A figure beside the note, with what it means on hover or focus. */
+  aside?: { text: string; why: string } | null;
   /** Something more under the note. */
   children?: ReactNode;
 }) {
-  const { label, value, note, part } = props;
+  const { label, value, note, part, aside } = props;
+  const why = useId();
   return (
     <div className="tile">
       <span className="label">{label}</span>
@@ -180,6 +183,17 @@ export function Tile(props: {
         </span>
       )}
       {note && <span className="note">{note}</span>}
+      {aside && (
+        <span className="note">
+          {/* Focusable, so that a keyboard or a tap opens what it means too. */}
+          <span className="explained" tabIndex={0} aria-describedby={why}>
+            <span>{aside.text}</span>
+            <span className="explanation" role="tooltip" id={why}>
+              {aside.why}
+            </span>
+          </span>
+        </span>
+      )}
       {props.children}
     </div>
   );
