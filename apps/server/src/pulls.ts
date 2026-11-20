@@ -86,31 +86,30 @@ export const COMMON_LINE = 3;
 
 /**
  * For each added line of each file, the agent that wrote it, or null. A
- * common line is put down only to a session that also wrote a line of the
- * pull request that is not: without that, it would go to whichever older
- * session last added it, while the one that wrote it has not been uploaded.
+ * common line is put down only to a session that also added a line of the
+ * pull request that is not (whether or not that line went to it), or every
+ * line of a file of it: without that, it would go to whichever older session
+ * last added it, while the one that wrote it has not been uploaded.
  */
 export function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[][] {
   // Looking only at claims on a file of the same name keeps this quick.
-  const byName = new Map<string, Claim[]>();
-  for (const claim of claims) {
-    const name = claim.path.slice(claim.path.lastIndexOf("/") + 1);
-    const list = byName.get(name);
-    if (list) list.push(claim);
-    else byName.set(name, [claim]);
-  }
   // A claim that names no session is a session of its own.
-  const whose = (claim: Claim): unknown =>
-    claim.session ? `${claim.session.machine_id}\n${claim.session.source}\n${claim.session.session_id}` : claim;
+  const byName = new Map<string, { claim: Claim; who: string }[]>();
+  claims.forEach((claim, i) => {
+    const name = claim.path.slice(claim.path.lastIndexOf("/") + 1);
+    const who = claim.session ? `${claim.session.machine_id}\n${claim.session.source}\n${claim.session.session_id}` : `#${i}`;
+    const list = byName.get(name);
+    if (list) list.push({ claim, who });
+    else byName.set(name, [{ claim, who }]);
+  });
   const pools = files.map((file) => {
     const name = file.path.slice(file.path.lastIndexOf("/") + 1);
     // Per line, who added it: the session that started last comes first.
-    const pool = new Map<string, { writer: Writer; who: unknown }[]>();
+    const pool = new Map<string, { writer: Writer; who: string }[]>();
     const matching = (byName.get(name) ?? [])
-      .filter((claim) => samePath(claim.path, file.path))
-      .sort((a, b) => b.started - a.started);
-    for (const claim of matching) {
-      const who = whose(claim);
+      .filter(({ claim }) => samePath(claim.path, file.path))
+      .sort((a, b) => b.claim.started - a.claim.started);
+    for (const { claim, who } of matching) {
       for (const hash of claim.hashes) {
         const list = pool.get(hash);
         const added = { writer: { tool: claim.tool, model: claim.model, session: claim.session }, who };
@@ -126,41 +125,47 @@ export function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[]
     }
     return { pool, common };
   });
-  // Each line an agent added accounts for one line of the pull request: the
-  // lines that are not common first, and the sessions they show worked on it.
-  // So does a session that added every line of one of its files, common or
-  // not: a file of nothing but imports is still the work of whoever wrote it.
-  const shown = new Set<unknown>();
+  const shown = creditedWithCommon(files, pools);
+  // Each line an agent added accounts for one line of the pull request, the
+  // session that started last first; a common line only for a session shown.
+  return files.map((file, i) => {
+    const { pool, common } = pools[i]!;
+    return file.hashes.map((hash) => {
+      const list = pool.get(hash);
+      if (!list) return null;
+      const at = common.has(hash) ? list.findIndex((added) => shown.has(added.who)) : 0;
+      return at < 0 || at >= list.length ? null : list.splice(at, 1)[0]!.writer;
+    });
+  });
+}
+
+/**
+ * The sessions a common line can go to: those that added a line of the pull
+ * request that is not common, and those that added every line of one of its
+ * files, common or not (a file of nothing but imports is still the work of
+ * whoever wrote it), as many times as the file has each.
+ */
+function creditedWithCommon(
+  files: FileHashes[],
+  pools: { pool: Map<string, { who: string }[]>; common: Set<string> }[],
+): Set<string> {
+  const shown = new Set<string>();
   files.forEach((file, i) => {
     const { pool, common } = pools[i]!;
+    for (const hash of file.hashes) {
+      if (!common.has(hash)) for (const added of pool.get(hash) ?? []) shown.add(added.who);
+    }
     if (file.hashes.length === 0 || !file.hashes.every((hash) => common.has(hash))) return;
-    // As many times as the file has each line: a line three times takes a session that added it three times.
+    // A line three times takes a session that added it three times.
     const needed = new Map<string, number>();
     for (const hash of file.hashes) needed.set(hash, (needed.get(hash) ?? 0) + 1);
-    const times = (who: unknown, hash: string) => pool.get(hash)!.filter((added) => added.who === who).length;
-    const [hash] = needed.keys();
-    for (const who of new Set(pool.get(hash!)!.map((added) => added.who))) {
+    const times = (who: string, hash: string) => pool.get(hash)!.filter((added) => added.who === who).length;
+    const [first] = needed.keys();
+    for (const who of new Set(pool.get(first!)!.map((added) => added.who))) {
       if ([...needed].every(([line, count]) => times(who, line) >= count)) shown.add(who);
     }
   });
-  const lines = files.map((file, i) =>
-    file.hashes.map((hash) => {
-      const { pool, common } = pools[i]!;
-      if (common.has(hash)) return null;
-      const added = pool.get(hash)?.shift();
-      if (added) shown.add(added.who);
-      return added?.writer ?? null;
-    }),
-  );
-  return files.map((file, i) =>
-    file.hashes.map((hash, j) => {
-      const { pool, common } = pools[i]!;
-      if (!common.has(hash)) return lines[i]![j]!;
-      const list = pool.get(hash)!;
-      const at = list.findIndex((added) => shown.has(added.who));
-      return at < 0 ? null : list.splice(at, 1)[0]!.writer;
-    }),
-  );
+  return shown;
 }
 
 function tally<T extends LinesBy>(rows: Map<string, T>, writer: Writer, make: () => T): T {
@@ -929,7 +934,9 @@ async function recordReport(
   // says what it came to. A session still going is uploaded at every turn,
   // and would otherwise push the reports out of what is kept.
   // (A report since, with figures that moved nothing, wrote no row: it is not merged past.)
-  const reported = async () => {
+  // pull_requests.updated_at is the report clock: only storePull sets it, and
+  // matching again (rematchPull) or anything else that updates the row must not.
+  const reportedSince = async () => {
     const [pull] = await db.query<{ later: boolean }>(
       `SELECT updated_at > (SELECT at FROM pull_request_reports WHERE org_id = $1 AND id = $4) AS later
        FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
@@ -937,7 +944,7 @@ async function recordReport(
     );
     return pull?.later === true;
   };
-  if (latest?.event === "match" && report.event === "match" && !(await reported())) {
+  if (latest?.event === "match" && report.event === "match" && !(await reportedSince())) {
     // Back to what the row before it says: then nothing moved, and it goes.
     const [before] = await db.query<{ commits: unknown; lines: unknown; agent_lines: unknown; sessions: unknown }>(
       `SELECT commits, lines, agent_lines, sessions FROM pull_request_reports
@@ -1077,7 +1084,7 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
          .filter((name) => !kept.includes(name))
          .map((name) => `${name} = ${set(name)}`)
          .join(", ")},
-       updated_at = clock_timestamp(), matched_at = clock_timestamp()`,
+       updated_at = clock_timestamp(), matched_at = clock_timestamp()`, // the report clock: see recordReport
     Object.values(columns),
   );
   // Closing without merging, or opening again, changes what its lines take from other pull requests.
@@ -1274,7 +1281,12 @@ export async function rematchPull(
   return { attribution, matched_at: iso(stored?.matched_at) ?? new Date().toISOString() };
 }
 
-/** No more than this many pull requests are matched again when one session is uploaded: the ones reported last. */
+/**
+ * No more than this many pull requests are matched again when one session is
+ * uploaded: those it added most lines of, then those reported last. Its lines
+ * are counted here whether common or not (telling which are takes every other
+ * session's claims), so one sharing more boilerplate with it can come first.
+ */
 export const MATCH_ON_UPLOAD = 5;
 
 /**
@@ -1376,7 +1388,7 @@ export async function pullsAddedTo(db: OrgDb, key: SessionKey, hashKey?: string)
  */
 export async function matchedBy(db: OrgDb, key: SessionKey, { hold = false }: { hold?: boolean } = {}): Promise<string | null> {
   const [row] = await db.query<{ by: string | null }>(
-    `SELECT md5(concat_ws(E'\n', (payload->'lines')::text, ${SESSION_EMAIL}, repo, branch, runtime, started_at::text, primary_model)) AS by FROM sessions
+    `SELECT md5(jsonb_build_array(payload->'lines', ${SESSION_EMAIL}, repo, branch, runtime, started_at, primary_model)::text) AS by FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4${hold ? " FOR UPDATE" : ""}`,
     [db.orgId, key.machine_id, key.source, key.session_id],
   );

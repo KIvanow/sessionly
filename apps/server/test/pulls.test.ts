@@ -117,6 +117,18 @@ test("a common line goes only to a session that wrote other lines of the pull re
     { tool: "codex", model: null, lines: 2 },
     { tool: "claude-code", model: "opus-5-5", lines: 1 },
   ]);
+  // one that added another of its lines has it though that line went to a later session
+  const ab = [file("b.css", 20, 1)];
+  const lost = [
+    from("A", claim("codex", null, "b.css", 9, 20)),
+    from("B", claim("grok", "grok-4", "b.css", 5, 20, 1)),
+    from("C", claim("cursor", null, "b.css", 3, 1)),
+    from("D", claim("claude-code", "opus-4-8", "b.css", 2, 1)),
+  ];
+  assert.deepEqual(attribute(ab, ab, lost).now.by, [
+    { tool: "codex", model: null, lines: 1 },
+    { tool: "grok", model: "grok-4", lines: 1 },
+  ]);
   // in two sessions' work it is not common yet
   assert.deepEqual(attribute(pr, pr, old.slice(1)).now.by, [{ tool: "cursor", model: null, lines: 1 }]);
   // one session's claims on the same file count as one
