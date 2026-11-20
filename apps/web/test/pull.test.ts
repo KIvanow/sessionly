@@ -181,6 +181,8 @@ test("a pull request's cost is said with what is not sure about it", () => {
   assert.equal(pullCostNote({ ...none, sessions: 0, sessions_without_cost: 0 }), "no session was matched to its lines");
   // review took every agent line out: what they cost is still said
   assert.equal(pullCostNote({ ...none, sessions: 0, sessions_without_cost: 0, opened_usd: 4 }), "none of the agent lines it was opened with is left: they cost $4.00");
+  // nor, with no session's lines left, that none is when some are
+  assert.match(pullCostNote({ ...none, sessions: 0, sessions_without_cost: 0, opened_usd: 4, opened_surviving_lines: 2 }), /that have a cost is left: .*; 2 of sessions with none are$/);
   assert.equal(pullCost(null), "–");
   assert.match(pullCostNote(null), /were not kept/);
   // what a line cost is small, and is not shown as nothing

@@ -28,20 +28,6 @@ export function pullCost(c: Pick<PullCost, "usd" | "estimated" | "sessions_witho
 export function pullCostNote(c: PullCost | null): string {
   if (!c) return "not known: its sessions were not kept at its last report";
   const opened = unsure(c.opened_is_floor, c.opened_estimated);
-  if (c.sessions === 0) {
-    return c.opened_usd != null
-      ? `none of the agent lines it was opened with is left: they cost ${opened}${usdOf(c.opened_usd)}`
-      : "no session was matched to its lines";
-  }
-  const without = c.sessions_without_cost - c.sessions_uncounted;
-  const missing = [
-    without > 0 ? `${count(without)} of ${count(c.sessions)} ${c.sessions === 1 ? "session" : "sessions"} ${without === 1 ? "has" : "have"} no cost figure` : null,
-    c.sessions_uncounted > 0
-      ? `the share of ${count(c.sessions_uncounted)} ${c.sessions_uncounted === 1 ? "session is" : "sessions is"} still being worked out since the upgrade`
-      : null,
-  ]
-    .filter(Boolean)
-    .join("; ");
   // Review replaced every agent line it was opened with, or every one of a session with a cost: what
   // those cost is in no other figure here.
   const left = c.opened_surviving_lines ?? 0;
@@ -51,6 +37,16 @@ export function pullCostNote(c: PullCost | null): string {
       : left === 0
         ? `none of the agent lines it was opened with is left: they cost ${opened}${usdOf(c.opened_usd)}`
         : `none of the agent lines it was opened with that have a cost is left: they cost ${opened}${usdOf(c.opened_usd)}; ${count(left)} of sessions with none ${left === 1 ? "is" : "are"}`;
+  if (c.sessions === 0) return gone ?? "no session was matched to its lines";
+  const without = c.sessions_without_cost - c.sessions_uncounted;
+  const missing = [
+    without > 0 ? `${count(without)} of ${count(c.sessions)} ${c.sessions === 1 ? "session" : "sessions"} ${without === 1 ? "has" : "have"} no cost figure` : null,
+    c.sessions_uncounted > 0
+      ? `the share of ${count(c.sessions_uncounted)} ${c.sessions_uncounted === 1 ? "session is" : "sessions is"} still being worked out since the upgrade`
+      : null,
+  ]
+    .filter(Boolean)
+    .join("; ");
   const partial =
     c.sessions_with_cost_partial > 0
       ? `the cost of ${count(c.sessions_with_cost_partial)} ${c.sessions_with_cost_partial === 1 ? "session leaves" : "sessions leave"} requests out`
