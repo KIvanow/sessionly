@@ -287,16 +287,21 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     session is charged to them too.
   - **For Claude Code, other branches' work is left out.** It says which branch was checked
     out at every turn, so a pull request is charged what was spent on its own branch, and
-    what was spent on the branch it is based on before its own was made: the planning on
-    `main` that led to it is part of what it cost. (When a pull request on that base branch
-    itself has the session's lines, what was spent there is that one's.) What the session
-    spent on any other branch is that branch's pull request's, or no one's. When a session
-    has lines in a pull request and spent nothing on its branch or its base (the branch was
-    renamed before it was pushed, say, or the lines were picked onto another), the branch
-    names are what is off there, not the work: that pull request is charged as the other
-    agents' sessions are, its share of the whole session by lines, while the session's other
-    pull requests are still charged what their branches say. (Where the two come to more
-    than the session cost, all are brought down alike.) A report from an Action too old to say what
+    what was spent on the branch it is based on: the planning on `main` that led to it is
+    part of what it cost. The record says how much was spent on a branch and not when, so
+    this is **all** the session spent on the base branch, whether before the pull request's
+    own branch was made or after: unrelated work done on `main` in the same session is
+    charged too, shared between the session's pull requests that are based on it. (When a
+    pull request on that base branch itself has the session's lines, what was spent there is
+    that one's.) What the session spent on any other branch is that branch's pull request's,
+    or no one's, and so is what it spent while no branch was named. When a session has lines
+    in a pull request and spent nothing on that pull request's own branch (the branch was
+    renamed before it was pushed, say, a detached checkout, or the lines were picked onto
+    another), the branch names are what is off there, not the work: that pull request is
+    charged as the other agents' sessions are, its share of the whole session by lines, or
+    what was spent on its base where that is more, while the session's other pull requests
+    are still charged what their branches say. (Where that comes to more than the session
+    cost, all are brought down alike.) A report from an Action too old to say what
     the pull request is based on is taken to be based on `main` or `master`. A Claude Code
     session uploaded before turns were kept by branch is charged whole, as the other
     agents' are, until its machine uploads it again.

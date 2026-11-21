@@ -28,7 +28,7 @@ import {
 } from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
 import type { OrgDb } from "./db.ts";
-import { chargeAgain, holdPull, IN_WORKTREE, rematchPulls, reportedPaths } from "./pulls.ts";
+import { chargeAgain, holdPull, holdPullSessions, IN_WORKTREE, rematchPulls, reportedPaths } from "./pulls.ts";
 import { Conflict, forgetLines, RemovedPerson, storeUpload } from "./sessions.ts";
 
 export interface Demo {
@@ -387,6 +387,7 @@ async function hidePull(db: OrgDb, repo: string, number: number, hide: string[],
     [db.orgId, repo, number],
   );
   let changed = !same(was, now);
+  const fewer: { machine_id: string; source: string; session_id: string }[] = [];
   for (const s of sessions) {
     const matched = s.matched == null ? null : jsonOf<Record<string, string[]>>(s.matched);
     const opened = s.opened_matched == null ? null : jsonOf<Record<string, string[]>>(s.opened_matched);
@@ -394,7 +395,10 @@ async function hidePull(db: OrgDb, repo: string, number: number, hide: string[],
     if (same(matched, matchedShown(matched, hide)) && same(opened, matchedShown(opened, hide)) && same(contributed, matchedShown(contributed, hide))) continue;
     changed = true;
     // What its opening lines still there count as was of the lines taken out too, and so was what it
-    // is charged: it is weighed again when the pull request is matched again, as it is next (`keepSessions`).
+    // is charged: it is weighed and charged again below, whether or not the pull request can be
+    // matched again after (one last reported before its committers were kept cannot).
+    if (fewer.length === 0) await holdPullSessions(db);
+    fewer.push({ machine_id: s.machine_id, source: s.source, session_id: s.session_id });
     await db.query(
       `UPDATE pull_sessions SET matched = $7::jsonb, opened_matched = $8::jsonb, opened_kept = NULL, opened_here = NULL,
               contributed = $9::jsonb, contributed_lines = NULL
@@ -408,6 +412,7 @@ async function hidePull(db: OrgDb, repo: string, number: number, hide: string[],
      WHERE org_id = $1 AND repo = $2 AND number = $3`,
     [db.orgId, repo, number, JSON.stringify(now.first), JSON.stringify(now.last), jsonOrNull(now.detail), jsonOrNull(now.feedback), rules, changed],
   );
+  await chargeAgain(db, fewer);
   return changed;
 }
 
@@ -517,7 +522,7 @@ export async function importDemo(from: Each, to: Each, demo: Pick<Demo, "repo" |
     // that went in review are in no report any more, and could not be matched to it again.
     await forgetLines(db, before, { again: true });
     const keyOf = (s: { machine_id?: string; source?: string; session_id?: string }) => `${s.machine_id}\n${s.source}\n${s.session_id}`;
-    const again = new Set<string>();
+    const again = new Map<string, { machine_id: string; source: string; session_id: string }>();
     let copied = 0;
     let skipped = 0;
     for (const row of theirs) {
@@ -529,7 +534,8 @@ export async function importDemo(from: Each, to: Each, demo: Pick<Demo, "repo" |
         await db.query(`RELEASE SAVEPOINT one`);
         if (stored) {
           copied += 1;
-          again.add(keyOf(made.session ?? {}));
+          const s = made.session ?? {};
+          again.set(keyOf(s), { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! });
         } else skipped += 1;
       } catch (err) {
         if (!refused(err)) throw err;
@@ -539,8 +545,9 @@ export async function importDemo(from: Each, to: Each, demo: Pick<Demo, "repo" |
     }
     const gone = before.filter((s) => !again.has(keyOf(s)));
     await forgetLines(db, gone);
-    // Charged from here on, though a pull request of theirs cannot be matched again below.
-    await chargeAgain(db, before.filter((s) => again.has(keyOf(s))));
+    // Charged from here on, though a pull request of theirs cannot be matched again below: the ones
+    // copied before, and one copied anew whose lines a pull request kept from an earlier copy of it.
+    await chargeAgain(db, [...again.values()]);
     return { copied, skipped, removed: gone.length };
   });
   // Every pull request of the repository there, a batch at a time, as the page's own button does it.

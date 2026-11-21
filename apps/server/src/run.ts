@@ -288,11 +288,19 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       const orgs = await db.query<{ org_id: string }>(
         `SELECT DISTINCT s.org_id FROM pull_sessions s JOIN pull_requests r USING (org_id, repo, number) WHERE ${UNWEIGHED}`,
       );
+      // One organisation's that fails holds up no other's: the rest are gone through, and it is tried again later.
+      let failed = false;
       for (const { org_id } of orgs) {
-        let after: SessionAt | null = null;
-        do after = await db.asOrg(org_id, (tx) => weighKeptSome(tx, after));
-        while (after);
+        try {
+          let after: SessionAt | null = null;
+          do after = await db.asOrg(org_id, (tx) => weighKeptSome(tx, after));
+          while (after);
+        } catch (err) {
+          failed = true;
+          console.error(`weighing the pull requests' surviving lines of ${org_id} failed:`, err);
+        }
       }
+      if (failed) setTimeout(weighing, 10 * 60_000).unref();
     })().catch((err) => {
       console.error("weighing pull requests' surviving lines failed:", err);
       setTimeout(weighing, 10 * 60_000).unref();

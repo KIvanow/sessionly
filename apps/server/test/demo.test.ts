@@ -434,4 +434,15 @@ test("a path hidden later is taken out of what a pull request's surviving lines 
   // the note's line goes from what it was opened with and from what survived, though matching again finds the same lines
   await importDemo(p.from, p.to, { repo: REPO, hide: ["notes"] });
   assert.equal(await kept(), 3);
+  // one that cannot be matched again (reported before its committers were kept) is weighed and
+  // charged again all the same: it is not left as from before an upgrade
+  await importDemo(p.from, p.to, { repo: REPO, hide: [] });
+  await db.query(`UPDATE pull_requests SET committers = NULL WHERE org_id = $1 AND number = 1`, [p.there]);
+  const whole = JSON.stringify({ "src/a.ts": [h(1), h(2), h(3)], "notes/SECRET-plan.md": [h(900)] });
+  await db.query(`UPDATE pull_sessions SET matched = $2::jsonb, contributed = $2::jsonb, contributed_lines = 4 WHERE org_id = $1 AND number = 1`, [p.there, whole]);
+  await db.query(`UPDATE pull_requests SET shown_rules = NULL WHERE org_id = $1 AND number = 1`, [p.there]);
+  await importDemo(p.from, p.to, { repo: REPO, hide: ["notes"] });
+  const [after] = await db.query<{ contributed_lines: unknown; contributed: unknown }>(`SELECT contributed_lines, contributed FROM pull_sessions WHERE org_id = $1 AND number = 1`, [p.there]);
+  const gave = typeof after!.contributed === "string" ? JSON.parse(after!.contributed) : after!.contributed;
+  assert.deepEqual([Number(after!.contributed_lines), Object.keys(gave)], [3, ["src/a.ts"]]);
 });

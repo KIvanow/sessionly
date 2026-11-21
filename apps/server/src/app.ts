@@ -97,6 +97,9 @@ class Undo extends Error {}
 /** People an organisation may add an hour: each is a message to an address nobody confirmed. */
 const INVITES_PER_HOUR = 30;
 
+/** How long after it failed charging a session to its pull requests is tried again, each time it fails, in milliseconds. */
+const CHARGE_RETRIES_MS = [30_000, 5 * 60_000, 30 * 60_000];
+
 /** An error an extension wants answered with a given status and a stable code. */
 export class ApiError extends Error {
   status: 400 | 403 | 404 | 409;
@@ -256,6 +259,8 @@ export interface Options {
   telemetry?: Telemetry | null;
   /** What the committers kept of a pull request are hashed with (SESSIONLY_HASH_KEY); none: a plain hash. */
   hashKey?: string;
+  /** In place of `CHARGE_RETRIES_MS`: tests do not wait that long. */
+  chargeRetriesMs?: number[];
   /**
    * The organisation one repository is shown in (demo.ts), and the paths of
    * it that are not shown; or why those cannot be trusted, and reports to it
@@ -436,11 +441,19 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     // What it cost, or where, is another: its pull requests are charged again, whether or not
     // any of them has other lines of it now.
     if (spent) {
-      try {
-        await ownerDb.asOrg(c.get("principal").orgId, (db) => chargeSession(db, spent));
-      } catch (err) {
-        failed(err);
-      }
+      const { orgId } = c.get("principal");
+      // What fails (a report held the organisation's lines for too long) is tried again, later each
+      // time: a session's last upload is followed by no other that would charge it.
+      const charging = async (tries: number[]): Promise<void> => {
+        try {
+          await ownerDb.asOrg(orgId, (db) => chargeSession(db, spent));
+        } catch (err) {
+          failed(err);
+          const [wait, ...rest] = tries;
+          if (wait != null) setTimeout(() => void charging(rest), wait).unref();
+        }
+      };
+      await charging(options.chargeRetriesMs ?? CHARGE_RETRIES_MS);
     }
     if (!stored) return;
     try {

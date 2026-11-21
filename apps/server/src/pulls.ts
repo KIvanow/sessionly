@@ -246,8 +246,26 @@ type Wrote = Pick<PullSession, "machine_id" | "source" | "session_id" | "lines">
 /** And which of the lines the pull request was first reported with are its own. */
 type Kept = Wrote & { opened_lines: number; opened_matched: Lines };
 
-/** A line of a file, as the sets of lines seen are keyed. */
+/** A line of a file, as the lines seen are keyed. */
 const lineKey = (path: string, hash: string): string => `${path}\n${hash}`;
+
+/** How often each line is in a pull request's files, first or now: as often as the one that has it most. */
+function copiesIn(...reports: FileHashes[][]): Map<string, number> {
+  const most = new Map<string, number>();
+  for (const files of reports) {
+    const here = new Map<string, number>();
+    for (const file of files) for (const hash of file.hashes) here.set(lineKey(file.path, hash), (here.get(lineKey(file.path, hash)) ?? 0) + 1);
+    for (const [key, n] of here) if (n > (most.get(key) ?? 0)) most.set(key, n);
+  }
+  return most;
+}
+
+/** Two sets of lines put together, a line in both as often as in the two. */
+function addLines(a: Lines, b: Lines): Lines {
+  const all: Lines = { ...a };
+  for (const [path, hashes] of Object.entries(b)) all[path] = [...(all[path] ?? []), ...hashes];
+  return all;
+}
 
 /**
  * A pull request's lines as they are now, file by file and session by
@@ -440,13 +458,15 @@ const DEFAULT_BASES = ["main", "master"];
  * before the branch was made: the planning, the first edits) is theirs
  * too. What was spent on any other branch is no pull request's.
  *
- * One of them with no branch the session spent on, neither its own nor its
- * base (a branch renamed before it was pushed, lines picked onto another):
- * the names are what is off there and not the work, since its lines are
- * there. It is charged as of a session that names no branches, its share of
- * all the session cost by lines, and the others what their branches say;
- * where that comes to more than was spent, all are brought down alike. Null
- * for a session with no cost figure, or none.
+ * One of them on whose own branch the session spent nothing (a branch
+ * renamed before it was pushed, a detached checkout, lines picked onto
+ * another): the names are what is off there and not the work, since its
+ * lines are there. It is charged as of a session that names no branches,
+ * its share of all the session cost by lines, or what was spent on its base
+ * where that is more: a cent spent on `main` does not make the names say
+ * what it cost. The others are charged what their branches say; where all
+ * that comes to more than was spent, all are brought down alike. Null for a
+ * session with no cost figure, or none.
  */
 export function charge(
   session: Spent | null,
@@ -456,7 +476,7 @@ export function charge(
   if (session == null || cost == null) return rows.map(() => null);
   const named = new Map<string, number>();
   for (const spent of Array.isArray(session.by_branch) ? session.by_branch : []) {
-    if (typeof spent?.branch === "string" && typeof spent.usd === "number" && spent.usd > 0) {
+    if (typeof spent?.branch === "string" && typeof spent.usd === "number" && Number.isFinite(spent.usd) && spent.usd > 0) {
       named.set(spent.branch, (named.get(spent.branch) ?? 0) + spent.usd);
     }
   }
@@ -473,15 +493,12 @@ export function charge(
   if (named.size === 0) return whole;
   const basedOn = (row: (typeof rows)[number], branch: string) => (row.base_ref != null ? row.base_ref === branch : DEFAULT_BASES.includes(branch));
   const charged = rows.map(() => 0);
-  const found = new Set<number>();
   for (const [branch, spent] of named) {
     const heads = every.filter((i) => rows[i]!.head_ref === branch);
-    const among = heads.length > 0 ? heads : every.filter((i) => basedOn(rows[i]!, branch));
-    for (const i of among) found.add(i);
-    byLines(spent, among, charged);
+    byLines(spent, heads.length > 0 ? heads : every.filter((i) => basedOn(rows[i]!, branch)), charged);
   }
-  // One with lines of the session's and no branch of its turns': the branches do not say what it cost.
-  for (const i of every) if (!found.has(i)) charged[i] = whole[i]!;
+  // One with lines of the session's and nothing spent on its own branch: the branches do not say what it cost.
+  for (const i of every) if (rows[i]!.head_ref == null || !named.has(rows[i]!.head_ref!)) charged[i] = Math.max(charged[i]!, whole[i]!);
   // Never more than was spent, whatever the turns add up to, or with such a one beside them.
   const total = charged.reduce((sum, one) => sum + one, 0);
   return total > cost && total > 0 ? charged.map((one) => (one * cost) / total) : charged;
@@ -891,7 +908,7 @@ async function match(
   first: FileHashes[],
   now: FileHashes[],
   firstEvent: string,
-): Promise<{ attribution: PullAttribution; files: PullFile[]; sessions: Kept[]; seen: Set<string> }> {
+): Promise<{ attribution: PullAttribution; files: PullFile[]; sessions: Kept[]; seen: Map<string, number> }> {
   const claims = await claimsFor(db, about);
   // Worked out once, for the figures and for the page: the two then agree.
   const lines = writers(now, claims);
@@ -915,8 +932,9 @@ async function match(
     },
     files,
     sessions,
-    // The lines whose writers this says: those it was first reported with, and those it has now.
-    seen: new Set([...first, ...now].flatMap((file) => file.hashes.map((hash) => lineKey(file.path, hash)))),
+    // The lines whose writers this says: those it was first reported with, and those it has now,
+    // each as often as the one of the two that has it most.
+    seen: copiesIn(first, now),
   };
 }
 
@@ -1181,8 +1199,8 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   // read here, or is looked for in this pull request once this is committed
   // (`pullsAddedTo` waits for it).
   await holdPullSessions(db);
-  const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string }>(
-    `SELECT first_files, first_event, state FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
+  const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string; head_ref: string | null; base_ref: string | null }>(
+    `SELECT first_files, first_event, state, head_ref, base_ref FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
     [db.orgId, report.repo, report.number],
   );
   const first = existing ? json<FileHashes[]>(existing.first_files) : report.files;
@@ -1258,7 +1276,10 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   );
   // Closing without merging, or opening again, changes what its lines take from other pull requests.
   const turned = existing != null && (existing.state === "closed") !== (report.state === "closed");
-  await keepSessions(db, report.repo, report.number, sessions, turned, seen);
+  // Its branch, or the one it is based on, is another (one stacked on a pull request that was merged
+  // is based on what that one was): what its sessions spent on which branch is its own is another too.
+  const moved = existing != null && ((existing.head_ref ?? null) !== (report.head_ref ?? null) || (existing.base_ref ?? null) !== (report.base_ref ?? null));
+  await keepSessions(db, report.repo, report.number, sessions, turned || moved, seen);
   await recordReport(db, {
     repo: report.repo,
     number: report.number,
@@ -1300,7 +1321,7 @@ export async function holdPullSessions(db: OrgDb): Promise<void> {
  * out again in every pull request those sessions, and the ones before, have
  * lines in: a line now in two is shared.
  */
-async function keepSessions(db: OrgDb, repo: string, number: number, sessions: Kept[], turned: boolean, seen: Set<string>): Promise<void> {
+async function keepSessions(db: OrgDb, repo: string, number: number, sessions: Kept[], turned: boolean, seen: Map<string, number>): Promise<void> {
   // Most reports change none of this (a review, a comment, a push of other
   // lines): then nothing is written. (A report holds the lock below from
   // before it reads the sessions, `storePull`; matching again takes it here.)
@@ -1322,15 +1343,22 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
     // None for one deleted since, whose lines are not kept past it: it stays only while this match has it.
     const before = kept(row.contributed) ?? unionLines(kept(row.matched), kept(row.opened_matched));
     if (!before) continue;
+    // A line it gave more often than the files have it now, or had at first (three of the same,
+    // of which review took two): the copies that are in neither are gone, and stay its own.
     const gone: Lines = {};
     for (const [path, hashes] of Object.entries(before)) {
-      const left = hashes.filter((hash) => !seen.has(lineKey(path, hash)));
+      const there = new Map<string, number>();
+      const left = hashes.filter((hash) => {
+        const n = (there.get(hash) ?? 0) + 1;
+        there.set(hash, n);
+        return n > (seen.get(lineKey(path, hash)) ?? 0);
+      });
       if (left.length > 0) gone[path] = left;
     }
     if (Object.keys(gone).length === 0) continue;
     const key = sessionKey(row as never);
     const now = next.get(key);
-    if (now) now.contributed = unionLines(now.contributed, gone)!;
+    if (now) now.contributed = addLines(now.contributed, gone);
     else {
       const s = { machine_id: String(row.machine_id), source: String(row.source), session_id: String(row.session_id) };
       next.set(key, { ...s, lines: 0, matched: {}, opened_lines: 0, opened_matched: {}, contributed: gone });

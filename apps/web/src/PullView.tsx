@@ -151,9 +151,10 @@ export function PullView({
         <h2>Sessions that wrote it</h2>
         {p.cost?.usd != null && (
           <p className="muted hint">
-            A session's cost here is what it spent on this pull request's branch. One that gave lines
-            to other pull requests too is split between them by the lines it gave each, and a line
-            that is in several is shared out. Lines that review took out since still count: what was
+            A session's cost here is what it spent, all of it where this is the one pull request it
+            gave lines to. One that gave lines to other pull requests too is split between them by
+            the lines it gave each, and a line that is in several is shared out; of a Claude Code
+            session, what it spent on other branches than this one and its base is left out. Lines that review took out since still count: what was
             spent on them was spent. Their sum is the agent cost above: what the matched sessions
             cost, not what making the pull request did.
           </p>
