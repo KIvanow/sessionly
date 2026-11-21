@@ -384,6 +384,33 @@ test("what a copied session gave a pull request is kept through the next import,
   assert.deepEqual(await spent(), [null, []]);
 });
 
+test("an import with nothing new leaves what the copies gave as it was, and a line they were opened with goes to a later session once", async () => {
+  const p = await pair("opened");
+  assert.equal((await send(p.ann, session("o1", REPO, [1, 2]))).status, 200);
+  const importIt = () => importDemo(p.from, p.to, { repo: REPO, hide: [] });
+  const pushed = (hashes: number[], event: string) => call(p.ci, "PUT", "/prs", pullOf(1, [{ path: "src/a.ts", hashes: hashes.map(h) }], { event }));
+  // opened with two lines of the session's, of which review takes one before the first import
+  await pushed([1, 2], "opened");
+  await pushed([2], "synchronize");
+  const kept = async () =>
+    (await db.query(`SELECT session_id, matched, opened_matched, contributed, gone, contributed_lines FROM pull_sessions WHERE org_id = $1 ORDER BY session_id`, [p.there])).map((row) => JSON.stringify(row));
+  const gave = async () => (await call(p.admin, "GET", `/prs/detail?repo=${REPO}&number=1`)).body.sessions.map((x: any) => [x.session_id, x.lines, x.contributed_lines]).sort();
+  await importIt();
+  assert.deepEqual(await gave(), [["o1", 1, 2]]);
+  const first = await kept();
+  await importIt();
+  assert.deepEqual(await kept(), first);
+  // a later session that wrote the line that went: it is that one's, as it would be uploaded there itself
+  const later = session("o2", REPO, [1]);
+  later.session.started_at = "2026-11-10T09:30:00Z";
+  assert.equal((await send(p.ann, later)).status, 200);
+  await importIt();
+  assert.deepEqual(await gave(), [["o1", 1, 1], ["o2", 0, 1]]);
+  const second = await kept();
+  await importIt();
+  assert.deepEqual(await kept(), second);
+});
+
 test("a session by the same name uploaded where it is shown is never replaced, nor removed, by an import", async () => {
   const p = await pair("direct");
   const annThere = await tokenFor(db, { email: "ann@example.com", role: "member" }, p.there);

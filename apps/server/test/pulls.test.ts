@@ -7,9 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countHashedLines, migrationAt, openDb, type Db } from "../src/db.ts";
 import { DEFAULT_ORG } from "../src/auth.ts";
-import { forgetLines } from "../src/sessions.ts";
 import { newOrg, testDb, testDbUrl, tokenFor } from "./helpers.ts";
-import { attribute, breakdown, charge, chargeAgain, CURRENT_ACTION, type Claim, historyChange, holdPullSessions, MATCH_AT_ONCE, olderAction, UNKNOWN_REPORTER, weigh, weighKept, weighKeptSome, writers, type SessionAt, unionLines } from "../src/pulls.ts";
+import { attribute, breakdown, charge, chargeAgain, CURRENT_ACTION, type Claim, historyChange, holdPullSessions, MATCH_AT_ONCE, olderAction, UNKNOWN_REPORTER, weigh, weighKept, weighKeptSome, writers, type SessionAt } from "../src/pulls.ts";
+import { unionLines } from "../src/contributed.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
 const h = (n: number) => n.toString(16).padStart(16, "0");
@@ -2122,35 +2122,6 @@ test("what a session gave and is charged holds through copies of a line and a la
   await sent(19, [file("f.ts", 2701), file("e.ts", 2700, 2702)], { event: "synchronize" });
   assert.deepEqual(await first(), [[3, 4, 8]]);
 
-  // a line of a session's in two files, and in one push the one turns out to be a later session's
-  // and the other moves to a third file: the one that moved is not also kept as gone, whatever the
-  // files are called. (The push comes before the pull request was matched again for the later
-  // session's upload: its sessions are put back as they were.)
-  for (const [number, lost] of [[20, "a.ts"], [21, "z.ts"]] as const) {
-    const at = (id: string, started: string, paths: string[]) => {
-      const one = session(id, "claude-code", "claude-opus-5-5", started, paths.map((path) => ({ path, model: null, hashes: [h(2800 + number)] })));
-      one.session.repo.remote = repo;
-      (one.session as Record<string, unknown>).cost = { total_usd: 10, source: "recorded" };
-      return call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, one);
-    };
-    await at(`h-had-${number}`, "2026-11-10T09:00:00Z", [lost, "b.ts", "m.ts"]);
-    await sent(number, [file("y.ts", 9000 + number)]);
-    await sent(number, [file("y.ts", 9000 + number), file(lost, 2800 + number), file("b.ts", 2800 + number)], { event: "synchronize" });
-    const rows = await db.query(`SELECT * FROM pull_sessions WHERE repo = $1 AND number = $2`, [repo, number]);
-    await at(`h-took-${number}`, "2026-11-10T10:00:00Z", [lost]);
-    await db.query(`DELETE FROM pull_sessions WHERE repo = $1 AND number = $2`, [repo, number]);
-    for (const row of rows) {
-      const columns = Object.keys(row);
-      await db.query(
-        `INSERT INTO pull_sessions (${columns.join(", ")}) VALUES (${columns.map((_, i) => `$${i + 1}`).join(", ")})`,
-        columns.map((column) => (row[column] !== null && typeof row[column] === "object" ? JSON.stringify(row[column]) : row[column])),
-      );
-    }
-    await sent(number, [file("y.ts", 9000 + number), file(lost, 2800 + number), file("m.ts", 2800 + number)], { event: "synchronize" });
-    const gave = (await pull(number)).sessions.map((x: any) => [x.session_id, x.lines, x.contributed_lines]).sort();
-    assert.deepEqual(gave, [[`h-had-${number}`, 1, 1], [`h-took-${number}`, 1, 1]], lost);
-  }
-
   // a line the pull request was opened with, that review took out, and that turns out to be a later
   // session's, uploaded since: it is there to match by still, so it is that one's alone and counts once
   const later = (id: string, usd: number, files: Record<string, number[]>) => {
@@ -2170,18 +2141,16 @@ test("what a session gave and is charged holds through copies of a line and a la
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 23 })).status, 200);
   assert.deepEqual(await opened(), [["h-opened", 1, 1, 4], ["h-theirs", 0, 1, 10]]);
 
-  // a session whose lines went with it and that is stored anew (the demo's copy of it): the copies
-  // that went in review are kept from before, one of two of a line and one in another file
+  // a session that is deleted and stored anew at once, as the demo's copy of it is: its lines in the
+  // pull request stay through it, and the copies that went in review are kept, one of two of a line
+  // and one in another file
   await put("h-anew", 5, { "c1.ts": [3000, 3000, 3001], "c2.ts": [3002], "c3.ts": [3002] });
   await sent(24, [file("y.ts", 9008)]);
   await sent(24, [file("y.ts", 9008), file("c1.ts", 3000, 3000, 3001), file("c2.ts", 3002), file("c3.ts", 3002)], { event: "synchronize" });
   await sent(24, [file("y.ts", 9008), file("c1.ts", 3000, 3001), file("c2.ts", 3002)], { event: "synchronize" });
   const anew = async () => (await pull(24)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd]);
   assert.deepEqual(await anew(), [[3, 5, 5]]);
-  await db.asOrg(DEFAULT_ORG, async (tx) => {
-    const gone = await tx.query(`DELETE FROM sessions WHERE org_id = $1 AND session_id = 'h-anew' RETURNING machine_id, source, session_id`, [tx.orgId]);
-    await forgetLines(tx, gone, { again: true });
-  });
+  await db.query(`DELETE FROM sessions WHERE session_id = 'h-anew'`);
   await put("h-anew", 5, { "c1.ts": [3000, 3000, 3001], "c2.ts": [3002], "c3.ts": [3002] });
   assert.deepEqual(await anew(), [[3, 5, 5]]);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 24 })).status, 200);

@@ -519,9 +519,10 @@ export async function importDemo(from: Each, to: Each, demo: Pick<Demo, "repo" |
       `DELETE FROM sessions WHERE org_id = $1 AND copied RETURNING machine_id, source, session_id`,
       [db.orgId],
     );
-    // What each contributed to a pull request is kept for the copy made of it below: lines
-    // that went in review are in no report any more, and could not be matched to it again.
-    await forgetLines(db, before, { again: true });
+    // Their lines in the pull requests stay as they are for the copies made of them below, and
+    // go only with the ones not copied again: lines that went in review are in no report any
+    // more and could not be matched to a copy again, and which of the lines a pull request was
+    // opened with were whose says, at the next match, which of them are another's since.
     const keyOf = (s: { machine_id?: string; source?: string; session_id?: string }) => `${s.machine_id}\n${s.source}\n${s.session_id}`;
     const again = new Map<string, { machine_id: string; source: string; session_id: string }>();
     let copied = 0;

@@ -866,7 +866,7 @@ const MIGRATIONS: string[] = [
   // What a session contributed to a pull request at any time: the lines it
   // has there now, those the pull request was first reported with, and those
   // it had at a report between that are gone since, as the hashes by file.
-  // It only grows (see `keepSessions` in pulls.ts): what the session is
+  // It only grows (see `contributedAfter` in contributed.ts): what the session is
   // charged there (`charged_usd`, see `charge`) is split by it, so review
   // taking lines out does not make a pull request cheaper.
   // `contributed_lines` is null from before, until the server has charged
@@ -876,7 +876,7 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE pull_sessions ADD COLUMN contributed_lines integer`,
   `ALTER TABLE pull_sessions ADD COLUMN charged_usd double precision`,
   // Which of the lines it had in the pull request went from its files since:
-  // they stay the session's whatever is matched after (see `keepSessions`).
+  // they stay the session's whatever is matched after (see `contributedAfter`).
   // Null from before, and with `contributed`.
   `ALTER TABLE pull_sessions ADD COLUMN gone jsonb`,
 ];

@@ -298,24 +298,18 @@ async function dropOwn(db: OrgDb, key: unknown[], email: string, refiled: string
  * at once, so none is left with lines shared out with them, and what the
  * other sessions' lines count as is their own affair.
  */
-export async function forgetLines(
-  db: OrgDb,
-  sessions: Record<string, unknown>[],
-  /** `again`: they are about to be stored again (a copy made anew), and what each contributed is kept for that. */
-  { again = false }: { again?: boolean } = {},
-): Promise<void> {
+export async function forgetLines(db: OrgDb, sessions: Record<string, unknown>[]): Promise<void> {
   if (sessions.length === 0) return;
   // After any report that is storing these now: it then finds the session gone, or this finds what it stored.
   await holdPullSessions(db);
   await db.query(
     `UPDATE pull_sessions p SET matched = NULL, opened_matched = NULL, weight = p.lines, opened_weight = p.opened_lines, opened_kept = NULL, opened_here = NULL,
-            contributed = CASE WHEN $3::boolean THEN p.contributed END, gone = CASE WHEN $3::boolean THEN p.gone END,
-            charged_usd = NULL
+            contributed = NULL, gone = NULL, charged_usd = NULL
      FROM jsonb_to_recordset($2::jsonb) AS gone(machine_id text, source text, session_id text)
      WHERE p.org_id = $1 AND p.machine_id = gone.machine_id AND p.source = gone.source
        AND p.session_id = gone.session_id
        AND (p.matched IS NOT NULL OR p.opened_matched IS NOT NULL OR p.contributed IS NOT NULL OR p.charged_usd IS NOT NULL)`,
-    [db.orgId, JSON.stringify(sessions.map((s) => ({ machine_id: s.machine_id, source: s.source, session_id: s.session_id }))), again],
+    [db.orgId, JSON.stringify(sessions.map((s) => ({ machine_id: s.machine_id, source: s.source, session_id: s.session_id })))],
   );
 }
 
