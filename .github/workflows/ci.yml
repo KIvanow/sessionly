@@ -56,7 +56,6 @@ jobs:
             echo "::warning::Two parallel hooks each downloaded the binary; the steps they noted are in this job's log."
             cat "$log"
             rm -f "$log"
-            rm -f "$log"
           done
 
   # The oldest Rust the crate claims to build with (rust-version in Cargo.toml).
@@ -76,7 +75,6 @@ jobs:
             [ -e "$log" ] || continue
             echo "::warning::Two parallel hooks each downloaded the binary; the steps they noted are in this job's log."
             cat "$log"
-            rm -f "$log"
             rm -f "$log"
           done
 

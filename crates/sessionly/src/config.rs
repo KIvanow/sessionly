@@ -41,7 +41,7 @@ pub struct Config {
     /// How much content uploaded records carry.
     pub upload_content: Content,
     /// Bring the ledger up to date (and upload, if a server is set) in the
-    /// background when a session ends.
+    /// background when a turn or a session ends.
     pub auto_sync: bool,
     /// Upload hashes of the lines agents added, so the server can tell which
     /// lines of a pull request an agent wrote. Off unless switched on.

@@ -87,7 +87,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Totals per user, repository, model or day
+    /// Totals per tool, user, repository, model or day
     Summary {
         #[command(flatten)]
         filter: FilterArgs,
@@ -155,7 +155,8 @@ enum Command {
     },
     /// Show or change local settings
     Settings {
-        /// Sync (and upload, if connected) in the background when a session ends
+        /// Sync (and upload, if connected) in the background when a turn or a
+        /// session ends
         #[arg(long, value_name = "on|off", value_parser = parse_on_off)]
         auto_sync: Option<bool>,
         /// How much content uploads carry
@@ -203,7 +204,8 @@ enum Command {
         #[arg(value_enum, default_value = "session")]
         which: SchemaKind,
     },
-    /// Hook entry point: read one payload on stdin and store it (used by Claude Code)
+    /// Hook entry point: read one payload on stdin and store it (used by the
+    /// hooks of Claude Code, Cursor, Grok and Codex)
     Capture,
 }
 
@@ -230,8 +232,9 @@ struct Target {
     #[arg(long, value_name = "DIR")]
     project: Option<PathBuf>,
     /// The repository at DIR (default: this directory), for Claude Code
-    /// cloud sessions and Cursor cloud agents: a script and hook entries to
-    /// commit, which do nothing on a person's own machine
+    /// cloud sessions, Cursor cloud agents and Codex cloud tasks: a script,
+    /// hook entries and an AGENTS.md section to commit, which do nothing on a
+    /// person's own machine
     #[arg(
         long,
         value_name = "DIR",
@@ -954,7 +957,7 @@ fn print_settings(config: &config::Config) {
     println!(
         "Auto sync:  {}",
         if config.auto_sync {
-            "on (runs in the background when a session ends)"
+            "on (runs in the background when a turn or a session ends)"
         } else {
             "off"
         }

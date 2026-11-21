@@ -26,10 +26,13 @@ jobs:
       # Only the report of an earlier pull request compares commits.
       contents: read
     env:
-      # A step cannot ask whether a secret is set; it can ask this.
+      # A step cannot ask whether a secret is set; it can ask these. A pull
+      # request from a fork is given no secrets, so it is not reported.
+      TOKEN: ${{ secrets.SESSIONLY_TOKEN }}
       DEMO_TOKEN: ${{ secrets.SESSIONLY_DEMO_TOKEN }}
     steps:
-      - uses: KIvanow/sessionly/action@c0b1e569d8686e3b244daa68fa73ea19c16748f9 # several pull requests in one run ("all", 20-60), 18 November 2026
+      - if: env.TOKEN != ''
+        uses: KIvanow/sessionly/action@c0b1e569d8686e3b244daa68fa73ea19c16748f9 # several pull requests in one run ("all", 20-60), 18 November 2026
         with:
           url: https://app.sessionly.dev
           # A token with the ci role, which can report pull requests and nothing else.

@@ -64,7 +64,7 @@
         <div class="wrap">
           <h1>Data Processing Agreement</h1>
           <p class="meta">
-            Effective as of 16 November 2026
+            Effective as of 21 November 2026
             <span class="pdf-link">&middot; <a href="/dpa.pdf">Download PDF</a></span>
           </p>
           <p class="print-note">
@@ -630,15 +630,19 @@
               stay on the engineer's machine.
             </li>
             <li>
-              <strong>Session records (always):</strong> a random machine identifier; the agent and
-              session identifier; the git user name and email address and the repository's remote
-              address, as configured on the machine, or, for a session that ran in the cloud, the
+              <strong>Session records (always):</strong> a random machine identifier; the agent,
+              its version and how it was started, and the session identifier; the git user name
+              and email address, the repository's remote address and the branch name, as
+              configured on the machine, or, for a session that ran in the cloud, the
               email address the platform gives for the person who started it; start and end
               times, active time and the
               timing of each turn; counts of prompts, tool calls, subagents and permission
               requests; for each tool call its tool, status, duration and output size; the files
               read or changed, as paths relative to the repository or home directory, with lines
-              added and removed; models, token counts and cost; the rewrite measurement per file.
+              added and removed; the folder the session ran in and the repository's folder
+              (shortened to <code>~/&hellip;</code> when under the home directory); the permission
+              modes used and the paths of the instruction files loaded; models, token counts and
+              cost; the rewrite measurement per file.
               Together these show when and on what a person worked with an agent.
             </li>
             <li>
@@ -941,7 +945,7 @@
           <p>
             A ledger of AI coding agent sessions. Open source under Apache-2.0 and
             <a href="https://docs.sessionly.dev/server.html">self-hosted</a>. Claude Code,
-            Cursor, Grok and GitHub are trademarks of their owners; Sessionly is not affiliated
+            Cursor, Grok, Codex and GitHub are trademarks of their owners; Sessionly is not affiliated
             with them.
           </p>
           <p>Email <a href="mailto:support@sessionly.dev">support@sessionly.dev</a>.</p>

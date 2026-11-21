@@ -31,9 +31,10 @@ minutes) or twice (kept an hour). Requests to a model that isn't in the price ta
 out of an estimate and counted in `unpriced_requests`, so an incomplete total is visible as
 such. (Inside a recorded run they need no estimate: Claude Code's total covers them.)
 
-The table has Anthropic's models only, from the Claude 4 models on. A model's name is read without
-what a provider adds to it (`anthropic.` in front, a date or `[1m]` behind). Sessions of other
-agents get their cost another way, or have none: see [Agents](agents.md).
+The table has Anthropic's models from the Claude 4 models on, OpenAI's models at their API list
+prices (for [Codex](codex.md)), and Cursor's Composer models. A model's name is read without
+what a provider adds to it (`anthropic.` in front, a date or `[1m]` behind). How each agent's
+sessions get their cost is in [Agents](agents.md).
 
 How close is it? On one machine with 97 transcripts, the estimate for a recorded run equalled
 Claude Code's total to the cent in about a third of the sessions and was lower in most of the
