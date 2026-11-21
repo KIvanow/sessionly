@@ -325,6 +325,7 @@ fn facts(
             unpriced_requests: 0,
             untracked_usd: None,
             prompts_covered: None,
+            by_branch: Vec::new(),
         }),
         usage: models,
         subagents: Vec::new(),

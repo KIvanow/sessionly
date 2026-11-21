@@ -39,7 +39,7 @@ import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type
 import { demoFrom, reportsShownIn } from "./demo.ts";
 import { tidy } from "./limits.ts";
 import { purgeDeletedOrgs } from "./orgs.ts";
-import { type SessionAt, weighKeptSome } from "./pulls.ts";
+import { type SessionAt, UNWEIGHED, weighKeptSome } from "./pulls.ts";
 import {
   github,
   google,
@@ -252,7 +252,13 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       .catch((err) => console.error("purging organisations failed:", err));
   }, 60 * 60_000);
   purging.unref();
+  // What is still going on after an upload was answered: waited for before the server stops.
+  const pending = new Set<Promise<void>>();
   const app = createApp(db, {
+    background: (work) => {
+      pending.add(work);
+      void work.finally(() => pending.delete(work));
+    },
     hashKey: hashKeyOf(process.env),
     // Whatever else is wrong with the settings of a demo: reports there are never kept whole.
     demo: reportsShownIn(process.env),
@@ -280,18 +286,27 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   counting();
 
   // Pull requests' sessions kept before what their opening lines still there
-  // count as was: weighed now, beside the requests, so that no figure stays
-  // measured the old way. What failed is tried again later.
+  // count as was, or before what each contributed and is charged was: weighed
+  // and charged now, beside the requests, so that no figure stays measured
+  // the old way. What failed is tried again later.
   const weighing = () =>
     void (async () => {
       const orgs = await db.query<{ org_id: string }>(
-        `SELECT DISTINCT org_id FROM pull_sessions WHERE opened_matched IS NOT NULL AND opened_kept IS NULL`,
+        `SELECT DISTINCT s.org_id FROM pull_sessions s JOIN pull_requests r USING (org_id, repo, number) WHERE ${UNWEIGHED}`,
       );
+      // One organisation's that fails holds up no other's: the rest are gone through, and it is tried again later.
+      let failed = false;
       for (const { org_id } of orgs) {
-        let after: SessionAt | null = null;
-        do after = await db.asOrg(org_id, (tx) => weighKeptSome(tx, after));
-        while (after);
+        try {
+          let after: SessionAt | null = null;
+          do after = await db.asOrg(org_id, (tx) => weighKeptSome(tx, after));
+          while (after);
+        } catch (err) {
+          failed = true;
+          console.error(`weighing the pull requests' surviving lines of ${org_id} failed:`, err);
+        }
       }
+      if (failed) setTimeout(weighing, 10 * 60_000).unref();
     })().catch((err) => {
       console.error("weighing pull requests' surviving lines failed:", err);
       setTimeout(weighing, 10 * 60_000).unref();
@@ -327,6 +342,9 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {
       server.close(async () => {
+        // What goes on after an upload was answered (its pull requests charged and matched
+        // again) is waited for: nothing would do it later for one left undone.
+        await Promise.allSettled([...pending]);
         await db.close();
         process.exit(0);
       });

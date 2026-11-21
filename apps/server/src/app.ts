@@ -45,6 +45,7 @@ import {
   checkReport,
   getPull,
   listPulls,
+  chargeSession,
   rematchPull,
   rematchPulls,
   pullsAddedTo,
@@ -68,6 +69,8 @@ export type Env = {
     afterMerge?: PullAfterMergeReport;
     /** The session an upload stored: the pull requests it adds lines to are matched again once it is committed. */
     stored?: { machine_id: string; source: string; session_id: string };
+    /** And one it stored with another cost, or other branches: its pull requests are charged again then too. */
+    spent?: { machine_id: string; source: string; session_id: string };
   };
 };
 
@@ -93,6 +96,9 @@ class Undo extends Error {}
 
 /** People an organisation may add an hour: each is a message to an address nobody confirmed. */
 const INVITES_PER_HOUR = 30;
+
+/** How long after it failed charging a session to its pull requests is tried again, each time it fails, in milliseconds. */
+const CHARGE_RETRIES_MS = [30_000, 5 * 60_000, 30 * 60_000];
 
 /** An error an extension wants answered with a given status and a stable code. */
 export class ApiError extends Error {
@@ -253,6 +259,10 @@ export interface Options {
   telemetry?: Telemetry | null;
   /** What the committers kept of a pull request are hashed with (SESSIONLY_HASH_KEY); none: a plain hash. */
   hashKey?: string;
+  /** In place of `CHARGE_RETRIES_MS`: tests do not wait that long. */
+  chargeRetriesMs?: number[];
+  /** Handed what goes on after an upload was answered (its pull requests matched and charged again): tests wait for it, and so does a server that is stopping. */
+  background?: (work: Promise<void>) => void;
   /**
    * The organisation one repository is shown in (demo.ts), and the paths of
    * it that are not shown; or why those cannot be trusted, and reports to it
@@ -424,22 +434,45 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
 
   // The pull requests a session just stored adds lines to are found and
   // matched again once it is committed, each in a transaction of its own, as
-  // above. What fails is logged: the session is stored all the same.
+  // above. What fails is logged: the session is stored all the same. The
+  // upload is not kept waiting for any of it: a report may hold the
+  // organisation's lines for longer than whoever uploads waits for an answer,
+  // and the session is stored. Its pull requests are a moment behind it.
   api.put("/sessions/:machine/:source/:session", async (c, next) => {
     await next();
     const stored = c.get("stored");
-    if (c.res.status !== 200 || !stored) return;
-    try {
-      for (const { repo, number } of await ownerDb.asOrg(c.get("principal").orgId, (db) => pullsAddedTo(db, stored, options.hashKey))) {
-        try {
-          await ownerDb.asOrg(c.get("principal").orgId, (db) => rematchPull(db, repo, number, options.hashKey, { uploaded: true }));
-        } catch (err) {
-          failed(err);
-        }
+    const spent = c.get("spent");
+    if (c.res.status !== 200 || (!spent && !stored)) return;
+    // What fails (a report held the organisation's lines for too long) is tried again, later each
+    // time: a session's last upload is followed by no other that would charge it.
+    const charging = async (key: NonNullable<typeof spent>, tries: number[]): Promise<void> => {
+      try {
+        await ownerDb.asOrg(c.get("principal").orgId, (db) => chargeSession(db, key));
+      } catch (err) {
+        failed(err);
+        const [wait, ...rest] = tries;
+        if (wait != null) setTimeout(() => void charging(key, rest), wait).unref();
       }
-    } catch (err) {
-      failed(err);
-    }
+    };
+    const after = async (): Promise<void> => {
+      // What it cost, or where, is another: its pull requests are charged again, whether or not
+      // any of them has other lines of it now.
+      if (spent) await charging(spent, options.chargeRetriesMs ?? CHARGE_RETRIES_MS);
+      if (!stored) return;
+      try {
+        for (const { repo, number } of await ownerDb.asOrg(c.get("principal").orgId, (db) => pullsAddedTo(db, stored, options.hashKey))) {
+          try {
+            await ownerDb.asOrg(c.get("principal").orgId, (db) => rematchPull(db, repo, number, options.hashKey, { uploaded: true }));
+          } catch (err) {
+            failed(err);
+          }
+        }
+      } catch (err) {
+        failed(err);
+      }
+    };
+    const work = after();
+    options.background?.(work);
   });
 
   // Adding a person puts an organisation in front of them the next time
@@ -632,9 +665,10 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     }
     // Uploaded again at every turn, mostly as it was: then no pull request has anything new.
     if (result.stored && result.changed) c.set("stored", key);
+    if (result.stored && result.spent) c.set("spent", key);
     // Not stored, and not excluded: the server already has more of this cloud session.
     // Excluded: the person stopped the repository, so the session was not kept.
-    const { changed: _, ...answer } = result;
+    const { changed: _, spent: __, ...answer } = result;
     return c.json(answer);
   });
 

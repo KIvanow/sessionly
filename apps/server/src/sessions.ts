@@ -16,7 +16,7 @@ import {
 } from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
 import type { OrgDb } from "./db.ts";
-import { holdPullSessions, matchedBy } from "./pulls.ts";
+import { holdPullSessions, matchedBy, spentBy } from "./pulls.ts";
 
 const UNKNOWN = "(unknown)";
 
@@ -107,6 +107,8 @@ export type StoreResult = {
   excluded?: true;
   /** Stored, and what decides which pull requests it counts in is not what it was (`matchedBy`). */
   changed?: boolean;
+  /** Stored, and what it cost, or on which branches, is not what it was (`spentBy`): its pull requests are charged again. */
+  spent?: boolean;
 };
 
 /**
@@ -143,6 +145,7 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   // Read with the row held: another upload of this same session waits for
   // this one, and compares with what it left. (Uploads of other sessions do not wait.)
   const before = await matchedBy(db, { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! }, { hold: true });
+  const spentBefore = await spentBy(db, { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! });
   const [existing] = await db.query<{ owner_email: string; runtime: string | null; prompts: number; checkpoints: unknown }>(
     `SELECT owner_email, runtime, prompts, checkpoints FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
@@ -234,7 +237,8 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   );
   if (stored.length === 0) throw new Conflict("this session was uploaded by someone else");
   const after = await matchedBy(db, { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! });
-  return { stored: true, changed: after !== before };
+  const spentAfter = await spentBy(db, { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! });
+  return { stored: true, changed: after !== before, spent: spentAfter !== spentBefore };
 }
 
 /**
@@ -284,8 +288,10 @@ async function dropOwn(db: OrgDb, key: unknown[], email: string, refiled: string
 
 /**
  * A deleted session's lines go from the pull requests that kept which ones
- * they were. That it had lines there, and how many, stays: the pull request
- * then says a session of it was deleted since.
+ * they were, and with them what it contributed to each and was charged
+ * there: its cost is in no pull request from then on. That it had lines
+ * there, and how many, stays: the pull request then says a session of it
+ * was deleted since.
  *
  * Without them its lines in each count whole, as `weigh` counts those of a
  * pull request whose lines were not kept. They go from all its pull requests
@@ -297,10 +303,12 @@ export async function forgetLines(db: OrgDb, sessions: Record<string, unknown>[]
   // After any report that is storing these now: it then finds the session gone, or this finds what it stored.
   await holdPullSessions(db);
   await db.query(
-    `UPDATE pull_sessions p SET matched = NULL, opened_matched = NULL, weight = p.lines, opened_weight = p.opened_lines, opened_kept = NULL, opened_here = NULL
+    `UPDATE pull_sessions p SET matched = NULL, opened_matched = NULL, weight = p.lines, opened_weight = p.opened_lines, opened_kept = NULL, opened_here = NULL,
+            contributed = NULL, gone = NULL, gone_opened = NULL, charged_usd = NULL
      FROM jsonb_to_recordset($2::jsonb) AS gone(machine_id text, source text, session_id text)
      WHERE p.org_id = $1 AND p.machine_id = gone.machine_id AND p.source = gone.source
-       AND p.session_id = gone.session_id AND (p.matched IS NOT NULL OR p.opened_matched IS NOT NULL)`,
+       AND p.session_id = gone.session_id
+       AND (p.matched IS NOT NULL OR p.opened_matched IS NOT NULL OR p.contributed IS NOT NULL OR p.charged_usd IS NOT NULL)`,
     [db.orgId, JSON.stringify(sessions.map((s) => ({ machine_id: s.machine_id, source: s.source, session_id: s.session_id })))],
   );
 }
@@ -502,9 +510,28 @@ const GROUP_KEY: Record<GroupBy, string> = {
   day: `coalesce(to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), '${UNKNOWN}')`,
 };
 
+/**
+ * What each session is charged to pull requests (`pull_sessions.charged_usd`,
+ * see `charge` in pulls.ts): to those merged or open, and to those closed
+ * without merging. Joined to `sessions`, one row for each.
+ */
+const CHARGED = `LEFT JOIN LATERAL (
+    SELECT coalesce(sum(p.charged_usd) FILTER (WHERE r.state <> 'closed'), 0) AS in_live,
+           coalesce(sum(p.charged_usd) FILTER (WHERE r.state = 'closed'), 0) AS in_closed
+    FROM pull_sessions p JOIN pull_requests r ON r.org_id = p.org_id AND r.repo = p.repo AND r.number = p.number
+    WHERE p.org_id = sessions.org_id AND p.machine_id = sessions.machine_id AND p.source = sessions.source
+      AND p.session_id = sessions.session_id
+  ) charged ON true`;
+
+/** No more of a session than it cost: one stored a moment ago with a lower cost is charged again after. (A cost below nothing counts as none.) */
+const IN_LIVE = `least(charged.in_live, greatest(coalesce(cost_usd, 0), 0))`;
+
+// (A cost below nothing is not a cost: none of it in the total, as in what is charged to pull requests.)
 const TOTAL_COLUMNS = `
   count(*) AS sessions,
-  coalesce(sum(cost_usd), 0) AS cost_usd,
+  coalesce(sum(greatest(cost_usd, 0)), 0) AS cost_usd,
+  coalesce(sum(${IN_LIVE}), 0) AS in_pr_usd,
+  coalesce(sum(least(charged.in_closed, greatest(coalesce(cost_usd, 0), 0) - ${IN_LIVE})), 0) AS closed_unmerged_usd,
   count(*) FILTER (WHERE cost_usd IS NULL) AS sessions_without_cost,
   count(*) FILTER (WHERE cost_usd IS NOT NULL AND cost_source <> 'recorded') AS sessions_with_estimated_cost,
   sum(active_ms) AS active_ms, sum(prompts) AS prompts, sum(tool_calls) AS tool_calls,
@@ -522,6 +549,9 @@ const TOTAL_COLUMNS = `
   sum((checkpoints #>> '{${age},surviving}')::double precision) AS ck_${age}_surviving`,
   ).join(",\n  ")}`;
 
+/** To a millionth of a dollar, as a pull request's cost is. */
+const money = (usd: number): number => Math.round(usd * 1e6) / 1e6;
+
 function totals(row: Record<string, unknown>): Totals {
   // Out of the sessions with measured lines: one with none has nothing to keep at any age.
   const kept = (age: (typeof CHECKPOINTS)[number]): KeptAt => ({
@@ -534,6 +564,10 @@ function totals(row: Record<string, unknown>): Totals {
     key: String(row.key),
     sessions: num(row.sessions),
     cost_usd: num(row.cost_usd),
+    in_pr_usd: money(num(row.in_pr_usd)),
+    closed_unmerged_usd: money(num(row.closed_unmerged_usd)),
+    // What is left, so that the three are the cost between them.
+    not_in_pr_usd: Math.max(0, money(num(row.cost_usd) - money(num(row.in_pr_usd)) - money(num(row.closed_unmerged_usd)))),
     sessions_without_cost: num(row.sessions_without_cost),
     sessions_with_estimated_cost: num(row.sessions_with_estimated_cost),
     active_ms: num(row.active_ms),
@@ -569,10 +603,10 @@ export async function summarize(
   const { sql, params } = where(viewer, filters);
   const order = by === "day" ? "1" : "cost_usd DESC, 1";
   const groups = await db.query(
-    `SELECT ${GROUP_KEY[by]} AS key, ${TOTAL_COLUMNS} FROM sessions ${sql} GROUP BY 1 ORDER BY ${order}`,
+    `SELECT ${GROUP_KEY[by]} AS key, ${TOTAL_COLUMNS} FROM sessions ${CHARGED} ${sql} GROUP BY 1 ORDER BY ${order}`,
     params,
   );
-  const [total] = await db.query(`SELECT 'total' AS key, ${TOTAL_COLUMNS} FROM sessions ${sql}`, params);
+  const [total] = await db.query(`SELECT 'total' AS key, ${TOTAL_COLUMNS} FROM sessions ${CHARGED} ${sql}`, params);
   return { groups: groups.map(totals), total: totals(total ?? { key: "total" }) };
 }
 

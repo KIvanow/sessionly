@@ -32,7 +32,7 @@ Before a record leaves the machine:
 
 | Level | What is sent |
 |---|---|
-| `metadata` (default) | Counts, sizes, timings, tool names, statuses, relative file paths, models, tokens, cost, rewrite figures, git user, remote and branch, the working directory and repository folder (as `~/…` under the home directory), the agent's version and how it was started, its permission modes, and the paths of the instruction files it loaded (`CLAUDE.md`, rules). **No text** from prompts, commands, search patterns, URLs, errors or titles, and no content hashes. |
+| `metadata` (default) | Counts, sizes, timings, tool names, statuses, relative file paths, models, tokens, cost (for Claude Code also by branch), rewrite figures, git user, remote and branch, the working directory and repository folder (as `~/…` under the home directory), the agent's version and how it was started, its permission modes, and the paths of the instruction files it loaded (`CLAUDE.md`, rules). **No text** from prompts, commands, search patterns, URLs, errors or titles, and no content hashes. |
 | `previews` | The above, plus the 200-character previews and the hashes. A preview can contain anything you typed or ran, including secrets. |
 
 **Line hashes are a separate switch, off by default.** `sessionly settings --line-hashes on`

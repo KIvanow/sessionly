@@ -28,7 +28,7 @@ import {
 } from "@sessionly/schema";
 import type { Principal } from "./auth.ts";
 import type { OrgDb } from "./db.ts";
-import { holdPull, IN_WORKTREE, rematchPulls, reportedPaths } from "./pulls.ts";
+import { chargeAgain, holdPull, holdPullSessions, IN_WORKTREE, rematchPulls, reportedPaths } from "./pulls.ts";
 import { Conflict, forgetLines, RemovedPerson, storeUpload } from "./sessions.ts";
 
 export interface Demo {
@@ -382,22 +382,30 @@ async function hidePull(db: OrgDb, repo: string, number: number, hide: string[],
     detail: was.detail && { ...was.detail, files: was.detail.files && filesShown(was.detail.files, hide) },
     feedback: was.feedback && feedbackShown(was.feedback, hide)!,
   };
-  const sessions = await db.query<{ machine_id: string; source: string; session_id: string; matched: unknown; opened_matched: unknown }>(
-    `SELECT machine_id, source, session_id, matched, opened_matched FROM pull_sessions WHERE org_id = $1 AND repo = $2 AND number = $3`,
+  const sessions = await db.query<{ machine_id: string; source: string; session_id: string; matched: unknown; opened_matched: unknown; contributed: unknown; gone: unknown; gone_opened: unknown }>(
+    `SELECT machine_id, source, session_id, matched, opened_matched, contributed, gone, gone_opened FROM pull_sessions WHERE org_id = $1 AND repo = $2 AND number = $3`,
     [db.orgId, repo, number],
   );
   let changed = !same(was, now);
+  const fewer: { machine_id: string; source: string; session_id: string }[] = [];
   for (const s of sessions) {
     const matched = s.matched == null ? null : jsonOf<Record<string, string[]>>(s.matched);
     const opened = s.opened_matched == null ? null : jsonOf<Record<string, string[]>>(s.opened_matched);
-    if (same(matched, matchedShown(matched, hide)) && same(opened, matchedShown(opened, hide))) continue;
+    const contributed = s.contributed == null ? null : jsonOf<Record<string, string[]>>(s.contributed);
+    const gone = s.gone == null ? null : jsonOf<Record<string, string[]>>(s.gone);
+    const goneOpened = s.gone_opened == null ? null : jsonOf<Record<string, string[]>>(s.gone_opened);
+    if (same(matched, matchedShown(matched, hide)) && same(opened, matchedShown(opened, hide)) && same(contributed, matchedShown(contributed, hide))) continue;
     changed = true;
-    // What its opening lines still there count as was of the lines taken out too: it is weighed
-    // again when the pull request is matched again, as it is next (`keepSessions`).
+    // What its opening lines still there count as was of the lines taken out too, and so was what it
+    // is charged: it is weighed and charged again below, whether or not the pull request can be
+    // matched again after (one last reported before its committers were kept cannot).
+    if (fewer.length === 0) await holdPullSessions(db);
+    fewer.push({ machine_id: s.machine_id, source: s.source, session_id: s.session_id });
     await db.query(
-      `UPDATE pull_sessions SET matched = $7::jsonb, opened_matched = $8::jsonb, opened_kept = NULL, opened_here = NULL
+      `UPDATE pull_sessions SET matched = $7::jsonb, opened_matched = $8::jsonb, opened_kept = NULL, opened_here = NULL,
+              contributed = $9::jsonb, gone = $10::jsonb, gone_opened = $11::jsonb, contributed_lines = NULL
        WHERE org_id = $1 AND repo = $2 AND number = $3 AND machine_id = $4 AND source = $5 AND session_id = $6`,
-      [db.orgId, repo, number, s.machine_id, s.source, s.session_id, jsonOrNull(matchedShown(matched, hide)), jsonOrNull(matchedShown(opened, hide))],
+      [db.orgId, repo, number, s.machine_id, s.source, s.session_id, jsonOrNull(matchedShown(matched, hide)), jsonOrNull(matchedShown(opened, hide)), jsonOrNull(matchedShown(contributed, hide)), jsonOrNull(matchedShown(gone, hide)), jsonOrNull(matchedShown(goneOpened, hide))],
     );
   }
   await db.query(
@@ -406,6 +414,7 @@ async function hidePull(db: OrgDb, repo: string, number: number, hide: string[],
      WHERE org_id = $1 AND repo = $2 AND number = $3`,
     [db.orgId, repo, number, JSON.stringify(now.first), JSON.stringify(now.last), jsonOrNull(now.detail), jsonOrNull(now.feedback), rules, changed],
   );
+  await chargeAgain(db, fewer);
   return changed;
 }
 
@@ -511,9 +520,12 @@ export async function importDemo(from: Each, to: Each, demo: Pick<Demo, "repo" |
       `DELETE FROM sessions WHERE org_id = $1 AND copied RETURNING machine_id, source, session_id`,
       [db.orgId],
     );
-    await forgetLines(db, before);
+    // Their lines in the pull requests stay as they are for the copies made of them below, and
+    // go only with the ones not copied again: lines that went in review are in no report any
+    // more and could not be matched to a copy again, and which of the lines a pull request was
+    // opened with were whose says, at the next match, which of them are another's since.
     const keyOf = (s: { machine_id?: string; source?: string; session_id?: string }) => `${s.machine_id}\n${s.source}\n${s.session_id}`;
-    const again = new Set<string>();
+    const again = new Map<string, { machine_id: string; source: string; session_id: string }>();
     let copied = 0;
     let skipped = 0;
     for (const row of theirs) {
@@ -525,7 +537,8 @@ export async function importDemo(from: Each, to: Each, demo: Pick<Demo, "repo" |
         await db.query(`RELEASE SAVEPOINT one`);
         if (stored) {
           copied += 1;
-          again.add(keyOf(made.session ?? {}));
+          const s = made.session ?? {};
+          again.set(keyOf(s), { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! });
         } else skipped += 1;
       } catch (err) {
         if (!refused(err)) throw err;
@@ -533,7 +546,15 @@ export async function importDemo(from: Each, to: Each, demo: Pick<Demo, "repo" |
         skipped += 1;
       }
     }
-    return { copied, skipped, removed: before.filter((s) => !again.has(keyOf(s))).length };
+    const gone = before.filter((s) => !again.has(keyOf(s)));
+    await forgetLines(db, gone);
+    // Charged from here on, though a pull request of theirs cannot be matched again below: the ones
+    // copied before, and one copied anew whose lines a pull request kept from an earlier copy of it.
+    // (Held here: with no copy from before, nothing above took it, and what a server just
+    // started is weighing from before an upgrade must not be written over this.)
+    await holdPullSessions(db);
+    await chargeAgain(db, [...again.values()]);
+    return { copied, skipped, removed: gone.length };
   });
   // Every pull request of the repository there, a batch at a time, as the page's own button does it.
   let matched = 0;

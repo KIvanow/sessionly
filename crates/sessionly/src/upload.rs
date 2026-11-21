@@ -1159,6 +1159,42 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
     }
 
     #[test]
+    fn cost_by_branch_is_sent_and_hashed_only_where_there_is_one() {
+        let mut upload = Upload {
+            schema_version: 1,
+            session: Session {
+                session_id: "s".into(),
+                cost: Some(crate::session::Cost::estimate(10.0, 0)),
+                ..Default::default()
+            },
+            rewrite: None,
+            lines: Vec::new(),
+            checkpoints: Vec::new(),
+        };
+        // As every agent but Claude Code sends it, and as it was sent before.
+        let before = payload_hash(&upload);
+        assert!(!serde_json::to_string(&upload)
+            .unwrap()
+            .contains("by_branch"));
+        upload.session.cost.as_mut().unwrap().by_branch = vec![
+            crate::session::BranchCost {
+                branch: Some("feat".into()),
+                usd: 6.0,
+            },
+            crate::session::BranchCost {
+                branch: None,
+                usd: 4.0,
+            },
+        ];
+        assert_ne!(payload_hash(&upload), before);
+        let sent = serde_json::to_value(&upload).unwrap();
+        assert_eq!(
+            sent["session"]["cost"]["by_branch"],
+            serde_json::json!([{ "branch": "feat", "usd": 6.0 }, { "branch": null, "usd": 4.0 }])
+        );
+    }
+
+    #[test]
     fn a_new_checkpoint_is_sent_once_and_none_changes_nothing() {
         use crate::ledger::Fingerprint;
         use crate::rewrite::FileLines;
