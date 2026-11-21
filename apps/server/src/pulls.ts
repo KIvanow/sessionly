@@ -268,6 +268,13 @@ function addLines(a: Lines, b: Lines): Lines {
   return Object.fromEntries(all);
 }
 
+/** How often each line of each file is in a set of lines, keyed as the lines seen are. */
+function copiesAt(lines: Lines | null): Map<string, number> {
+  const copies = new Map<string, number>();
+  for (const [path, hashes] of Object.entries(lines ?? {})) for (const hash of hashes) copies.set(lineKey(path, hash), (copies.get(lineKey(path, hash)) ?? 0) + 1);
+  return copies;
+}
+
 /** How often each line is in a set of lines, whatever file it is in. */
 function copiesOf(lines: Lines | null): Map<string, number> {
   const copies = new Map<string, number>();
@@ -481,11 +488,14 @@ const DEFAULT_BASES = ["main", "master"];
  * on a branch is the pull requests' whose branch it is. What was spent on
  * one that is no such pull request's and that some are based on (`main`,
  * before the branch was made: the planning, the first edits) is theirs
- * too. In either, a line that an earlier pull request had already is that
- * one's, and what was spent on it with it: what was spent on `develop` is
- * the release's from it by name, and goes to the ones that brought its
- * lines, but for what is new in it; what was spent on the branch of one
- * that brings an earlier one's lines again goes to the earlier one. What
+ * too. A branch may be one's own and the base of others: where its own had
+ * its lines first (the others are stacked on it), what was spent there is
+ * that one's; where one based on it had its lines first (`develop`, and
+ * then a release from it of what they brought), it stays with all of those,
+ * and the release is charged for what is new in it. In any of these, a line
+ * that an earlier pull request had already is that one's, and what was
+ * spent on it with it: what was spent on the branch of one that brings an
+ * earlier one's lines again goes to the earlier one. What
  * was spent on any other branch is no pull request's. What was spent on turns that name no branch
  * is shared out between all of them by lines: no name says nothing of where
  * the work went.
@@ -544,7 +554,12 @@ export function charge(
   const charged = rows.map(() => 0);
   for (const [branch, spent] of named) {
     const heads = every.filter((i) => rows[i]!.head_ref === branch);
-    byLines(spent, heads.length > 0 ? heads : every.filter((i) => basedOn(rows[i]!, branch)), charged);
+    const based = every.filter((i) => rows[i]!.head_ref !== branch && basedOn(rows[i]!, branch));
+    // Its own pull request's where that one had its lines first: the others are stacked on it.
+    // Where one based on it had its lines first, it was spent on those, and stays with all of
+    // them when their release from it comes, whichever of them that one has the lines of.
+    const stacked = heads.length > 0 && (based.length === 0 || heads[0]! < based[0]!);
+    byLines(spent, stacked ? heads : [...based, ...heads], charged);
   }
   byLines(unnamed, every, charged);
   // One with lines of the session's and nothing spent on its own branch: the branches do not say what it cost.
@@ -1370,9 +1385,11 @@ export async function holdPullSessions(db: OrgDb): Promise<void> {
  * it has now (`seen`), is whose this match says it is: one put down to a
  * session before the one that wrote it was uploaded goes with it. A line
  * that is in neither any more stays with the session it was last put down
- * to: there is nothing left to match it by.
- * A line is the same line in whatever file: one whose file was renamed, or
- * that was moved to another, has not gone and is not given again.
+ * to: there is nothing left to match it by. Which those are is kept
+ * (`gone`), so that matching the same files again changes nothing.
+ * A session's line is the same line in whatever file: one whose file was
+ * renamed, or that was moved to another, has not gone and is not given
+ * again.
  *
  * What their lines count as, and what each session is charged, is worked
  * out again in every pull request those sessions, and the ones before, have
@@ -1385,15 +1402,15 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   // The pull request's own row is held by whoever got here, so these are not
   // changing under it.
   const had = await db.query(
-    `SELECT s.machine_id, s.source, s.session_id, s.lines, s.opened_lines, s.matched, s.opened_matched, s.contributed,
+    `SELECT s.machine_id, s.source, s.session_id, s.lines, s.opened_lines, s.matched, s.opened_matched, s.contributed, s.gone,
             (r.first_event = 'opened' AND s.opened_matched IS NOT NULL AND s.opened_kept IS NULL) OR s.contributed_lines IS NULL AS unweighed
      FROM pull_sessions s JOIN pull_requests r USING (org_id, repo, number)
      WHERE s.org_id = $1 AND s.repo = $2 AND s.number = $3`,
     [db.orgId, repo, number],
   );
   const kept = (value: unknown) => (value == null ? null : json<Lines>(value));
-  const next = new Map<string, Kept & { contributed: Lines }>(
-    sessions.map((s) => [sessionKey(s), { ...s, contributed: unionLines(s.matched, s.opened_matched)! }]),
+  const next = new Map<string, Kept & { contributed: Lines; gone: Lines }>(
+    sessions.map((s) => [sessionKey(s), { ...s, contributed: unionLines(s.matched, s.opened_matched)!, gone: {} }]),
   );
   // What each had given before, in an order that does not depend on how the rows come back.
   // From before what a session contributed was kept apart: what it had then, and was opened with.
@@ -1401,73 +1418,83 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   const gave = had
     .map((row) => ({ row, key: sessionKey(row as never), before: kept(row.contributed) ?? unionLines(kept(row.matched), kept(row.opened_matched)) }))
     .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  // A line given more often, by all of them together, than the files have it now or had at
-  // first (three of the same, of which review took two; one each of two sessions, of which
-  // review took one): the copies that are in neither are gone. They stay with the sessions
-  // that this match gives fewer of than they had given, so that what a session gave does not
-  // shrink when review takes its lines out, while a line that is still there is whose this
-  // match says it is. A copy is still there when its file has it, or when this match puts it
-  // down to a session in whatever file: one whose file someone renamed, with no session that
-  // wrote it under the new name, is in neither, and stays with the session that gave it.
-  const given = new Map<string, number>();
-  const there = new Map<string, number>();
-  for (const { before } of gave) {
-    for (const [line, n] of copiesOf(before)) given.set(line, (given.get(line) ?? 0) + n);
-    for (const [path, hashes] of Object.entries(before ?? {})) {
-      for (const [hash, n] of copiesOf({ [path]: hashes })) there.set(lineKey(path, hash), (there.get(lineKey(path, hash)) ?? 0) + n);
-    }
-  }
-  // (In the files it was given in: no more of them than were given there.)
-  const inPlace = new Map<string, number>();
-  for (const [key, n] of there) {
-    const hash = key.slice(key.lastIndexOf("\n") + 1);
-    inPlace.set(hash, (inPlace.get(hash) ?? 0) + Math.min(n, seen.get(key) ?? 0));
-  }
-  const matchedNow = new Map([...next].map(([key, s]) => [key, copiesOf(s.contributed)]));
+  // A line that sessions had in a file, more often than that file has it now or had at first,
+  // and more often than this match gives it there: the copies over are gone (three of the
+  // same, of which review took two; one each of two sessions, of which review took one).
+  // They stay with the sessions that had them there and have fewer there now, and are kept
+  // as gone (`gone`): the same report again, or a line of the same words that another session
+  // writes later, there or in another file, takes none of them back. A line that is still
+  // there is whose this match says it is.
+  // A session's own line is the same line in whatever file: one it has in another file now
+  // (the file was renamed, the line moved) has not gone, and one of its lines that went and
+  // that it has again is not counted twice. Another session's line in another file says
+  // nothing of this one's.
+  const has = new Map([...next].map(([key, s]) => [key, copiesAt(s.contributed)]));
+  const held = gave.flatMap(({ row, key, before }) => {
+    if (!before) return [];
+    const all = copiesAt(before);
+    // (No more of them than it gave there.)
+    const went = new Map([...copiesAt(kept(row.gone))].map(([line, n]) => [line, Math.min(n, all.get(line) ?? 0)]));
+    const there = new Map([...all].map(([line, n]) => [line, n - (went.get(line) ?? 0)]));
+    return [{ row, key, went, there, now: has.get(key) ?? new Map<string, number>() }];
+  });
+  const over = new Map<string, number>();
+  for (const { there } of held) for (const [line, n] of there) over.set(line, (over.get(line) ?? 0) + n);
   const matched = new Map<string, number>();
-  for (const has of matchedNow.values()) for (const [hash, n] of has) matched.set(hash, (matched.get(hash) ?? 0) + n);
-  const left = new Map([...given].map(([hash, n]) => [hash, Math.max(0, n - Math.max(inPlace.get(hash) ?? 0, matched.get(hash) ?? 0))]));
-  for (const { row, key, before } of gave) {
-    if (!before) continue;
-    const has = matchedNow.get(key);
-    // How many copies of each line of its own are gone, and then which: those of the files that have fewer of it now.
-    const take = new Map<string, number>();
-    for (const [hash, n] of copiesOf(before)) {
-      const some = Math.min(n - (has?.get(hash) ?? 0), left.get(hash) ?? 0);
+  for (const now of has.values()) for (const [line, n] of now) matched.set(line, (matched.get(line) ?? 0) + n);
+  for (const [line, n] of over) over.set(line, Math.max(0, n - Math.max(seen.get(line) ?? 0, matched.get(line) ?? 0)));
+  const hashOf = (line: string) => line.slice(line.lastIndexOf("\n") + 1);
+  const pathOf = (line: string) => line.slice(0, line.lastIndexOf("\n"));
+  for (const { row, key, went, there, now } of held) {
+    // What it has now that it had not, by line whatever the file: of its own lines, moved or back.
+    const more = new Map<string, number>();
+    for (const [line, n] of now) {
+      const some = n - (there.get(line) ?? 0);
       if (some <= 0) continue;
-      left.set(hash, left.get(hash)! - some);
-      take.set(hash, some);
+      // Back where it went from, first.
+      const back = Math.min(some, went.get(line) ?? 0);
+      if (back > 0) went.set(line, went.get(line)! - back);
+      if (some > back) more.set(hashOf(line), (more.get(hashOf(line)) ?? 0) + some - back);
     }
-    if (take.size === 0) continue;
-    const still = new Map(Object.entries(next.get(key)?.contributed ?? {}));
+    const moved = (line: string, n: number): number => {
+      const some = Math.min(n, more.get(hashOf(line)) ?? 0);
+      if (some > 0) more.set(hashOf(line), more.get(hashOf(line))! - some);
+      return n - some;
+    };
     const gone = new Map<string, string[]>();
-    for (const [path, hashes] of Object.entries(before)) {
-      const had = copiesOf({ [path]: hashes });
-      const stays = copiesOf({ [path]: still.get(path) ?? [] });
-      for (const [hash, n] of had) {
-        const some = Math.min(n - (stays.get(hash) ?? 0), take.get(hash) ?? 0);
-        if (some <= 0) continue;
-        take.set(hash, take.get(hash)! - some);
-        gone.set(path, [...(gone.get(path) ?? []), ...Array<string>(some).fill(hash)]);
-      }
+    const keep = (line: string, n: number) => {
+      if (n > 0) gone.set(pathOf(line), [...(gone.get(pathOf(line)) ?? []), ...Array<string>(n).fill(hashOf(line))]);
+    };
+    // (In an order that does not depend on how its files were kept.)
+    for (const line of [...there.keys()].sort()) {
+      const fewer = moved(line, there.get(line)! - (now.get(line) ?? 0));
+      const some = Math.min(fewer, over.get(line) ?? 0);
+      if (some <= 0) continue;
+      over.set(line, over.get(line)! - some);
+      keep(line, some);
     }
+    for (const line of [...went.keys()].sort()) keep(line, moved(line, went.get(line)!));
     if (gone.size === 0) continue;
     // (As entries: a file may be called `__proto__`, or `constructor`.)
-    const now = next.get(key);
-    if (now) now.contributed = addLines(now.contributed, Object.fromEntries(gone));
-    else {
+    const one = next.get(key);
+    if (one) {
+      one.gone = Object.fromEntries(gone);
+      one.contributed = addLines(one.contributed, one.gone);
+    } else {
       const s = { machine_id: String(row.machine_id), source: String(row.source), session_id: String(row.session_id) };
-      next.set(key, { ...s, lines: 0, matched: {}, opened_lines: 0, opened_matched: {}, contributed: Object.fromEntries(gone) });
+      next.set(key, { ...s, lines: 0, matched: {}, opened_lines: 0, opened_matched: {}, contributed: Object.fromEntries(gone), gone: Object.fromEntries(gone) });
     }
   }
   const files = (lines: Lines | null) => lines && Object.keys(lines).sort().map((path) => [path, [...lines[path]!].sort()]);
-  const said = (s: { lines: unknown; opened_lines: unknown; matched: unknown; opened_matched: unknown; contributed: unknown }) =>
+  const said = (s: { lines: unknown; opened_lines: unknown; matched: unknown; opened_matched: unknown; contributed: unknown; gone: unknown }) =>
     JSON.stringify([
       s.lines == null ? null : num(s.lines),
       s.opened_lines == null ? null : num(s.opened_lines),
       files(kept(s.matched)),
       files(kept(s.opened_matched)),
       files(kept(s.contributed)),
+      // (None kept, of one from before they were: none.)
+      files(kept(s.gone) ?? {}),
     ]);
   const was = new Map(had.map((row) => [sessionKey(row as never), said(row as never)]));
   // (One kept before what its opening lines still there count as was, or what it contributed, is weighed again.)
@@ -1484,13 +1511,13 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
     await db.query(
       `INSERT INTO pull_sessions
          (org_id, repo, number, machine_id, source, session_id, lines, weight, matched, opened_lines, opened_weight, opened_matched,
-          contributed, contributed_lines)
+          contributed, gone, contributed_lines)
        SELECT $1, $2, $3, s.machine_id, s.source, s.session_id, s.lines, s.lines, CASE WHEN here.is THEN s.matched END,
               s.opened_lines, s.opened_lines, CASE WHEN here.is THEN s.opened_matched END,
-              CASE WHEN here.is THEN s.contributed END, s.contributed_lines
+              CASE WHEN here.is THEN s.contributed END, CASE WHEN here.is THEN s.gone END, s.contributed_lines
        FROM jsonb_to_recordset($4::jsonb)
          AS s(machine_id text, source text, session_id text, lines integer, matched jsonb, opened_lines integer, opened_matched jsonb,
-              contributed jsonb, contributed_lines integer),
+              contributed jsonb, gone jsonb, contributed_lines integer),
        LATERAL (SELECT EXISTS (SELECT 1 FROM sessions x WHERE x.org_id = $1 AND x.machine_id = s.machine_id
                                AND x.source = s.source AND x.session_id = s.session_id) AS is) here`,
       [db.orgId, repo, number, JSON.stringify([...next.values()].map((s) => ({ ...s, contributed_lines: countLines(s.contributed) })))],

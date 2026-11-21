@@ -261,7 +261,7 @@ export interface Options {
   hashKey?: string;
   /** In place of `CHARGE_RETRIES_MS`: tests do not wait that long. */
   chargeRetriesMs?: number[];
-  /** Handed what goes on after an upload was answered (its pull requests matched and charged again): tests wait for it. */
+  /** Handed what goes on after an upload was answered (its pull requests matched and charged again): tests wait for it, and so does a server that is stopping. */
   background?: (work: Promise<void>) => void;
   /**
    * The organisation one repository is shown in (demo.ts), and the paths of

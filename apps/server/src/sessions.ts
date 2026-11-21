@@ -309,7 +309,8 @@ export async function forgetLines(
   await holdPullSessions(db);
   await db.query(
     `UPDATE pull_sessions p SET matched = NULL, opened_matched = NULL, weight = p.lines, opened_weight = p.opened_lines, opened_kept = NULL, opened_here = NULL,
-            contributed = CASE WHEN $3::boolean THEN p.contributed END, charged_usd = NULL
+            contributed = CASE WHEN $3::boolean THEN p.contributed END, gone = CASE WHEN $3::boolean THEN p.gone END,
+            charged_usd = NULL
      FROM jsonb_to_recordset($2::jsonb) AS gone(machine_id text, source text, session_id text)
      WHERE p.org_id = $1 AND p.machine_id = gone.machine_id AND p.source = gone.source
        AND p.session_id = gone.session_id
@@ -528,14 +529,14 @@ const CHARGED = `LEFT JOIN LATERAL (
       AND p.session_id = sessions.session_id
   ) charged ON true`;
 
-/** No more of a session than it cost: one stored a moment ago with a lower cost is charged again after. */
-const IN_LIVE = `least(charged.in_live, coalesce(cost_usd, 0))`;
+/** No more of a session than it cost: one stored a moment ago with a lower cost is charged again after. (And none of a cost below nothing, which charges nothing.) */
+const IN_LIVE = `greatest(0, least(charged.in_live, coalesce(cost_usd, 0)))`;
 
 const TOTAL_COLUMNS = `
   count(*) AS sessions,
   coalesce(sum(cost_usd), 0) AS cost_usd,
   coalesce(sum(${IN_LIVE}), 0) AS in_pr_usd,
-  coalesce(sum(least(charged.in_closed, coalesce(cost_usd, 0) - ${IN_LIVE})), 0) AS closed_unmerged_usd,
+  coalesce(sum(greatest(0, least(charged.in_closed, coalesce(cost_usd, 0) - ${IN_LIVE}))), 0) AS closed_unmerged_usd,
   count(*) FILTER (WHERE cost_usd IS NULL) AS sessions_without_cost,
   count(*) FILTER (WHERE cost_usd IS NOT NULL AND cost_source <> 'recorded') AS sessions_with_estimated_cost,
   sum(active_ms) AS active_ms, sum(prompts) AS prompts, sum(tool_calls) AS tool_calls,

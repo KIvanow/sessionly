@@ -1803,8 +1803,9 @@ test("a session's cost is split between the pull requests it has lines in by wha
   // two on the one branch share what was spent on it; a branch that is a pull request's own
   // is not also the base of the ones stacked on it afterwards
   assert.deepEqual(usd(charge(turns, [row("main", lines("c.ts", 5), 0, "release"), row("feat", lines("a.ts", 1, 2, 3), 0, "main"), row("feat", lines("b.ts", 4), 0, "main")])), [3, 4.5, 1.5]);
-  // whichever was opened first, while its lines are its own
-  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3), 0, "main"), row("feat", lines("b.ts", 4), 0, "main"), row("main", lines("c.ts", 5), 0, "release")])), [4.5, 1.5, 3]);
+  // where the ones based on it had their lines first, what was spent on it stays with them when its
+  // own comes: that one is charged for its line, one of the five
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3), 0, "main"), row("feat", lines("b.ts", 4), 0, "main"), row("main", lines("c.ts", 5), 0, "release")])), [6.3, 2.1, 0.6]);
   // one that brings an earlier one's lines again, on a branch of its own: what was spent there went on
   // those lines, and is the earlier one's; with a line that is new in it, a third of it is its own
   const again = { cost_usd: 10, by_branch: [{ branch: "one", usd: 4 }, { branch: "two", usd: 6 }] };
@@ -1826,6 +1827,12 @@ test("a session's cost is split between the pull requests it has lines in by wha
   assert.deepEqual(usd(charge(planned, [row("feat", lines("a.ts", 1, 2, 3), 0, "develop"), row("develop", lines("a.ts", 1, 2, 3), 0, "main")])), [10, 0]);
   // with a line of its own it is charged for that one, as one of the four: no more moves
   assert.deepEqual(usd(charge(planned, [row("feat", lines("a.ts", 1, 2, 3), 0, "develop"), row("develop", { "a.ts": [1, 2, 3].map(h), "v.ts": [4].map(h) }, 0, "main")])), [7.75, 2.25]);
+  // a release that has the lines of one of two that are based on its branch: the other keeps its
+  // share of what was spent there, and nothing moves when the release comes
+  const both = { cost_usd: 10, by_branch: [{ branch: "develop", usd: 4 }, { branch: "one", usd: 3 }, { branch: "two", usd: 3 }] };
+  const based = [row("one", lines("a.ts", 1, 2, 3), 0, "develop"), row("two", lines("b.ts", 9), 0, "develop")];
+  assert.deepEqual(usd(charge(both, based)), [6, 4]);
+  assert.deepEqual(usd(charge(both, [...based, row("develop", lines("a.ts", 1, 2, 3), 0, "main")])), [6, 4, 0]);
   // lines together: each as often as the one that has it most
   assert.deepEqual(unionLines({ "a.ts": [h(1), h(1), h(2)] }, { "a.ts": [h(1), h(3)], "constructor": [h(4)] }), { "a.ts": [h(1), h(1), h(2), h(3)], "constructor": [h(4)] });
   // a file renamed between the two: its lines are in both, once
@@ -1969,6 +1976,17 @@ test("what was spent getting a pull request merged stays spent, and every dollar
   for (const g of (await spent()).groups) addsUp(g, `after deleting, ${g.key}`);
   // someone who sees only their own sessions is told the same of those
   addsUp((await call(tokens.ann, "GET", "/summary?by=tool&repo=acme/spent")).body.total, "their own");
+  // a cost below nothing charges nothing, and takes nothing off what is in pull requests
+  const off = "github.com/acme/below";
+  for (const [id, usd, hashes] of [["sp-below", -5, []], ["sp-above", 10, [h(801), h(802)]]] as const) {
+    const s = session(id, "claude-code", "claude-opus-5-5", "2026-11-10T09:00:00Z", hashes.length ? [{ path: "z.ts", model: null, hashes: [...hashes] }] : []);
+    s.session.repo.remote = off;
+    (s.session as Record<string, unknown>).cost = { total_usd: usd, source: "estimated" };
+    assert.equal((await call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, s)).status, 200);
+  }
+  await call(tokens.ci, "PUT", "/prs", report({ repo: off, number: 1, files: [file("z.ts", 801, 802)] }));
+  const below = (await call(tokens.admin, "GET", "/summary?by=tool&repo=acme/below")).body.total;
+  assert.deepEqual([below.in_pr_usd, below.closed_unmerged_usd], [10, 0]);
 });
 
 test("what a session gave and is charged holds through copies of a line and a later pull request with the same lines, and moves with a pull request's branches", async () => {
@@ -2046,6 +2064,46 @@ test("what a session gave and is charged holds through copies of a line and a la
   assert.deepEqual(await lone(), [[2, 2, 3]]);
   await sent(15, [file("y.ts", 9004), file("alone.ts", 2300, 2301)], { event: "synchronize" });
   assert.deepEqual(await lone(), [[0, 2, 3]]);
+
+  // a line that went in review, and then another session writes a line of the same words in another
+  // file: that says nothing of the one that went, which the first session gave still
+  await sent(16, [file("y.ts", 9005)]);
+  await put("h-went", 10, { "g.ts": [2400] });
+  await sent(16, [file("y.ts", 9005), file("g.ts", 2400)], { event: "synchronize" });
+  await sent(16, [file("y.ts", 9005)], { event: "synchronize" });
+  await put("h-wrote", 4, { "i.ts": [2400, 2401] });
+  await sent(16, [file("y.ts", 9005), file("i.ts", 2400, 2401)], { event: "synchronize" });
+  const sixteen = await pull(16);
+  assert.deepEqual([sixteen.cost.usd, sixteen.sessions.map((x: any) => [x.session_id, x.lines, x.contributed_lines, x.cost_share_usd]).sort()], [14, [["h-went", 0, 1, 10], ["h-wrote", 2, 2, 4]]]);
+
+  // the same line of two sessions in two files, and review takes the one file's: the copy that went
+  // is the session's that had it there, whatever the sessions are called, and stays its own when the
+  // other file's copy turns out to be a third session's, uploaded later
+  await sent(17, [file("y.ts", 9006)]);
+  await put("h-b", 10, { "k.ts": [2500] });
+  await put("h-a", 20, { "l.ts": [2500] });
+  await sent(17, [file("y.ts", 9006), file("k.ts", 2500), file("l.ts", 2500)], { event: "synchronize" });
+  await sent(17, [file("y.ts", 9006), file("l.ts", 2500)], { event: "synchronize" });
+  const late = session("h-c", "claude-code", "claude-opus-5-5", "2026-11-10T14:00:00Z", [{ path: "l.ts", model: null, hashes: [h(2500)] }]);
+  late.session.repo.remote = repo;
+  (late.session as Record<string, unknown>).cost = { total_usd: 30, source: "recorded" };
+  await call(tokens.ann, "PUT", "/sessions/m1/claude-code/h-c", late);
+  const seventeen = await pull(17);
+  assert.deepEqual([seventeen.cost.usd, seventeen.sessions.map((x: any) => [x.session_id, x.lines, x.contributed_lines, x.cost_share_usd]).sort()], [40, [["h-b", 0, 1, 10], ["h-c", 1, 1, 30]]]);
+
+  // two copies of a line, of which review takes one, and the one left is no one's now (its commits
+  // are someone else's): the copy that went is kept, and the same report again changes nothing
+  await put("h-twice", 10, { "v.ts": [2600, 2600] });
+  await sent(18, [file("y.ts", 9007)], { commit_emails: ["ann@example.com"] });
+  await sent(18, [file("y.ts", 9007), file("v.ts", 2600, 2600)], { event: "synchronize", commit_emails: ["ann@example.com"] });
+  const twice = async () => (await pull(18)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd]);
+  assert.deepEqual(await twice(), [[2, 2, 10]]);
+  for (let again = 0; again < 3; again++) {
+    await sent(18, [file("y.ts", 9007), file("v.ts", 2600)], { event: "synchronize", commit_emails: ["bob@example.com"] });
+    assert.deepEqual(await twice(), [[0, 1, 10]], `report ${again + 1}`);
+  }
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 18 })).status, 200);
+  assert.deepEqual(await twice(), [[0, 1, 10]]);
 
   // one stacked on another: what was spent on main is the one's that is based on it, until the first
   // is merged and the second is based on main as well, with not a line of either changed

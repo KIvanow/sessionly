@@ -875,6 +875,11 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE pull_sessions ADD COLUMN contributed jsonb`,
   `ALTER TABLE pull_sessions ADD COLUMN contributed_lines integer`,
   `ALTER TABLE pull_sessions ADD COLUMN charged_usd double precision`,
+  // Which of the lines it contributed are in the pull request no more, in
+  // what it was first reported with or in what it has now: they stay the
+  // session's whatever is matched after (see `keepSessions`). Null from
+  // before, and with `contributed`.
+  `ALTER TABLE pull_sessions ADD COLUMN gone jsonb`,
 ];
 
 /**

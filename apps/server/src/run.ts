@@ -252,7 +252,13 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       .catch((err) => console.error("purging organisations failed:", err));
   }, 60 * 60_000);
   purging.unref();
+  // What is still going on after an upload was answered: waited for before the server stops.
+  const pending = new Set<Promise<void>>();
   const app = createApp(db, {
+    background: (work) => {
+      pending.add(work);
+      void work.finally(() => pending.delete(work));
+    },
     hashKey: hashKeyOf(process.env),
     // Whatever else is wrong with the settings of a demo: reports there are never kept whole.
     demo: reportsShownIn(process.env),
@@ -336,6 +342,9 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {
       server.close(async () => {
+        // What goes on after an upload was answered (its pull requests charged and matched
+        // again) is waited for: nothing would do it later for one left undone.
+        await Promise.allSettled([...pending]);
         await db.close();
         process.exit(0);
       });
