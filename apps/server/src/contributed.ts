@@ -132,7 +132,7 @@ export interface Contributed {
  *   (`gone_opened`), where the match gives the session that line of the
  *   first report (more often than it has it in the files), and only as
  *   long as it does: one that the match gives to another session, or to
- *   no one, or that is in the files again, is not kept. Any other copy that went (a later copy of such a line too) stays
+ *   no one, is not kept. Any other copy that went (a later copy of such a line too) stays
  *   the session's for good.
  * - All of that is of the lines a session has in the files (`matched`). The
  *   lines it was opened with are put together with them and those that went
@@ -210,13 +210,31 @@ export function contributedAfter(before: Held[], now: Credited[], first: Map<str
     for (const line of [...later.keys()].sort()) add(kept.later, line, stays(line, later.get(line)!));
     return { key, went, passed, credit, ...kept };
   });
-  // Then which of them are lines of the first report: of those kept as such, no more than the
-  // match gives the session of that line there beyond those it has in the files, nor between
-  // the sessions than only the first report has still. Of those that left their place with
-  // this match, as many more are: the ones of the sessions that the match gives the line there
-  // (one that moved is one of them as much as one that went), before the others', which are
-  // not kept at all (the match gives the line to another session, or to no one).
-  for (const s of left) for (const [line, n] of s.opened) s.opened.set(line, take(firstOnly, line, Math.min(n, s.credit.get(line) ?? 0)));
+  // Then which of them are lines of the first report. Only the first report has `firstOnly`
+  // of each still, and those are the sessions' that the match gives them, before any other's:
+  // - one kept as such stays while the match gives the session that line there beyond those it
+  //   has in the files, and is one of them;
+  // - so is one the session kept as its own (it went while the files had the line as often as
+  //   the first report), as far as the match gives it more of the line than that: it is kept
+  //   as a line of the first report from here on;
+  // - and so is one that left its place with this match (one that moved as much as one that
+  //   went): those that went are kept as lines of the first report.
+  // What is left of them after is no session's the match gives the line there, or no one's:
+  // so many of the others' that went with this match are not kept at all.
+  for (const s of left) {
+    for (const [line, n] of s.opened) {
+      const some = Math.min(n, s.credit.get(line) ?? 0);
+      s.opened.set(line, some);
+      take(firstOnly, line, some);
+    }
+  }
+  for (const s of left) {
+    for (const [line, n] of s.later) {
+      const some = take(firstOnly, line, Math.min(n, (s.credit.get(line) ?? 0) - (s.opened.get(line) ?? 0)));
+      add(s.opened, line, some);
+      s.later.set(line, n - some);
+    }
+  }
   for (const s of left) {
     for (const [line, n] of s.passed) {
       const some = take(firstOnly, line, Math.min(n, (s.credit.get(line) ?? 0) - (s.opened.get(line) ?? 0)));

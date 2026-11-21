@@ -26,12 +26,24 @@ class Pull {
     );
     return this;
   }
+  /** How often the sessions contributed each line between them, whatever the file. */
+  get total(): Record<string, number> {
+    const total: Record<string, number> = {};
+    for (const row of this.rows.values()) for (const hash of Object.values(row.contributed!).flat()) total[hash] = (total[hash] ?? 0) + 1;
+    return Object.fromEntries(Object.entries(total).sort());
+  }
   /** How many lines each session contributed. */
   get gave(): Record<string, number> {
     return Object.fromEntries([...this.rows].map(([key, row]) => [key, countLines(row.contributed!)]));
   }
   gone(key: string): Files {
     return numbers(this.rows.get(key)?.gone ?? {});
+  }
+  /** Another with the same rows: what is matched in the one is not in the other. */
+  copy(): Pull {
+    const other = new Pull(this.first);
+    other.rows = new Map(this.rows);
+    return other;
   }
   /** The same match again changes nothing. */
   again(now: Files, credits: Record<string, { has?: Files; opened?: Files }>): this {
@@ -188,7 +200,7 @@ test("a line of the first report that went is kept only while the match gives th
   const copy = { s1: { opened: one }, s3: { has: one } };
   const both = { s2: { opened: one }, s3: { has: one } };
   const copyFirst = went().match(one, copy).again(one, copy);
-  assert.deepEqual([copyFirst.gave, copyFirst.gone("s1")], [{ s1: 1, s3: 1 }, {}]);
+  assert.deepEqual(copyFirst.gave, { s1: 1, s3: 1 });
   copyFirst.match(one, both).again(one, both);
   assert.deepEqual(copyFirst.gave, { s2: 1, s3: 1 });
   const uploadFirst = went().match({}, { s2: { opened: one } }).match(one, both);
@@ -221,6 +233,31 @@ test("a line of the first report that went is kept only while the match gives th
   const moving = new Pull(c).match(c, { s3: { has: c, opened: c } }).match(three, { s3: { has: c, opened: c }, s2: { has: { "c.ts": [1] } } });
   moving.match({ "b.ts": [1] }, { s3: { has: { "b.ts": [1] }, opened: c } });
   assert.deepEqual([moving.gave, moving.gone("s2")], [{ s2: 1, s3: 2 }, { "c.ts": [1] }]);
+
+  // a later copy of the first report's line that is another session's, and review takes the two out
+  // one after the other, the first session's first while the files have the line still: the later
+  // session's is its own when it goes, in two pushes as in one
+  const twoOf = { "a.ts": [1, 1] };
+  const held = { s1: { has: one, opened: one }, s2: { has: one } };
+  const dup = () => new Pull(one).match(one, { s1: { has: one, opened: one } }).match(twoOf, held);
+  const inTwo = dup().match(one, { s1: { opened: one }, s2: { has: one } }).match({}, { s1: { opened: one } }).again({}, { s1: { opened: one } });
+  assert.deepEqual([inTwo.gave, inTwo.gone("s2")], [{ s1: 1, s2: 1 }, { "a.ts": [1] }]);
+  const inOne = dup().match({}, { s1: { opened: one } });
+  assert.deepEqual([inOne.gave, inOne.gone("s2")], [{ s1: 1, s2: 1 }, { "a.ts": [1] }]);
+  // and when the line is in the files again as the later session's, and goes again
+  inOne.match(one, { s1: { opened: one }, s2: { has: one } }).match({}, { s1: { opened: one } });
+  assert.deepEqual(inOne.gave, { s1: 1, s2: 1 });
+
+  // a session's own second copy of the first report's line, and review takes the two out one after
+  // the other: one of them is the first report's, and is a later session's alone when that one
+  // turns out to have written it, as when the two went in one push
+  const mine = { s1: { has: twoOf, opened: one } };
+  const own = () => new Pull(one).match(one, { s1: { has: one, opened: one } }).match(twoOf, mine);
+  for (const went of [own().match(one, { s1: { has: one, opened: one } }).match({}, { s1: { opened: one } }), own().match({}, { s1: { opened: one } })]) {
+    assert.deepEqual([went.gave, numbers(went.rows.get("s1")!.gone_opened!)], [{ s1: 2 }, { "a.ts": [1] }]);
+    went.match({}, { s9: { opened: one } }).again({}, { s9: { opened: one } });
+    assert.deepEqual(went.gave, { s1: 1, s9: 1 });
+  }
 
   // two of a line in the first report, one each of two sessions, and both went: each keeps its own,
   // and when one of them turns out to be a third session's, only that one is given up
@@ -260,7 +297,9 @@ test("what was kept before is read as it was kept", () => {
 
 test("through any pushes and uploads, the same match again changes nothing and no session gives fewer lines for a push", () => {
   // The lines are put down to sessions as simply as may be: each copy in a file to the session that
-  // wrote that line in that file and started last, as often as it wrote it.
+  // wrote that line in that file and started last, as often as it wrote it. In every other run some
+  // sessions began after the pull request was opened, and are given none of the first report's lines:
+  // then a line of it and the same line in the files may be two sessions'.
   const PATHS = ["a.ts", "b.ts", "c.ts"];
   for (let seed = 1; seed <= 1500; seed++) {
     let state = seed;
@@ -271,16 +310,18 @@ test("through any pushes and uploads, the same match again changes nothing and n
       return Math.floor((((t ^ (t >>> 14)) >>> 0) / 4294967296) * n);
     };
     const wrote: Files[] = [];
+    const late: boolean[] = [];
     const write = () => {
       const files: Files = {};
       for (const path of PATHS) if (random(2)) files[path] = Array.from({ length: 1 + random(3) }, () => 1 + random(3));
       wrote.push(files);
+      late.push(seed % 2 === 0 && wrote.length > 1 && random(2) === 1);
       return files;
     };
-    const credit = (files: Files): Files[] => {
+    const credit = (files: Files, early = false): Files[] => {
       const whose: Files[] = wrote.map(() => ({}));
       for (const [path, hashes] of Object.entries(files)) {
-        const left = wrote.map((s) => [...(s[path] ?? [])]);
+        const left = wrote.map((s, i) => (early && late[i] ? [] : [...(s[path] ?? [])]));
         for (const hash of hashes) {
           for (let i = wrote.length - 1; i >= 0; i--) {
             const at = left[i]!.indexOf(hash);
@@ -299,6 +340,7 @@ test("through any pushes and uploads, the same match again changes nothing and n
     const where = `seed ${seed}`;
     for (let step = 0; step < 12; step++) {
       const what = step === 0 ? 4 : random(5);
+      const was = files;
       if (what === 0 || wrote.length === 0) {
         const more = write();
         if (random(2)) for (const [path, hashes] of Object.entries(more)) files = { ...files, [path]: [...(files[path] ?? []), ...hashes] };
@@ -314,16 +356,39 @@ test("through any pushes and uploads, the same match again changes nothing and n
       } else if (what === 3) {
         files = Object.fromEntries(Object.entries(files).filter(() => random(3)));
       }
-      const [has, opened] = [credit(files), credit(pull.first)];
+      const [has, opened] = [credit(files), credit(pull.first, true)];
       const credits = Object.fromEntries(
         wrote.map((_, i) => [`s${i}`, { has: has[i]!, opened: opened[i]! }] as const).filter(([, s]) => countLines(lines(s.has)) + countLines(lines(s.opened)) > 0),
       );
       const before = pull.gave;
+      // Lines taken out in two pushes come to the same as in one, half of them first here: as
+      // many of each line between the sessions (which of two sessions' copies of a line in a
+      // file is the one that went first is not theirs to say).
+      const halfway = what === 1 || what === 3 ? pull.copy() : null;
       pull.match(files, credits).again(files, credits);
+      if (halfway) {
+        const half: Files = { ...files };
+        for (const [path, hashes] of Object.entries(was)) {
+          const kept = [...(files[path] ?? [])];
+          const out = hashes.filter((hash) => {
+            const at = kept.indexOf(hash);
+            if (at >= 0) kept.splice(at, 1);
+            return at < 0;
+          });
+          half[path] = [...(files[path] ?? []), ...out.filter(() => random(2))];
+        }
+        const [some, first] = [credit(half), credit(pull.first, true)];
+        const between = Object.fromEntries(
+          wrote.map((_, i) => [`s${i}`, { has: some[i]!, opened: first[i]! }] as const).filter(([, s]) => countLines(lines(s.has)) + countLines(lines(s.opened)) > 0),
+        );
+        assert.deepEqual(halfway.match(half, between).match(files, credits).total, pull.total, `${where}, step ${step}: in two pushes`);
+      }
       for (const [line, n] of [...copiesAt(lines(files)), ...copiesAt(lines(pull.first))]) ever.set(line, Math.max(ever.get(line) ?? 0, n));
       const gave = pull.gave;
-      // (An upload may give a session's line to another; a push of files does not.)
-      if (what !== 0 && what !== 4) for (const [key, n] of Object.entries(before)) assert.ok((gave[key] ?? 0) >= n, `${where}, step ${step}: ${key} gave ${n} and gives ${gave[key] ?? 0}`);
+      // (An upload may give a session's line to another; a push of files does not. Where a line of
+      // the first report and the same line in the files are two sessions', the one in the files is
+      // not kept when it goes: that is not said of those runs.)
+      if (what !== 0 && what !== 4 && seed % 2 === 1) for (const [key, n] of Object.entries(before)) assert.ok((gave[key] ?? 0) >= n, `${where}, step ${step}: ${key} gave ${n} and gives ${gave[key] ?? 0}`);
       for (const [key, row] of pull.rows) {
         const s = wrote[Number(key.slice(1))]!;
         // No more of a line than the session wrote, and none of a file than the pull request ever had there.
