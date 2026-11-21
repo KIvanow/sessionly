@@ -278,9 +278,11 @@
             each belongs to; the session records your machines upload; and the pull request reports
             the GitHub Action sends. With the default content level a session record contains
             counts, timings, tool names, relative file paths, models, tokens, cost, rewrite
-            figures and the git name, email and remote (or, for a session that ran in the cloud,
-            the email address the platform gives), and no text from prompts, commands or
-            files. Previews and line hashes are stored only if the uploading machine switched them
+            figures, the git name, email, remote and branch (or, for a session that ran in the
+            cloud, the email address the platform gives), the folder the session ran in and the
+            repository's folder (shortened to <code>~/&hellip;</code> under the home directory),
+            the agent's version and how it was started, its permission modes and the paths of
+            the instruction files it loaded, and no text from prompts, commands or files. Previews and line hashes are stored only if the uploading machine switched them
             on. It never stores full prompts, file contents, command output or source code. The
             <a href="/privacy">Privacy Policy</a> has the details.
           </p>
