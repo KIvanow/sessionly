@@ -63,7 +63,7 @@
       <section class="legal">
         <div class="wrap">
           <h1>Privacy Policy</h1>
-          <p class="meta">Effective as of 20 November 2026</p>
+          <p class="meta">Effective as of 21 November 2026</p>
 
           <div class="summary">
             <h2>In short</h2>
@@ -114,12 +114,15 @@
             <strong>The software on your machine, and self-hosted installs.</strong> The
             <code>sessionly</code> program stores what it captures in a folder on your own machine
             (<code>~/.sessionly</code>). It does not report usage, telemetry or account data to me.
-            Its network connections are the upload to the server you connect it to with
-            <code>sessionly connect</code> and, once connected, a check at most once a day for a
-            newer release on GitHub, which sends no account, machine identifier or session
-            (GitHub sees the address the connection comes from;
-            <code>sessionly settings --update-check off</code> turns it off). Until you connect,
-            nothing leaves the machine. If you run the Sessionly server yourself, everything
+            On its own it connects to two places: the server you connect it to with
+            <code>sessionly connect</code> and, once connected, GitHub, at most once a day, to
+            ask for the newest release. That request carries the program's version and no
+            account, machine identifier or session; GitHub sees the address the connection comes
+            from, and <code>sessionly settings --update-check off</code> turns it off. Two
+            commands you run yourself also reach GitHub, connected or not:
+            <code>sessionly update</code> downloads a release, and
+            <code>sessionly install --repo</code> reads a release's checksums. Apart from these,
+            nothing leaves the machine until you connect. If you run the Sessionly server yourself, everything
             described below is stored on your infrastructure, not mine, and license files are
             verified offline. The one exception is the dashboard's page counts, described under
             &ldquo;Automatic data collection&rdquo;, which you can turn off with
@@ -189,8 +192,8 @@
               home directory, with lines added and removed;
             </li>
             <li>
-              the folder the session ran in and the repository's folder, as paths under the home
-              directory (<code>~/&hellip;</code>), and the paths of the instruction files the
+              the folder the session ran in and the repository's folder (shortened to
+              <code>~/&hellip;</code> when they are under the home directory), and the paths of the instruction files the
               agent loaded (such as <code>CLAUDE.md</code>);
             </li>
             <li>the permission modes the agent ran in;</li>

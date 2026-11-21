@@ -957,7 +957,7 @@ fn print_settings(config: &config::Config) {
     println!(
         "Auto sync:  {}",
         if config.auto_sync {
-            "on (runs in the background when a session ends)"
+            "on (runs in the background when a turn or a session ends)"
         } else {
             "off"
         }

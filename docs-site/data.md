@@ -37,9 +37,13 @@ What a server does with it:
   lines, never the lines, and nothing of what reviews and comments say.
 - The dashboard counts which of its pages are opened, and nothing of what they show; a server
   of your own can turn that off (see [Dashboard](dashboard.md#page-counts)). The `sessionly`
-  binary and the server send nothing to anyone but each other, with one exception: a
-  connected binary asks GitHub, at most once a day, for the newest release's version (see
-  [What an upload contains](upload-contents.md); `sessionly settings --update-check off`
-  stops it).
+  binary and the server send nothing to anyone but each other, except:
+  - a connected binary asks GitHub, at most once a day, for the newest release's version (see
+    [What an upload contains](upload-contents.md); `sessionly settings --update-check off`
+    stops it);
+  - `sessionly update` downloads a release from GitHub, and `sessionly install --repo` reads
+    a release's checksums there unless given a file, connected or not;
+  - a server set up for signing in with Google or GitHub asks that provider who signed in (see
+    [People, tokens and sign-in](people-and-tokens.md#signing-in-with-google-or-github)).
 
 [Files and settings](files.md) lists every file the binary keeps.
