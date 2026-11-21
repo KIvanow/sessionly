@@ -32,7 +32,7 @@ jobs:
       DEMO_TOKEN: ${{ secrets.SESSIONLY_DEMO_TOKEN }}
     steps:
       - if: env.TOKEN != ''
-        uses: KIvanow/sessionly/action@c0b1e569d8686e3b244daa68fa73ea19c16748f9 # several pull requests in one run ("all", 20-60), 18 November 2026
+        uses: KIvanow/sessionly/action@a6f7c3959f4da4792417c886a196b59a29c4f8fd # the cost of a pull request is what was spent on it, 22 November 2026
         with:
           url: https://app.sessionly.dev
           # A token with the ci role, which can report pull requests and nothing else.
@@ -43,7 +43,7 @@ jobs:
       # anyone (see "Showing a repository in another organisation" in the docs),
       # where there is a token for it. The comment above is the only one.
       - if: env.DEMO_TOKEN != ''
-        uses: KIvanow/sessionly/action@c0b1e569d8686e3b244daa68fa73ea19c16748f9
+        uses: KIvanow/sessionly/action@a6f7c3959f4da4792417c886a196b59a29c4f8fd
         with:
           url: https://app.sessionly.dev
           token: ${{ secrets.SESSIONLY_DEMO_TOKEN }}

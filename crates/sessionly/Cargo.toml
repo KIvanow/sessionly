@@ -1,6 +1,6 @@
 [package]
 name = "sessionly"
-version = "0.6.3"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.89"
 description = "Local collector and ledger for AI coding agent sessions"
