@@ -225,8 +225,9 @@
             <div class="sheet-foot">
               <p>
                 21 sessions, 29h 50m active, 480 files changed. 5 of the 21 costs are estimates and
-                3 sessions have no cost figure: Codex records none, and neither did the Cursor
-                session. One repository and one developer over one week: a record of this work, not
+                3 sessions have no cost figure: the Codex ones were imported before Sessionly
+                estimated Codex costs from their tokens, and the Cursor session reported none. One
+                repository and one developer over one week: a record of this work, not
                 a benchmark of the agents.
               </p>
               <a href="https://app.sessionly.dev/#/demo">Open these figures in the demo →</a>
@@ -530,7 +531,10 @@
                 <tr>
                   <th scope="row">Cost</th>
                   <td>Claude Code's recorded total, with an estimate for what it leaves out</td>
-                  <td class="no">Not recorded</td>
+                  <td>
+                    An estimate: its tokens at OpenAI's API list prices. Not what a ChatGPT plan
+                    bills
+                  </td>
                   <td>
                     An estimate at API list prices for turns the hooks saw. Not what Cursor bills
                   </td>
@@ -548,7 +552,7 @@
           </div>
           <p class="note">
             Checked with Codex 0.169.0, the Cursor editor 3.27 and Grok 1.0.77. Codex records
-            tokens but no cost, so its sessions add nothing to cost totals. Codex's editor
+            tokens but no cost, so its cost is an estimate from those tokens. Codex's editor
             extension and its subagents are read but not checked yet, and Cursor's command-line
             agent is not read yet. No agent's sign-in files are opened.
           </p>
@@ -822,7 +826,19 @@ SESSIONLY_LINE_HASHES=on</pre>
                   <td>Yes</td>
                 </tr>
                 <tr>
-                  <th scope="row">Git name, email and remote</th>
+                  <th scope="row">Git name, email, remote and branch</th>
+                  <td>Yes</td>
+                  <td class="hl">Yes</td>
+                  <td>Yes</td>
+                </tr>
+                <tr>
+                  <th scope="row">Working directory and repository folder</th>
+                  <td>Absolute</td>
+                  <td class="hl">Shortened to <code>~/</code> under the home directory</td>
+                  <td>Shortened to <code>~/</code> under the home directory</td>
+                </tr>
+                <tr>
+                  <th scope="row">Agent version, permission modes, instruction-file paths</th>
                   <td>Yes</td>
                   <td class="hl">Yes</td>
                   <td>Yes</td>
@@ -997,7 +1013,7 @@ SESSIONLY_LINE_HASHES=on</pre>
             <h3>Read the numbers for what they are.</h3>
             <p>
               Cost is the agent's own recorded figure where there is one and an estimate from
-              token counts elsewhere; Codex records none. It is not an invoice. The rewrite rate measures whether
+              token counts elsewhere, as for Codex, which records none. It is not an invoice. The rewrite rate measures whether
               lines survived, not whether they were good or why they changed. The agent share of
               a pull request is a floor. Names and emails come from git config, or for a cloud
               session from the platform: a label, not a verified identity.

@@ -39,12 +39,13 @@ the one it is based on, and not what the session spent on others, where the bran
 account for its lines
 (see [Pull requests](pull-requests.md#how-to-read-it)). It is branch names and amounts,
 nothing else, and it is left out for a session in the cloud, whose sandbox holds one branch,
-and for a session whose transcript is gone. Other agents record one branch for a session, or
-none.
+and for a session whose transcript was gone before a version that keeps this read it. Other
+agents record one branch for a session, or none.
 
-The table has Anthropic's models only, from the Claude 4 models on. A model's name is read without
-what a provider adds to it (`anthropic.` in front, a date or `[1m]` behind). Sessions of other
-agents get their cost another way, or have none: see [Agents](agents.md).
+The table has Anthropic's models from the Claude 4 models on, OpenAI's models at their API list
+prices (for [Codex](codex.md)), and Cursor's Composer models. A model's name is read without
+what a provider adds to it (`anthropic.` in front, a date or `[1m]` behind). How each agent's
+sessions get their cost is in [Agents](agents.md).
 
 How close is it? On one machine with 97 transcripts, the estimate for a recorded run equalled
 Claude Code's total to the cent in about a third of the sessions and was lower in most of the

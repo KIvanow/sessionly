@@ -63,7 +63,7 @@
       <section class="legal">
         <div class="wrap">
           <h1>Terms of Service</h1>
-          <p class="meta">Last updated: 16 November 2026</p>
+          <p class="meta">Last updated: 21 November 2026</p>
 
           <div class="summary">
             <h2>In short</h2>
@@ -155,7 +155,7 @@
           <h3>1.1 What Sessionly is</h3>
           <p>
             Sessionly is a ledger of AI coding agent sessions. A program on a developer's machine
-            records what coding agents such as Claude Code, Cursor and Grok were asked, which tools
+            records what coding agents such as Claude Code, Cursor, Grok and Codex were asked, which tools
             they ran, which files they changed and what it cost, and measures how much of what they
             wrote is still there later. It can upload a record of each session to a Sessionly
             server, which shows the same figures for a team. The Hosted Service is my installation
@@ -278,9 +278,11 @@
             each belongs to; the session records your machines upload; and the pull request reports
             the GitHub Action sends. With the default content level a session record contains
             counts, timings, tool names, relative file paths, models, tokens, cost, rewrite
-            figures and the git name, email and remote (or, for a session that ran in the cloud,
-            the email address the platform gives), and no text from prompts, commands or
-            files. Previews and line hashes are stored only if the uploading machine switched them
+            figures, the git name, email, remote and branch (or, for a session that ran in the
+            cloud, the email address the platform gives), the folder the session ran in and the
+            repository's folder (shortened to <code>~/&hellip;</code> under the home directory),
+            the agent's version and how it was started, its permission modes and the paths of
+            the instruction files it loaded, and no text from prompts, commands or files. Previews and line hashes are stored only if the uploading machine switched them
             on. It never stores full prompts, file contents, command output or source code. The
             <a href="/privacy">Privacy Policy</a> has the details.
           </p>
@@ -327,8 +329,11 @@
             <li>
               <strong>The agent share of a pull request is a floor.</strong> A line counts as an
               agent's only when an uploaded session added it; people without Sessionly, sessions
-              uploaded without line hashes, changes made by shell commands and generated files all
-              count as not an agent's. Lines are matched by short hashes, so a common line can
+              uploaded without line hashes, changes a shell command made on a person's machine
+              that are not sure to be the command's (with the default shell-edits setting), and
+              generated files all count as not an agent's. A person who sets
+              <code>sessionly settings --shell-edits all</code> counts everything that changed
+              while a command ran, which can include their own edits. Lines are matched by short hashes, so a common line can
               match by coincidence.
             </li>
             <li>
@@ -471,9 +476,9 @@
           <p>
             &ldquo;Sessionly&rdquo; and the Sessionly logo may not be used in connection with your
             or any third-party products or services without permission, except to say truthfully
-            that you use or are compatible with Sessionly. Claude Code, Cursor, Grok, GitHub and
-            other product names are trademarks of their owners. Sessionly is not affiliated with,
-            endorsed by or sponsored by any of them.
+            that you use or are compatible with Sessionly. Claude Code, Cursor, Grok, Codex,
+            GitHub and other product names are trademarks of their owners. Sessionly is not
+            affiliated with, endorsed by or sponsored by any of them.
           </p>
           <h3>9.3 Feedback</h3>
           <p>
@@ -757,7 +762,7 @@
           <p>
             A ledger of AI coding agent sessions. Open source under Apache-2.0 and
             <a href="https://docs.sessionly.dev/server.html">self-hosted</a>. Claude Code,
-            Cursor, Grok and GitHub are trademarks of their owners; Sessionly is not affiliated
+            Cursor, Grok, Codex and GitHub are trademarks of their owners; Sessionly is not affiliated
             with them.
           </p>
           <p>Email <a href="mailto:support@sessionly.dev">support@sessionly.dev</a>.</p>

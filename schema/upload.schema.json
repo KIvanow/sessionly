@@ -306,7 +306,7 @@
           "default": []
         },
         "files": {
-          "description": "Files read or changed through the agent's file tools. What shell\ncommands changed is known only for a session in the cloud, where the\nworking tree is compared before and after each command.",
+          "description": "Files read or changed through the agent's file tools, and by its shell\ncommands where the hooks saw them: the working tree is compared before\nand after each command. In the cloud everything that changed counts.\nOn a person's own machine that depends on `--shell-edits`: by default\nonly what is sure to be the command's, with `all` everything that\nchanged meanwhile, with `off` nothing.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/FileTouched"

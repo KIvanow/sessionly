@@ -1,4 +1,4 @@
-//! Automatic sync: when a session ends, bring the ledger up to date and
+//! Automatic sync: when a turn or a session ends, bring the ledger up to date and
 //! upload in the background, so nobody has to run a command.
 //!
 //! The capture hook starts a detached `sessionly auto` process and returns at

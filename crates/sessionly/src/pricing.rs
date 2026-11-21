@@ -110,9 +110,9 @@ const PRICES: &[(&str, Price)] = &[
     // OpenAI, Standard tier, from https://developers.openai.com/api/docs/pricing
     // (what platform.openai.com/docs/pricing redirects to), read 2026-11-20:
     // input, cached input, output, then the 30-minute and 12-hour write
-    // prices. Where the page shows no write price there is none here, and a
-    // request that wrote to the cache stays unpriced. Models the page does not
-    // list (gpt-5.1-codex and the like) have no price.
+    // prices. Where the page shows no write price there is none here, and what
+    // a request wrote to the cache is charged at the input price. Models the
+    // page does not list (such as gpt-5.1-codex) have no price.
     (
         "gpt-6.2-astra",
         Price::listed(8.0, 0.40, 40.0, Some((10.0, 20.0))),

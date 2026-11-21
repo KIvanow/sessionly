@@ -25,12 +25,14 @@ session ended (`checkpoints`: counts and times, see [Rewrite rate](rewrite-rate.
 Before a record leaves the machine:
 
 - **Paths are made relative:** to the repository for files inside it, otherwise to the home
-  directory (`~/…`). No absolute path under your home directory is sent.
+  directory (`~/…`). The working directory and the repository's folder are only shortened to
+  `~/…`, so outside the home directory (`/srv/…`, `/workspace`) they are sent as they are. No
+  absolute path under your home directory is sent.
 - **The content level is applied** and written into the record's `content` field:
 
 | Level | What is sent |
 |---|---|
-| `metadata` (default) | Counts, sizes, timings, tool names, statuses, relative file paths, models, tokens, cost (for Claude Code also by branch), rewrite figures, git user, remote and branch names. **No text** from prompts, commands, search patterns, URLs, errors or titles, and no content hashes. |
+| `metadata` (default) | Counts, sizes, timings, tool names, statuses, relative file paths, models, tokens, cost (for Claude Code also by branch), rewrite figures, git user, remote and branch, the working directory and repository folder (as `~/…` under the home directory), the agent's version and how it was started, its permission modes, and the paths of the instruction files it loaded (`CLAUDE.md`, rules). **No text** from prompts, commands, search patterns, URLs, errors or titles, and no content hashes. |
 | `previews` | The above, plus the 200-character previews and the hashes. A preview can contain anything you typed or ran, including secrets. |
 
 **Line hashes are a separate switch, off by default.** `sessionly settings --line-hashes on`
@@ -62,7 +64,9 @@ know to `unknown`, and ignores fields it doesn't know.
 The agent (`source`) and a tool's name are plain text: `claude-code`, `cursor`, `grok` or
 `codex`, and whatever the tool is called.
 
-A background upload also asks GitHub, at most once a day, for the address of the newest
-release. The request sends no account, machine id, or session; GitHub does see the address
-the connection comes from. `sessionly settings --update-check off` stops that. The capture
-hooks do not ask, and neither does a machine that is not connected to a server.
+A background run also asks GitHub, at most once a day, for the address of the newest
+release (or asks `SESSIONLY_RELEASE_LATEST`, if that is set). The request carries the binary's
+version (as its `User-Agent`) and no account, machine id, or session; GitHub does see the
+address the connection comes from. `sessionly settings --update-check off` stops that. The
+capture hooks do not ask, and neither does a machine that is not connected to a server or
+has automatic sync off.
