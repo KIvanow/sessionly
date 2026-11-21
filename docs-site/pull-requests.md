@@ -337,7 +337,7 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     each one's count), the "Agent lines that survived review" tile says what it is beside
     them, and why.
   - **What a session gave a pull request** is kept on the server as the hashes of those
-    lines, and only grows. There is no history of pushes: a line that went from the files
+    lines, and review taking lines out does not make it less. There is no history of pushes: a line that went from the files
     stays with the session it was last put down to there, and which lines those are is kept
     beside the session's others. A line that is still in the files, or in the first report,
     follows the matching, so one put down to an older session before the session that wrote
@@ -353,9 +353,11 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     server sees reports and uploads one at a time, not what happened between them. Where
     several sessions wrote the same line in the same file (a closing brace, an import), which
     of them keeps a copy that review took out can depend on what arrived first, the push or
-    a session's upload. None of this changes what a session cost. It moves a line, and
-    with it a share of that session's cost, between the pull requests the session is in,
-    and takes a session that gave only such a line out of the pull request:
+    a session's upload, and on whether the copies went in one push or in several. None of
+    this changes what a session cost. A line is counted for one session more or one fewer
+    than wrote it, and with it a share of that session's cost moves between the pull
+    requests the session is in; a session that gave only such a line may be left out of
+    the pull request:
     - A session's line that review took out, and that another session then writes again in
       the same file: where the push arrives before that session is uploaded, the line is
       put down to the first session for a moment, and it no longer keeps the one that went.
@@ -365,7 +367,10 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     - A line the pull request was opened with that the matching gives to one session, while
       the same line in the files is another's (the second began after it was opened): both
       count it while it is there, and the second does not keep it when it goes. The same
-      holds where the opening line is no session's.
+      holds where the opening line is no session's. Where the first session keeps an
+      earlier copy of the line that went, the second does keep its own; if a third
+      session then turns out to have written the opening line, the line is counted for
+      all three, though the file never had it more than twice.
     - A session that moved a line it was opened with to another file, after which another
       session writes the same line where it was and that goes too: that copy is not kept.
     - A copy that review takes out in the very report that first puts a session's lines down

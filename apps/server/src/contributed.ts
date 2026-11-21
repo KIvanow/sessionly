@@ -108,8 +108,9 @@ export interface Contributed {
  * `first` and `seen` are how often each line of each file is in what the
  * pull request was first reported with, and in what it has now.
  *
- * What a session contributed only grows, so that what it is charged does
- * not shrink when review takes its lines out:
+ * What a session contributed is not made less by review taking its lines
+ * out, so that what it is charged does not shrink then (a line that turns
+ * out to be another session's does go with that one):
  *
  * - A line that is in the files now is whose the match says it is: one put
  *   down to a session before the one that wrote it was uploaded goes with it.
@@ -128,7 +129,9 @@ export interface Contributed {
  * - A line the pull request was first reported with is there to match by
  *   still when it went from the files: it is whose the match says it is
  *   there. A copy that goes is one of those while the first report has
- *   more of that line than the files have now. It is kept, as such
+ *   more of that line than the files have now (and no session the match
+ *   gives the line there keeps an earlier copy of it for good: that one
+ *   holds its place). It is kept, as such
  *   (`gone_opened`), where the match gives the session that line of the
  *   first report (more often than it has it in the files), and only as
  *   long as it does: one that the match gives to another session, or to
@@ -143,7 +146,8 @@ export interface Contributed {
  * Copies of one line in one file cannot be told apart, and neither can the
  * order of an upload and a push be seen after: where several sessions wrote
  * the same line in a file, which of them keeps a copy that went may go by
- * what came first (docs-site/pull-requests.md, "Known limits", lists them).
+ * what came first, or by whether the copies went in one push or several
+ * (docs-site/pull-requests.md, "Known limits", lists the cases).
  */
 export function contributedAfter(before: Held[], now: Credited[], first: Map<string, number>, seen: Map<string, number>): Contributed[] {
   const byKey = <T extends { key: string }>(rows: T[]): T[] => [...rows].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
