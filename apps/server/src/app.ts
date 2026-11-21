@@ -441,12 +441,11 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     // What it cost, or where, is another: its pull requests are charged again, whether or not
     // any of them has other lines of it now.
     if (spent) {
-      const { orgId } = c.get("principal");
       // What fails (a report held the organisation's lines for too long) is tried again, later each
       // time: a session's last upload is followed by no other that would charge it.
       const charging = async (tries: number[]): Promise<void> => {
         try {
-          await ownerDb.asOrg(orgId, (db) => chargeSession(db, spent));
+          await ownerDb.asOrg(c.get("principal").orgId, (db) => chargeSession(db, spent));
         } catch (err) {
           failed(err);
           const [wait, ...rest] = tries;
