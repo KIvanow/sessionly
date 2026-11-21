@@ -1768,9 +1768,14 @@ test("a session's cost is split between the pull requests it has lines in by wha
   const turns = { cost_usd: 10, by_branch: [{ branch: "feat", usd: 6 }, { branch: "main", usd: 3 }, { branch: null, usd: 1 }] };
   assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1)), row("main", lines("b.ts", 2), 0, "release")])), [6, 3]);
   // one with its lines and nothing spent on its branch nor its base (renamed before it was pushed):
-  // the names are what is off, and all it cost is shared out by lines, as of one that names none
+  // the names are what is off there, and it is charged its share of all it cost by lines, as of one
+  // that names none; the others keep what their branches say
   assert.deepEqual(usd(charge(turns, [row("renamed", lines("a.ts", 1), 0, "develop")])), [10]);
-  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3)), row("renamed", lines("b.ts", 4, 5), 0, "develop")])), [6, 4]);
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3), 0, "develop"), row("renamed", lines("b.ts", 4, 5), 0, "develop")])), [6, 4]);
+  // one of two lines in ten: a fifth of all it cost, and what was spent on main is still no one's
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3, 4, 5, 6, 7, 8), 0, "develop"), row("renamed", lines("b.ts", 9, 10), 0, "develop")])), [6, 2]);
+  // more than was spent between them: both are brought down alike (nine and four of ten)
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3)), row("renamed", lines("b.ts", 4, 5), 0, "develop")])), [6.923077, 3.076923]);
   // a report that does not say what it is based on is taken to be based on main
   assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1))])), [9]);
   assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1), 0, "develop")])), [6]);
@@ -1782,7 +1787,7 @@ test("a session's cost is split between the pull requests it has lines in by wha
   assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3), 0, "main"), row("feat", lines("b.ts", 4), 0, "main"), row("main", lines("c.ts", 5), 0, "release")])), [4.5, 1.5, 3]);
   // never more than it cost, whatever the turns add up to, or with one that names no branch beside them
   assert.deepEqual(usd(charge({ ...turns, cost_usd: 4 }, [row("feat", lines("a.ts", 1), 0, "develop")])), [4]);
-  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1)), row(null, lines("b.ts", 2), 0, "develop")])), [5, 5]);
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1)), row(null, lines("b.ts", 2), 0, "develop")])), [6.428571, 3.571429]);
   // turns that name no branch say no more than the session does
   assert.deepEqual(usd(charge({ cost_usd: 10, by_branch: [{ branch: null, usd: 10 }] }, [row("feat", lines("a.ts", 1))])), [10]);
   // lines together: each as often as the one that has it most

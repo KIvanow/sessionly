@@ -438,13 +438,15 @@ const DEFAULT_BASES = ["main", "master"];
  * on a branch is the pull requests' whose branch it is. What was spent on
  * one that is no such pull request's and that some are based on (`main`,
  * before the branch was made: the planning, the first edits) is theirs
- * too. What was spent on any other branch is no pull request's. That holds
- * while every one of them has a branch the session spent on, its own or its
- * base. Where one has neither (a branch renamed before it was pushed, lines
- * picked onto another), the names are what is off and not the work: its
- * lines are there, and all of the session's cost is shared out by lines, as
- * of one that names no branches. Null for a session with no cost figure, or
- * none.
+ * too. What was spent on any other branch is no pull request's.
+ *
+ * One of them with no branch the session spent on, neither its own nor its
+ * base (a branch renamed before it was pushed, lines picked onto another):
+ * the names are what is off there and not the work, since its lines are
+ * there. It is charged as of a session that names no branches, its share of
+ * all the session cost by lines, and the others what their branches say;
+ * where that comes to more than was spent, all are brought down alike. Null
+ * for a session with no cost figure, or none.
  */
 export function charge(
   session: Spent | null,
@@ -465,9 +467,10 @@ export function charge(
     among.forEach((i, at) => (charged[i]! += all > 0 ? (spent * weights[at]!) / all : 0));
     return charged;
   };
-  const whole = () => byLines(cost, every, rows.map(() => 0));
+  // What each would be charged of a session that names no branches.
+  const whole = byLines(cost, every, rows.map(() => 0));
   // Turns that name no branch at all say no more than a session that names none.
-  if (named.size === 0) return whole();
+  if (named.size === 0) return whole;
   const basedOn = (row: (typeof rows)[number], branch: string) => (row.base_ref != null ? row.base_ref === branch : DEFAULT_BASES.includes(branch));
   const charged = rows.map(() => 0);
   const found = new Set<number>();
@@ -477,9 +480,9 @@ export function charge(
     for (const i of among) found.add(i);
     byLines(spent, among, charged);
   }
-  // One with lines of the session's and no branch of its turns': the branches do not say where the work went.
-  if (found.size < rows.length) return whole();
-  // Never more than was spent, whatever the turns add up to.
+  // One with lines of the session's and no branch of its turns': the branches do not say what it cost.
+  for (const i of every) if (!found.has(i)) charged[i] = whole[i]!;
+  // Never more than was spent, whatever the turns add up to, or with such a one beside them.
   const total = charged.reduce((sum, one) => sum + one, 0);
   return total > cost && total > 0 ? charged.map((one) => (one * cost) / total) : charged;
 }

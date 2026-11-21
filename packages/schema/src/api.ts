@@ -675,7 +675,7 @@ export interface PullSession {
    * requests too (a line in several being shared out between them). Of a
    * session whose turns name their branches (Claude Code), that is what it
    * spent on the pull request's branch and on the one it is based on, or
-   * all of it where it spent nothing on either. It does not shrink when
+   * its share of all of it by lines where it spent nothing on either. It does not shrink when
    * lines are taken out. Null where the session has no cost figure, or has
    * been deleted, or is `uncounted`.
    */

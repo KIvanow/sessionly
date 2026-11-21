@@ -293,8 +293,10 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     spent on any other branch is that branch's pull request's, or no one's. When a session
     has lines in a pull request and spent nothing on its branch or its base (the branch was
     renamed before it was pushed, say, or the lines were picked onto another), the branch
-    names are what is off, not the work: the session is then charged whole, split by lines
-    between the pull requests it gave lines to, as the other agents' are. A report from an Action too old to say what
+    names are what is off there, not the work: that pull request is charged as the other
+    agents' sessions are, its share of the whole session by lines, while the session's other
+    pull requests are still charged what their branches say. (Where the two come to more
+    than the session cost, all are brought down alike.) A report from an Action too old to say what
     the pull request is based on is taken to be based on `main` or `master`. A Claude Code
     session uploaded before turns were kept by branch is charged whole, as the other
     agents' are, until its machine uploads it again.
