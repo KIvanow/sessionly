@@ -328,8 +328,10 @@
               <strong>The agent share of a pull request is a floor.</strong> A line counts as an
               agent's only when an uploaded session added it; people without Sessionly, sessions
               uploaded without line hashes, changes a shell command made on a person's machine
-              that are not sure to be the command's, and generated files all count as not an
-              agent's. Lines are matched by short hashes, so a common line can
+              that are not sure to be the command's (with the default shell-edits setting), and
+              generated files all count as not an agent's. A person who sets
+              <code>sessionly settings --shell-edits all</code> counts everything that changed
+              while a command ran, which can include their own edits. Lines are matched by short hashes, so a common line can
               match by coincidence.
             </li>
             <li>

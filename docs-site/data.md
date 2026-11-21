@@ -38,7 +38,8 @@ What a server does with it:
 - The dashboard counts which of its pages are opened, and nothing of what they show; a server
   of your own can turn that off (see [Dashboard](dashboard.md#page-counts)). The `sessionly`
   binary and the server send nothing to anyone but each other, except:
-  - a connected binary asks GitHub, at most once a day, for the newest release's version (see
+  - a connected binary with automatic sync on asks GitHub (or `SESSIONLY_RELEASE_LATEST`), at
+    most once a day, for the newest release's version (see
     [What an upload contains](upload-contents.md); `sessionly settings --update-check off`
     stops it);
   - `sessionly update` downloads a release from GitHub, and `sessionly install --repo` reads

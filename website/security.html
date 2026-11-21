@@ -95,8 +95,8 @@
               </li>
               <li>
                 The program and the server send no telemetry, and licenses are verified offline.
-                A connected program asks GitHub once a day which release is newest; that can be
-                turned off. The dashboard counts which of its pages are
+                A connected program asks GitHub at most once a day which release is newest; that
+                can be turned off. The dashboard counts which of its pages are
                 opened, and nothing of what they show or of where it runs; a self-hosted server
                 can turn that off.
               </li>
@@ -184,10 +184,13 @@
           <p>
             Nothing, until you run <code>sessionly connect</code>. The program makes two kinds of
             network connection on its own: the upload to the server you connected, and, once
-            connected, a question to GitHub at most once a day for the newest release's version.
-            It carries the program's version (in its <code>User-Agent</code>) and no account,
-            machine identifier or session; GitHub sees the address it comes from. <code>sessionly settings --update-check off</code> stops it,
-            and the capture hooks never ask. It sends no telemetry. The other commands that reach
+            connected and while automatic sync is on, a question to GitHub at most once a day for
+            the newest release's version (or to the address in
+            <code>SESSIONLY_RELEASE_LATEST</code>, if you set one). It carries the program's
+            version (in its <code>User-Agent</code>) and no account, machine identifier or
+            session; GitHub sees the address it comes from.
+            <code>sessionly settings --update-check off</code> stops it, and the capture hooks
+            never ask. It sends no telemetry. The other commands that reach
             the network are <code>sessionly update</code>, which downloads a release from GitHub,
             and <code>sessionly install --repo</code>, which reads a release's checksums from
             GitHub unless you give it a file; both work without a connection too. Once connected, before a record is uploaded:

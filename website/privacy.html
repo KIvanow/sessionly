@@ -115,8 +115,9 @@
             <code>sessionly</code> program stores what it captures in a folder on your own machine
             (<code>~/.sessionly</code>). It does not report usage, telemetry or account data to me.
             On its own it connects to two places: the server you connect it to with
-            <code>sessionly connect</code> and, once connected, GitHub, at most once a day, to
-            ask for the newest release. That request carries the program's version and no
+            <code>sessionly connect</code> and, once connected and while automatic sync is on,
+            GitHub, at most once a day, to ask for the newest release (or another address, if you
+            set <code>SESSIONLY_RELEASE_LATEST</code>). That request carries the program's version and no
             account, machine identifier or session; GitHub sees the address the connection comes
             from, and <code>sessionly settings --update-check off</code> turns it off. Two
             commands you run yourself also reach GitHub, connected or not:

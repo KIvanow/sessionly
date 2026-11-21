@@ -130,9 +130,11 @@ export interface Session {
   tool_calls?: ToolCall[];
   /**
    * Files read or changed through the agent's file tools, and by its shell
-   * commands: the working tree is compared before and after each command.
-   * On a person's own machine only what is sure to be the command's is
-   * counted; in the cloud, everything that changed.
+   * commands where the hooks saw them: the working tree is compared before
+   * and after each command. In the cloud everything that changed counts.
+   * On a person's own machine that depends on `--shell-edits`: by default
+   * only what is sure to be the command's, with `all` everything that
+   * changed meanwhile, with `off` nothing.
    */
   files?: FileTouched[];
   subagents?: Subagent[];

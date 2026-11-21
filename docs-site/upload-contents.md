@@ -64,7 +64,9 @@ know to `unknown`, and ignores fields it doesn't know.
 The agent (`source`) and a tool's name are plain text: `claude-code`, `cursor`, `grok` or
 `codex`, and whatever the tool is called.
 
-A background upload also asks GitHub, at most once a day, for the address of the newest
-release. The request carries the binary's version (as its `User-Agent`) and no account,
-machine id, or session; GitHub does see the address the connection comes from. `sessionly settings --update-check off` stops that. The capture
-hooks do not ask, and neither does a machine that is not connected to a server.
+A background run also asks GitHub, at most once a day, for the address of the newest
+release (or asks `SESSIONLY_RELEASE_LATEST`, if that is set). The request carries the binary's
+version (as its `User-Agent`) and no account, machine id, or session; GitHub does see the
+address the connection comes from. `sessionly settings --update-check off` stops that. The
+capture hooks do not ask, and neither does a machine that is not connected to a server or
+has automatic sync off.

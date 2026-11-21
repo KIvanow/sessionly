@@ -218,7 +218,7 @@
       "default": []
     },
     "files": {
-      "description": "Files read or changed through the agent's file tools, and by its shell\ncommands: the working tree is compared before and after each command.\nOn a person's own machine only what is sure to be the command's is\ncounted; in the cloud, everything that changed.",
+      "description": "Files read or changed through the agent's file tools, and by its shell\ncommands where the hooks saw them: the working tree is compared before\nand after each command. In the cloud everything that changed counts.\nOn a person's own machine that depends on `--shell-edits`: by default\nonly what is sure to be the command's, with `all` everything that\nchanged meanwhile, with `off` nothing.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/FileTouched"
