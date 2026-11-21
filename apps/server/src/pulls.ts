@@ -310,29 +310,33 @@ export function breakdown(now: FileHashes[], lines: (Writer | null)[][]): { file
 
 /**
  * How many lines a session's lines in each of its pull requests count as,
- * for splitting what it cost. A line that is in several (one stacked on
- * another, a release of what was merged before) is shared out between
- * them, so that together they count it once. A pull request closed without
- * merging takes nothing from the others: its lines are shared out as if it
- * counted, and those of the others as if it were not there. One whose lines
- * were not kept (`matched` null) counts all of them.
+ * for splitting what it cost. The rows are its pull requests in the order
+ * they had their lines (see `weighAgain`). A line that is in several (one stacked on another, a
+ * release of what was merged before) counts in the first of them it is in,
+ * and in a later one only as often as it has it more: what the first was
+ * charged for a line stays there, and a later one is charged for what is
+ * new in it. A pull request closed without merging takes nothing from the
+ * others: its lines count as if it were one of them, and those of the
+ * others as if it were not there. One whose lines were not kept (`matched`
+ * null) counts all of them.
  */
 export function weigh(rows: { live: boolean; lines: number; matched: Lines | null }[]): number[] {
   const { counted, pooled } = linesOf(rows);
   return rows.map((row, i) => {
-    const counts = counted[i];
-    if (!counts) return row.lines;
-    const all = pooled(row);
+    if (!counted[i]) return row.lines;
     let weight = 0;
-    for (const [line, n] of counts) weight += (n * all.get(line)!.most) / all.get(line)!.sum;
+    for (const n of pooled(row).own[i]!.values()) weight += n;
     return weight;
   });
 }
 
+/** Each line of a row, counted: as often as each of them has it that are its own, and as often as the one that has it most. */
+type Owned = { own: (Map<string, number> | null)[]; most: Map<string, number> };
+
 /**
- * Each row's lines, counted, and for each line how often it is there in all
- * of them together and in the one that has it most: of the rows not closed
- * for one that is not, of all of them for one that is (see `weigh`).
+ * Each row's lines, counted, and how many copies of each are its own: those
+ * that none of the rows before it has. Of the rows not closed for one that
+ * is not, of all of them for one that is (see `weigh`).
  */
 function linesOf(rows: { live: boolean; matched: Lines | null }[]) {
   const counted = rows.map((row) => {
@@ -343,16 +347,19 @@ function linesOf(rows: { live: boolean; matched: Lines | null }[]) {
     }
     return counts;
   });
-  const among = (which: (row: { live: boolean }) => boolean) => {
-    const all = new Map<string, { sum: number; most: number }>();
-    counted.forEach((counts, i) => {
-      if (!counts || !which(rows[i]!)) return;
+  const among = (which: (row: { live: boolean }) => boolean): Owned => {
+    const most = new Map<string, number>();
+    const own = counted.map((counts, i) => {
+      if (!counts || !which(rows[i]!)) return null;
+      const mine = new Map<string, number>();
       for (const [line, n] of counts) {
-        const one = all.get(line) ?? { sum: 0, most: 0 };
-        all.set(line, { sum: one.sum + n, most: Math.max(one.most, n) });
+        const before = most.get(line) ?? 0;
+        mine.set(line, Math.max(0, n - before));
+        if (n > before) most.set(line, n);
       }
+      return mine;
     });
-    return all;
+    return { own, most };
   };
   const live = among((row) => row.live);
   const every = among(() => true);
@@ -363,34 +370,43 @@ function linesOf(rows: { live: boolean; matched: Lines | null }[]) {
  * Of what a session's lines that pull requests were opened with count as
  * (`weigh`, of `opened`), what those still there count as: there in any of
  * the pull requests it has lines in now (`now`), not only the one it was
- * opened in. So a line opened in two counts once between them as long as one
- * of them keeps it, wherever it ended up; a line opened more often than it
- * is still there counts for those copies only, shared out in proportion.
- * Null for one whose lines were not kept.
+ * opened in. So a line opened in two counts once, in the first, as long as
+ * one of them keeps it, wherever it ended up; a line opened more often than
+ * it is still there counts for those copies only, in proportion. Null for
+ * one whose lines were not kept.
  *
- * With `among`, a line is shared out as it is between those instead, all
- * alike: what a session contributed to each of its pull requests, which is
- * what its cost is split by (see `charge`). A line then survives for as much
- * of it as was paid for here.
+ * With `among`, a line counts as it does between those instead, all alike:
+ * what a session contributed to each of its pull requests, which is what its
+ * cost is split by (see `charge`), `at` saying which of them each of
+ * `opened` is. A line then survives for as much of it as was paid for here.
  */
 export function weighKept(
   opened: { live: boolean; matched: Lines | null }[],
   now: { live: boolean; matched: Lines | null }[],
   among?: { matched: Lines | null }[],
+  at?: number[],
 ): (number | null)[] {
   const { counted, pooled } = linesOf(opened);
   const there = linesOf(now).pooled;
-  const shared = among && linesOf(among.map((row) => ({ live: true, matched: row.matched }))).pooled({ live: true });
+  const given = among && linesOf(among.map((row) => ({ live: true, matched: row.matched })));
+  const shared = given?.pooled({ live: true });
   return opened.map((row, i) => {
     const counts = counted[i];
     if (!counts) return null;
     const own = pooled(row);
-    const kept = there(row);
+    const kept = there(row).most;
+    const where = at ? at[i]! : i;
     let weight = 0;
     for (const [line, n] of counts) {
-      // (One whose lines were not kept is in no sharing out: its lines are then shared as they were opened.)
-      const { sum, most } = shared?.get(line) ?? own.get(line)!;
-      weight += (n * Math.min(kept.get(line)?.most ?? 0, most)) / sum;
+      // (One whose lines were not kept is in no sharing out: its lines then count as they were opened.)
+      const gave = given?.counted[where]?.get(line);
+      if (shared && gave) {
+        const most = shared.most.get(line)!;
+        weight += (n * shared.own[where]!.get(line)! * Math.min(kept.get(line) ?? 0, most)) / (gave * most);
+      } else {
+        const most = own.most.get(line)!;
+        weight += (own.own[i]!.get(line)! * Math.min(kept.get(line) ?? 0, most)) / most;
+      }
     }
     return weight;
   });
@@ -449,10 +465,12 @@ const DEFAULT_BASES = ["main", "master"];
 
 /**
  * What a session is charged to each of the pull requests it contributed
- * lines to, split between them as the lines it contributed to each at any
- * time (`contributed`) count, a line in several being shared out between
- * them (see `weigh`). Merged, open or closed, they share alike: which of
- * them a charge is in does not move it.
+ * lines to (`rows`, in the order they had their lines), split between them as
+ * the lines it contributed to each at any time (`contributed`) count, a line
+ * in several counting in the first of them (see `weigh`): a later one that
+ * brings the same lines again, a release of what was merged before, takes
+ * nothing from it. Merged, open or closed, they count alike: which of them
+ * a charge is in does not move it.
  *
  * Having lines in a pull request is what makes a session pay for it. Of a
  * session that says no more than one branch for all of it, or none, all of
@@ -463,7 +481,14 @@ const DEFAULT_BASES = ["main", "master"];
  * on a branch is the pull requests' whose branch it is. What was spent on
  * one that is no such pull request's and that some are based on (`main`,
  * before the branch was made: the planning, the first edits) is theirs
- * too. What was spent on any other branch is no pull request's.
+ * too. In either, a line that an earlier pull request had already is that
+ * one's, and what was spent on it with it: what was spent on `develop` is
+ * the release's from it by name, and goes to the ones that brought its
+ * lines, but for what is new in it; what was spent on the branch of one
+ * that brings an earlier one's lines again goes to the earlier one. What
+ * was spent on any other branch is no pull request's. What was spent on turns that name no branch
+ * is shared out between all of them by lines: no name says nothing of where
+ * the work went.
  *
  * One of them on whose own branch the session spent nothing (a branch
  * renamed before it was pushed, a detached checkout, lines picked onto
@@ -488,15 +513,31 @@ export function charge(
       named.set(spent.branch, (named.get(spent.branch) ?? 0) + spent.usd);
     }
   }
+  // What was spent on turns that name no branch: that says nothing of where the work went.
+  let unnamed = 0;
+  for (const spent of Array.isArray(session.by_branch) ? session.by_branch : []) {
+    if (typeof spent?.branch !== "string" && typeof spent?.usd === "number" && Number.isFinite(spent.usd) && spent.usd > 0) unnamed += spent.usd;
+  }
   const every = rows.map((_, i) => i);
-  const byLines = (spent: number, among: number[], charged: number[]) => {
-    const weights = weigh(among.map((i) => ({ live: true, lines: rows[i]!.lines, matched: rows[i]!.contributed })));
+  const { counted } = linesOf(rows.map((row) => ({ live: true, matched: row.contributed })));
+  // Shared out between some of them by the lines they have, each line once: and a line that one
+  // before them had already, among them or not, is that one's, with what was spent on it.
+  const byLines = (spent: number, among: number[], charged: number[]): void => {
+    const weights = rows.map(() => 0);
+    const most = new Map<string, number>();
+    for (const i of among) {
+      if (!counted[i]) weights[i]! += rows[i]!.lines;
+      else for (const [line, n] of counted[i]) if (n > (most.get(line) ?? 0)) most.set(line, n);
+    }
+    for (const [line, n] of most) {
+      for (let copy = 1; copy <= n; copy++) weights[rows.findIndex((_, i) => (counted[i]?.get(line) ?? 0) >= copy)]! += 1;
+    }
     const all = weights.reduce((sum, weight) => sum + weight, 0);
-    among.forEach((i, at) => (charged[i]! += all > 0 ? (spent * weights[at]!) / all : 0));
-    return charged;
+    if (all > 0) weights.forEach((weight, i) => (charged[i]! += (spent * weight) / all));
   };
   // What each would be charged of a session that names no branches.
-  const whole = byLines(cost, every, rows.map(() => 0));
+  const whole = rows.map(() => 0);
+  byLines(cost, every, whole);
   // Turns that name no branch at all say no more than a session that names none.
   if (named.size === 0) return whole;
   const basedOn = (row: (typeof rows)[number], branch: string) => (row.base_ref != null ? row.base_ref === branch : DEFAULT_BASES.includes(branch));
@@ -505,6 +546,7 @@ export function charge(
     const heads = every.filter((i) => rows[i]!.head_ref === branch);
     byLines(spent, heads.length > 0 ? heads : every.filter((i) => basedOn(rows[i]!, branch)), charged);
   }
+  byLines(unnamed, every, charged);
   // One with lines of the session's and nothing spent on its own branch: the branches do not say what it cost.
   for (const i of every) if (rows[i]!.head_ref == null || !named.has(rows[i]!.head_ref!)) charged[i] = Math.max(charged[i]!, whole[i]!);
   // Never more than was spent, whatever the turns add up to, or with such a one beside them.
@@ -1207,8 +1249,8 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   // read here, or is looked for in this pull request once this is committed
   // (`pullsAddedTo` waits for it).
   await holdPullSessions(db);
-  const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string; head_ref: string | null; base_ref: string | null }>(
-    `SELECT first_files, first_event, state, head_ref, base_ref FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
+  const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string; head_ref: string | null; base_ref: string | null; ended: boolean }>(
+    `SELECT first_files, first_event, state, head_ref, base_ref, coalesce(merged_at, closed_at) IS NOT NULL AS ended FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
     [db.orgId, report.repo, report.number],
   );
   const first = existing ? json<FileHashes[]>(existing.first_files) : report.files;
@@ -1287,7 +1329,10 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   // Its branch, or the one it is based on, is another (one stacked on a pull request that was merged
   // is based on what that one was): what its sessions spent on which branch is its own is another too.
   const moved = existing != null && ((existing.head_ref ?? null) !== (report.head_ref ?? null) || (existing.base_ref ?? null) !== (report.base_ref ?? null));
-  await keepSessions(db, report.repo, report.number, sessions, turned || moved, seen);
+  // Merged, or closed, where it was open, or the other way: it had its lines before those that are open still
+  // (see `weighAgain`), so which of them a line in several is in may be another.
+  const ended = existing != null && existing.ended !== ((report.merged_at ?? report.closed_at ?? null) != null);
+  await keepSessions(db, report.repo, report.number, sessions, turned || moved || ended, seen);
   await recordReport(db, {
     repo: report.repo,
     number: report.number,
@@ -1450,7 +1495,8 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
             o.charged_usd, r.state <> 'closed' AS live, r.first_event = 'opened' AS from_open, r.head_ref, r.base_ref
      FROM jsonb_to_recordset($2::jsonb) AS k(machine_id text, source text, session_id text)
      JOIN pull_sessions o ON o.org_id = $1 AND o.machine_id = k.machine_id AND o.source = k.source AND o.session_id = k.session_id
-     JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number`,
+     JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number
+     ORDER BY coalesce(r.merged_at, r.closed_at) NULLS LAST, coalesce(r.created_at, r.first_seen_at), o.repo, o.number`,
     [db.orgId, JSON.stringify(touched)],
   );
   if (rows.length === 0) return;
@@ -1479,10 +1525,14 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
   const lines = (kept: unknown) => (kept == null ? null : json<Lines>(kept));
   const same = (stored: unknown, now: number) => stored != null && Math.abs(num(stored) - now) < 1e-9;
   const changed: Record<string, unknown>[] = [];
+  // (Each session's pull requests in the order they had their lines, as near as is known: the one
+  // merged or closed first, and of those still open the one opened first. A line gets into another
+  // by the one it is in being merged there, a stack merged from the top or a release, so the one
+  // merged first had it first. A line in several is the first one's.)
   for (const [key, its] of bySession) {
     const weights = weigh(its.map((row) => ({ live: row.live === true, lines: num(row.lines), matched: lines(row.matched) })));
-    // The lines each was first reported with are shared out likewise: ones that
-    // moved from one pull request to another were opened in both, and paid for once.
+    // The lines each was first reported with count likewise: ones that moved from
+    // one pull request to another were opened in both, and paid for once, in the first.
     // Only between those seen from the start: of another, what it was first
     // reported with says nothing, and it takes nothing from them.
     const fromOpen = its.filter((row) => row.from_open === true);
@@ -1495,13 +1545,14 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
       const counted = contributed ? countLines(contributed) : Math.max(num(row.lines), num(row.opened_lines));
       return { contributed, lines: row.contributed_lines == null ? counted : num(row.contributed_lines) };
     });
-    // And of those, what the ones still there, in any of them, count as: a line shared out as
+    // And of those, what the ones still there, in any of them, count as: a line counted as
     // the session's cost is, between all it contributed to, so that what a line that survived
     // cost divides what was paid for it here.
     const keptWith = weighKept(
       openedWith,
       fromOpen.map((row) => ({ live: row.live === true, matched: lines(row.matched) })),
       gave.map((one) => ({ matched: one.contributed })),
+      fromOpen.map((row) => its.indexOf(row)),
     );
     const kept = new Map(keptWith.map((weight, i) => [fromOpen[i]!, weight]));
     const charged = charge(
@@ -2079,7 +2130,7 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   let stuck = 0;
   let uncounted = 0;
   // What the lines it has now of the sessions charged count as, a line that
-  // is in two pull requests being half a line in each: what a line of it cost
+  // is in two pull requests counting in the one opened first: what a line of it cost
   // is said of those. A session with no cost figure says nothing of that.
   let costed = 0;
   // What the sessions it was first reported with lines of were charged, where
@@ -2133,8 +2184,8 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   const a = pull.attribution;
   const each = usd != null && costed > 0 ? usd / costed : null;
   // What the lines that survived count as, of what they were opened with. A
-  // line opened in two pull requests is half a line in each, and counts as
-  // surviving in both while either keeps it: between them it is one line,
+  // line opened in two pull requests is the first one's, and counts as
+  // surviving there while either keeps it: between them it is one line,
   // wherever it ended up. Of a session whose lines were not kept, which of
   // them survived is not known: of the lines that survived here, those the
   // others do not account for are taken to be shared out between such

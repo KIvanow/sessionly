@@ -261,6 +261,8 @@ export interface Options {
   hashKey?: string;
   /** In place of `CHARGE_RETRIES_MS`: tests do not wait that long. */
   chargeRetriesMs?: number[];
+  /** Handed what goes on after a request was answered (charging a session's pull requests again): tests wait for it. */
+  background?: (work: Promise<void>) => void;
   /**
    * The organisation one repository is shown in (demo.ts), and the paths of
    * it that are not shown; or why those cannot be trusted, and reports to it
@@ -439,7 +441,9 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const spent = c.get("spent");
     if (c.res.status !== 200) return;
     // What it cost, or where, is another: its pull requests are charged again, whether or not
-    // any of them has other lines of it now.
+    // any of them has other lines of it now. The upload is not kept waiting for that: a report
+    // may hold the organisation's lines for longer than whoever uploads waits for an answer, and
+    // the session is stored. What its pull requests cost is a moment behind it.
     if (spent) {
       // What fails (a report held the organisation's lines for too long) is tried again, later each
       // time: a session's last upload is followed by no other that would charge it.
@@ -452,7 +456,8 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
           if (wait != null) setTimeout(() => void charging(rest), wait).unref();
         }
       };
-      await charging(options.chargeRetriesMs ?? CHARGE_RETRIES_MS);
+      const work = charging(options.chargeRetriesMs ?? CHARGE_RETRIES_MS);
+      options.background?.(work);
     }
     if (!stored) return;
     try {

@@ -275,12 +275,19 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     fixed it up is in the second whole: the two are told apart by session, not by push.
   - **A session in several pull requests** is split between them by the lines it gave each,
     and counted once: six lines in one and four in another is $6 and $4 of a $10 session. A
-    line that is in several (one stacked on another, a release of what was merged before) is
-    shared out between them. The split does not move when review removes lines, when a
-    file is renamed, nor when one of them is merged or closed. It moves when the session
-    gives a pull request more lines, is uploaded with another cost or is deleted, when a
-    pull request's head or base branch changes, and when a line still in a pull request
-    turns out to be another session's, uploaded later.
+    line that is in several (one stacked on another, a release of what was merged before)
+    counts in the one that **had it first**, and a later one is charged only for the lines
+    that are new in it: a release pull request of work that earlier ones brought is charged
+    nothing for it, and takes nothing from them. The one that had it first is taken to be
+    the one merged (or closed) first, and of those still open the one opened first: a line
+    gets from one pull request into another by the first being merged into the other's
+    branch. The split does not move when
+    review removes lines, when a file is renamed, nor when one of them is merged or closed.
+    It moves when the session gives a pull request more lines, is uploaded with another
+    cost or is deleted, when a pull request's head or base branch changes, when a line
+    still in a pull request turns out to be another session's, uploaded later, and when the
+    order of two pull requests that share lines changes: one of two open ones is merged, or
+    one that was merged earlier is reported after the others (a backfill).
   - **Having lines in the pull request is what makes a session pay for it**, whatever branch
     it began on. Codex, Grok and a Cursor cloud agent name one branch for a whole session (a
     local Cursor session names none), and that is often the branch the session started on
@@ -293,11 +300,15 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     part of what it cost. The record says how much was spent on a branch and not when, so
     this is **all** the session spent on the base branch, whether before the pull request's
     own branch was made or after: unrelated work done on `main` in the same session is
-    charged too, shared between the session's pull requests that are based on it. (When a
-    pull request on that base branch itself has the session's lines, what was spent there is
-    that one's.) What the session spent on any other branch is that branch's pull request's,
-    or no one's, and so is what it spent while no branch was named (unless no turn of it
-    names a branch at all: it is then charged whole, as a session of the other agents is). When a session has lines
+    charged too, shared between the session's pull requests that are based on it. A branch
+    can be one pull request's own and the base of others. Where its own pull request was
+    opened first (the others are stacked on it), what was spent there is that one's. Where
+    the others were opened first (a release from `develop` of what they brought), it was
+    spent on them, and is shared by lines between all of them: the release is charged for
+    the lines that are new in it, and nothing moves off the others when it appears. What
+    the session spent on any other branch is that branch's pull request's, or no one's.
+    What it spent while no branch was named is shared between all its pull requests by
+    lines: a missing name says nothing of where the work went. When a session has lines
     in a pull request and spent nothing on that pull request's own branch (the branch was
     renamed before it was pushed, say, a detached checkout, or the lines were picked onto
     another), the branch names are what is off there, not the work: that pull request is
@@ -309,8 +320,8 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     session uploaded before turns were kept by branch is charged whole, as the other
     agents' are, until its machine uploads it again.
   - **The cost of a line.** Divided by the agent lines the pull request has now (of the
-    sessions that have a cost figure, a line that is in two pull requests being half a line
-    in each), the cost gives the cost of an agent line. The **cost of a line that got through
+    sessions that have a cost figure, a line that is in two pull requests counting in the
+    one that had it first), the cost gives the cost of an agent line. The **cost of a line that got through
     review** is what the first version cost, divided by the lines of it that survived. Review
     removing lines lowers no cost: it leaves fewer lines to divide by, so this figure goes up.
     That is the sign of money that bought less. When no line of the first version is left

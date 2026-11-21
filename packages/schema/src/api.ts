@@ -508,13 +508,17 @@ export interface PullCloud {
  * contributed lines to it cost, whether or not those lines are still in it.
  * A session is charged to the pull requests it contributed lines to, split
  * between them by the lines it contributed to each at any time, at its
- * opening or in a later push. Review taking lines out does not lower it.
+ * opening or in a later push; a line in several counts in the one that had
+ * it first (merged first, or of those open, opened first), so a later one
+ * is charged for what is new in it. Review taking
+ * lines out does not lower it.
  * Having lines in a pull request is what makes a session pay for it,
  * whatever branch it began on: a session of an agent that names one branch
  * for all of it, or none, counts whole, so other work it did is charged
  * here too. Where the agent says which branch each turn ran on (Claude
  * Code), what was spent on the pull request's branch and on the one it is
- * based on counts, and what was spent on other branches does not; a pull
+ * based on counts, what was spent on turns that name no branch is shared
+ * out by lines, and what was spent on other branches does not count; a pull
  * request on whose own branch such a session spent nothing is charged its
  * share of the whole session by lines, where that is more. It is the cost of
  * those sessions and not of the pull request's whole making: lines that are
@@ -552,7 +556,8 @@ export interface PullCost {
   /**
    * What an agent line of it cost: `usd` for what the lines it has now of
    * the sessions charged count as, a line that is in several pull requests
-   * being shared out between them. Null when it has none of theirs now. A
+   * counting in the one that had it first. Null when it has none of theirs now,
+   * or none that is new in it. A
    * floor when one of those has a cost that leaves requests out.
    */
   per_agent_line_usd: number | null;
@@ -676,7 +681,7 @@ export interface PullSession {
   /**
    * What it is charged in this pull request: all of what it spent, or its
    * share of that by `contributed_lines` when it contributed to other pull
-   * requests too (a line in several being shared out between them). Of a
+   * requests too (a line in several counting in the one that had it first). Of a
    * session whose turns name their branches (Claude Code), that is what it
    * spent on the pull request's branch and on the one it is based on, or
    * its share of all of it by lines where it spent nothing on the pull
