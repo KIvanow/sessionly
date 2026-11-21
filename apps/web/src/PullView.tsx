@@ -439,8 +439,6 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
           </>
         ) : s.uncounted ? (
           <span className="muted">not known yet</span>
-        ) : s.off_branch ? (
-          <span className="muted">on another branch</span>
         ) : (
           "–"
         )}

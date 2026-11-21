@@ -438,50 +438,50 @@ const DEFAULT_BASES = ["main", "master"];
  * on a branch is the pull requests' whose branch it is. What was spent on
  * one that is no such pull request's and that some are based on (`main`,
  * before the branch was made: the planning, the first edits) is theirs
- * too. What was spent on any other branch is no pull request's, and one
- * with nothing spent on its branch or its base is `off_branch`: charged
- * nothing. Null for a session with no cost figure, or none.
+ * too. What was spent on any other branch is no pull request's. That holds
+ * while every one of them has a branch the session spent on, its own or its
+ * base. Where one has neither (a branch renamed before it was pushed, lines
+ * picked onto another), the names are what is off and not the work: its
+ * lines are there, and all of the session's cost is shared out by lines, as
+ * of one that names no branches. Null for a session with no cost figure, or
+ * none.
  */
 export function charge(
   session: Spent | null,
   rows: { head_ref: string | null; base_ref?: string | null; lines: number; contributed: Lines | null }[],
-): { usd: number | null; off_branch: boolean }[] {
+): (number | null)[] {
   const cost = session?.cost_usd;
-  if (session == null || cost == null) return rows.map(() => ({ usd: null, off_branch: false }));
+  if (session == null || cost == null) return rows.map(() => null);
   const named = new Map<string, number>();
   for (const spent of Array.isArray(session.by_branch) ? session.by_branch : []) {
     if (typeof spent?.branch === "string" && typeof spent.usd === "number" && spent.usd > 0) {
       named.set(spent.branch, (named.get(spent.branch) ?? 0) + spent.usd);
     }
   }
-  const charged = rows.map((): { usd: number | null; off_branch: boolean } => ({ usd: 0, off_branch: true }));
-  const share = (spent: number, among: number[]) => {
+  const every = rows.map((_, i) => i);
+  const byLines = (spent: number, among: number[], charged: number[]) => {
     const weights = weigh(among.map((i) => ({ live: true, lines: rows[i]!.lines, matched: rows[i]!.contributed })));
     const all = weights.reduce((sum, weight) => sum + weight, 0);
-    among.forEach((i, at) => {
-      charged[i]!.usd! += all > 0 ? (spent * weights[at]!) / all : 0;
-      charged[i]!.off_branch = false;
-    });
-  };
-  const every = rows.map((_, i) => i);
-  // Turns that name no branch at all say no more than a session that names none.
-  if (named.size === 0) {
-    share(cost, every);
+    among.forEach((i, at) => (charged[i]! += all > 0 ? (spent * weights[at]!) / all : 0));
     return charged;
-  }
+  };
+  const whole = () => byLines(cost, every, rows.map(() => 0));
+  // Turns that name no branch at all say no more than a session that names none.
+  if (named.size === 0) return whole();
   const basedOn = (row: (typeof rows)[number], branch: string) => (row.base_ref != null ? row.base_ref === branch : DEFAULT_BASES.includes(branch));
+  const charged = rows.map(() => 0);
+  const found = new Set<number>();
   for (const [branch, spent] of named) {
     const heads = every.filter((i) => rows[i]!.head_ref === branch);
     const among = heads.length > 0 ? heads : every.filter((i) => basedOn(rows[i]!, branch));
-    if (among.length > 0) share(Math.min(cost, spent), among);
+    for (const i of among) found.add(i);
+    byLines(spent, among, charged);
   }
-  // A pull request that names no branch shares in all of it, beside those that share a branch's.
-  const unnamed = every.filter((i) => rows[i]!.head_ref == null);
-  if (unnamed.length > 0) share(cost, unnamed);
-  // Never more than was spent.
-  const total = charged.reduce((sum, one) => sum + one.usd!, 0);
-  if (total > cost && total > 0) for (const one of charged) one.usd = (one.usd! * cost) / total;
-  return charged;
+  // One with lines of the session's and no branch of its turns': the branches do not say where the work went.
+  if (found.size < rows.length) return whole();
+  // Never more than was spent, whatever the turns add up to.
+  const total = charged.reduce((sum, one) => sum + one, 0);
+  return total > cost && total > 0 ? charged.map((one) => (one * cost) / total) : charged;
 }
 
 const FEEDBACK_KINDS = ["review", "inline", "conversation"];
@@ -1385,7 +1385,7 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
   const rows = await db.query(
     `SELECT o.repo, o.number, o.machine_id, o.source, o.session_id, o.lines, o.weight, o.matched,
             o.opened_lines, o.opened_weight, o.opened_matched, o.opened_kept, o.opened_here, o.contributed, o.contributed_lines,
-            o.charged_usd, o.off_branch, r.state <> 'closed' AS live, r.first_event = 'opened' AS from_open, r.head_ref, r.base_ref
+            o.charged_usd, r.state <> 'closed' AS live, r.first_event = 'opened' AS from_open, r.head_ref, r.base_ref
      FROM jsonb_to_recordset($2::jsonb) AS k(machine_id text, source text, session_id text)
      JOIN pull_sessions o ON o.org_id = $1 AND o.machine_id = k.machine_id AND o.source = k.source AND o.session_id = k.session_id
      JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number`,
@@ -1458,8 +1458,7 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
         unchanged(row.opened_kept, still) &&
         unchanged(row.opened_here, here) &&
         row.contributed_lines != null &&
-        unchanged(row.charged_usd, charged[i]!.usd) &&
-        row.off_branch === charged[i]!.off_branch
+        unchanged(row.charged_usd, charged[i]!)
       )
         return;
       changed.push({
@@ -1475,8 +1474,7 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
         // Kept as it is where it was kept already: only one from before is given what it had.
         contributed: row.contributed_lines == null && row.contributed == null ? gave[i]!.contributed : null,
         contributed_lines: gave[i]!.lines,
-        charged_usd: charged[i]!.usd,
-        off_branch: charged[i]!.off_branch,
+        charged_usd: charged[i]!,
       });
     });
   }
@@ -1484,11 +1482,11 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
   await db.query(
     `UPDATE pull_sessions o SET weight = c.weight, opened_weight = c.opened_weight, opened_kept = c.opened_kept,
             opened_here = c.opened_here, contributed = coalesce(c.contributed, o.contributed),
-            contributed_lines = c.contributed_lines, charged_usd = c.charged_usd, off_branch = c.off_branch
+            contributed_lines = c.contributed_lines, charged_usd = c.charged_usd
      FROM jsonb_to_recordset($2::jsonb)
        AS c(repo text, number integer, machine_id text, source text, session_id text, weight double precision,
             opened_weight double precision, opened_kept double precision, opened_here integer, contributed jsonb,
-            contributed_lines integer, charged_usd double precision, off_branch boolean)
+            contributed_lines integer, charged_usd double precision)
      WHERE o.org_id = $1 AND o.repo = c.repo AND o.number = c.number AND o.machine_id = c.machine_id
        AND o.source = c.source AND o.session_id = c.session_id`,
     [db.orgId, JSON.stringify(changed)],
@@ -1918,7 +1916,7 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
   const rows = await db.query(
     `WITH mine AS (
        SELECT p.repo, p.number, p.machine_id, p.source, p.session_id, p.lines, p.weight, p.opened_lines, p.opened_weight,
-              p.opened_kept, p.opened_here, p.contributed_lines, p.charged_usd, p.off_branch, r.state = 'closed' AS closed
+              p.opened_kept, p.opened_here, p.contributed_lines, p.charged_usd, r.state = 'closed' AS closed
        FROM (${chosen.sql}) c
        JOIN pull_sessions p ON p.org_id = $1 AND p.repo = c.repo AND p.number = c.number
        JOIN pull_requests r ON r.org_id = p.org_id AND r.repo = p.repo AND r.number = p.number
@@ -1966,7 +1964,6 @@ async function sharesIn(db: OrgDb, chosen: { sql: string; params: unknown[] }, f
         cost_share_usd: cost == null ? null : money(cost),
         uncounted: uncounted && whole != null,
         unshared: held && unkept && num(row.pulls) > 1,
-        off_branch: held && !uncounted && row.off_branch === true,
         session: held
           ? {
               owner_email: String(row.owner_email),
@@ -2019,7 +2016,6 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   let unshared = 0;
   let stuck = 0;
   let uncounted = 0;
-  let offBranch = 0;
   // What the lines it has now of the sessions charged count as, a line that
   // is in two pull requests being half a line in each: what a line of it cost
   // is said of those. A session with no cost figure says nothing of that.
@@ -2043,17 +2039,14 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
   let unsaidLines = 0;
   let unsaidCosted = 0;
   for (const share of shares) {
-    const { lines, cost_share_usd: cost, unshared: unsure, uncounted: later, off_branch: elsewhere } = share.wrote;
+    const { lines, cost_share_usd: cost, unshared: unsure, uncounted: later } = share.wrote;
     sessions += 1;
-    // Its lines are here, and what it spent was spent on another branch: charged nothing, it
-    // says nothing of what a line cost either.
-    if (elsewhere) offBranch += 1;
     if (!share.opened_known) openedKnown = false;
     else if (share.opened_lines > 0) {
       if (share.opened_kept == null) unsaidLines += share.opened_lines;
       else hereSaid += share.opened_here ?? 0;
       if (cost == null) openedFloor = true;
-      else if (!elsewhere) {
+      else {
         opened = (opened ?? 0) + cost;
         if (share.opened_kept == null) unsaidCosted += share.opened_weight;
         else kept += share.opened_kept;
@@ -2067,7 +2060,6 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
       if (later) uncounted += 1;
       continue;
     }
-    if (elsewhere) continue;
     // One all of whose lines went in review was charged all the same: what it spent was spent.
     usd = (usd ?? 0) + cost;
     if (lines > 0) costed += share.weight;
@@ -2101,7 +2093,6 @@ function costOf(pull: Pick<PullRow, "attribution" | "first_event">, shares: Shar
     sessions_unshared: unshared,
     sessions_unshared_for_good: stuck,
     sessions_uncounted: uncounted,
-    sessions_off_branch: offBranch,
     per_agent_line_usd: each == null ? null : money(each),
     opened_usd: opened == null ? null : money(opened),
     opened_is_floor: opened != null && openedFloor,

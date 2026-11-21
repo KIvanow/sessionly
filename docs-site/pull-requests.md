@@ -290,10 +290,11 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     what was spent on the branch it is based on before its own was made: the planning on
     `main` that led to it is part of what it cost. (When a pull request on that base branch
     itself has the session's lines, what was spent there is that one's.) What the session
-    spent on any other branch is that branch's pull request's, or no one's. A session with
-    lines in the pull request and nothing spent on its branch or its base (the branch was
-    renamed before it was pushed, say) is listed with "on another branch" in place of a
-    cost, and the tile says how many there are. A report from an Action too old to say what
+    spent on any other branch is that branch's pull request's, or no one's. When a session
+    has lines in a pull request and spent nothing on its branch or its base (the branch was
+    renamed before it was pushed, say, or the lines were picked onto another), the branch
+    names are what is off, not the work: the session is then charged whole, split by lines
+    between the pull requests it gave lines to, as the other agents' are. A report from an Action too old to say what
     the pull request is based on is taken to be based on `main` or `master`. A Claude Code
     session uploaded before turns were kept by branch is charged whole, as the other
     agents' are, until its machine uploads it again.

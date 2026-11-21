@@ -17,8 +17,8 @@ light or dark as the system is, and serves the same two typefaces itself, from
   [Action](pull-requests.md) reports pull requests, where it went: **merged or open pull
   requests**, **closed without merging**, and **not in a pull request**, which is sessions
   whose work has not reached a pull request yet: exploration, abandoned branches, work whose
-  pull request is not open yet, and what a Claude Code session spent on a branch that is neither
-  its pull request's nor the one that is based on. Every dollar is in one of the three, and they add up to the total; see
+  pull request is not open yet, and what a Claude Code session spent on other branches than
+  its pull requests' and the ones those are based on. Every dollar is in one of the three, and they add up to the total; see
   [how a pull request is charged](pull-requests.md#how-to-read-it)), sessions, active time,
   prompts, tokens, tool calls and failure rate, files changed, the share of files rewritten
   since and of agent lines kept at 7 days (see [Rewrite rate](rewrite-rate.md#at-1-7-and-30-days));

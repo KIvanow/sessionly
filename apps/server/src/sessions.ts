@@ -309,7 +309,7 @@ export async function forgetLines(
   await holdPullSessions(db);
   await db.query(
     `UPDATE pull_sessions p SET matched = NULL, opened_matched = NULL, weight = p.lines, opened_weight = p.opened_lines, opened_kept = NULL, opened_here = NULL,
-            contributed = CASE WHEN $3::boolean THEN p.contributed END, charged_usd = NULL, off_branch = false
+            contributed = CASE WHEN $3::boolean THEN p.contributed END, charged_usd = NULL
      FROM jsonb_to_recordset($2::jsonb) AS gone(machine_id text, source text, session_id text)
      WHERE p.org_id = $1 AND p.machine_id = gone.machine_id AND p.source = gone.source
        AND p.session_id = gone.session_id

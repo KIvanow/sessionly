@@ -47,9 +47,6 @@ export function pullCostNote(c: PullCost | null): string {
     c.sessions_uncounted > 0
       ? `the share of ${count(c.sessions_uncounted)} ${c.sessions_uncounted === 1 ? "session is" : "sessions is"} still being worked out since the upgrade`
       : null,
-    c.sessions_off_branch > 0
-      ? `${count(c.sessions_off_branch)} ${c.sessions_off_branch === 1 ? "session" : "sessions"} ran on another branch, and ${c.sessions_off_branch === 1 ? "is" : "are"} not charged here`
-      : null,
   ]
     .filter(Boolean)
     .join("; ");
@@ -82,9 +79,8 @@ export function pullCostNote(c: PullCost | null): string {
  * estimate, null where there is none, and why, where the figure alone does
  * not say.
  */
-export function sessionShare(s: Pick<PullSession, "cost_share_usd" | "uncounted" | "unshared" | "off_branch" | "session">): { text: string | null; why: string | null } {
+export function sessionShare(s: Pick<PullSession, "cost_share_usd" | "uncounted" | "unshared" | "session">): { text: string | null; why: string | null } {
   if (s.uncounted) return { text: null, why: "its share is still being worked out since the upgrade" };
-  if (s.off_branch) return { text: null, why: "what it spent was spent on another branch than this pull request's: it is not charged here" };
   if (!s.session || s.cost_share_usd == null) return { text: null, why: null };
   const estimated = s.session.cost_source !== "recorded" || s.unshared;
   return {

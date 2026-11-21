@@ -131,7 +131,7 @@ test("reviews and comments are counted apart for people, for bots and for the au
 });
 
 test("a pull request's cost is said with what is not sure about it", () => {
-  const whole = { usd: 4.1, estimated: false, sessions: 3, sessions_without_cost: 0, sessions_with_cost_partial: 0, sessions_unshared: 0, sessions_unshared_for_good: 0, sessions_uncounted: 0, sessions_off_branch: 0, per_agent_line_usd: 0.1, opened_usd: 4.1, opened_is_floor: false, opened_estimated: false, opened_surviving_lines: 20, per_surviving_line_usd: 0.2, per_surviving_line_is_floor: false };
+  const whole = { usd: 4.1, estimated: false, sessions: 3, sessions_without_cost: 0, sessions_with_cost_partial: 0, sessions_unshared: 0, sessions_unshared_for_good: 0, sessions_uncounted: 0, per_agent_line_usd: 0.1, opened_usd: 4.1, opened_is_floor: false, opened_estimated: false, opened_surviving_lines: 20, per_surviving_line_usd: 0.2, per_surviving_line_is_floor: false };
   assert.equal(pullCost(whole), "$4.10");
   assert.equal(pullCostNote(whole), "$0.10 per agent line; $0.20 per line that survived review");
   // an estimate, and a floor: a session of it has no cost figure
@@ -173,9 +173,6 @@ test("a pull request's cost is said with what is not sure about it", () => {
     pullCostNote({ ...whole, usd: 6.1 }),
     "$0.10 per agent line; $0.20 per line that survived review; $4.10 of it for its first version, the rest in review",
   );
-  // a session whose money was spent on another branch is said not to be charged
-  assert.match(pullCostNote({ ...whole, sessions_off_branch: 1 }), /; 1 session ran on another branch, and is not charged here$/);
-  assert.match(pullCostNote({ ...whole, sessions_off_branch: 2 }), /; 2 sessions ran on another branch, and are not charged here$/);
   // every line it was opened with went in review, and what was spent on it is what it was
   assert.equal(
     pullCostNote({ ...whole, per_agent_line_usd: null, opened_surviving_lines: 0, per_surviving_line_usd: null }),
@@ -188,7 +185,7 @@ test("a pull request's cost is said with what is not sure about it", () => {
   // one whose cost leaves requests out does
   assert.equal(pullCostNote({ ...whole, opened_is_floor: true, per_surviving_line_is_floor: true }), "$0.10 per agent line; at least $0.20 per line that survived review");
   // no figure is a dash and never a cost of nothing
-  const none = { usd: null, estimated: false, sessions: 2, sessions_without_cost: 2, sessions_with_cost_partial: 0, sessions_unshared: 0, sessions_unshared_for_good: 0, sessions_uncounted: 0, sessions_off_branch: 0, per_agent_line_usd: null, opened_usd: null, opened_is_floor: false, opened_estimated: false, opened_surviving_lines: null, per_surviving_line_usd: null, per_surviving_line_is_floor: false };
+  const none = { usd: null, estimated: false, sessions: 2, sessions_without_cost: 2, sessions_with_cost_partial: 0, sessions_unshared: 0, sessions_unshared_for_good: 0, sessions_uncounted: 0, per_agent_line_usd: null, opened_usd: null, opened_is_floor: false, opened_estimated: false, opened_surviving_lines: null, per_surviving_line_usd: null, per_surviving_line_is_floor: false };
   assert.equal(pullCost(none), "–");
   assert.equal(pullCostNote(none), "2 of 2 sessions have no cost figure");
   assert.equal(pullCostNote({ ...none, sessions: 0, sessions_without_cost: 0 }), "no session was matched to its lines");
@@ -204,7 +201,7 @@ test("a pull request's cost is said with what is not sure about it", () => {
 
 test("a session's share of what it cost says what is not sure about it", () => {
   const known = { cost_usd: 6, cost_source: "recorded" } as any;
-  const s = { cost_share_usd: 3, uncounted: false, unshared: false, off_branch: false, session: known };
+  const s = { cost_share_usd: 3, uncounted: false, unshared: false, session: known };
   assert.deepEqual(sessionShare(s), { text: "$3.00", why: null });
   // of a cost that is an estimate
   assert.deepEqual(sessionShare({ ...s, session: { ...known, cost_source: "estimated" } }), { text: "~$3.00", why: null });
@@ -215,11 +212,6 @@ test("a session's share of what it cost says what is not sure about it", () => {
   });
   // it has a cost, and its share is not known yet: that is said, not left as a bare dash
   assert.deepEqual(sessionShare({ ...s, cost_share_usd: null, uncounted: true }), { text: null, why: "its share is still being worked out since the upgrade" });
-  // spent on another branch: charged nothing here, which is not a cost of nothing
-  assert.deepEqual(sessionShare({ ...s, cost_share_usd: 0, off_branch: true }), {
-    text: null,
-    why: "what it spent was spent on another branch than this pull request's: it is not charged here",
-  });
   // no cost figure, or deleted since
   assert.deepEqual(sessionShare({ ...s, cost_share_usd: null }), { text: null, why: null });
   assert.deepEqual(sessionShare({ ...s, session: null }), { text: null, why: null });
