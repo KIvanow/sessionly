@@ -249,7 +249,7 @@ type Kept = Wrote & { opened_lines: number; opened_matched: Lines };
 /** A line of a file, as the lines seen are keyed. */
 const lineKey = (path: string, hash: string): string => `${path}\n${hash}`;
 
-/** How often each line of each file is in a pull request's files: of several reports, as often as the one that has it most. */
+/** How often each line of each file is in a pull request's files. */
 function copiesIn(...reports: FileHashes[][]): Map<string, number> {
   const most = new Map<string, number>();
   for (const files of reports) {
@@ -1385,9 +1385,10 @@ export async function holdPullSessions(db: OrgDb): Promise<void> {
  * it has now, is whose this match says it is: one put down to a session
  * before the one that wrote it was uploaded goes with it. A line that went
  * from what it has now (it is not in `seen`) stays with the session it was
- * last put down to there as well: there is nothing left there to match it
- * by. Which those are is kept (`gone`), so that matching the same files
- * again changes nothing.
+ * last put down to there, unless it is one the pull request was first
+ * reported with that this match gives to another: of the others there is
+ * nothing left to match by. Which those are is kept (`gone`), so that
+ * matching the same files again changes nothing.
  * A session's line is the same line in whatever file: one whose file was
  * renamed, or that was moved to another, has not gone and is not given
  * again.
@@ -1442,7 +1443,19 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
       row.gone != null
         ? copiesAt(kept(row.gone))
         : new Map([...copiesAt(before)].map(([line, n]) => [line, Math.max(0, n - (present.get(line) ?? 0))]));
-    return [{ row, key, went, there: copiesAt(kept(row.matched)), now: has.get(key) ?? new Map<string, number>() }];
+    // What it had in the files as last reported. Of one whose lines went with it and that is
+    // here again (a copy made anew, see `forgetLines`): all it contributed that had not gone.
+    const there =
+      row.matched != null
+        ? copiesAt(kept(row.matched))
+        : new Map([...copiesAt(before)].map(([line, n]) => [line, Math.max(0, n - (went.get(line) ?? 0))]));
+    // The lines it was opened with that it is not opened with any more: they are another
+    // session's now, or no one's. (Not said of one whose lines were not kept.)
+    const opened = copiesAt(next.get(key)?.opened_matched ?? {});
+    const lost = new Map(
+      [...copiesAt(kept(row.opened_matched))].map(([line, n]) => [line, Math.max(0, n - (opened.get(line) ?? 0))] as const).filter(([, n]) => n > 0),
+    );
+    return [{ row, key, went, there, lost, now: has.get(key) ?? new Map<string, number>() }];
   });
   const were = new Map<string, number>();
   for (const { there } of held) for (const [line, n] of there) were.set(line, (were.get(line) ?? 0) + n);
@@ -1453,7 +1466,7 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   const grew = new Map([...matched].map(([line, n]) => [line, Math.max(0, n - (were.get(line) ?? 0))]));
   const hashOf = (line: string) => line.slice(line.lastIndexOf("\n") + 1);
   const pathOf = (line: string) => line.slice(0, line.lastIndexOf("\n"));
-  for (const { row, key, went, there, now } of held) {
+  for (const { row, key, went, there, lost, now } of held) {
     // What it has now that it had not, by line whatever the file: of its own lines, moved or back.
     const more = new Map<string, number>();
     for (const line of [...now.keys()].sort()) {
@@ -1473,9 +1486,9 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
       if (some > 0) more.set(hashOf(line), more.get(hashOf(line))! - some);
       return n - some;
     };
-    const gone = new Map<string, string[]>();
+    const left = new Map<string, number>();
     const keep = (line: string, n: number) => {
-      if (n > 0) gone.set(pathOf(line), [...(gone.get(pathOf(line)) ?? []), ...Array<string>(n).fill(hashOf(line))]);
+      if (n > 0) left.set(line, (left.get(line) ?? 0) + n);
     };
     // (In an order that does not depend on how its files were kept. Only of a copy that went
     // may it be said that it moved: one still there that is another's now did not.)
@@ -1486,6 +1499,12 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
       keep(line, moved(line, some));
     }
     for (const line of [...went.keys()].sort()) keep(line, moved(line, went.get(line)!));
+    // A line the pull request was first reported with is there to match by still, though it
+    // went from what it has now: one that this match gives to another session, or to no one,
+    // where it gave it to this one before, is not this one's as gone either.
+    for (const [line, n] of lost) if (left.has(line)) left.set(line, Math.max(0, left.get(line)! - n));
+    const gone = new Map<string, string[]>();
+    for (const [line, n] of left) if (n > 0) gone.set(pathOf(line), [...(gone.get(pathOf(line)) ?? []), ...Array<string>(n).fill(hashOf(line))]);
     if (gone.size === 0) continue;
     // (As entries: a file may be called `__proto__`, or `constructor`.)
     const one = next.get(key);

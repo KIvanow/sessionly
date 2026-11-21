@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countHashedLines, migrationAt, openDb, type Db } from "../src/db.ts";
 import { DEFAULT_ORG } from "../src/auth.ts";
+import { forgetLines } from "../src/sessions.ts";
 import { newOrg, testDb, testDbUrl, tokenFor } from "./helpers.ts";
 import { attribute, breakdown, charge, chargeAgain, CURRENT_ACTION, type Claim, historyChange, holdPullSessions, MATCH_AT_ONCE, olderAction, UNKNOWN_REPORTER, weigh, weighKept, weighKeptSome, writers, type SessionAt, unionLines } from "../src/pulls.ts";
 
@@ -2149,6 +2150,42 @@ test("what a session gave and is charged holds through copies of a line and a la
     const gave = (await pull(number)).sessions.map((x: any) => [x.session_id, x.lines, x.contributed_lines]).sort();
     assert.deepEqual(gave, [[`h-had-${number}`, 1, 1], [`h-took-${number}`, 1, 1]], lost);
   }
+
+  // a line the pull request was opened with, that review took out, and that turns out to be a later
+  // session's, uploaded since: it is there to match by still, so it is that one's alone and counts once
+  const later = (id: string, usd: number, files: Record<string, number[]>) => {
+    const one = session(id, "claude-code", "claude-opus-5-5", "2026-11-10T14:00:00Z", Object.entries(files).map(([path, numbers]) => ({ path, model: null, hashes: numbers.map(h) })));
+    one.session.repo.remote = repo;
+    (one.session as Record<string, unknown>).cost = { total_usd: usd, source: "recorded" };
+    return call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, one);
+  };
+  await put("h-opened", 12, { "o.ts": [2900, 2901], "o2.ts": [2902, 2903] });
+  await sent(22, [file("o2.ts", 2902, 2903)]);
+  await sent(23, [file("o.ts", 2900, 2901)]);
+  await sent(23, [file("o.ts", 2901)], { event: "synchronize" });
+  const opened = async () => (await pull(23)).sessions.map((x: any) => [x.session_id, x.lines, x.contributed_lines, x.cost_share_usd]).sort();
+  assert.deepEqual(await opened(), [["h-opened", 1, 2, 6]]);
+  await later("h-theirs", 10, { "o.ts": [2900] });
+  assert.deepEqual(await opened(), [["h-opened", 1, 1, 4], ["h-theirs", 0, 1, 10]]);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 23 })).status, 200);
+  assert.deepEqual(await opened(), [["h-opened", 1, 1, 4], ["h-theirs", 0, 1, 10]]);
+
+  // a session whose lines went with it and that is stored anew (the demo's copy of it): the copies
+  // that went in review are kept from before, one of two of a line and one in another file
+  await put("h-anew", 5, { "c1.ts": [3000, 3000, 3001], "c2.ts": [3002], "c3.ts": [3002] });
+  await sent(24, [file("y.ts", 9008)]);
+  await sent(24, [file("y.ts", 9008), file("c1.ts", 3000, 3000, 3001), file("c2.ts", 3002), file("c3.ts", 3002)], { event: "synchronize" });
+  await sent(24, [file("y.ts", 9008), file("c1.ts", 3000, 3001), file("c2.ts", 3002)], { event: "synchronize" });
+  const anew = async () => (await pull(24)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd]);
+  assert.deepEqual(await anew(), [[3, 5, 5]]);
+  await db.asOrg(DEFAULT_ORG, async (tx) => {
+    const gone = await tx.query(`DELETE FROM sessions WHERE org_id = $1 AND session_id = 'h-anew' RETURNING machine_id, source, session_id`, [tx.orgId]);
+    await forgetLines(tx, gone, { again: true });
+  });
+  await put("h-anew", 5, { "c1.ts": [3000, 3000, 3001], "c2.ts": [3002], "c3.ts": [3002] });
+  assert.deepEqual(await anew(), [[3, 5, 5]]);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 24 })).status, 200);
+  assert.deepEqual(await anew(), [[3, 5, 5]]);
 
   // one stacked on another: what was spent on main is the one's that is based on it, until the first
   // is merged and the second is based on main as well, with not a line of either changed
