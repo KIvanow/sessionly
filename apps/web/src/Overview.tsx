@@ -92,6 +92,9 @@ export function Overview({ token, scope, showUsers, onPick, onSignOut }: Props) 
 /** The figures at the top: the cost on a sheet of its own, the rest beside it. */
 function Headline({ total }: { total: Totals }) {
   const estimated = total.sessions_with_estimated_cost;
+  const why = useId();
+  // Where the cost went, once any of it is in a pull request: before the Action reports one, all of it is in none.
+  const inPulls = total.in_pr_usd > 0 || total.closed_unmerged_usd > 0;
   return (
     <section className="headline" aria-label="Totals">
       <div className="hero">
@@ -109,6 +112,24 @@ function Headline({ total }: { total: Totals }) {
             </>
           )}
         </dl>
+        {inPulls && (
+          <dl className="facts where" aria-label="Where the cost went">
+            <dt>Merged or open pull requests</dt>
+            <dd>{usd(total.in_pr_usd)}</dd>
+            <dt>Closed without merging</dt>
+            <dd>{usd(total.closed_unmerged_usd)}</dd>
+            <dt>
+              {/* Focusable, so that a keyboard or a tap opens what it means too. */}
+              <span className="explained" tabIndex={0} aria-describedby={why}>
+                <span>Not in a pull request</span>
+                <span className="explanation" role="tooltip" id={why}>
+                  Sessions whose work hasn't reached a pull request yet: exploration, abandoned branches, or work whose PR isn't open yet.
+                </span>
+              </span>
+            </dt>
+            <dd>{usd(total.not_in_pr_usd)}</dd>
+          </dl>
+        )}
         <span className="note">
           {estimated > 0 && `${count(estimated)} of ${count(total.sessions)} sessions are estimates. `}
           {total.sessions_without_cost > 0 && `${count(total.sessions_without_cost)} have no cost figure.`}

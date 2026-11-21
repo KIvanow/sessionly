@@ -168,6 +168,16 @@ test("a pull request's cost is said with what is not sure about it", () => {
     pullCostNote({ ...whole, sessions_without_cost: 2, sessions_uncounted: 1, opened_usd: null, per_surviving_line_usd: null }),
     "$0.10 per agent line; 1 of 3 sessions has no cost figure; the share of 1 session is still being worked out since the upgrade",
   );
+  // review rounds cost more since it was opened: what its first version cost is said beside what was spent
+  assert.equal(
+    pullCostNote({ ...whole, usd: 6.1 }),
+    "$0.10 per agent line; $0.20 per line that survived review; $4.10 of it for its first version, the rest in review",
+  );
+  // every line it was opened with went in review, and what was spent on it is what it was
+  assert.equal(
+    pullCostNote({ ...whole, per_agent_line_usd: null, opened_surviving_lines: 0, per_surviving_line_usd: null }),
+    "none of the agent lines it was opened with is left: they cost $4.10",
+  );
   // a cost that is not nothing is not shown as nothing
   assert.equal(pullCost({ ...whole, usd: 0.00001 }), "$0.000010");
   // a session with no cost figure makes what the opening lines cost a floor, not what a surviving one of the others did
@@ -225,7 +235,7 @@ test("the lines a cost per surviving line divides by are shown beside how many s
 
 test("the cost of several pull requests says what it leaves out", () => {
   const total = { cost_usd: 42, pulls_with_cost_missing: 0, pulls_closed_with_cost: 0, per_surviving_line_usd: 0.25, per_surviving_line_is_floor: false, per_surviving_line_estimated: false };
-  assert.equal(pullsCostNote(total), "$0.25 per agent line that survived review; what the matched sessions cost, each for its share of lines");
+  assert.equal(pullsCostNote(total), "$0.25 per agent line that survived review; what the sessions that gave them lines cost, review rounds included");
   assert.equal(pullsCostNote({ ...total, pulls_with_cost_missing: 2, per_surviving_line_usd: null }), "not known in full for 2 pull requests");
   // a session of the lines they were opened with has no cost: what a surviving line cost is a floor
   assert.match(pullsCostNote({ ...total, per_surviving_line_is_floor: true }), /^at least \$0\.25 per agent line that survived review; /);

@@ -151,9 +151,11 @@ export function PullView({
         <h2>Sessions that wrote it</h2>
         {p.cost?.usd != null && (
           <p className="muted hint">
-            A session's cost here is its share of what the whole session cost: as many of the lines it
-            uploaded hashes of as are in this pull request. A line that is in other pull requests too
-            is shared out between them. Their sum is the agent cost above: what the matched sessions
+            A session's cost here is what it spent, all of it where this is the one pull request it
+            gave lines to. One that gave lines to other pull requests too is split between them by
+            the lines it gave each, and a line that is in several counts in the one that had it first; of a Claude Code
+            session, what it spent on other branches than this one and its base is left out. Lines that review took out since still count: what was
+            spent on them was spent. Their sum is the agent cost above: what the matched sessions
             cost, not what making the pull request did.
           </p>
         )}
@@ -420,6 +422,7 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
   const known = s.session;
   const name = known?.title || `Session ${s.session_id.slice(0, 8)}`;
   const its = sessionShare(s);
+  const gave = s.contributed_lines;
   return (
     <tr>
       <td className="title">
@@ -441,7 +444,7 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
           "–"
         )}
       </td>
-      <td className="num">
+      <td className="num" title={gave > s.lines ? `It gave this pull request ${count(gave)} ${gave === 1 ? "line" : "lines"} in all: review took the rest out` : undefined}>
         {count(s.lines)} <span className="muted">({percent(share(s.lines, lines))})</span>
       </td>
     </tr>

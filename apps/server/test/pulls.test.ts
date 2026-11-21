@@ -8,7 +8,8 @@ import { join } from "node:path";
 import { countHashedLines, migrationAt, openDb, type Db } from "../src/db.ts";
 import { DEFAULT_ORG } from "../src/auth.ts";
 import { newOrg, testDb, testDbUrl, tokenFor } from "./helpers.ts";
-import { attribute, breakdown, CURRENT_ACTION, type Claim, historyChange, MATCH_AT_ONCE, olderAction, UNKNOWN_REPORTER, weigh, weighKept, weighKeptSome, writers, type SessionAt } from "../src/pulls.ts";
+import { attribute, breakdown, charge, chargeAgain, CURRENT_ACTION, type Claim, historyChange, holdPullSessions, MATCH_AT_ONCE, olderAction, UNKNOWN_REPORTER, weigh, weighKept, weighKeptSome, writers, type SessionAt } from "../src/pulls.ts";
+import { unionLines } from "../src/contributed.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
 const h = (n: number) => n.toString(16).padStart(16, "0");
@@ -209,12 +210,14 @@ const tokens = { admin: "", ann: "", ci: "" };
 
 before(async () => {
   db = await testDb();
-  app = createApp(db, {});
+  app = createApp(db, { background: (work) => void later.push(work) });
   tokens.admin = await tokenFor(db, { email: "boss@example.com", role: "admin" });
   tokens.ann = await tokenFor(db, { email: "ann@example.com", role: "member" });
   tokens.ci = await tokenFor(db, { email: "ci@example.com", role: "ci" });
 });
 after(() => db.close());
+
+const later: Promise<void>[] = [];
 
 async function call(token: string, method: string, path: string, body?: unknown) {
   const response = await app.request(`/api/v1${path}`, {
@@ -222,6 +225,8 @@ async function call(token: string, method: string, path: string, body?: unknown)
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  // What an upload leaves to be done once it is answered (its pull requests charged again) is waited for.
+  await Promise.all(later.splice(0));
   return { status: response.status, body: (await response.json()) as any };
 }
 
@@ -1452,7 +1457,7 @@ test("another organisation's history is not visible", async () => {
   assert.ok(Number(others?.n) > 0);
 });
 
-test("what a pull request's sessions cost it: each for the share of its lines that are there", async () => {
+test("what was spent on a pull request: its sessions' cost, split by the lines each contributed to it", async () => {
   const repo = "github.com/acme/cost";
   const range = (from: number, count: number) => Array.from({ length: count }, (_, i) => from + i);
   const upload = (id: string, path: string, numbers: number[], cost: unknown, remote = repo) => {
@@ -1462,21 +1467,29 @@ test("what a pull request's sessions cost it: each for the share of its lines th
     return call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, s);
   };
   const detail = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}&number=${number}`)).body;
+  const none = { sessions_without_cost: 0, sessions_with_cost_partial: 0, sessions_unshared: 0, sessions_unshared_for_good: 0, sessions_uncounted: 0 };
 
-  // one session of a hundred lines: forty are in one pull request, ten in another, fifty in neither
+  // one session of a hundred lines: forty went into one pull request, ten into another, fifty into neither.
+  // All of what it cost is theirs, four to one: the fifty that got nowhere were paid for on the way to these
   assert.equal((await upload("c-wide", "c.ts", range(1000, 100), { total_usd: 10, source: "recorded" })).status, 200);
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 1, files: [file("c.ts", ...range(1000, 40), 5000)] }));
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 2, event: "synchronize", files: [file("c.ts", ...range(1040, 10))] }));
   const a = await detail(1);
-  assert.deepEqual(a.cost, { usd: 4, estimated: false, sessions: 1, sessions_without_cost: 0, sessions_with_cost_partial: 0, sessions_unshared: 0, sessions_unshared_for_good: 0, sessions_uncounted: 0, per_agent_line_usd: 0.1, opened_usd: 4, opened_is_floor: false, opened_estimated: false, opened_surviving_lines: 40, per_surviving_line_usd: 0.1, per_surviving_line_is_floor: false });
-  assert.deepEqual([a.sessions[0].lines, a.sessions[0].hashed_lines, a.sessions[0].cost_share_usd, a.sessions[0].session.cost_usd], [40, 100, 4, 10]);
+  assert.deepEqual(a.cost, { usd: 8, estimated: false, sessions: 1, ...none, per_agent_line_usd: 0.2, opened_usd: 8, opened_is_floor: false, opened_estimated: false, opened_surviving_lines: 40, per_surviving_line_usd: 0.2, per_surviving_line_is_floor: false });
+  assert.deepEqual(
+    [a.sessions[0].lines, a.sessions[0].contributed_lines, a.sessions[0].hashed_lines, a.sessions[0].cost_share_usd, a.sessions[0].session.cost_usd],
+    [40, 40, 100, 8, 10],
+  );
   // not seen from the start: what a line that survived cost is not known, what one that is there cost is
   const b = await detail(2);
-  assert.deepEqual([b.cost.usd, b.cost.per_agent_line_usd, b.cost.per_surviving_line_usd], [1, 0.1, null]);
-  // review takes half of them out: the session's share is of the lines that are left
+  assert.deepEqual([b.cost.usd, b.cost.opened_usd, b.cost.per_agent_line_usd, b.cost.per_surviving_line_usd], [2, null, 0.2, null]);
+  // review takes half of them out: what was spent on it was spent, and the lines that are left cost twice as much each
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 1, event: "closed", state: "merged", files: [file("c.ts", ...range(1000, 20), 5000)] }));
-  // and a line that got through cost two: forty were paid for, twenty are left
-  assert.deepEqual((await detail(1)).cost, { usd: 2, estimated: false, sessions: 1, sessions_without_cost: 0, sessions_with_cost_partial: 0, sessions_unshared: 0, sessions_unshared_for_good: 0, sessions_uncounted: 0, per_agent_line_usd: 0.1, opened_usd: 4, opened_is_floor: false, opened_estimated: false, opened_surviving_lines: 20, per_surviving_line_usd: 0.2, per_surviving_line_is_floor: false });
+  const reviewed = await detail(1);
+  assert.deepEqual(reviewed.cost, { usd: 8, estimated: false, sessions: 1, ...none, per_agent_line_usd: 0.4, opened_usd: 8, opened_is_floor: false, opened_estimated: false, opened_surviving_lines: 20, per_surviving_line_usd: 0.4, per_surviving_line_is_floor: false });
+  assert.deepEqual([reviewed.sessions[0].lines, reviewed.sessions[0].contributed_lines, reviewed.sessions[0].cost_share_usd], [20, 40, 8]);
+  // and the other pull request's share is what it was
+  assert.equal((await detail(2)).cost.usd, 2);
 
   // all of a session's lines in one pull request: its cost is the pull request's, estimated as it is
   await upload("c-whole", "d.ts", range(2000, 5), { total_usd: 2, source: "estimated" });
@@ -1489,16 +1502,16 @@ test("what a pull request's sessions cost it: each for the share of its lines th
   const c = await detail(3);
   // what a line cost is said of the lines that have a cost: five of the ten, and so is what one that
   // survived cost, which is then no floor. What it was opened with cost is what is known of it, and is
-  assert.deepEqual(c.cost, { usd: 2, estimated: true, sessions: 3, sessions_without_cost: 2, sessions_with_cost_partial: 0, sessions_unshared: 0, sessions_unshared_for_good: 0, sessions_uncounted: 0, per_agent_line_usd: 0.4, opened_usd: 2, opened_is_floor: true, opened_estimated: true, opened_surviving_lines: 10, per_surviving_line_usd: 0.4, per_surviving_line_is_floor: false });
-  // the lines of the one taken back are not kept past it; that it had two is
-  const kept = await db.query(`SELECT session_id, lines, matched IS NULL AS forgotten FROM pull_sessions WHERE repo = $1 AND number = 3 ORDER BY session_id`, [repo]);
-  assert.deepEqual(kept.map((row) => [row.session_id, Number(row.lines), row.forgotten]), [["c-gone", 2, true], ["c-none", 3, false], ["c-whole", 5, false]]);
+  assert.deepEqual(c.cost, { usd: 2, estimated: true, sessions: 3, ...none, sessions_without_cost: 2, per_agent_line_usd: 0.4, opened_usd: 2, opened_is_floor: true, opened_estimated: true, opened_surviving_lines: 10, per_surviving_line_usd: 0.4, per_surviving_line_is_floor: false });
+  // the lines of the one taken back are not kept past it, nor is what it was charged; that it had two is
+  const kept = await db.query(`SELECT session_id, lines, matched IS NULL AND contributed IS NULL AS forgotten, charged_usd FROM pull_sessions WHERE repo = $1 AND number = 3 ORDER BY session_id`, [repo]);
+  assert.deepEqual(kept.map((row) => [row.session_id, Number(row.lines), row.forgotten, row.charged_usd]), [["c-gone", 2, true, null], ["c-none", 3, false, null], ["c-whole", 5, false, 2]]);
   const shares = Object.fromEntries(c.sessions.map((s: any) => [s.session_id, [s.hashed_lines, s.cost_share_usd]]));
   assert.deepEqual(shares, { "c-whole": [5, 2], "c-none": [3, null], "c-gone": [null, null] });
 
   // one with no session at all has no cost, which is not a cost of nothing
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 4, files: [file("g.ts", 6000)] }));
-  assert.deepEqual((await detail(4)).cost, { usd: null, estimated: false, sessions: 0, sessions_without_cost: 0, sessions_with_cost_partial: 0, sessions_unshared: 0, sessions_unshared_for_good: 0, sessions_uncounted: 0, per_agent_line_usd: null, opened_usd: null, opened_is_floor: false, opened_estimated: false, opened_surviving_lines: null, per_surviving_line_usd: null, per_surviving_line_is_floor: false });
+  assert.deepEqual((await detail(4)).cost, { usd: null, estimated: false, sessions: 0, ...none, per_agent_line_usd: null, opened_usd: null, opened_is_floor: false, opened_estimated: false, opened_surviving_lines: null, per_surviving_line_usd: null, per_surviving_line_is_floor: false });
 
   // the list says the same of each as its page, and the summary is their sum
   const list = (await call(tokens.admin, "GET", "/prs?repo=acme/cost")).body.pulls;
@@ -1508,56 +1521,58 @@ test("what a pull request's sessions cost it: each for the share of its lines th
     [total.cost_usd, total.cost_estimated, total.pulls_with_cost_missing],
     [list.reduce((sum: number, row: any) => sum + (row.cost.usd ?? 0), 0), true, 1],
   );
-  assert.equal(total.cost_usd, 5);
-  // of those seen from the start: #1's forty lines at 0.1 and the two dollars known of #3's, for the 30 that
-  // survived, of which 25 are of a session with a cost: #3's five with one. Those without a cost are left
-  // out of both sides, so it is no floor: none of the sessions with a cost leaves requests out
+  assert.equal(total.cost_usd, 12);
+  // of those seen from the start: the eight dollars #1 was opened for and the two known of #3's, for the 30
+  // lines that survived, of which 25 are of a session with a cost: #3's five with one. Those without a cost
+  // are left out of both sides, so it is no floor: none of the sessions with a cost leaves requests out.
+  // What the summary says a surviving line cost is those costs over those lines, as each page has them
   assert.deepEqual([total.agent_lines_surviving, total.agent_lines_surviving_once], [30, 25]);
-  assert.deepEqual([total.per_surviving_line_usd, total.per_surviving_line_is_floor, total.per_surviving_line_estimated], [0.24, false, true]);
+  assert.deepEqual([total.per_surviving_line_usd, total.per_surviving_line_is_floor, total.per_surviving_line_estimated], [0.4, false, true]);
+  assert.equal(total.per_surviving_line_usd, (reviewed.cost.opened_usd + c.cost.opened_usd) / total.agent_lines_surviving_once);
 
-  // the same lines in two pull requests (one stacked on the other): the session is split, not counted twice
+  // the same lines in two pull requests (a release of what the first brought): the session is counted once,
+  // in the first. Six dollars for its ten lines there, sixty cents a line, and all of them survived; the
+  // later one has nothing that is new in it, and is charged nothing
   await upload("c-twice", "h.ts", range(7000, 10), { total_usd: 6, source: "recorded" });
   for (const number of [5, 6]) await call(tokens.ci, "PUT", "/prs", report({ repo, number, files: [file("h.ts", ...range(7000, 10))] }));
-  // each has half of each line, three dollars for five lines' worth: a line cost sixty cents, in either.
-  // Both were opened with them, and all of them survived: the same of those
-  for (const number of [5, 6]) {
-    const twice = await detail(number);
-    assert.deepEqual(
-      [twice.cost.usd, twice.cost.per_agent_line_usd, twice.sessions[0].cost_share_usd, twice.cost.opened_usd, twice.cost.per_surviving_line_usd],
-      [3, 0.6, 3, 3, 0.6],
-      `#${number}`,
-    );
-  }
-  assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost")).body.total.cost_usd, 11);
-  // a report that no longer has them gives its share back to the other
+  const twice = async (number: number) => {
+    const { cost, sessions } = await detail(number);
+    return [cost.usd, cost.per_agent_line_usd, sessions[0].cost_share_usd, cost.opened_usd, cost.per_surviving_line_usd];
+  };
+  assert.deepEqual(await twice(5), [6, 0.6, 6, 6, 0.6]);
+  assert.deepEqual(await twice(6), [0, null, 0, 0, null]);
+  assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost")).body.total.cost_usd, 18);
+  // a push that takes them out of either moves nothing: it was opened with them, and is charged as it was
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 6, event: "synchronize", files: [file("h.ts", 7999)] }));
-  assert.equal((await detail(5)).cost.usd, 6);
-  assert.equal((await detail(6)).cost.usd, null);
+  assert.deepEqual([(await detail(5)).cost.usd, (await detail(6)).cost.usd, (await detail(6)).cost.per_surviving_line_usd], [6, 0, null]);
+  await call(tokens.ci, "PUT", "/prs", report({ repo, number: 5, event: "synchronize", files: [file("h.ts", 7998)] }));
+  assert.deepEqual([(await detail(5)).cost.usd, (await detail(6)).cost.usd], [6, 0]);
 
-  // a session stored again with no line hashes: its lines in pull requests (20 and 10) are what it is split by
+  // a session stored again with another cost: its pull requests are charged again, as they were split
   assert.equal((await upload("c-wide", "c.ts", [], { total_usd: 9, source: "recorded" })).status, 200);
-  assert.deepEqual([(await detail(1)).cost.usd, (await detail(2)).cost.usd], [6, 3]);
+  assert.deepEqual([(await detail(1)).cost.usd, (await detail(2)).cost.usd], [7.2, 1.8]);
   assert.equal((await detail(1)).sessions[0].hashed_lines, 0);
 
-  // ten of a session's thirty lines, the same ten in two pull requests: five count in each
+  // ten of a session's thirty lines, the same ten in two pull requests: all it cost in the first
   await upload("c-part", "i.ts", range(8000, 30), { total_usd: 30, source: "recorded" });
   for (const number of [7, 8]) await call(tokens.ci, "PUT", "/prs", report({ repo, number, files: [file("i.ts", ...range(8000, 10))] }));
-  assert.deepEqual([(await detail(7)).cost.usd, (await detail(8)).cost.usd], [5, 5]);
-  // a third that is closed without merging takes nothing from them
-  await call(tokens.ci, "PUT", "/prs", report({ repo, number: 9, event: "closed", state: "closed", files: [file("i.ts", ...range(8000, 10))] }));
-  assert.deepEqual([(await detail(7)).cost.usd, (await detail(8)).cost.usd, (await detail(9)).cost.usd], [5, 5, 3.333333]);
-  // and one of the two closing so leaves the whole ten to the other
+  assert.deepEqual([(await detail(7)).cost.usd, (await detail(8)).cost.usd], [30, 0]);
+  // a third, with ten others of its lines, that is closed without merging takes its share as they do: its money did not get merged
+  await call(tokens.ci, "PUT", "/prs", report({ repo, number: 9, event: "closed", state: "closed", files: [file("i.ts", ...range(8010, 10))] }));
+  assert.deepEqual([(await detail(7)).cost.usd, (await detail(8)).cost.usd, (await detail(9)).cost.usd], [15, 0, 15]);
+  // and one of the two closing so moves no charge
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 8, event: "closed", state: "closed", files: [file("i.ts", ...range(8000, 10))] }));
-  assert.equal((await detail(7)).cost.usd, 10);
+  assert.deepEqual([(await detail(7)).cost.usd, (await detail(8)).cost.usd, (await detail(9)).cost.usd], [15, 0, 15]);
 
-  // the total leaves out the ones closed without merging, whose lines are in another too; asked for alone, they are summed
+  // the total leaves out the ones closed without merging; asked for alone, they are summed
   const all = (await call(tokens.admin, "GET", "/prs?repo=acme/cost&limit=500")).body.pulls;
   const sum = (rows: any[]) => Math.round(rows.reduce((n: number, row: any) => n + (row.cost?.usd ?? 0), 0) * 1e6) / 1e6;
   assert.deepEqual(all.filter((row: any) => row.state === "closed").map((row: any) => row.number).sort(), [8, 9]);
   assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost")).body.total.cost_usd, sum(all.filter((row: any) => row.state !== "closed")));
   assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost&state=closed")).body.total.cost_usd, sum(all.filter((row: any) => row.state === "closed")));
+  assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost&state=closed")).body.total.cost_usd, 15);
 
-  // one whose only pull request with a cost is closed unmerged: the summary says that one is left out
+  // the summary says how many closed unmerged ones with a cost it leaves out
   const leftOut = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost")).body.total.pulls_closed_with_cost;
   assert.equal(leftOut, 2);
 
@@ -1569,21 +1584,28 @@ test("what a pull request's sessions cost it: each for the share of its lines th
   assert.deepEqual([partial.usd, partial.estimated, partial.sessions_without_cost, partial.sessions_with_cost_partial], [1, true, 0, 1]);
   assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost")).body.total.pulls_with_cost_missing, before + 1);
 
-  // a pull request none of whose agent lines survived is still in what a surviving line cost
+  // a session that only pushed review fixes is in what was spent, and not in what the first version cost
   await upload("c-lost", "k.ts", range(9500, 4), { total_usd: 4, source: "recorded" }, `${repo}-2`);
   await upload("c-kept", "l.ts", range(9600, 4), { total_usd: 4, source: "recorded" }, `${repo}-2`);
   await call(tokens.ci, "PUT", "/prs", report({ repo: `${repo}-2`, number: 1, files: [file("k.ts", ...range(9500, 4))] }));
   await call(tokens.ci, "PUT", "/prs", report({ repo: `${repo}-2`, number: 1, event: "synchronize", files: [file("k.ts", 9500), file("l.ts", ...range(9600, 4))] }));
   const lost = (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}-2&number=1`)).body.cost;
-  // five agent lines now for five dollars; opened with four, of which one is left
-  assert.deepEqual([lost.usd, lost.per_agent_line_usd, lost.opened_usd, lost.per_surviving_line_usd], [5, 1, 4, 4]);
+  // eight dollars for the five agent lines it has now; opened for four, with four lines of which one is left
+  assert.deepEqual([lost.usd, lost.per_agent_line_usd, lost.opened_usd, lost.per_surviving_line_usd], [8, 1.6, 4, 4]);
   await call(tokens.ci, "PUT", "/prs", report({ repo: `${repo}-2`, number: 1, event: "synchronize", files: [file("l.ts", ...range(9600, 4))] }));
-  const none = (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}-2&number=1`)).body.cost;
-  assert.deepEqual([none.usd, none.opened_usd, none.per_surviving_line_usd], [4, 4, null]);
-  // and when review leaves no agent line at all, what the ones it was opened with cost is still known
+  const gone = (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}-2&number=1`)).body.cost;
+  // every line it was opened with went in review: the four dollars were spent, and no line survived to divide them by
+  assert.deepEqual([gone.usd, gone.opened_usd, gone.opened_surviving_lines, gone.per_surviving_line_usd], [8, 4, 0, null]);
+  // and when review leaves no agent line at all, both sessions are still charged, and still on its page
   await call(tokens.ci, "PUT", "/prs", report({ repo: `${repo}-2`, number: 1, event: "synchronize", files: [file("z.ts", 1)] }));
   const bare = (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}-2&number=1`)).body;
-  assert.deepEqual([bare.cost.usd, bare.cost.sessions, bare.cost.opened_usd, bare.sessions], [null, 0, 4, []]);
+  assert.deepEqual([bare.cost.usd, bare.cost.sessions, bare.cost.opened_usd, bare.cost.per_agent_line_usd], [8, 2, 4, null]);
+  assert.deepEqual(
+    bare.sessions.map((s: any) => [s.session_id, s.lines, s.contributed_lines, s.cost_share_usd]),
+    [["c-kept", 0, 4, 4], ["c-lost", 0, 4, 4]],
+  );
+  // its history names the sessions with lines in it, as it did
+  assert.deepEqual(bare.history[0].sessions, []);
   await upload("c-fine", "m.ts", range(9700, 4), { total_usd: 2, source: "recorded" }, `${repo}-2`);
   await call(tokens.ci, "PUT", "/prs", report({ repo: `${repo}-2`, number: 2, files: [file("m.ts", ...range(9700, 4))] }));
   // four dollars of lines that are gone and two of lines that stayed, for the four that stayed
@@ -1596,33 +1618,35 @@ test("what a pull request's sessions cost it: each for the share of its lines th
   await call(tokens.ci, "PUT", "/prs", report({ repo: moved, number: 1, event: "synchronize", files: [file("z.ts", 1)] }));
   await call(tokens.ci, "PUT", "/prs", report({ repo: moved, number: 2, files: [file("n.ts", ...range(9800, 10))] }));
   const opened = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${moved}&number=${number}`)).body.cost.opened_usd;
-  assert.deepEqual([await opened(1), await opened(2)], [5, 5]);
-  // the ten that survived in the second cost a dollar each, as they did, though it paid for half of them
-  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${moved}&number=2`)).body.cost.per_surviving_line_usd, 1);
+  assert.deepEqual([await opened(1), await opened(2)], [10, 0]);
+  // the ten that survived in the second were paid for in the first: of what one cost, the second says nothing
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${moved}&number=2`)).body.cost.per_surviving_line_usd, null);
   // between them, ten dollars for the ten lines that survived, though in the second only
   const movedTotal = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost-3")).body.total;
   assert.deepEqual([movedTotal.cost_usd, movedTotal.per_surviving_line_usd, movedTotal.agent_lines_surviving_once], [10, 1, 10]);
 
-  // one not seen from the start (a release of what was merged) takes nothing of what another was opened with
+  // one not seen from the start (a release of what was merged) is charged for what is new in it: nothing.
+  // Each line was paid for in the one opened with them, and survives there
   const released = `${repo}-4`;
   await upload("c-released", "o.ts", range(9900, 10), { total_usd: 10, source: "recorded" }, released);
   await call(tokens.ci, "PUT", "/prs", report({ repo: released, number: 1, files: [file("o.ts", ...range(9900, 10))] }));
   await call(tokens.ci, "PUT", "/prs", report({ repo: released, number: 2, event: "synchronize", files: [file("o.ts", ...range(9900, 10))] }));
   const of = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${released}&number=${number}`)).body.cost;
-  assert.deepEqual([(await of(1)).usd, (await of(1)).opened_usd, (await of(1)).per_surviving_line_usd], [5, 10, 1]);
-  assert.deepEqual([(await of(2)).usd, (await of(2)).opened_usd], [5, null]);
-  assert.equal((await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost-4")).body.total.per_surviving_line_usd, 1);
+  assert.deepEqual([(await of(1)).usd, (await of(1)).opened_usd, (await of(1)).per_surviving_line_usd], [10, 10, 1]);
+  assert.deepEqual([(await of(2)).usd, (await of(2)).opened_usd], [0, null]);
+  const releasedTotal = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/cost-4")).body.total;
+  assert.deepEqual([releasedTotal.cost_usd, releasedTotal.per_surviving_line_usd, releasedTotal.agent_lines_surviving_once], [10, 1, 10]);
 
   // a session taken back and sent again: the pull request from before is matched again as it arrives, so which of
-  // its lines it has is known once more, and a new one with the same lines shares them with it for sure
+  // its lines it has is known once more, and a new one with the same lines has nothing new in it for sure
   await upload("c-gone", "f.ts", range(4000, 2), { total_usd: 50, source: "recorded" });
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 11, files: [file("f.ts", ...range(4000, 2))] }));
   const three = (await detail(3)).cost;
-  assert.deepEqual([three.sessions_unshared, three.sessions_unshared_for_good], [0, 0]);
+  assert.deepEqual([three.usd, three.sessions_unshared, three.sessions_unshared_for_good], [52, 0, 0]);
   const eleven = await detail(11);
-  assert.deepEqual([eleven.cost.usd, eleven.cost.estimated, eleven.cost.sessions_unshared], [25, false, 0]);
-  assert.deepEqual([eleven.cost.opened_usd, eleven.cost.opened_estimated], [25, false]);
-  assert.deepEqual([eleven.sessions[0].cost_share_usd, eleven.sessions[0].unshared, eleven.sessions[0].uncounted], [25, false, false]);
+  assert.deepEqual([eleven.cost.usd, eleven.cost.estimated, eleven.cost.sessions_unshared], [0, false, 0]);
+  assert.deepEqual([eleven.cost.opened_usd, eleven.cost.opened_estimated], [0, false]);
+  assert.deepEqual([eleven.sessions[0].cost_share_usd, eleven.sessions[0].unshared, eleven.sessions[0].uncounted], [0, false, false]);
 });
 
 test("a line opened in two pull requests survives once between them, wherever it ended up", async () => {
@@ -1637,21 +1661,21 @@ test("a line opened in two pull requests survives once between them, wherever it
   const cost = async (number: number, remote = repo) => (await call(tokens.admin, "GET", `/prs/detail?repo=${remote}&number=${number}`)).body.cost;
   const summary = async (query: string) => (await call(tokens.admin, "GET", `/prs/summary?${query}`)).body.total;
 
-  // ten lines for six dollars, both pull requests opened with all of them: three dollars and five lines' worth in each
+  // ten lines for six dollars, both pull requests opened with all of them: the six dollars and the ten lines are the first one's
   assert.equal((await upload("c-halves", "a.ts", range(100, 10), 6)).status, 200);
   for (const number of [1, 2]) await call(tokens.ci, "PUT", "/prs", report({ repo, number, files: [file("a.ts", ...range(100, 10))] }));
-  // review leaves four in the first, merged; the second keeps all ten. Each line is half a line in
-  // each, and survives in the second: the session paid six dollars for ten lines that survived
+  // review leaves four in the first, merged; the second keeps all ten. Each line was paid for in the
+  // first, and survives in the second: the session paid six dollars for ten lines that survived
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 1, event: "closed", state: "merged", files: [file("a.ts", ...range(100, 4))] }));
   const one = await cost(1);
-  assert.deepEqual([one.opened_usd, one.per_surviving_line_usd], [3, 0.6]);
-  // the summary of it alone says the same: its half of the ten
+  assert.deepEqual([one.opened_usd, one.per_surviving_line_usd], [6, 0.6]);
+  // the summary of it alone says the same: the ten are its own
   const merged = await summary("repo=acme/halves&state=merged");
-  assert.deepEqual([merged.per_surviving_line_usd, merged.agent_lines_surviving, merged.agent_lines_surviving_once], [0.6, 4, 5]);
+  assert.deepEqual([merged.per_surviving_line_usd, merged.agent_lines_surviving, merged.agent_lines_surviving_once], [0.6, 4, 10]);
 
   // of both: each line once between them
   const two = await cost(2);
-  assert.deepEqual([two.opened_usd, two.per_surviving_line_usd], [3, 0.6]);
+  assert.deepEqual([two.opened_usd, two.per_surviving_line_usd], [0, null]);
   const both = await summary("repo=acme/halves");
   assert.deepEqual([both.agent_lines_surviving, both.agent_lines_surviving_once, both.per_surviving_line_usd], [14, 10, 0.6]);
 
@@ -1677,11 +1701,12 @@ test("a line opened in two pull requests survives once between them, wherever it
   };
   assert.equal(await weighAll(), 1);
   assert.equal(await weighAll(), 0);
-  assert.deepEqual([(await cost(1)).per_surviving_line_usd, (await cost(2)).per_surviving_line_usd], [0.6, 0.6]);
+  assert.deepEqual([(await cost(1)).per_surviving_line_usd, (await cost(2)).per_surviving_line_usd], [0.6, null]);
   await db.query(`UPDATE pull_sessions SET opened_kept = NULL WHERE repo = $1 AND number = 2`, [repo]);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 2 })).status, 200);
   const [weighed] = await db.query(`SELECT opened_kept FROM pull_sessions WHERE repo = $1 AND number = 2`, [repo]);
-  assert.equal(Number(weighed!.opened_kept), 5);
+  assert.notEqual(weighed!.opened_kept, null);
+  assert.equal(Number(weighed!.opened_kept), 0);
 
   // a pull request not seen from the start (a release of what was merged) keeps lines that went in
   // review elsewhere: they did not survive there, and it is never weighed for it
@@ -1725,7 +1750,464 @@ test("a line opened in two pull requests survives once between them, wherever it
   assert.deepEqual(after.map((row) => [row.session_id, Number(row.opened_kept)]), [["c-old", 0], ["c-solo", 5]]);
 });
 
-test("a share is unsure only for lines not kept in a pull request it is weighed against", async () => {
+test("a session's cost is split between the pull requests it has lines in by what it contributed to each", () => {
+  const lines = (path: string, ...numbers: number[]) => ({ [path]: numbers.map(h) });
+  const row = (head_ref: string | null, contributed: Record<string, string[]> | null, count = 0, base_ref: string | null = null) => ({
+    head_ref,
+    base_ref,
+    lines: contributed ? Object.values(contributed).flat().length : count,
+    contributed,
+  });
+  const usd = (charged: (number | null)[]) => charged.map((one) => one && Math.round(one * 1e6) / 1e6);
+  const whole = { cost_usd: 10, by_branch: null };
+  // no cost figure, or no session: nothing is said
+  assert.deepEqual(charge(null, [row(null, lines("a.ts", 1))]), [null]);
+  assert.deepEqual(charge({ ...whole, cost_usd: null }, [row(null, lines("a.ts", 1))]), [null]);
+  // nor of one whose cost is no amount
+  assert.deepEqual(charge({ ...whole, cost_usd: -5 }, [row(null, lines("a.ts", 1))]), [null]);
+  assert.deepEqual(charge({ ...whole, cost_usd: Infinity }, [row(null, lines("a.ts", 1))]), [null]);
+  // all of it to the one it contributed to, however few lines; six lines and four: six dollars and four
+  assert.deepEqual(usd(charge(whole, [row("feat", lines("a.ts", 1))])), [10]);
+  assert.deepEqual(usd(charge(whole, [row("a", lines("a.ts", 1, 2, 3, 4, 5, 6)), row("b", lines("b.ts", 7, 8, 9, 10))])), [6, 4]);
+  // the same lines in two are the first one's, and a later one is charged for what is new in it;
+  // one whose lines were not kept counts as many as it had
+  assert.deepEqual(usd(charge(whole, [row("a", lines("a.ts", 1, 2)), row("b", lines("a.ts", 1, 2))])), [10, 0]);
+  assert.deepEqual(usd(charge(whole, [row("a", lines("a.ts", 1, 2)), row("b", lines("a.ts", 1, 2, 3, 4, 5, 6))])), [3.333333, 6.666667]);
+  assert.deepEqual(usd(charge(whole, [row("a", null, 3), row("b", lines("a.ts", 1))])), [7.5, 2.5]);
+  // its turns name their branches: what was spent on each is its pull requests', and what was spent
+  // on the branch they are based on, before theirs was made, is theirs too; the rest is no one's
+  const turns = { cost_usd: 10, by_branch: [{ branch: "feat", usd: 6 }, { branch: "main", usd: 3 }, { branch: "tmp", usd: 1 }] };
+  assert.deepEqual(usd(charge(turns, [row("main", lines("b.ts", 2), 0, "release"), row("feat", lines("a.ts", 1))])), [3, 6]);
+  // a cent spent on its base does not make the names say what it cost: nothing was spent on its own
+  // branch, and its share by lines is the more
+  assert.deepEqual(usd(charge({ cost_usd: 20.01, by_branch: [{ branch: "main", usd: 0.01 }, { branch: "tmp", usd: 20 }] }, [row("feat", lines("a.ts", 1), 0, "main")])), [20.01]);
+  // and what was spent on its base is what it is charged where that is the more
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3, 4, 5, 6, 7, 8, 9)), row("late", lines("b.ts", 10), 0, "release")])), [9, 1]);
+  // an amount that is no number is no amount
+  assert.deepEqual(usd(charge({ cost_usd: 10, by_branch: [{ branch: "feat", usd: Infinity }, { branch: "main", usd: 3 }] }, [row("feat", lines("a.ts", 1))])), [10]);
+  // one with its lines and nothing spent on its branch nor its base (renamed before it was pushed):
+  // the names are what is off there, and it is charged its share of all it cost by lines, as of one
+  // that names none; the others keep what their branches say
+  assert.deepEqual(usd(charge(turns, [row("renamed", lines("a.ts", 1), 0, "develop")])), [10]);
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3), 0, "develop"), row("renamed", lines("b.ts", 4, 5), 0, "develop")])), [6, 4]);
+  // one of two lines in ten: a fifth of all it cost, and what was spent on main is still no one's
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3, 4, 5, 6, 7, 8), 0, "develop"), row("renamed", lines("b.ts", 9, 10), 0, "develop")])), [6, 2]);
+  // more than was spent between them: both are brought down alike (nine and four of ten)
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3)), row("renamed", lines("b.ts", 4, 5), 0, "develop")])), [6.923077, 3.076923]);
+  // a report that does not say what it is based on is taken to be based on main
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1))])), [9]);
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1), 0, "develop")])), [6]);
+  // two that are based on it share what was spent there by their lines, three to one,
+  // and each has what was spent on its own branch
+  const two = { cost_usd: 10, by_branch: [{ branch: "feat", usd: 6 }, { branch: "other", usd: 1 }, { branch: "main", usd: 3 }] };
+  assert.deepEqual(usd(charge(two, [row("feat", lines("a.ts", 1, 2, 3), 0, "main"), row("other", lines("b.ts", 4), 0, "main")])), [8.25, 1.75]);
+  // two on the one branch share what was spent on it; a branch that is a pull request's own
+  // is not also the base of the ones stacked on it afterwards
+  assert.deepEqual(usd(charge(turns, [row("main", lines("c.ts", 5), 0, "release"), row("feat", lines("a.ts", 1, 2, 3), 0, "main"), row("feat", lines("b.ts", 4), 0, "main")])), [3, 4.5, 1.5]);
+  // where the ones based on it had their lines first, what was spent on it stays with them when its
+  // own comes: that one is charged for its line, one of the five
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3), 0, "main"), row("feat", lines("b.ts", 4), 0, "main"), row("main", lines("c.ts", 5), 0, "release")])), [6.3, 2.1, 0.6]);
+  // one that brings an earlier one's lines again, on a branch of its own: what was spent there went on
+  // those lines, and is the earlier one's; with a line that is new in it, a third of it is its own
+  const again = { cost_usd: 10, by_branch: [{ branch: "one", usd: 4 }, { branch: "two", usd: 6 }] };
+  assert.deepEqual(usd(charge(again, [row("one", lines("a.ts", 1, 2)), row("two", lines("a.ts", 1, 2))])), [10, 0]);
+  assert.deepEqual(usd(charge(again, [row("one", lines("a.ts", 1, 2)), row("two", lines("a.ts", 1, 2, 3))])), [8, 2]);
+  // never more than it cost, whatever the turns add up to, or with one that names no branch beside them
+  assert.deepEqual(usd(charge({ ...turns, cost_usd: 4 }, [row("feat", lines("a.ts", 1), 0, "develop")])), [4]);
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1)), row(null, lines("b.ts", 2), 0, "develop")])), [6.428571, 3.571429]);
+  // turns that name no branch say no more than the session does
+  assert.deepEqual(usd(charge({ cost_usd: 10, by_branch: [{ branch: null, usd: 10 }] }, [row("feat", lines("a.ts", 1))])), [10]);
+  // and beside turns that name one, what they cost is shared out by lines: no name says nothing of where the work went
+  const some = { cost_usd: 10, by_branch: [{ branch: null, usd: 9 }, { branch: "feat", usd: 1 }] };
+  assert.deepEqual(usd(charge(some, [row("feat", lines("a.ts", 1), 0, "develop")])), [10]);
+  assert.deepEqual(usd(charge(some, [row("feat", lines("a.ts", 1, 2), 0, "develop"), row("feat", lines("b.ts", 3), 0, "develop")])), [6.666667, 3.333333]);
+  // a release of what an earlier one brought: nothing in it is new, so what was spent on its branch
+  // (the planning, on what the first is based on) is the first one's still, and it is charged nothing
+  const planned = { cost_usd: 10, by_branch: [{ branch: "develop", usd: 9 }, { branch: "feat", usd: 1 }] };
+  assert.deepEqual(usd(charge(planned, [row("feat", lines("a.ts", 1, 2, 3), 0, "develop")])), [10]);
+  assert.deepEqual(usd(charge(planned, [row("feat", lines("a.ts", 1, 2, 3), 0, "develop"), row("develop", lines("a.ts", 1, 2, 3), 0, "main")])), [10, 0]);
+  // with a line of its own it is charged for that one, as one of the four: no more moves
+  assert.deepEqual(usd(charge(planned, [row("feat", lines("a.ts", 1, 2, 3), 0, "develop"), row("develop", { "a.ts": [1, 2, 3].map(h), "v.ts": [4].map(h) }, 0, "main")])), [7.75, 2.25]);
+  // a release that has the lines of one of two that are based on its branch: the other keeps its
+  // share of what was spent there, and nothing moves when the release comes
+  const both = { cost_usd: 10, by_branch: [{ branch: "develop", usd: 4 }, { branch: "one", usd: 3 }, { branch: "two", usd: 3 }] };
+  const based = [row("one", lines("a.ts", 1, 2, 3), 0, "develop"), row("two", lines("b.ts", 9), 0, "develop")];
+  assert.deepEqual(usd(charge(both, based)), [6, 4]);
+  assert.deepEqual(usd(charge(both, [...based, row("develop", lines("a.ts", 1, 2, 3), 0, "main")])), [6, 4, 0]);
+  // lines together: each as often as the one that has it most
+  assert.deepEqual(unionLines({ "a.ts": [h(1), h(1), h(2)] }, { "a.ts": [h(1), h(3)], "constructor": [h(4)] }), { "a.ts": [h(1), h(1), h(2), h(3)], "constructor": [h(4)] });
+  // a file renamed between the two: its lines are in both, once
+  assert.deepEqual(unionLines({ "b.ts": [h(1), h(2)] }, { "a.ts": [h(1), h(2), h(5)] }), { "b.ts": [h(1), h(2)], "a.ts": [h(5)] });
+  assert.deepEqual(unionLines(null, { "a.ts": [h(1)] }), { "a.ts": [h(1)] });
+  assert.equal(unionLines(null, null), null);
+});
+
+test("what was spent getting a pull request merged stays spent, and every dollar is in one of three places", async () => {
+  const repo = "github.com/acme/spent";
+  const range = (from: number, count: number) => Array.from({ length: count }, (_, i) => from + i);
+  const put = (id: string, usd: number | null, files: Record<string, number[]>, more: { source?: string; branch?: string; by_branch?: unknown; started?: string } = {}) => {
+    const source = more.source ?? "claude-code";
+    const s = session(id, source, "claude-opus-5-5", more.started ?? "2026-11-10T09:00:00Z", Object.entries(files).map(([path, numbers]) => ({ path, model: null, hashes: numbers.map(h) })));
+    Object.assign(s.session.repo, { remote: repo, ...(more.branch ? { branch: more.branch } : {}) });
+    if (usd != null) (s.session as Record<string, unknown>).cost = { total_usd: usd, source: "recorded", ...(more.by_branch ? { by_branch: more.by_branch } : {}) };
+    return call(tokens.ann, "PUT", `/sessions/m1/${source}/${id}`, s);
+  };
+  const sent = (number: number, files: unknown[], more: Record<string, unknown> = {}) => call(tokens.ci, "PUT", "/prs", report({ repo, number, files, ...more }));
+  const pull = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}&number=${number}`)).body;
+  const cost = async (number: number) => (await pull(number)).cost;
+  const spent = async (by = "tool") => (await call(tokens.admin, "GET", `/summary?by=${by}&repo=acme/spent`)).body;
+  const cents = (usd: number) => Math.round(usd * 100);
+  const addsUp = (t: any, where: string) =>
+    assert.equal(cents(t.in_pr_usd + t.closed_unmerged_usd + t.not_in_pr_usd), cents(t.cost_usd), `${where}: ${JSON.stringify([t.in_pr_usd, t.closed_unmerged_usd, t.not_in_pr_usd, t.cost_usd])}`);
+
+  // a ten dollar session feeds one pull request, and review takes every line of it out
+  assert.equal((await put("sp-all", 10, { "a.ts": range(100, 10) }, { branch: "feat-a" })).status, 200);
+  await sent(1, [file("a.ts", ...range(100, 10))], { head_ref: "feat-a" });
+  assert.deepEqual([(await cost(1)).usd, (await cost(1)).opened_usd, (await cost(1)).per_surviving_line_usd], [10, 10, 1]);
+  await sent(1, [file("a.ts", 9999)], { head_ref: "feat-a", event: "synchronize" });
+  const all = await cost(1);
+  assert.deepEqual([all.usd, all.opened_usd, all.opened_surviving_lines, all.per_surviving_line_usd, all.per_agent_line_usd], [10, 10, 0, null, null]);
+
+  // a session that only pushed review fixes is in what was spent, and not in what the first version cost
+  await put("sp-open", 6, { "b.ts": range(200, 5) });
+  await sent(2, [file("b.ts", ...range(200, 5))]);
+  await put("sp-fix", 3, { "c.ts": range(300, 2) }, { started: "2026-11-10T13:00:00Z" });
+  await sent(2, [file("b.ts", ...range(200, 5)), file("c.ts", ...range(300, 2))], { event: "synchronize" });
+  assert.deepEqual([(await cost(2)).usd, (await cost(2)).opened_usd, (await cost(2)).sessions], [9, 6, 2]);
+  // and stays in it when a later push takes its fixes out again: they are in no report any more
+  await sent(2, [file("b.ts", ...range(200, 4))], { event: "synchronize" });
+  const fixed = await pull(2);
+  assert.deepEqual([fixed.cost.usd, fixed.cost.opened_usd, fixed.cost.per_surviving_line_usd], [9, 6, 1.5]);
+  assert.deepEqual(fixed.sessions.map((s: any) => [s.session_id, s.lines, s.contributed_lines, s.cost_share_usd]), [["sp-open", 4, 5, 6], ["sp-fix", 0, 2, 3]]);
+
+  // six lines in one pull request and four in another: six dollars and four, whatever review does after
+  await put("sp-split", 10, { "d.ts": range(400, 6), "e.ts": range(500, 4) });
+  await sent(3, [file("d.ts", ...range(400, 6))]);
+  await sent(4, [file("e.ts", ...range(500, 4))]);
+  assert.deepEqual([(await cost(3)).usd, (await cost(4)).usd], [6, 4]);
+  await sent(3, [file("d.ts", ...range(400, 2))], { event: "synchronize", state: "merged" });
+  await sent(4, [file("e.ts", 500, 9998)], { event: "synchronize" });
+  assert.deepEqual([(await cost(3)).usd, (await cost(4)).usd, (await cost(3)).opened_usd, (await cost(3)).per_surviving_line_usd], [6, 4, 6, 3]);
+
+  // Claude Code says which branch each turn ran on: what was spent on the pull request's counts, and
+  // what was spent on main before the branch was made, and not what was spent on another
+  await put("sp-turns", 10, { "f.ts": range(600, 3) }, { branch: "main", by_branch: [{ branch: "feat-f", usd: 6 }, { branch: "main", usd: 3 }, { branch: "spike", usd: 1 }] });
+  await sent(5, [file("f.ts", ...range(600, 3))], { head_ref: "feat-f", base_ref: "main" });
+  const five = await pull(5);
+  assert.deepEqual([five.cost.usd, five.cost.opened_usd, five.sessions[0].cost_share_usd], [9, 9, 9]);
+  // one whose lines are in a pull request on a branch it spent nothing on, nor on its base (renamed
+  // before it was pushed): the lines say it is its work, and it pays whole
+  await put("sp-renamed", 3, { "g.ts": range(700, 2) }, { branch: "wip", by_branch: [{ branch: "wip", usd: 3 }] });
+  await sent(6, [file("g.ts", ...range(700, 2))], { head_ref: "feat-g", base_ref: "develop" });
+  const six = await pull(6);
+  assert.deepEqual([six.cost.usd, six.cost.sessions, six.cost.sessions_without_cost, six.sessions[0].cost_share_usd], [3, 1, 0, 3]);
+
+  // Codex names one branch for a session: all of it is charged where its lines are, though two of its
+  // ten lines are there and the rest was other work, and so is one that began on main
+  await put("sp-codex", 5, { "h.ts": range(800, 10) }, { source: "codex", branch: "feat-h" });
+  await put("sp-main", 1.25, { "i.ts": range(900, 2) }, { source: "codex", branch: "main" });
+  await sent(7, [file("h.ts", 800, 801), file("i.ts", ...range(900, 2))], { head_ref: "feat-h" });
+  const seven = await pull(7);
+  assert.deepEqual([seven.cost.usd, seven.cost.sessions], [6.25, 2]);
+  assert.deepEqual(
+    seven.sessions.map((s: any) => [s.session_id, s.cost_share_usd]).sort(),
+    [["sp-codex", 5], ["sp-main", 1.25]],
+  );
+
+  // one closed without merging, one session that reached no pull request, and one whose lines
+  // turned out to be a later session's: it is in no pull request once that one is uploaded
+  await put("sp-closed", 2.57, { "j.ts": range(1000, 3) });
+  await sent(8, [file("j.ts", ...range(1000, 3))], { state: "closed", event: "closed" });
+  await put("sp-none", 1.11, { "k.ts": range(1100, 3) });
+  await put("sp-early", 4, { "l.ts": range(1200, 2) }, { started: "2026-11-10T08:00:00Z" });
+  await sent(9, [file("l.ts", ...range(1200, 2))]);
+  assert.equal((await cost(9)).usd, 4);
+  await put("sp-late", 2.03, { "l.ts": range(1200, 2) }, { started: "2026-11-10T10:00:00Z" });
+  const nine = await pull(9);
+  assert.deepEqual([nine.cost.usd, nine.sessions.map((s: any) => s.session_id)], [2.03, ["sp-late"]]);
+
+  // merged or open, closed unmerged, and in no pull request: between them, all that was spent
+  const { total, groups } = await spent();
+  assert.deepEqual(
+    [total.in_pr_usd, total.closed_unmerged_usd, total.not_in_pr_usd, total.cost_usd],
+    // sp-all, sp-open and sp-fix, sp-split, nine of sp-turns, sp-renamed, sp-codex and sp-main, sp-late; sp-closed; the rest of sp-turns, sp-none, sp-early
+    [10 + 9 + 10 + 9 + 3 + 5 + 1.25 + 2.03, 2.57, 1 + 1.11 + 4, 57.96],
+  );
+  addsUp(total, "total");
+  assert.deepEqual(groups.map((g: any) => g.key).sort(), ["claude-code", "codex"]);
+  for (const g of groups) addsUp(g, g.key);
+  for (const by of ["day", "model", "repo", "user"]) for (const g of (await spent(by)).groups) addsUp(g, `${by} ${g.key}`);
+  // what is in pull requests is what their pages say was spent on them
+  const pulls = (await call(tokens.admin, "GET", "/prs?repo=acme/spent&limit=500")).body.pulls;
+  const sum = (rows: any[]) => rows.reduce((n: number, row: any) => n + (row.cost?.usd ?? 0), 0);
+  assert.equal(cents(sum(pulls.filter((p: any) => p.state !== "closed"))), cents(total.in_pr_usd));
+  assert.equal(cents(sum(pulls.filter((p: any) => p.state === "closed"))), cents(total.closed_unmerged_usd));
+  const summary = (await call(tokens.admin, "GET", "/prs/summary?repo=acme/spent")).body.total;
+  assert.equal(cents(summary.cost_usd), cents(total.in_pr_usd));
+  // and what the summary says a line that survived cost is what those opened from the start cost, over
+  // the lines of theirs that survived, as each page has them
+  const open = pulls.filter((p: any) => p.state !== "closed" && p.cost?.opened_usd != null);
+  const openedFor = open.reduce((n: number, p: any) => n + p.cost.opened_usd, 0);
+  assert.deepEqual(open.map((p: any) => p.number).sort(), [1, 2, 3, 4, 5, 6, 7, 9]);
+  assert.equal(summary.per_surviving_line_usd, Math.round((openedFor / summary.agent_lines_surviving_once) * 1e6) / 1e6);
+  // (ten lines went from #1 with ten dollars: 4 + 2 + 1 + 3 + 2 + 2 + 2 + 2 are left of the rest)
+  assert.deepEqual([openedFor, summary.agent_lines_surviving_once], [10 + 6 + 6 + 4 + 9 + 3 + 5 + 1.25 + 2.03, 18]);
+
+  // closing one moves its money from one place to the other, and no charge
+  await sent(4, [file("e.ts", 500, 9998)], { event: "closed", state: "closed" });
+  const closed = (await spent()).total;
+  assert.deepEqual([closed.in_pr_usd, closed.closed_unmerged_usd, closed.not_in_pr_usd], [total.in_pr_usd - 4, 2.57 + 4, total.not_in_pr_usd].map((n) => Math.round(n * 1e6) / 1e6));
+  assert.deepEqual([(await cost(3)).usd, (await cost(4)).usd], [6, 4]);
+
+  // a session stored again with another cost: charged again, split as it was
+  await put("sp-split", 20, { "d.ts": range(400, 6), "e.ts": range(500, 4) });
+  assert.deepEqual([(await cost(3)).usd, (await cost(4)).usd], [12, 8]);
+  addsUp((await spent()).total, "after it cost more");
+
+  // deleting a session takes what it cost out of every pull request and every one of the three
+  assert.equal((await call(tokens.ann, "DELETE", "/sessions/m1/claude-code/sp-split")).status, 200);
+  assert.deepEqual([(await cost(3)).usd, (await cost(3)).sessions_without_cost, (await cost(4)).usd], [null, 1, null]);
+  assert.deepEqual((await db.query(`SELECT charged_usd, contributed FROM pull_sessions WHERE session_id = 'sp-split'`)).map((row) => [row.charged_usd, row.contributed]), [[null, null], [null, null]]);
+  const after = (await spent()).total;
+  assert.deepEqual(
+    [after.in_pr_usd, after.closed_unmerged_usd, after.not_in_pr_usd, after.cost_usd],
+    [total.in_pr_usd - 10, 2.57, total.not_in_pr_usd, 47.96].map((n) => Math.round(n * 1e6) / 1e6),
+  );
+  addsUp(after, "after deleting");
+  for (const g of (await spent()).groups) addsUp(g, `after deleting, ${g.key}`);
+  // someone who sees only their own sessions is told the same of those
+  addsUp((await call(tokens.ann, "GET", "/summary?by=tool&repo=acme/spent")).body.total, "their own");
+  // a cost below nothing is no cost: it charges nothing, and takes nothing off the total or off what
+  // is in pull requests, so the three still come to the total
+  const off = "github.com/acme/below";
+  for (const [id, usd, hashes] of [["sp-below", -5, []], ["sp-above", 10, [h(801), h(802)]]] as const) {
+    const s = session(id, "claude-code", "claude-opus-5-5", "2026-11-10T09:00:00Z", hashes.length ? [{ path: "z.ts", model: null, hashes: [...hashes] }] : []);
+    s.session.repo.remote = off;
+    (s.session as Record<string, unknown>).cost = { total_usd: usd, source: "estimated" };
+    assert.equal((await call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, s)).status, 200);
+  }
+  await call(tokens.ci, "PUT", "/prs", report({ repo: off, number: 1, files: [file("z.ts", 801, 802)] }));
+  const below = (await call(tokens.admin, "GET", "/summary?by=tool&repo=acme/below")).body.total;
+  assert.deepEqual([below.cost_usd, below.in_pr_usd, below.closed_unmerged_usd, below.not_in_pr_usd], [10, 10, 0, 0]);
+  addsUp(below, "with a cost below nothing");
+  const alone = (await call(tokens.admin, "GET", "/summary?by=tool&repo=acme/below&q=sp-below")).body.total;
+  assert.deepEqual([alone.sessions, alone.cost_usd, alone.in_pr_usd, alone.not_in_pr_usd], [1, 0, 0, 0]);
+});
+
+test("what a session gave and is charged holds through copies of a line and a later pull request with the same lines, and moves with a pull request's branches", async () => {
+  const repo = "github.com/acme/held";
+  const put = (id: string, usd: number, files: Record<string, number[]>, by_branch?: unknown) => {
+    const s = session(id, "claude-code", "claude-opus-5-5", "2026-11-10T13:00:00Z", Object.entries(files).map(([path, numbers]) => ({ path, model: null, hashes: numbers.map(h) })));
+    s.session.repo.remote = repo;
+    (s.session as Record<string, unknown>).cost = { total_usd: usd, source: "recorded", ...(by_branch ? { by_branch } : {}) };
+    return call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, s);
+  };
+  const sent = (number: number, files: unknown[], more: Record<string, unknown> = {}) => call(tokens.ci, "PUT", "/prs", report({ repo, number, files, ...more }));
+  const pull = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}&number=${number}`)).body;
+
+  // three of the same line in a later push, and review takes two of them out: the one left is
+  // still in the file, and the two that went are still what the session gave
+  await sent(1, [file("m.ts", 9001)]);
+  assert.equal((await put("h-same", 4, { "m.ts": [1300, 1300, 1300], "n.ts": [1400] })).status, 200);
+  await sent(1, [file("m.ts", 9001, 1300, 1300, 1300)], { event: "synchronize" });
+  await sent(2, [file("n.ts", 1400)]);
+  const gave = async () => [1, 2].map(async (n) => (await pull(n)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd]));
+  assert.deepEqual(await Promise.all(await gave()), [[[3, 3, 3]], [[1, 1, 1]]]);
+  await sent(1, [file("m.ts", 9001, 1300)], { event: "synchronize" });
+  assert.deepEqual(await Promise.all(await gave()), [[[1, 3, 3]], [[1, 1, 1]]]);
+  // and when the last copy goes too
+  await sent(1, [file("m.ts", 9001)], { event: "synchronize" });
+  assert.deepEqual(await Promise.all(await gave()), [[[0, 3, 3]], [[1, 1, 1]]]);
+
+  // a copy each of two sessions, of which review takes one: the one left is put down to one of
+  // them, and the other still gave the copy that went
+  await sent(5, [file("r.ts", 9002)]);
+  await put("h-one", 2, { "r.ts": [1700] });
+  await put("h-two", 3, { "r.ts": [1700] });
+  await sent(5, [file("r.ts", 9002, 1700, 1700)], { event: "synchronize" });
+  const both = async () => (await pull(5)).sessions.map((x: any) => [x.session_id, x.contributed_lines, x.cost_share_usd]).sort();
+  assert.deepEqual(await both(), [["h-one", 1, 2], ["h-two", 1, 3]]);
+  await sent(5, [file("r.ts", 9002, 1700)], { event: "synchronize" });
+  assert.deepEqual(await both(), [["h-one", 1, 2], ["h-two", 1, 3]]);
+  await sent(5, [file("r.ts", 9002)], { event: "synchronize" });
+  assert.deepEqual(await both(), [["h-one", 1, 2], ["h-two", 1, 3]]);
+
+  // files by names that every object has already: what went from them is kept as any other
+  await sent(6, [file("s.ts", 9003)]);
+  await put("h-odd", 5, { constructor: [1800], ["__proto__"]: [1801], "s.ts": [1802] });
+  await sent(6, [file("s.ts", 9003, 1802), file("constructor", 1800), file("__proto__", 1801)], { event: "synchronize" });
+  const odd = async () => (await pull(6)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd]);
+  assert.deepEqual(await odd(), [[3, 3, 5]]);
+  await sent(6, [file("s.ts", 9003, 1802)], { event: "synchronize" });
+  assert.deepEqual(await odd(), [[1, 3, 5]]);
+  await sent(6, [file("s.ts", 9003)], { event: "synchronize" });
+  assert.deepEqual(await odd(), [[0, 3, 5]]);
+
+  // a file the session renamed in review, and then again (its lines are matched by the file they
+  // are in, so it wrote them in each): they are the same lines, not given a second time nor a
+  // third, and what the session is charged in its two pull requests stays where it was
+  const three = [1900, 1901, 1902];
+  await put("h-moved", 12, { "old.ts": three, "new.ts": three, "newer.ts": three, "apart.ts": three, "other.ts": [1910, 1911, 1912] });
+  await sent(7, [file("old.ts", 1900, 1901, 1902)]);
+  await sent(8, [file("other.ts", 1910, 1911, 1912)]);
+  const moved = async () => Promise.all([7, 8].map(async (n) => (await pull(n)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd])));
+  assert.deepEqual(await moved(), [[[3, 3, 6]], [[3, 3, 6]]]);
+  await sent(7, [file("new.ts", 1900, 1901, 1902)], { event: "synchronize" });
+  assert.deepEqual(await moved(), [[[3, 3, 6]], [[3, 3, 6]]]);
+  await sent(7, [file("newer.ts", 1900, 1901, 1902)], { event: "synchronize" });
+  assert.deepEqual(await moved(), [[[3, 3, 6]], [[3, 3, 6]]]);
+  // one of them moved to another file and one taken out: three given still
+  await sent(7, [file("newer.ts", 1900), file("apart.ts", 1901)], { event: "synchronize" });
+  assert.deepEqual(await moved(), [[[2, 3, 6]], [[3, 3, 6]]]);
+
+  // a file of its lines from a later push that someone renames, with no session that wrote it under
+  // the new name: the lines are in the pull request and no one's now, and what the session gave stays
+  await sent(15, [file("y.ts", 9004)]);
+  await put("h-lone", 3, { "lone.ts": [2300, 2301] });
+  await sent(15, [file("y.ts", 9004), file("lone.ts", 2300, 2301)], { event: "synchronize" });
+  const lone = async () => (await pull(15)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd]);
+  assert.deepEqual(await lone(), [[2, 2, 3]]);
+  await sent(15, [file("y.ts", 9004), file("alone.ts", 2300, 2301)], { event: "synchronize" });
+  assert.deepEqual(await lone(), [[0, 2, 3]]);
+
+  // a line that went in review, and then another session writes a line of the same words in another
+  // file: that says nothing of the one that went, which the first session gave still
+  await sent(16, [file("y.ts", 9005)]);
+  await put("h-went", 10, { "g.ts": [2400] });
+  await sent(16, [file("y.ts", 9005), file("g.ts", 2400)], { event: "synchronize" });
+  await sent(16, [file("y.ts", 9005)], { event: "synchronize" });
+  await put("h-wrote", 4, { "i.ts": [2400, 2401] });
+  await sent(16, [file("y.ts", 9005), file("i.ts", 2400, 2401)], { event: "synchronize" });
+  const sixteen = await pull(16);
+  assert.deepEqual([sixteen.cost.usd, sixteen.sessions.map((x: any) => [x.session_id, x.lines, x.contributed_lines, x.cost_share_usd]).sort()], [14, [["h-went", 0, 1, 10], ["h-wrote", 2, 2, 4]]]);
+
+  // the same line of two sessions in two files, and review takes the one file's: the copy that went
+  // is the session's that had it there, whatever the sessions are called, and stays its own when the
+  // other file's copy turns out to be a third session's, uploaded later
+  await sent(17, [file("y.ts", 9006)]);
+  await put("h-b", 10, { "k.ts": [2500] });
+  await put("h-a", 20, { "l.ts": [2500] });
+  await sent(17, [file("y.ts", 9006), file("k.ts", 2500), file("l.ts", 2500)], { event: "synchronize" });
+  await sent(17, [file("y.ts", 9006), file("l.ts", 2500)], { event: "synchronize" });
+  const late = session("h-c", "claude-code", "claude-opus-5-5", "2026-11-10T14:00:00Z", [{ path: "l.ts", model: null, hashes: [h(2500)] }]);
+  late.session.repo.remote = repo;
+  (late.session as Record<string, unknown>).cost = { total_usd: 30, source: "recorded" };
+  await call(tokens.ann, "PUT", "/sessions/m1/claude-code/h-c", late);
+  const seventeen = await pull(17);
+  assert.deepEqual([seventeen.cost.usd, seventeen.sessions.map((x: any) => [x.session_id, x.lines, x.contributed_lines, x.cost_share_usd]).sort()], [40, [["h-b", 0, 1, 10], ["h-c", 1, 1, 30]]]);
+
+  // two copies of a line, of which review takes one, and the one left is no one's now (its commits
+  // are someone else's): the copy that went is kept, and the same report again changes nothing
+  await put("h-twice", 10, { "v.ts": [2600, 2600] });
+  await sent(18, [file("y.ts", 9007)], { commit_emails: ["ann@example.com"] });
+  await sent(18, [file("y.ts", 9007), file("v.ts", 2600, 2600)], { event: "synchronize", commit_emails: ["ann@example.com"] });
+  const twice = async () => (await pull(18)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd]);
+  assert.deepEqual(await twice(), [[2, 2, 10]]);
+  for (let again = 0; again < 3; again++) {
+    await sent(18, [file("y.ts", 9007), file("v.ts", 2600)], { event: "synchronize", commit_emails: ["bob@example.com"] });
+    assert.deepEqual(await twice(), [[0, 1, 10]], `report ${again + 1}`);
+  }
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 18 })).status, 200);
+  assert.deepEqual(await twice(), [[0, 1, 10]]);
+
+  // a line the pull request was opened with and that the session has in a file pushed later too:
+  // when review takes the first of the two out, both are what the session gave still
+  await put("h-first", 8, { "f.ts": [2700, 2701], "e.ts": [2700, 2702] });
+  await sent(19, [file("f.ts", 2700, 2701)]);
+  await sent(19, [file("f.ts", 2700, 2701), file("e.ts", 2700, 2702)], { event: "synchronize" });
+  const first = async () => (await pull(19)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd]);
+  assert.deepEqual(await first(), [[4, 4, 8]]);
+  await sent(19, [file("f.ts", 2701), file("e.ts", 2700, 2702)], { event: "synchronize" });
+  assert.deepEqual(await first(), [[3, 4, 8]]);
+  await sent(19, [file("f.ts", 2701), file("e.ts", 2700, 2702)], { event: "synchronize" });
+  assert.deepEqual(await first(), [[3, 4, 8]]);
+
+  // a line the pull request was opened with, that review took out, and that turns out to be a later
+  // session's, uploaded since: it is there to match by still, so it is that one's alone and counts once
+  const later = (id: string, usd: number, files: Record<string, number[]>) => {
+    const one = session(id, "claude-code", "claude-opus-5-5", "2026-11-10T14:00:00Z", Object.entries(files).map(([path, numbers]) => ({ path, model: null, hashes: numbers.map(h) })));
+    one.session.repo.remote = repo;
+    (one.session as Record<string, unknown>).cost = { total_usd: usd, source: "recorded" };
+    return call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, one);
+  };
+  await put("h-opened", 12, { "o.ts": [2900, 2901], "o2.ts": [2902, 2903] });
+  await sent(22, [file("o2.ts", 2902, 2903)]);
+  await sent(23, [file("o.ts", 2900, 2901)]);
+  await sent(23, [file("o.ts", 2901)], { event: "synchronize" });
+  const opened = async () => (await pull(23)).sessions.map((x: any) => [x.session_id, x.lines, x.contributed_lines, x.cost_share_usd]).sort();
+  assert.deepEqual(await opened(), [["h-opened", 1, 2, 6]]);
+  await later("h-theirs", 10, { "o.ts": [2900] });
+  assert.deepEqual(await opened(), [["h-opened", 1, 1, 4], ["h-theirs", 0, 1, 10]]);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 23 })).status, 200);
+  assert.deepEqual(await opened(), [["h-opened", 1, 1, 4], ["h-theirs", 0, 1, 10]]);
+
+  // a session that is deleted and stored anew at once, as the demo's copy of it is: its lines in the
+  // pull request stay through it, and the copies that went in review are kept, one of two of a line
+  // and one in another file
+  await put("h-anew", 5, { "c1.ts": [3000, 3000, 3001], "c2.ts": [3002], "c3.ts": [3002] });
+  await sent(24, [file("y.ts", 9008)]);
+  await sent(24, [file("y.ts", 9008), file("c1.ts", 3000, 3000, 3001), file("c2.ts", 3002), file("c3.ts", 3002)], { event: "synchronize" });
+  await sent(24, [file("y.ts", 9008), file("c1.ts", 3000, 3001), file("c2.ts", 3002)], { event: "synchronize" });
+  const anew = async () => (await pull(24)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd]);
+  assert.deepEqual(await anew(), [[3, 5, 5]]);
+  await db.query(`DELETE FROM sessions WHERE session_id = 'h-anew'`);
+  await put("h-anew", 5, { "c1.ts": [3000, 3000, 3001], "c2.ts": [3002], "c3.ts": [3002] });
+  assert.deepEqual(await anew(), [[3, 5, 5]]);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 24 })).status, 200);
+  assert.deepEqual(await anew(), [[3, 5, 5]]);
+
+  // one stacked on another: what was spent on main is the one's that is based on it, until the first
+  // is merged and the second is based on main as well, with not a line of either changed
+  await put("h-stack", 10, { "p.ts": [1500, 1501], "q.ts": [1600, 1601] }, [{ branch: "main", usd: 4 }, { branch: "st1", usd: 3 }, { branch: "st2", usd: 3 }]);
+  await sent(3, [file("p.ts", 1500, 1501)], { head_ref: "st1", base_ref: "main" });
+  await sent(4, [file("q.ts", 1600, 1601)], { head_ref: "st2", base_ref: "st1" });
+  assert.deepEqual([(await pull(3)).cost.usd, (await pull(4)).cost.usd], [7, 3]);
+  await sent(4, [file("q.ts", 1600, 1601)], { head_ref: "st2", base_ref: "main", event: "edited" });
+  assert.deepEqual([(await pull(3)).cost.usd, (await pull(4)).cost.usd], [5, 5]);
+
+  // a release of what an earlier one brought, from the branch that one is based on, where the
+  // planning was: nothing moves off the first, and the release is charged nothing
+  await put("h-plan", 10, { "t.ts": [2000, 2001, 2002] }, [{ branch: "develop", usd: 9 }, { branch: "feat", usd: 1 }]);
+  await sent(9, [file("t.ts", 2000, 2001, 2002)], { head_ref: "feat", base_ref: "develop" });
+  assert.equal((await pull(9)).cost.usd, 10);
+  await sent(10, [file("t.ts", 2000, 2001, 2002)], { head_ref: "develop", base_ref: "main" });
+  assert.deepEqual([(await pull(9)).cost.usd, (await pull(10)).cost.usd], [10, 0]);
+  // which is the first of two that are open goes by when they were opened, not by their numbers
+  await put("h-order", 4, { "u.ts": [2100, 2101] });
+  await sent(11, [file("u.ts", 2100, 2101)], { created_at: "2026-11-12T12:00:00Z" });
+  await sent(12, [file("u.ts", 2100, 2101)], { created_at: "2026-11-11T12:00:00Z" });
+  assert.deepEqual([(await pull(11)).cost.usd, (await pull(12)).cost.usd], [0, 4]);
+  // and one that is merged had its lines before one that is open still: a stack merged from the top
+  // leaves the upper one's lines in the lower one, which was opened first and did not bring them
+  await sent(11, [file("u.ts", 2100, 2101)], { created_at: "2026-11-12T12:00:00Z", event: "closed", state: "merged", merged_at: "2026-11-13T12:00:00Z" });
+  assert.deepEqual([(await pull(11)).cost.usd, (await pull(12)).cost.usd], [4, 0]);
+  // as it did before one merged after it
+  await sent(12, [file("u.ts", 2100, 2101)], { created_at: "2026-11-11T12:00:00Z", event: "closed", state: "merged", merged_at: "2026-11-14T12:00:00Z" });
+  assert.deepEqual([(await pull(11)).cost.usd, (await pull(12)).cost.usd], [4, 0]);
+
+  // one closed without merging keeps what it cost while no other has its lines; done again as
+  // another, the one that may ship has them, and the closed one keeps the line that only it has
+  await put("h-redo", 6, { "w.ts": [2200, 2201, 2202] });
+  await sent(13, [file("w.ts", 2200, 2201, 2202)]);
+  await sent(13, [file("w.ts", 2200, 2201, 2202)], { event: "closed", state: "closed", closed_at: "2026-11-12T12:00:00Z" });
+  assert.equal((await pull(13)).cost.usd, 6);
+  await sent(14, [file("w.ts", 2200, 2201)], { created_at: "2026-11-13T12:00:00Z" });
+  assert.deepEqual([(await pull(13)).cost.usd, (await pull(14)).cost.usd], [2, 4]);
+  const buckets = async () => {
+    const { total } = (await call(tokens.admin, "GET", `/summary?by=tool&repo=acme/held`)).body;
+    return [total.in_pr_usd, total.closed_unmerged_usd, total.not_in_pr_usd].map((usd: number) => Math.round(usd * 100) / 100);
+  };
+  const before = await buckets();
+  // merged, it has them still; and opened again, the closed one is before it once more
+  await sent(14, [file("w.ts", 2200, 2201)], { created_at: "2026-11-13T12:00:00Z", event: "closed", state: "merged", merged_at: "2026-11-14T12:00:00Z" });
+  assert.deepEqual([(await pull(13)).cost.usd, (await pull(14)).cost.usd], [2, 4]);
+  assert.deepEqual(await buckets(), before);
+  await sent(13, [file("w.ts", 2200, 2201, 2202)], { event: "reopened", state: "open" });
+  await sent(14, [file("w.ts", 2200, 2201)], { created_at: "2026-11-13T12:00:00Z", event: "reopened", state: "open" });
+  assert.deepEqual([(await pull(13)).cost.usd, (await pull(14)).cost.usd], [6, 0]);
+});
+
+test("a share is unsure when a pull request it is split with did not keep which lines are whose", async () => {
   const repo = "github.com/acme/unkept";
   const s = session("c-unkept", "claude-code", "claude-opus-5-5", "2026-11-10T09:00:00Z", [{ path: "p.ts", model: null, hashes: [100, 101, 102, 103].map(h) }]);
   s.session.repo.remote = repo;
@@ -1734,21 +2216,26 @@ test("a share is unsure only for lines not kept in a pull request it is weighed 
   const files = [file("p.ts", 100, 101, 102, 103)];
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 1, files }));
   await call(tokens.ci, "PUT", "/prs", report({ repo, number: 2, event: "closed", state: "closed", files }));
-  // the one closed without merging as if it were from before which lines are whose was kept, and could not be matched again
-  await db.query(`UPDATE pull_sessions SET matched = NULL WHERE repo = $1 AND number = 2`, [repo]);
-  await db.query(`UPDATE pull_requests SET committers = NULL WHERE repo = $1 AND number = 2`, [repo]);
   const of = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}&number=${number}`)).body;
   const flags = (p: any) => [p.cost.estimated, p.cost.sessions_unshared, p.cost.sessions_unshared_for_good, p.sessions[0].unshared];
-  // it takes nothing from the open one, which is as sure as it was: all four lines, at two dollars
+  // the same four lines in both, and which they are is kept: all it cost in the first, for sure
   const open = await of(1);
   assert.deepEqual(flags(open), [false, 0, 0, false]);
-  assert.deepEqual([open.cost.usd, open.cost.per_agent_line_usd], [8, 2]);
-  // it is shared out with the open one, which may have the same lines
-  assert.deepEqual(flags(await of(2)), [true, 1, 1, true]);
-  // an open one whose lines were not kept is weighed against: then the first is unsure, and can be matched again
-  await call(tokens.ci, "PUT", "/prs", report({ repo, number: 3, files }));
-  await db.query(`UPDATE pull_sessions SET matched = NULL WHERE repo = $1 AND number = 3`, [repo]);
+  assert.deepEqual([open.cost.usd, open.cost.per_agent_line_usd, (await of(2)).cost.usd], [8, 2, 0]);
+  // the one closed without merging as if it were from before which lines are whose was kept: they may be
+  // the same ones or others, so what each is charged is an estimate. It can be matched again, to find out
+  await db.query(`UPDATE pull_sessions SET matched = NULL, contributed = NULL WHERE repo = $1 AND number = 2`, [repo]);
   assert.deepEqual(flags(await of(1)), [true, 1, 0, true]);
+  assert.deepEqual(flags(await of(2)), [true, 1, 0, true]);
+  // and as if it could not: only a new report of it by the Action says which lines they are
+  await db.query(`UPDATE pull_requests SET committers = NULL WHERE repo = $1 AND number = 2`, [repo]);
+  assert.deepEqual(flags(await of(1)), [true, 1, 1, true]);
+  // charged again, by the lines it was opened with, which are kept still: the same four, the first one's
+  await db.asOrg(DEFAULT_ORG, async (tx) => {
+    await holdPullSessions(tx);
+    await chargeAgain(tx, [{ machine_id: "m1", source: "claude-code", session_id: "c-unkept" }]);
+  });
+  assert.deepEqual([(await of(1)).cost.usd, (await of(2)).cost.usd], [8, 0]);
 });
 
 test("a deleted session's lines count whole in each of its pull requests", async () => {
@@ -1766,19 +2253,19 @@ test("a deleted session's lines count whole in each of its pull requests", async
       Number(row.weight),
       Number(row.opened_weight),
     ]);
-  // the same ten lines in both, opened with them: five in each
-  assert.deepEqual(await weights(), [[1, 5, 5], [2, 5, 5]]);
+  // the same ten lines in both, opened with them: they are the first one's
+  assert.deepEqual(await weights(), [[1, 10, 10], [2, 0, 0]]);
   assert.equal((await call(tokens.ann, "DELETE", "/sessions/m1/claude-code/c-forgot")).status, 200);
   // which they were is gone: all ten count in each, as for a pull request whose lines were not kept
   assert.deepEqual(await weights(), [[1, 10, 10], [2, 10, 10]]);
   // sent again: both are matched again as it arrives, and which lines they have is known once more.
-  // The same ten in each: five of them, of six dollars, three in each
+  // The same ten in each: the first one's, and the six dollars with them
   assert.equal((await put()).status, 200);
-  assert.deepEqual(await weights(), [[1, 5, 5], [2, 5, 5]]);
+  assert.deepEqual(await weights(), [[1, 10, 10], [2, 0, 0]]);
   const cost = (await call(tokens.admin, "GET", `/prs/detail?repo=${repo}&number=1`)).body.cost;
   assert.deepEqual(
     [cost.usd, cost.per_agent_line_usd, cost.estimated, cost.sessions_unshared, cost.opened_usd, cost.opened_estimated, cost.per_surviving_line_usd],
-    [3, 0.6, false, 0, 3, false, 0.6],
+    [6, 0.6, false, 0, 6, false, 0.6],
   );
 });
 
@@ -1799,30 +2286,38 @@ test("counting sessions' line hashes waits for none that another transaction hol
   assert.deepEqual(counted.map((row) => [row.session_id, Number(row.hashed_lines)]), [["c-free", 2], ["c-held", 2]]);
 });
 
-test("a line in several pull requests is shared out between them", () => {
+test("a line in several pull requests counts in the first of them", () => {
   const a = { "a.ts": [h(1), h(2), h(2)], "b.ts": [h(1)] };
   // alone: every line counts
   assert.deepEqual(weigh([{ live: true, lines: 4, matched: a }]), [4]);
-  // the same file elsewhere, with one copy of the line that is twice here: three lines are shared, and twice is the most there is
-  assert.deepEqual(weigh([{ live: true, lines: 4, matched: a }, { live: true, lines: 2, matched: { "a.ts": [h(1), h(2)] } }]), [0.5 + 4 / 3 + 1, 0.5 + 2 / 3]);
-  // one closed without merging is shared out with the others, and they without it
-  assert.deepEqual(weigh([{ live: true, lines: 1, matched: { "a.ts": [h(1)] } }, { live: false, lines: 1, matched: { "a.ts": [h(1)] } }]), [1, 0.5]);
+  // the same file in a later one, with one copy of the line that is twice here: nothing in it is new
+  const less = { "a.ts": [h(1), h(2)] };
+  assert.deepEqual(weigh([{ live: true, lines: 4, matched: a }, { live: true, lines: 2, matched: less }]), [4, 0]);
+  // and in an earlier one: its two lines are its own, and the second copy and the other file's line are new here
+  assert.deepEqual(weigh([{ live: true, lines: 2, matched: less }, { live: true, lines: 4, matched: a }]), [2, 2]);
+  // one closed without merging takes nothing from the others, before them or after: its own lines count beside theirs
+  const one = { "a.ts": [h(1)] };
+  assert.deepEqual(weigh([{ live: true, lines: 1, matched: one }, { live: false, lines: 1, matched: one }]), [1, 0]);
+  assert.deepEqual(weigh([{ live: false, lines: 1, matched: one }, { live: true, lines: 1, matched: one }]), [1, 1]);
   // one whose lines were not kept counts them all
   assert.deepEqual(weigh([{ live: true, lines: 7, matched: null }, { live: true, lines: 1, matched: { "a.ts": [h(1)] } }]), [7, 1]);
 });
 
-test("what a session's opening lines still there count as is shared out as they were, wherever they survived", () => {
+test("what a session's opening lines still there count as is the first one's, wherever they survived", () => {
   const both = { "a.ts": [h(1), h(2), h(2)] };
   const opened = [{ live: true, matched: both }, { live: true, matched: both }];
-  // all still there in the second only: between them, all three
+  // all still there in the second only: all three survived, and are the first one's
   const kept = weighKept(opened, [{ live: true, matched: {} }, { live: true, matched: both }]);
-  assert.deepEqual(kept, [1.5, 1.5]);
-  // one copy of the line it had twice is left: that copy is one line between them
-  assert.deepEqual(weighKept(opened, [{ live: true, matched: { "a.ts": [h(2)] } }, { live: true, matched: {} }]), [0.5, 0.5]);
-  // opened twice in one and once in the other, one copy left: one line between them, in proportion
-  const uneven = [{ live: true, matched: { "a.ts": [h(3), h(3)] } }, { live: true, matched: { "a.ts": [h(3)] } }];
-  const one = weighKept(uneven, [{ live: true, matched: {} }, { live: true, matched: { "a.ts": [h(3)] } }]);
-  assert.deepEqual(one.map((n) => Math.round(n! * 1e9) / 1e9), [Math.round((2 / 3) * 1e9) / 1e9, Math.round((1 / 3) * 1e9) / 1e9]);
+  assert.deepEqual(kept, [3, 0]);
+  // one copy of the line it had twice is left: that copy is one line
+  assert.deepEqual(weighKept(opened, [{ live: true, matched: { "a.ts": [h(2)] } }, { live: true, matched: {} }]), [1, 0]);
+  // opened once in one and twice in the other, one copy left: half of what each has of its own
+  const uneven = [{ live: true, matched: { "a.ts": [h(3)] } }, { live: true, matched: { "a.ts": [h(3), h(3)] } }];
+  assert.deepEqual(weighKept(uneven, [{ live: true, matched: {} }, { live: true, matched: { "a.ts": [h(3)] } }]), [0.5, 0.5]);
+  // as what it contributed counts: a later one that gave the line too has none of it, though it was opened with it
+  const gave = [{ matched: { "a.ts": [h(3)] } }, { matched: { "a.ts": [h(3)] } }];
+  assert.deepEqual(weighKept([{ live: true, matched: { "a.ts": [h(3)] } }], [{ live: true, matched: { "a.ts": [h(3)] } }], gave, [1]), [0]);
+  assert.deepEqual(weighKept([{ live: true, matched: { "a.ts": [h(3)] } }], [{ live: true, matched: { "a.ts": [h(3)] } }], gave, [0]), [1]);
   // and one whose lines were not kept says nothing
   assert.deepEqual(weighKept([{ live: true, matched: null }], [{ live: true, matched: both }]), [null]);
 });
@@ -1992,12 +2487,12 @@ test("pull requests and sessions from before the cost was shown have one after t
     assert.deepEqual(await hashed(), [["s1", 4], ["s2", 1]]);
     const upgradedApp = createApp(upgraded);
     const admin = await tokenFor(upgraded, { email: "boss@example.com", role: "admin" }, "old-cost");
-    // until one is counted, what share of it a pull request has is not known, and is said so: its payload is not opened to find out
-    await upgraded.query(`UPDATE sessions SET hashed_lines = NULL WHERE org_id = 'old-cost' AND session_id = 's1'`);
+    // until the server has charged the sessions it held to their pull requests, what one is charged of
+    // each is not known, and is said so
     const early = await (await upgradedApp.request("/api/v1/prs?state=merged", { headers: { authorization: `Bearer ${admin}` } })).json() as any;
     const first = early.pulls.find((p: any) => p.number === 1).cost;
     assert.deepEqual([first.usd, first.sessions_without_cost, first.sessions_uncounted], [null, 1, 1]);
-    // and its row says so, where it would have a share
+    // and its row says so, where it would have a share; the one with no line in it is no session of it
     const page = await (await upgradedApp.request("/api/v1/prs/detail?repo=github.com/acme/old&number=1", { headers: { authorization: `Bearer ${admin}` } })).json() as any;
     assert.deepEqual(page.sessions.map((s: any) => [s.session_id, s.cost_share_usd, s.uncounted]), [["s1", null, true]]);
     // the first history row is the figures already stored, and the sessions that had lines then
@@ -2014,12 +2509,15 @@ test("pull requests and sessions from before the cost was shown have one after t
     const third = await (await upgradedApp.request("/api/v1/prs/detail?repo=github.com/acme/old&number=3", { headers: { authorization: `Bearer ${admin}` } })).json() as any;
     assert.equal(third.history[0].reporter_version, null);
     assert.deepEqual(kept(third.history[0].sessions), [["s1", 2]]);
-    assert.deepEqual(await countHashedLines(upgraded), { counted: 1, failed: 0 });
+    // which it does once it is up, a batch at a time
+    let after: SessionAt | null = null;
+    while ((after = await upgraded.asOrg("old-cost", (tx) => weighKeptSome(tx, after, 1)))) continue;
+    assert.equal(await upgraded.asOrg("old-cost", (tx) => weighKeptSome(tx)), null);
     const list = await (await upgradedApp.request("/api/v1/prs?state=merged", { headers: { authorization: `Bearer ${admin}` } })).json() as any;
     const costs = Object.fromEntries(list.pulls.map((p: any) => [p.number, p.cost && [p.cost.usd, p.cost.estimated, p.cost.sessions_unshared, p.cost.opened_usd]]));
     // these were last reported before what they are matched by was kept: matching again cannot share the lines out, and that is said
     assert.deepEqual(list.pulls.filter((p: any) => p.cost).map((p: any) => [p.matchable, p.cost.sessions_unshared_for_good]), [[false, 1], [false, 1]]);
-    // two of the session's four lines, at eight dollars, in each of two: which lines was not kept, so they
+    // two lines of the session in each of two, and all it cost between them: which lines was not kept, so they
     // may be the same two, and the cost is said to be an estimate; what they were opened with cost is not known.
     // The other was reported before sessions were kept at all.
     assert.deepEqual(costs, { 1: [4, true, 1, null], 2: null, 3: [4, true, 1, null] });

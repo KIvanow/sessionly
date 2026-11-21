@@ -31,6 +31,17 @@ minutes) or twice (kept an hour). Requests to a model that isn't in the price ta
 out of an estimate and counted in `unpriced_requests`, so an incomplete total is visible as
 such. (Inside a recorded run they need no estimate: Claude Code's total covers them.)
 
+**By branch.** Claude Code writes the branch that was checked out on every row of the
+transcript, so the record also says how much of the cost was spent on each branch
+(`cost.by_branch`): the total, shared out as the estimates of the responses made on each
+branch are. A server uses it to count for a pull request what was spent on its branch and on
+the one it is based on, and not what the session spent on others, where the branches
+account for its lines
+(see [Pull requests](pull-requests.md#how-to-read-it)). It is branch names and amounts,
+nothing else, and it is left out for a session in the cloud, whose sandbox holds one branch,
+and for a session whose transcript was gone before a version that keeps this read it. Other
+agents record one branch for a session, or none.
+
 The table has Anthropic's models from the Claude 4 models on, OpenAI's models at their API list
 prices (for [Codex](codex.md)), and Cursor's Composer models. A model's name is read without
 what a provider adds to it (`anthropic.` in front, a date or `[1m]` behind). How each agent's
