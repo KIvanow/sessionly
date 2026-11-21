@@ -1757,6 +1757,9 @@ test("a session's cost is split between the pull requests it has lines in by wha
   // no cost figure, or no session: nothing is said
   assert.deepEqual(charge(null, [row(null, lines("a.ts", 1))]), [null]);
   assert.deepEqual(charge({ ...whole, cost_usd: null }, [row(null, lines("a.ts", 1))]), [null]);
+  // nor of one whose cost is no amount
+  assert.deepEqual(charge({ ...whole, cost_usd: -5 }, [row(null, lines("a.ts", 1))]), [null]);
+  assert.deepEqual(charge({ ...whole, cost_usd: Infinity }, [row(null, lines("a.ts", 1))]), [null]);
   // all of it to the one it contributed to, however few lines; six lines and four: six dollars and four
   assert.deepEqual(usd(charge(whole, [row("feat", lines("a.ts", 1))])), [10]);
   assert.deepEqual(usd(charge(whole, [row("a", lines("a.ts", 1, 2, 3, 4, 5, 6)), row("b", lines("b.ts", 7, 8, 9, 10))])), [6, 4]);
@@ -1800,6 +1803,8 @@ test("a session's cost is split between the pull requests it has lines in by wha
   assert.deepEqual(usd(charge({ cost_usd: 10, by_branch: [{ branch: null, usd: 10 }] }, [row("feat", lines("a.ts", 1))])), [10]);
   // lines together: each as often as the one that has it most
   assert.deepEqual(unionLines({ "a.ts": [h(1), h(1), h(2)] }, { "a.ts": [h(1), h(3)], "constructor": [h(4)] }), { "a.ts": [h(1), h(1), h(2), h(3)], "constructor": [h(4)] });
+  // a file renamed between the two: its lines are in both, once
+  assert.deepEqual(unionLines({ "b.ts": [h(1), h(2)] }, { "a.ts": [h(1), h(2), h(5)] }), { "b.ts": [h(1), h(2)], "a.ts": [h(5)] });
   assert.deepEqual(unionLines(null, { "a.ts": [h(1)] }), { "a.ts": [h(1)] });
   assert.equal(unionLines(null, null), null);
 });
@@ -1989,6 +1994,23 @@ test("what a session gave and is charged holds through copies of a line, and mov
   assert.deepEqual(await odd(), [[1, 3, 5]]);
   await sent(6, [file("s.ts", 9003)], { event: "synchronize" });
   assert.deepEqual(await odd(), [[0, 3, 5]]);
+
+  // a file the session renamed in review, and then again (its lines are matched by the file they
+  // are in, so it wrote them in each): they are the same lines, not given a second time nor a
+  // third, and what the session is charged in its two pull requests stays where it was
+  const three = [1900, 1901, 1902];
+  await put("h-moved", 12, { "old.ts": three, "new.ts": three, "newer.ts": three, "apart.ts": three, "other.ts": [1910, 1911, 1912] });
+  await sent(7, [file("old.ts", 1900, 1901, 1902)]);
+  await sent(8, [file("other.ts", 1910, 1911, 1912)]);
+  const moved = async () => Promise.all([7, 8].map(async (n) => (await pull(n)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd])));
+  assert.deepEqual(await moved(), [[[3, 3, 6]], [[3, 3, 6]]]);
+  await sent(7, [file("new.ts", 1900, 1901, 1902)], { event: "synchronize" });
+  assert.deepEqual(await moved(), [[[3, 3, 6]], [[3, 3, 6]]]);
+  await sent(7, [file("newer.ts", 1900, 1901, 1902)], { event: "synchronize" });
+  assert.deepEqual(await moved(), [[[3, 3, 6]], [[3, 3, 6]]]);
+  // one of them moved to another file and one taken out: three given still
+  await sent(7, [file("newer.ts", 1900), file("apart.ts", 1901)], { event: "synchronize" });
+  assert.deepEqual(await moved(), [[[2, 3, 6]], [[3, 3, 6]]]);
 
   // one stacked on another: what was spent on main is the one's that is based on it, until the first
   // is merged and the second is based on main as well, with not a line of either changed

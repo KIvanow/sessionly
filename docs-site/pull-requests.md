@@ -276,9 +276,11 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
   - **A session in several pull requests** is split between them by the lines it gave each,
     and counted once: six lines in one and four in another is $6 and $4 of a $10 session. A
     line that is in several (one stacked on another, a release of what was merged before) is
-    shared out between them. The split does not move when review removes lines, nor when one
-    of them is merged or closed: it moves only when the session gives a pull request more
-    lines, is uploaded with another cost, or is deleted.
+    shared out between them. The split does not move when review removes lines, when a
+    file is renamed, nor when one of them is merged or closed. It moves when the session
+    gives a pull request more lines, is uploaded with another cost or is deleted, when a
+    pull request's head or base branch changes, and when a line still in a pull request
+    turns out to be another session's, uploaded later.
   - **Having lines in the pull request is what makes a session pay for it**, whatever branch
     it began on. Codex, Grok and a Cursor cloud agent name one branch for a whole session (a
     local Cursor session names none), and that is often the branch the session started on

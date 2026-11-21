@@ -246,16 +246,17 @@ type Wrote = Pick<PullSession, "machine_id" | "source" | "session_id" | "lines">
 /** And which of the lines the pull request was first reported with are its own. */
 type Kept = Wrote & { opened_lines: number; opened_matched: Lines };
 
-/** A line of a file, as the lines seen are keyed. */
-const lineKey = (path: string, hash: string): string => `${path}\n${hash}`;
-
-/** How often each line is in a pull request's files, first or now: as often as the one that has it most. */
+/**
+ * How often each line is in a pull request's files, first or now: as often
+ * as the one that has it most. Whatever file it is in: a file renamed, or a
+ * line moved to another, is the same line still.
+ */
 function copiesIn(...reports: FileHashes[][]): Map<string, number> {
   const most = new Map<string, number>();
   for (const files of reports) {
     const here = new Map<string, number>();
-    for (const file of files) for (const hash of file.hashes) here.set(lineKey(file.path, hash), (here.get(lineKey(file.path, hash)) ?? 0) + 1);
-    for (const [key, n] of here) if (n > (most.get(key) ?? 0)) most.set(key, n);
+    for (const file of files) for (const hash of file.hashes) here.set(hash, (here.get(hash) ?? 0) + 1);
+    for (const [hash, n] of here) if (n > (most.get(hash) ?? 0)) most.set(hash, n);
   }
   return most;
 }
@@ -268,10 +269,10 @@ function addLines(a: Lines, b: Lines): Lines {
   return Object.fromEntries(all);
 }
 
-/** How often each line is in a set of lines. */
+/** How often each line is in a set of lines, whatever file it is in. */
 function copiesOf(lines: Lines | null): Map<string, number> {
   const copies = new Map<string, number>();
-  for (const [path, hashes] of Object.entries(lines ?? {})) for (const hash of hashes) copies.set(lineKey(path, hash), (copies.get(lineKey(path, hash)) ?? 0) + 1);
+  for (const hashes of Object.values(lines ?? {})) for (const hash of hashes) copies.set(hash, (copies.get(hash) ?? 0) + 1);
   return copies;
 }
 
@@ -413,25 +414,23 @@ function keptIn(opened: Lines | null, now: Lines | null): number | null {
   return kept;
 }
 
-/** Two sets of lines together: each line as often as the one that has it most. Null when neither was kept. */
+/**
+ * Two sets of lines together: each line as often as the one that has it
+ * most, whatever file it is in there (a file renamed between the two has the
+ * same lines still). Null when neither was kept.
+ */
 export function unionLines(a: Lines | null, b: Lines | null): Lines | null {
   if (!a || !b) return a ?? b;
   // (A file may be called `constructor`, which every object has already.)
   const all = new Map<string, string[]>(Object.entries(a));
+  const left = copiesOf(a);
   for (const [path, hashes] of Object.entries(b)) {
-    const had = all.get(path);
-    if (!had) {
-      all.set(path, hashes);
-      continue;
-    }
-    const left = new Map<string, number>();
-    for (const hash of had) left.set(hash, (left.get(hash) ?? 0) + 1);
     const more = hashes.filter((hash) => {
       const n = left.get(hash) ?? 0;
       if (n > 0) left.set(hash, n - 1);
       return n === 0;
     });
-    if (more.length > 0) all.set(path, [...had, ...more]);
+    if (more.length > 0) all.set(path, [...(all.get(path) ?? []), ...more]);
   }
   return Object.fromEntries(all);
 }
@@ -481,7 +480,8 @@ export function charge(
   rows: { head_ref: string | null; base_ref?: string | null; lines: number; contributed: Lines | null }[],
 ): (number | null)[] {
   const cost = session?.cost_usd;
-  if (session == null || cost == null) return rows.map(() => null);
+  // (A cost that is no amount, of an upload that is off, is none: nothing is charged of it.)
+  if (session == null || cost == null || !Number.isFinite(cost) || cost < 0) return rows.map(() => null);
   const named = new Map<string, number>();
   for (const spent of Array.isArray(session.by_branch) ? session.by_branch : []) {
     if (typeof spent?.branch === "string" && typeof spent.usd === "number" && Number.isFinite(spent.usd) && spent.usd > 0) {
@@ -1324,6 +1324,8 @@ export async function holdPullSessions(db: OrgDb): Promise<void> {
  * session before the one that wrote it was uploaded goes with it. A line
  * that is in neither any more stays with the session it was last put down
  * to: there is nothing left to match it by.
+ * A line is the same line in whatever file: one whose file was renamed, or
+ * that was moved to another, has not gone and is not given again.
  *
  * What their lines count as, and what each session is charged, is worked
  * out again in every pull request those sessions, and the ones before, have
@@ -1365,15 +1367,23 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   for (const { row, key, before } of gave) {
     if (!before) continue;
     const has = matchedNow.get(key);
+    // How many copies of each line of its own are gone, and then which: those of the files that have fewer of it now.
+    const take = new Map<string, number>();
+    for (const [hash, n] of copiesOf(before)) {
+      const some = Math.min(n - (has?.get(hash) ?? 0), left.get(hash) ?? 0);
+      if (some <= 0) continue;
+      left.set(hash, left.get(hash)! - some);
+      take.set(hash, some);
+    }
+    const still = new Map(Object.entries(next.get(key)?.contributed ?? {}));
     const gone = new Map<string, string[]>();
     for (const [path, hashes] of Object.entries(before)) {
       for (const hash of new Set(hashes)) {
-        const line = lineKey(path, hash);
-        const fewer = hashes.filter((one) => one === hash).length - (has?.get(line) ?? 0);
-        const take = Math.min(fewer, left.get(line) ?? 0);
-        if (take <= 0) continue;
-        left.set(line, left.get(line)! - take);
-        gone.set(path, [...(gone.get(path) ?? []), ...Array<string>(take).fill(hash)]);
+        const copies = (list: string[] | undefined) => (list ?? []).filter((one) => one === hash).length;
+        const some = Math.min(copies(hashes) - copies(still.get(path)), take.get(hash) ?? 0);
+        if (some <= 0) continue;
+        take.set(hash, take.get(hash)! - some);
+        gone.set(path, [...(gone.get(path) ?? []), ...Array<string>(some).fill(hash)]);
       }
     }
     if (gone.size === 0) continue;
@@ -2406,9 +2416,9 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
     total.lines += a.now.lines;
     total.agent_lines += a.now.agent_lines;
     if (a.now.agent_lines > 0) total.pulls_with_agent_lines += 1;
-    // One closed without merging has a cost of its own that the others' lines
-    // are not shared with: among them it would count a session twice. So it
-    // is in no figure of cost here, unless only such are asked for.
+    // What one closed without merging was charged went on work that did not
+    // land: it is counted apart, and is in no figure of cost here, unless
+    // only such are asked for.
     if (pull.state === "closed" && filters.state !== "closed") {
       if (pull.cost?.usd != null) total.pulls_closed_with_cost += 1;
     } else {
