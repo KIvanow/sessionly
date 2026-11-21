@@ -249,7 +249,7 @@ type Kept = Wrote & { opened_lines: number; opened_matched: Lines };
 /** A line of a file, as the lines seen are keyed. */
 const lineKey = (path: string, hash: string): string => `${path}\n${hash}`;
 
-/** How often each line of each file is in a pull request's files, first or now: as often as the one that has it most. */
+/** How often each line of each file is in a pull request's files: of several reports, as often as the one that has it most. */
 function copiesIn(...reports: FileHashes[][]): Map<string, number> {
   const most = new Map<string, number>();
   for (const files of reports) {
@@ -997,9 +997,9 @@ async function match(
     },
     files,
     sessions,
-    // The lines whose writers this says: those it was first reported with, and those it has now,
-    // each as often as the one of the two that has it most.
-    seen: copiesIn(first, now),
+    // The lines it has now, each as often as its file has it: one of a session's that is not
+    // among them any more went (see `keepSessions`).
+    seen: copiesIn(now),
   };
 }
 
@@ -1382,11 +1382,12 @@ export async function holdPullSessions(db: OrgDb): Promise<void> {
  * contributed to a pull request (`contributed`) only grows, so that what it
  * is charged there does not shrink when review takes its lines out. A line
  * that is still in what the pull request was first reported with, or in what
- * it has now (`seen`), is whose this match says it is: one put down to a
- * session before the one that wrote it was uploaded goes with it. A line
- * that is in neither any more stays with the session it was last put down
- * to: there is nothing left to match it by. Which those are is kept
- * (`gone`), so that matching the same files again changes nothing.
+ * it has now, is whose this match says it is: one put down to a session
+ * before the one that wrote it was uploaded goes with it. A line that went
+ * from what it has now (it is not in `seen`) stays with the session it was
+ * last put down to there as well: there is nothing left there to match it
+ * by. Which those are is kept (`gone`), so that matching the same files
+ * again changes nothing.
  * A session's line is the same line in whatever file: one whose file was
  * renamed, or that was moved to another, has not gone and is not given
  * again.
@@ -1412,49 +1413,60 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   const next = new Map<string, Kept & { contributed: Lines; gone: Lines }>(
     sessions.map((s) => [sessionKey(s), { ...s, contributed: unionLines(s.matched, s.opened_matched)!, gone: {} }]),
   );
-  // What each had given before, in an order that does not depend on how the rows come back.
-  // From before what a session contributed was kept apart: what it had then, and was opened with.
-  // None for one deleted since, whose lines are not kept past it: it stays only while this match has it.
+  // What each had before, in an order that does not depend on how the rows come back. None for
+  // one deleted since, whose lines are not kept past it: it stays only while this match has it.
   const gave = had
     .map((row) => ({ row, key: sessionKey(row as never), before: kept(row.contributed) ?? unionLines(kept(row.matched), kept(row.opened_matched)) }))
     .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  // A line that sessions had in a file, more often than that file has it now or had at first,
-  // and more often than this match gives it there: the copies over are gone (three of the
-  // same, of which review took two; one each of two sessions, of which review took one).
-  // They stay with the sessions that had them there and have fewer there now, and are kept
-  // as gone (`gone`): the same report again, or a line of the same words that another session
-  // writes later, there or in another file, takes none of them back. A line that is still
-  // there is whose this match says it is.
-  // A session's own line is the same line in whatever file: one it has in another file now
-  // (the file was renamed, the line moved) has not gone, and one of its lines that went and
-  // that it has again is not counted twice. Another session's line in another file says
-  // nothing of this one's.
-  const has = new Map([...next].map(([key, s]) => [key, copiesAt(s.contributed)]));
+  // A line that sessions had in a file as it was last reported, more often than that file has
+  // it now (`seen`) and more often than this match gives it there: the copies over are gone
+  // (three of the same, of which review took two; one each of two sessions, of which review
+  // took one). They stay with the sessions that had them there and have fewer there now, and
+  // are kept as gone (`gone`): the same report again, or a line of the same words that another
+  // session writes later, there or in another file, takes none of them back. A line that is
+  // still there is whose this match says it is.
+  // A session's own line is the same line in whatever file: one that went from a file while
+  // the session got one in another that no session had there (the file was renamed, the line
+  // moved) has not gone, and one of its lines that went and that it has again is not counted
+  // twice. Another session's line in another file says nothing of this one's, and neither
+  // does a line that was there already and turns out to be this session's.
+  // All this is of the lines it has now and had (`matched`): those it was opened with are
+  // put together with them after, a line in both once, so a line that went of two it had in
+  // two files is not lost in one it was opened with.
+  const has = new Map([...next].map(([key, s]) => [key, copiesAt(s.matched)]));
   const held = gave.flatMap(({ row, key, before }) => {
     if (!before) return [];
-    const all = copiesAt(before);
-    // (No more of them than it gave there.)
-    const went = new Map([...copiesAt(kept(row.gone))].map(([line, n]) => [line, Math.min(n, all.get(line) ?? 0)]));
-    const there = new Map([...all].map(([line, n]) => [line, n - (went.get(line) ?? 0)]));
-    return [{ row, key, went, there, now: has.get(key) ?? new Map<string, number>() }];
+    // (Of one kept before which went were: what it contributed and has in neither.)
+    const present = copiesAt(unionLines(kept(row.matched), kept(row.opened_matched)));
+    const went =
+      row.gone != null
+        ? copiesAt(kept(row.gone))
+        : new Map([...copiesAt(before)].map(([line, n]) => [line, Math.max(0, n - (present.get(line) ?? 0))]));
+    return [{ row, key, went, there: copiesAt(kept(row.matched)), now: has.get(key) ?? new Map<string, number>() }];
   });
-  const over = new Map<string, number>();
-  for (const { there } of held) for (const [line, n] of there) over.set(line, (over.get(line) ?? 0) + n);
+  const were = new Map<string, number>();
+  for (const { there } of held) for (const [line, n] of there) were.set(line, (were.get(line) ?? 0) + n);
   const matched = new Map<string, number>();
   for (const now of has.values()) for (const [line, n] of now) matched.set(line, (matched.get(line) ?? 0) + n);
-  for (const [line, n] of over) over.set(line, Math.max(0, n - Math.max(seen.get(line) ?? 0, matched.get(line) ?? 0)));
+  // How many of each are gone, and how many more of each the sessions have between them than they had.
+  const over = new Map([...were].map(([line, n]) => [line, Math.max(0, n - Math.max(seen.get(line) ?? 0, matched.get(line) ?? 0))]));
+  const grew = new Map([...matched].map(([line, n]) => [line, Math.max(0, n - (were.get(line) ?? 0))]));
   const hashOf = (line: string) => line.slice(line.lastIndexOf("\n") + 1);
   const pathOf = (line: string) => line.slice(0, line.lastIndexOf("\n"));
   for (const { row, key, went, there, now } of held) {
     // What it has now that it had not, by line whatever the file: of its own lines, moved or back.
     const more = new Map<string, number>();
-    for (const [line, n] of now) {
-      const some = n - (there.get(line) ?? 0);
+    for (const line of [...now.keys()].sort()) {
+      const some = now.get(line)! - (there.get(line) ?? 0);
       if (some <= 0) continue;
       // Back where it went from, first.
       const back = Math.min(some, went.get(line) ?? 0);
       if (back > 0) went.set(line, went.get(line)! - back);
-      if (some > back) more.set(hashOf(line), (more.get(hashOf(line)) ?? 0) + some - back);
+      // And one that no session had there: one of its own may have moved here.
+      const fresh = Math.min(some - back, grew.get(line) ?? 0);
+      if (fresh <= 0) continue;
+      grew.set(line, grew.get(line)! - fresh);
+      more.set(hashOf(line), (more.get(hashOf(line)) ?? 0) + fresh);
     }
     const moved = (line: string, n: number): number => {
       const some = Math.min(n, more.get(hashOf(line)) ?? 0);
@@ -1465,13 +1477,13 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
     const keep = (line: string, n: number) => {
       if (n > 0) gone.set(pathOf(line), [...(gone.get(pathOf(line)) ?? []), ...Array<string>(n).fill(hashOf(line))]);
     };
-    // (In an order that does not depend on how its files were kept.)
+    // (In an order that does not depend on how its files were kept. Only of a copy that went
+    // may it be said that it moved: one still there that is another's now did not.)
     for (const line of [...there.keys()].sort()) {
-      const fewer = moved(line, there.get(line)! - (now.get(line) ?? 0));
-      const some = Math.min(fewer, over.get(line) ?? 0);
+      const some = Math.min(there.get(line)! - (now.get(line) ?? 0), over.get(line) ?? 0);
       if (some <= 0) continue;
       over.set(line, over.get(line)! - some);
-      keep(line, some);
+      keep(line, moved(line, some));
     }
     for (const line of [...went.keys()].sort()) keep(line, moved(line, went.get(line)!));
     if (gone.size === 0) continue;
@@ -1479,7 +1491,7 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
     const one = next.get(key);
     if (one) {
       one.gone = Object.fromEntries(gone);
-      one.contributed = addLines(one.contributed, one.gone);
+      one.contributed = unionLines(addLines(one.matched, one.gone), one.opened_matched)!;
     } else {
       const s = { machine_id: String(row.machine_id), source: String(row.source), session_id: String(row.session_id) };
       next.set(key, { ...s, lines: 0, matched: {}, opened_lines: 0, opened_matched: {}, contributed: Object.fromEntries(gone), gone: Object.fromEntries(gone) });

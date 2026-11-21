@@ -2109,6 +2109,47 @@ test("what a session gave and is charged holds through copies of a line and a la
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 18 })).status, 200);
   assert.deepEqual(await twice(), [[0, 1, 10]]);
 
+  // a line the pull request was opened with and that the session has in a file pushed later too:
+  // when review takes the first of the two out, both are what the session gave still
+  await put("h-first", 8, { "f.ts": [2700, 2701], "e.ts": [2700, 2702] });
+  await sent(19, [file("f.ts", 2700, 2701)]);
+  await sent(19, [file("f.ts", 2700, 2701), file("e.ts", 2700, 2702)], { event: "synchronize" });
+  const first = async () => (await pull(19)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd]);
+  assert.deepEqual(await first(), [[4, 4, 8]]);
+  await sent(19, [file("f.ts", 2701), file("e.ts", 2700, 2702)], { event: "synchronize" });
+  assert.deepEqual(await first(), [[3, 4, 8]]);
+  await sent(19, [file("f.ts", 2701), file("e.ts", 2700, 2702)], { event: "synchronize" });
+  assert.deepEqual(await first(), [[3, 4, 8]]);
+
+  // a line of a session's in two files, and in one push the one turns out to be a later session's
+  // and the other moves to a third file: the one that moved is not also kept as gone, whatever the
+  // files are called. (The push comes before the pull request was matched again for the later
+  // session's upload: its sessions are put back as they were.)
+  for (const [number, lost] of [[20, "a.ts"], [21, "z.ts"]] as const) {
+    const at = (id: string, started: string, paths: string[]) => {
+      const one = session(id, "claude-code", "claude-opus-5-5", started, paths.map((path) => ({ path, model: null, hashes: [h(2800 + number)] })));
+      one.session.repo.remote = repo;
+      (one.session as Record<string, unknown>).cost = { total_usd: 10, source: "recorded" };
+      return call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, one);
+    };
+    await at(`h-had-${number}`, "2026-11-10T09:00:00Z", [lost, "b.ts", "m.ts"]);
+    await sent(number, [file("y.ts", 9000 + number)]);
+    await sent(number, [file("y.ts", 9000 + number), file(lost, 2800 + number), file("b.ts", 2800 + number)], { event: "synchronize" });
+    const rows = await db.query(`SELECT * FROM pull_sessions WHERE repo = $1 AND number = $2`, [repo, number]);
+    await at(`h-took-${number}`, "2026-11-10T10:00:00Z", [lost]);
+    await db.query(`DELETE FROM pull_sessions WHERE repo = $1 AND number = $2`, [repo, number]);
+    for (const row of rows) {
+      const columns = Object.keys(row);
+      await db.query(
+        `INSERT INTO pull_sessions (${columns.join(", ")}) VALUES (${columns.map((_, i) => `$${i + 1}`).join(", ")})`,
+        columns.map((column) => (row[column] !== null && typeof row[column] === "object" ? JSON.stringify(row[column]) : row[column])),
+      );
+    }
+    await sent(number, [file("y.ts", 9000 + number), file(lost, 2800 + number), file("m.ts", 2800 + number)], { event: "synchronize" });
+    const gave = (await pull(number)).sessions.map((x: any) => [x.session_id, x.lines, x.contributed_lines]).sort();
+    assert.deepEqual(gave, [[`h-had-${number}`, 1, 1], [`h-took-${number}`, 1, 1]], lost);
+  }
+
   // one stacked on another: what was spent on main is the one's that is based on it, until the first
   // is merged and the second is based on main as well, with not a line of either changed
   await put("h-stack", 10, { "p.ts": [1500, 1501], "q.ts": [1600, 1601] }, [{ branch: "main", usd: 4 }, { branch: "st1", usd: 3 }, { branch: "st2", usd: 3 }]);
