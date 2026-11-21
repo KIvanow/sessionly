@@ -337,15 +337,40 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     each one's count), the "Agent lines that survived review" tile says what it is beside
     them, and why.
   - **What a session gave a pull request** is kept on the server as the hashes of those
-    lines, and only grows. There is no history of pushes: a line that is in neither the
-    first report nor the latest stays with the session it was last put down to. A line that
-    is still in either follows the matching, so one put down to an older session before the
-    session that wrote it was uploaded moves to that one when it arrives, and its charge with
-    it. Pull requests from before this was kept are charged once after the upgrade, from the
+    lines, and only grows. There is no history of pushes: a line that went from the files
+    stays with the session it was last put down to there, and which lines those are is kept
+    beside the session's others. A line that is still in the files, or in the first report,
+    follows the matching, so one put down to an older session before the session that wrote
+    it was uploaded moves to that one when it arrives, and its charge with it. A session's
+    own line that moved to another file, or whose file was renamed, is the same line and is
+    not counted again. Pull requests from before this was kept are charged once after the upgrade, from the
     lines they have now and the lines they were opened with: lines that came and went
     between those were never kept, so a session that gave only such lines is not in them.
     Their costs are not frozen at what they were: they are worked out again under this rule,
     and for a while a pull request not charged yet says so in place of a cost.
+  - **Known limits: the same line written by several sessions.** A line is known by its
+    file and its text, so two copies of one line in one file cannot be told apart, and the
+    server sees reports and uploads one at a time, not what happened between them. Where
+    several sessions wrote the same line in the same file (a closing brace, an import), which
+    of them keeps a copy that review took out can depend on what arrived first, the push or
+    a session's upload. None of this changes what a session cost. It moves a line, and
+    with it a share of that session's cost, between the pull requests the session is in,
+    and takes a session that gave only such a line out of the pull request:
+    - A session's line that review took out, and that another session then writes again in
+      the same file: where the push arrives before that session is uploaded, the line is
+      put down to the first session for a moment, and it no longer keeps the one that went.
+    - A second copy of a line the pull request was opened with, taken out one push after
+      the other: both stay the session's, and when a session uploaded later turns out to
+      have written the opening line, that line is counted for both.
+    - A line the pull request was opened with that the matching gives to one session, while
+      the same line in the files is another's (the second began after it was opened): both
+      count it while it is there, and the second does not keep it when it goes. The same
+      holds where the opening line is no session's.
+    - A session that moved a line it was opened with to another file, after which another
+      session writes the same line where it was and that goes too: that copy is not kept.
+    - A copy that review takes out in the very report that first puts a session's lines down
+      to it (the session was uploaded after the push that brought them, and before the
+      pull request was matched again) was never kept as that session's.
   - **Where the figures above the list stop.** A pull request closed without merging keeps
     its cost on its own page and is left out of the figures above the list, unless only
     closed ones are shown; the tile says how many were. The [Overview](dashboard.md) puts

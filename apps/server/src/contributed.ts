@@ -139,6 +139,11 @@ export interface Contributed {
  *   after, a line in both once.
  *
  * The same `before` as this returned, with the same match, returns the same.
+ *
+ * Copies of one line in one file cannot be told apart, and neither can the
+ * order of an upload and a push be seen after: where several sessions wrote
+ * the same line in a file, which of them keeps a copy that went may go by
+ * what came first (docs-site/pull-requests.md, "Known limits", lists them).
  */
 export function contributedAfter(before: Held[], now: Credited[], first: Map<string, number>, seen: Map<string, number>): Contributed[] {
   const byKey = <T extends { key: string }>(rows: T[]): T[] => [...rows].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
@@ -214,9 +219,9 @@ export function contributedAfter(before: Held[], now: Credited[], first: Map<str
   // of each still, and those are the sessions' that the match gives them, before any other's:
   // - one kept as such stays while the match gives the session that line there beyond those it
   //   has in the files, and is one of them;
-  // - so is one the session kept as its own (it went while the files had the line as often as
-  //   the first report), as far as the match gives it more of the line than that: it is kept
-  //   as a line of the first report from here on;
+  // - so is one the session keeps for good (it went while the files had the line as often as
+  //   the first report), as far as the match gives it more of the line than that: it stays
+  //   the session's for good all the same, so that no later match takes it away;
   // - and so is one that left its place with this match (one that moved as much as one that
   //   went): those that went are kept as lines of the first report.
   // What is left of them after is no session's the match gives the line there, or no one's:
@@ -228,13 +233,7 @@ export function contributedAfter(before: Held[], now: Credited[], first: Map<str
       take(firstOnly, line, some);
     }
   }
-  for (const s of left) {
-    for (const [line, n] of s.later) {
-      const some = take(firstOnly, line, Math.min(n, (s.credit.get(line) ?? 0) - (s.opened.get(line) ?? 0)));
-      add(s.opened, line, some);
-      s.later.set(line, n - some);
-    }
-  }
+  for (const s of left) for (const [line, n] of s.later) take(firstOnly, line, Math.min(n, (s.credit.get(line) ?? 0) - (s.opened.get(line) ?? 0)));
   for (const s of left) {
     for (const [line, n] of s.passed) {
       const some = take(firstOnly, line, Math.min(n, (s.credit.get(line) ?? 0) - (s.opened.get(line) ?? 0)));
