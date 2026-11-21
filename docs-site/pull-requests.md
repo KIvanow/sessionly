@@ -294,7 +294,8 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     charged too, shared between the session's pull requests that are based on it. (When a
     pull request on that base branch itself has the session's lines, what was spent there is
     that one's.) What the session spent on any other branch is that branch's pull request's,
-    or no one's, and so is what it spent while no branch was named. When a session has lines
+    or no one's, and so is what it spent while no branch was named (unless no turn of it
+    names a branch at all: it is then charged whole, as a session of the other agents is). When a session has lines
     in a pull request and spent nothing on that pull request's own branch (the branch was
     renamed before it was pushed, say, a detached checkout, or the lines were picked onto
     another), the branch names are what is off there, not the work: that pull request is

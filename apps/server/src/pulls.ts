@@ -262,9 +262,17 @@ function copiesIn(...reports: FileHashes[][]): Map<string, number> {
 
 /** Two sets of lines put together, a line in both as often as in the two. */
 function addLines(a: Lines, b: Lines): Lines {
-  const all: Lines = { ...a };
-  for (const [path, hashes] of Object.entries(b)) all[path] = [...(all[path] ?? []), ...hashes];
-  return all;
+  // (A map: a file may be called `constructor`, which every object has already, or `__proto__`.)
+  const all = new Map(Object.entries(a));
+  for (const [path, hashes] of Object.entries(b)) all.set(path, [...(all.get(path) ?? []), ...hashes]);
+  return Object.fromEntries(all);
+}
+
+/** How often each line is in a set of lines. */
+function copiesOf(lines: Lines | null): Map<string, number> {
+  const copies = new Map<string, number>();
+  for (const [path, hashes] of Object.entries(lines ?? {})) for (const hash of hashes) copies.set(lineKey(path, hash), (copies.get(lineKey(path, hash)) ?? 0) + 1);
+  return copies;
 }
 
 /**
@@ -1338,30 +1346,43 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   const next = new Map<string, Kept & { contributed: Lines }>(
     sessions.map((s) => [sessionKey(s), { ...s, contributed: unionLines(s.matched, s.opened_matched)! }]),
   );
-  for (const row of had) {
-    // From before what a session contributed was kept apart: what it had then, and was opened with.
-    // None for one deleted since, whose lines are not kept past it: it stays only while this match has it.
-    const before = kept(row.contributed) ?? unionLines(kept(row.matched), kept(row.opened_matched));
+  // What each had given before, in an order that does not depend on how the rows come back.
+  // From before what a session contributed was kept apart: what it had then, and was opened with.
+  // None for one deleted since, whose lines are not kept past it: it stays only while this match has it.
+  const gave = had
+    .map((row) => ({ row, key: sessionKey(row as never), before: kept(row.contributed) ?? unionLines(kept(row.matched), kept(row.opened_matched)) }))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  // A line given more often, by all of them together, than the files have it now or had at
+  // first (three of the same, of which review took two; one each of two sessions, of which
+  // review took one): the copies that are in neither are gone. They stay with the sessions
+  // that this match gives fewer of than they had given, so that what a session gave does not
+  // shrink when review takes its lines out, while a line that is still there is whose this
+  // match says it is.
+  const given = new Map<string, number>();
+  for (const { before } of gave) for (const [line, n] of copiesOf(before)) given.set(line, (given.get(line) ?? 0) + n);
+  const left = new Map([...given].map(([line, n]) => [line, Math.max(0, n - (seen.get(line) ?? 0))]));
+  const matchedNow = new Map([...next].map(([key, s]) => [key, copiesOf(s.contributed)]));
+  for (const { row, key, before } of gave) {
     if (!before) continue;
-    // A line it gave more often than the files have it now, or had at first (three of the same,
-    // of which review took two): the copies that are in neither are gone, and stay its own.
-    const gone: Lines = {};
+    const has = matchedNow.get(key);
+    const gone = new Map<string, string[]>();
     for (const [path, hashes] of Object.entries(before)) {
-      const there = new Map<string, number>();
-      const left = hashes.filter((hash) => {
-        const n = (there.get(hash) ?? 0) + 1;
-        there.set(hash, n);
-        return n > (seen.get(lineKey(path, hash)) ?? 0);
-      });
-      if (left.length > 0) gone[path] = left;
+      for (const hash of new Set(hashes)) {
+        const line = lineKey(path, hash);
+        const fewer = hashes.filter((one) => one === hash).length - (has?.get(line) ?? 0);
+        const take = Math.min(fewer, left.get(line) ?? 0);
+        if (take <= 0) continue;
+        left.set(line, left.get(line)! - take);
+        gone.set(path, [...(gone.get(path) ?? []), ...Array<string>(take).fill(hash)]);
+      }
     }
-    if (Object.keys(gone).length === 0) continue;
-    const key = sessionKey(row as never);
+    if (gone.size === 0) continue;
+    // (As entries: a file may be called `__proto__`, or `constructor`.)
     const now = next.get(key);
-    if (now) now.contributed = addLines(now.contributed, gone);
+    if (now) now.contributed = addLines(now.contributed, Object.fromEntries(gone));
     else {
       const s = { machine_id: String(row.machine_id), source: String(row.source), session_id: String(row.session_id) };
-      next.set(key, { ...s, lines: 0, matched: {}, opened_lines: 0, opened_matched: {}, contributed: gone });
+      next.set(key, { ...s, lines: 0, matched: {}, opened_lines: 0, opened_matched: {}, contributed: Object.fromEntries(gone) });
     }
   }
   const files = (lines: Lines | null) => lines && Object.keys(lines).sort().map((path) => [path, [...lines[path]!].sort()]);

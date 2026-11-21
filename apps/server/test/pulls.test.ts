@@ -1966,6 +1966,30 @@ test("what a session gave and is charged holds through copies of a line, and mov
   await sent(1, [file("m.ts", 9001)], { event: "synchronize" });
   assert.deepEqual(await Promise.all(await gave()), [[[0, 3, 3]], [[1, 1, 1]]]);
 
+  // a copy each of two sessions, of which review takes one: the one left is put down to one of
+  // them, and the other still gave the copy that went
+  await sent(5, [file("r.ts", 9002)]);
+  await put("h-one", 2, { "r.ts": [1700] });
+  await put("h-two", 3, { "r.ts": [1700] });
+  await sent(5, [file("r.ts", 9002, 1700, 1700)], { event: "synchronize" });
+  const both = async () => (await pull(5)).sessions.map((x: any) => [x.session_id, x.contributed_lines, x.cost_share_usd]).sort();
+  assert.deepEqual(await both(), [["h-one", 1, 2], ["h-two", 1, 3]]);
+  await sent(5, [file("r.ts", 9002, 1700)], { event: "synchronize" });
+  assert.deepEqual(await both(), [["h-one", 1, 2], ["h-two", 1, 3]]);
+  await sent(5, [file("r.ts", 9002)], { event: "synchronize" });
+  assert.deepEqual(await both(), [["h-one", 1, 2], ["h-two", 1, 3]]);
+
+  // files by names that every object has already: what went from them is kept as any other
+  await sent(6, [file("s.ts", 9003)]);
+  await put("h-odd", 5, { constructor: [1800], ["__proto__"]: [1801], "s.ts": [1802] });
+  await sent(6, [file("s.ts", 9003, 1802), file("constructor", 1800), file("__proto__", 1801)], { event: "synchronize" });
+  const odd = async () => (await pull(6)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd]);
+  assert.deepEqual(await odd(), [[3, 3, 5]]);
+  await sent(6, [file("s.ts", 9003, 1802)], { event: "synchronize" });
+  assert.deepEqual(await odd(), [[1, 3, 5]]);
+  await sent(6, [file("s.ts", 9003)], { event: "synchronize" });
+  assert.deepEqual(await odd(), [[0, 3, 5]]);
+
   // one stacked on another: what was spent on main is the one's that is based on it, until the first
   // is merged and the second is based on main as well, with not a line of either changed
   await put("h-stack", 10, { "p.ts": [1500, 1501], "q.ts": [1600, 1601] }, [{ branch: "main", usd: 4 }, { branch: "st1", usd: 3 }, { branch: "st2", usd: 3 }]);

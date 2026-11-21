@@ -509,10 +509,14 @@ export interface PullCloud {
  * A session is charged to the pull requests it contributed lines to, split
  * between them by the lines it contributed to each at any time, at its
  * opening or in a later push. Review taking lines out does not lower it.
- * Where the agent says which branch each turn ran on (Claude Code), only
- * what was spent on the pull request's branch counts; a session of another
- * agent counts whole when the one branch it names is the pull request's, so
- * other work it did on that branch is charged here too. It is the cost of
+ * Having lines in a pull request is what makes a session pay for it,
+ * whatever branch it began on: a session of an agent that names one branch
+ * for all of it, or none, counts whole, so other work it did is charged
+ * here too. Where the agent says which branch each turn ran on (Claude
+ * Code), what was spent on the pull request's branch and on the one it is
+ * based on counts, and what was spent on other branches does not; a pull
+ * request on whose own branch such a session spent nothing is charged its
+ * share of the whole session by lines, where that is more. It is the cost of
  * those sessions and not of the pull request's whole making: lines that are
  * not put down to a session carry none.
  */

@@ -547,6 +547,9 @@ export async function importDemo(from: Each, to: Each, demo: Pick<Demo, "repo" |
     await forgetLines(db, gone);
     // Charged from here on, though a pull request of theirs cannot be matched again below: the ones
     // copied before, and one copied anew whose lines a pull request kept from an earlier copy of it.
+    // (Held here: with no copy from before, nothing above took it, and what a server just
+    // started is weighing from before an upgrade must not be written over this.)
+    await holdPullSessions(db);
     await chargeAgain(db, [...again.values()]);
     return { copied, skipped, removed: gone.length };
   });
