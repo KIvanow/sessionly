@@ -1976,7 +1976,8 @@ test("what was spent getting a pull request merged stays spent, and every dollar
   for (const g of (await spent()).groups) addsUp(g, `after deleting, ${g.key}`);
   // someone who sees only their own sessions is told the same of those
   addsUp((await call(tokens.ann, "GET", "/summary?by=tool&repo=acme/spent")).body.total, "their own");
-  // a cost below nothing charges nothing, and takes nothing off what is in pull requests
+  // a cost below nothing is no cost: it charges nothing, and takes nothing off the total or off what
+  // is in pull requests, so the three still come to the total
   const off = "github.com/acme/below";
   for (const [id, usd, hashes] of [["sp-below", -5, []], ["sp-above", 10, [h(801), h(802)]]] as const) {
     const s = session(id, "claude-code", "claude-opus-5-5", "2026-11-10T09:00:00Z", hashes.length ? [{ path: "z.ts", model: null, hashes: [...hashes] }] : []);
@@ -1986,7 +1987,10 @@ test("what was spent getting a pull request merged stays spent, and every dollar
   }
   await call(tokens.ci, "PUT", "/prs", report({ repo: off, number: 1, files: [file("z.ts", 801, 802)] }));
   const below = (await call(tokens.admin, "GET", "/summary?by=tool&repo=acme/below")).body.total;
-  assert.deepEqual([below.in_pr_usd, below.closed_unmerged_usd], [10, 0]);
+  assert.deepEqual([below.cost_usd, below.in_pr_usd, below.closed_unmerged_usd, below.not_in_pr_usd], [10, 10, 0, 0]);
+  addsUp(below, "with a cost below nothing");
+  const alone = (await call(tokens.admin, "GET", "/summary?by=tool&repo=acme/below&q=sp-below")).body.total;
+  assert.deepEqual([alone.sessions, alone.cost_usd, alone.in_pr_usd, alone.not_in_pr_usd], [1, 0, 0, 0]);
 });
 
 test("what a session gave and is charged holds through copies of a line and a later pull request with the same lines, and moves with a pull request's branches", async () => {

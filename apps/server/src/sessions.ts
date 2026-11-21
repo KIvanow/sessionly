@@ -529,14 +529,15 @@ const CHARGED = `LEFT JOIN LATERAL (
       AND p.session_id = sessions.session_id
   ) charged ON true`;
 
-/** No more of a session than it cost: one stored a moment ago with a lower cost is charged again after. (And none of a cost below nothing, which charges nothing.) */
-const IN_LIVE = `greatest(0, least(charged.in_live, coalesce(cost_usd, 0)))`;
+/** No more of a session than it cost: one stored a moment ago with a lower cost is charged again after. (A cost below nothing counts as none.) */
+const IN_LIVE = `least(charged.in_live, greatest(coalesce(cost_usd, 0), 0))`;
 
+// (A cost below nothing is not a cost: none of it in the total, as in what is charged to pull requests.)
 const TOTAL_COLUMNS = `
   count(*) AS sessions,
-  coalesce(sum(cost_usd), 0) AS cost_usd,
+  coalesce(sum(greatest(cost_usd, 0)), 0) AS cost_usd,
   coalesce(sum(${IN_LIVE}), 0) AS in_pr_usd,
-  coalesce(sum(greatest(0, least(charged.in_closed, coalesce(cost_usd, 0) - ${IN_LIVE}))), 0) AS closed_unmerged_usd,
+  coalesce(sum(least(charged.in_closed, greatest(coalesce(cost_usd, 0), 0) - ${IN_LIVE})), 0) AS closed_unmerged_usd,
   count(*) FILTER (WHERE cost_usd IS NULL) AS sessions_without_cost,
   count(*) FILTER (WHERE cost_usd IS NOT NULL AND cost_source <> 'recorded') AS sessions_with_estimated_cost,
   sum(active_ms) AS active_ms, sum(prompts) AS prompts, sum(tool_calls) AS tool_calls,
