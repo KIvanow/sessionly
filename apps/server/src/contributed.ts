@@ -69,7 +69,11 @@ export const countLines = (lines: Lines): number => Object.values(lines).reduce(
 /** A session's lines in a pull request as they were kept at the last match. `key` names the session. */
 export interface Held {
   key: string;
-  /** Its lines in the files as they were then. Null with the others for one deleted since: nothing of it is kept on. */
+  /**
+   * Its lines in the files as they were then. Null with the others for one deleted since: nothing
+   * of it is kept on. (Null beside what it contributed, of a copy an import was about to make again
+   * while that took its lines out: it had all it contributed that had not gone.)
+   */
   matched: Lines | null;
   /** Its lines in what the pull request was first reported with. */
   opened_matched: Lines | null;
@@ -77,6 +81,8 @@ export interface Held {
   contributed: Lines | null;
   /** Which of them went from the files. Null from before that was kept: what it contributed and has in neither. */
   gone: Lines | null;
+  /** Which of those that went are lines the pull request was first reported with. Null from before that was kept: none. */
+  gone_opened: Lines | null;
 }
 
 /** A session's lines in a pull request as this match says them. */
@@ -91,6 +97,8 @@ export interface Contributed {
   key: string;
   contributed: Lines;
   gone: Lines;
+  /** Which of those that went are lines the pull request was first reported with. */
+  gone_opened: Lines;
 }
 
 /**
@@ -118,10 +126,14 @@ export interface Contributed {
  *   another file says nothing of this one's, and neither does a line that
  *   was there already and turns out to be this session's.
  * - A line the pull request was first reported with is there to match by
- *   still when it went from the files: where the match gave it to a session
- *   before and gives it to another now, or to no one, the first does not
- *   keep it as gone. No more of them than the first report has and the
- *   files have not: a later copy of the line that went stays the session's.
+ *   still when it went from the files: it is whose the match says it is
+ *   there. A copy that goes is one of those while the first report has
+ *   more of that line than the files have now. It is kept, as such
+ *   (`gone_opened`), where the match gives the session that line of the
+ *   first report (more often than it has it in the files), and only as
+ *   long as it does: one that the match gives to another session, or to
+ *   no one, or that is in the files again, is not kept. Any other copy that went (a later copy of such a line too) stays
+ *   the session's for good.
  * - All of that is of the lines a session has in the files (`matched`). The
  *   lines it was opened with are put together with them and those that went
  *   after, a line in both once.
@@ -132,15 +144,21 @@ export function contributedAfter(before: Held[], now: Credited[], first: Map<str
   const byKey = <T extends { key: string }>(rows: T[]): T[] => [...rows].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   const credited = new Map(now.map((s) => [s.key, s]));
   const has = new Map(now.map((s) => [s.key, copiesAt(s.matched)]));
+  const none = new Map<string, number>();
   const held = byKey(before).flatMap((row) => {
     const all = row.contributed ?? unionLines(row.matched, row.opened_matched);
     if (!all) return [];
     const present = copiesAt(unionLines(row.matched, row.opened_matched));
     const went = row.gone ? copiesAt(row.gone) : new Map([...copiesAt(all)].map(([line, n]) => [line, Math.max(0, n - (present.get(line) ?? 0))]));
-    // The lines it was opened with that it is not opened with any more.
-    const opened = copiesAt(credited.get(row.key)?.opened_matched ?? {});
-    const lost = new Map([...copiesAt(row.opened_matched)].map(([line, n]) => [line, Math.max(0, n - (opened.get(line) ?? 0))]));
-    return [{ key: row.key, went, lost, there: copiesAt(row.matched), now: has.get(row.key) ?? new Map<string, number>() }];
+    // Those that went, apart: the ones the pull request was first reported with, and the others.
+    const opened = new Map([...copiesAt(row.gone_opened)].map(([line, n]) => [line, Math.min(n, went.get(line) ?? 0)]));
+    const later = new Map([...went].map(([line, n]) => [line, n - (opened.get(line) ?? 0)]));
+    const there = row.matched ? copiesAt(row.matched) : new Map([...copiesAt(all)].map(([line, n]) => [line, Math.max(0, n - (went.get(line) ?? 0))]));
+    // How many of each the match gives it in the first report beyond those it has in the files
+    // now: so many may be lines of the first report that went.
+    const now = has.get(row.key) ?? none;
+    const credit = new Map([...copiesAt(credited.get(row.key)?.opened_matched ?? {})].map(([line, n]) => [line, Math.max(0, n - (now.get(line) ?? 0))]));
+    return [{ key: row.key, opened, later, there, now, credit }];
   });
   const sum = (all: Iterable<Map<string, number>>): Map<string, number> => {
     const total = new Map<string, number>();
@@ -155,39 +173,68 @@ export function contributedAfter(before: Held[], now: Credited[], first: Map<str
   const grew = new Map([...are].map(([line, n]) => [line, Math.max(0, n - (were.get(line) ?? 0))]));
   const firstOnly = new Map([...first].map(([line, n]) => [line, Math.max(0, n - (seen.get(line) ?? 0))]));
   const take = (from: Map<string, number>, at: string, n: number): number => {
-    const some = Math.min(n, from.get(at) ?? 0);
+    const some = Math.max(0, Math.min(n, from.get(at) ?? 0));
     if (some > 0) from.set(at, from.get(at)! - some);
-    return Math.max(0, some);
+    return some;
   };
-  const gone = new Map<string, Lines>();
-  for (const { key, went, lost, there, now } of held) {
+  const add = (to: Map<string, number>, at: string, n: number): void => {
+    if (n > 0) to.set(at, (to.get(at) ?? 0) + n);
+  };
+  // First, of the lines each has in the files: which went with this match, and which of those
+  // that went before are kept on.
+  const left = held.map(({ key, opened, later, there, now, credit }) => {
     // What it has now that it had not, by line whatever the file: its own, moved here.
     const more = new Map<string, number>();
     for (const line of [...now.keys()].sort()) {
       let some = now.get(line)! - (there.get(line) ?? 0);
       if (some <= 0) continue;
-      // Back where it went from, first; then one that no session had there.
-      some -= take(went, line, some);
-      const fresh = take(grew, line, some);
-      if (fresh > 0) more.set(hashOf(line), (more.get(hashOf(line)) ?? 0) + fresh);
+      // Back where it went from, first (one the pull request was opened with before another:
+      // that one is in the files again); then one that no session had there.
+      some -= take(opened, line, some);
+      some -= take(later, line, some);
+      add(more, hashOf(line), take(grew, line, some));
     }
-    const left = new Map<string, number>();
-    const keep = (line: string, n: number) => {
-      // (But for one that moved.)
-      const stays = n - take(more, hashOf(line), n);
-      if (stays > 0) left.set(line, (left.get(line) ?? 0) + stays);
-    };
-    // Only of a copy that went may it be said that it moved: one still there that is another's now did not.
-    for (const line of [...there.keys()].sort()) keep(line, take(over, line, there.get(line)! - (now.get(line) ?? 0)));
-    for (const line of [...went.keys()].sort()) keep(line, went.get(line)!);
-    for (const line of [...lost.keys()].sort()) take(left, line, take(firstOnly, line, Math.min(lost.get(line)!, left.get(line) ?? 0)));
-    const lines = linesAt(left);
-    if (countLines(lines) > 0) gone.set(key, lines);
+    // (But for one that moved.)
+    const stays = (line: string, n: number): number => n - take(more, hashOf(line), n);
+    // Only of a copy that went may it be said that it moved: one still there that is another's
+    // now did not. (`passed`: those that left their place, the ones that moved with them.)
+    const went = new Map<string, number>();
+    const passed = new Map<string, number>();
+    for (const line of [...there.keys()].sort()) {
+      const some = take(over, line, there.get(line)! - (now.get(line) ?? 0));
+      add(passed, line, some);
+      add(went, line, stays(line, some));
+    }
+    const kept = { opened: new Map<string, number>(), later: new Map<string, number>() };
+    for (const line of [...opened.keys()].sort()) add(kept.opened, line, stays(line, opened.get(line)!));
+    for (const line of [...later.keys()].sort()) add(kept.later, line, stays(line, later.get(line)!));
+    return { key, went, passed, credit, ...kept };
+  });
+  // Then which of them are lines of the first report: of those kept as such, no more than the
+  // match gives the session of that line there beyond those it has in the files, nor between
+  // the sessions than only the first report has still. Of those that left their place with
+  // this match, as many more are: the ones of the sessions that the match gives the line there
+  // (one that moved is one of them as much as one that went), before the others', which are
+  // not kept at all (the match gives the line to another session, or to no one).
+  for (const s of left) for (const [line, n] of s.opened) s.opened.set(line, take(firstOnly, line, Math.min(n, s.credit.get(line) ?? 0)));
+  for (const s of left) {
+    for (const [line, n] of s.passed) {
+      const some = take(firstOnly, line, Math.min(n, (s.credit.get(line) ?? 0) - (s.opened.get(line) ?? 0)));
+      const opened = Math.min(some, s.went.get(line) ?? 0);
+      add(s.opened, line, opened);
+      if (opened > 0) s.went.set(line, s.went.get(line)! - opened);
+    }
+  }
+  const gone = new Map<string, { gone: Lines; gone_opened: Lines }>();
+  for (const s of left) {
+    for (const [line, n] of s.went) add(s.later, line, n - take(firstOnly, line, n));
+    const lines = { gone: linesAt(sum([s.opened, s.later])), gone_opened: linesAt(s.opened) };
+    if (countLines(lines.gone) > 0) gone.set(s.key, lines);
   }
   const all = new Set([...credited.keys(), ...gone.keys()]);
   return [...all].sort().map((key) => {
     const s = credited.get(key);
-    const went = gone.get(key) ?? {};
-    return { key, gone: went, contributed: unionLines(addLines(s?.matched ?? {}, went), s?.opened_matched ?? {})! };
+    const went = gone.get(key) ?? { gone: {}, gone_opened: {} };
+    return { key, ...went, contributed: unionLines(addLines(s?.matched ?? {}, went.gone), s?.opened_matched ?? {})! };
   });
 }

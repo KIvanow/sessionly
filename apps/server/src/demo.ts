@@ -382,8 +382,8 @@ async function hidePull(db: OrgDb, repo: string, number: number, hide: string[],
     detail: was.detail && { ...was.detail, files: was.detail.files && filesShown(was.detail.files, hide) },
     feedback: was.feedback && feedbackShown(was.feedback, hide)!,
   };
-  const sessions = await db.query<{ machine_id: string; source: string; session_id: string; matched: unknown; opened_matched: unknown; contributed: unknown; gone: unknown }>(
-    `SELECT machine_id, source, session_id, matched, opened_matched, contributed, gone FROM pull_sessions WHERE org_id = $1 AND repo = $2 AND number = $3`,
+  const sessions = await db.query<{ machine_id: string; source: string; session_id: string; matched: unknown; opened_matched: unknown; contributed: unknown; gone: unknown; gone_opened: unknown }>(
+    `SELECT machine_id, source, session_id, matched, opened_matched, contributed, gone, gone_opened FROM pull_sessions WHERE org_id = $1 AND repo = $2 AND number = $3`,
     [db.orgId, repo, number],
   );
   let changed = !same(was, now);
@@ -393,6 +393,7 @@ async function hidePull(db: OrgDb, repo: string, number: number, hide: string[],
     const opened = s.opened_matched == null ? null : jsonOf<Record<string, string[]>>(s.opened_matched);
     const contributed = s.contributed == null ? null : jsonOf<Record<string, string[]>>(s.contributed);
     const gone = s.gone == null ? null : jsonOf<Record<string, string[]>>(s.gone);
+    const goneOpened = s.gone_opened == null ? null : jsonOf<Record<string, string[]>>(s.gone_opened);
     if (same(matched, matchedShown(matched, hide)) && same(opened, matchedShown(opened, hide)) && same(contributed, matchedShown(contributed, hide))) continue;
     changed = true;
     // What its opening lines still there count as was of the lines taken out too, and so was what it
@@ -402,9 +403,9 @@ async function hidePull(db: OrgDb, repo: string, number: number, hide: string[],
     fewer.push({ machine_id: s.machine_id, source: s.source, session_id: s.session_id });
     await db.query(
       `UPDATE pull_sessions SET matched = $7::jsonb, opened_matched = $8::jsonb, opened_kept = NULL, opened_here = NULL,
-              contributed = $9::jsonb, gone = $10::jsonb, contributed_lines = NULL
+              contributed = $9::jsonb, gone = $10::jsonb, gone_opened = $11::jsonb, contributed_lines = NULL
        WHERE org_id = $1 AND repo = $2 AND number = $3 AND machine_id = $4 AND source = $5 AND session_id = $6`,
-      [db.orgId, repo, number, s.machine_id, s.source, s.session_id, jsonOrNull(matchedShown(matched, hide)), jsonOrNull(matchedShown(opened, hide)), jsonOrNull(matchedShown(contributed, hide)), jsonOrNull(matchedShown(gone, hide))],
+      [db.orgId, repo, number, s.machine_id, s.source, s.session_id, jsonOrNull(matchedShown(matched, hide)), jsonOrNull(matchedShown(opened, hide)), jsonOrNull(matchedShown(contributed, hide)), jsonOrNull(matchedShown(gone, hide)), jsonOrNull(matchedShown(goneOpened, hide))],
     );
   }
   await db.query(

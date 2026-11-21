@@ -21,7 +21,7 @@ class Pull {
     this.rows = new Map(
       after.map((row) => {
         const s = credited.find((one) => one.key === row.key);
-        return [row.key, { key: row.key, matched: s?.matched ?? {}, opened_matched: s?.opened_matched ?? {}, contributed: row.contributed, gone: row.gone }];
+        return [row.key, { key: row.key, matched: s?.matched ?? {}, opened_matched: s?.opened_matched ?? {}, contributed: row.contributed, gone: row.gone, gone_opened: row.gone_opened }];
       }),
     );
     return this;
@@ -163,20 +163,96 @@ test("the lines a pull request was opened with are whose the match says, also wh
   assert.deepEqual([uploadFirst.gave, uploadFirst.gone("s1")], [{ s1: 2, s2: 1 }, { "f.ts": [1] }]);
 });
 
+test("a line of the first report that went is kept only while the match gives the session that line", () => {
+  // which of those that went are lines of the first report is kept with them
+  const first = { "a.ts": [1, 2] };
+  const whole = { s1: { has: first, opened: first } };
+  const taken = { s1: { has: { "a.ts": [2] }, opened: first } };
+  const start = () => new Pull(first).match(first, whole).match({ "a.ts": [2] }, taken);
+  assert.deepEqual([start().gave, numbers(start().rows.get("s1")!.gone_opened!)], [{ s1: 2 }, { "a.ts": [1] }]);
+
+  // a later session wrote the line that went, and a push with its copy comes before the pull request
+  // was matched again for its upload: the line is that session's, once, as it is when the match came first
+  const theirs = { s1: { has: { "a.ts": [2] }, opened: { "a.ts": [2] } }, s3: { has: { "a.ts": [1] }, opened: { "a.ts": [1] } } };
+  const pushed = start().match({ "a.ts": [2, 1] }, theirs).again({ "a.ts": [2, 1] }, theirs);
+  assert.deepEqual([pushed.gave, pushed.gone("s1")], [{ s1: 1, s3: 1 }, {}]);
+  const matched = start().match({ "a.ts": [2] }, { s1: { has: { "a.ts": [2] }, opened: { "a.ts": [2] } }, s3: { opened: { "a.ts": [1] } } });
+  matched.match({ "a.ts": [2, 1] }, theirs);
+  assert.deepEqual([matched.gave, matched.gone("s1")], [{ s1: 1, s3: 1 }, {}]);
+
+  // a later session's new copy of it in the files, while the first report's is the first session's
+  // still, and then an earlier session that wrote the first report's is uploaded: in either order
+  // the first has none of it
+  const one = { "a.ts": [1] };
+  const went = () => new Pull(one).match(one, { s1: { has: one, opened: one } }).match({}, { s1: { opened: one } });
+  const copy = { s1: { opened: one }, s3: { has: one } };
+  const both = { s2: { opened: one }, s3: { has: one } };
+  const copyFirst = went().match(one, copy).again(one, copy);
+  assert.deepEqual([copyFirst.gave, copyFirst.gone("s1")], [{ s1: 1, s3: 1 }, {}]);
+  copyFirst.match(one, both).again(one, both);
+  assert.deepEqual(copyFirst.gave, { s2: 1, s3: 1 });
+  const uploadFirst = went().match({}, { s2: { opened: one } }).match(one, both);
+  assert.deepEqual(uploadFirst.gave, { s2: 1, s3: 1 });
+
+  // the line goes in the same match that gives it to the later session: that one's, once
+  const atOnce = new Pull(first).match(first, whole).match({ "a.ts": [2] }, { s1: { has: { "a.ts": [2] }, opened: { "a.ts": [2] } }, s3: { opened: { "a.ts": [1] } } });
+  assert.deepEqual([atOnce.gave, atOnce.gone("s1")], [{ s1: 1, s3: 1 }, {}]);
+  // and one that no session is given in the first report (the session that had it in the files
+  // started after the pull request was opened) is no one's when it goes
+  const noOnes = new Pull(one).match(one, { s1: { has: one } }).match({}, {}).again({}, {});
+  assert.deepEqual(noOnes.gave, {});
+
+  // a second copy of it, pushed later, and both went: one is the first report's and one is not, and
+  // when one is in the files again it is the first report's that is back
+  const grown = { "a.ts": [1, 1] };
+  const twoGone = () => new Pull(one).match(one, { s1: { has: one, opened: one } }).match(grown, { s1: { has: grown, opened: one } }).match({}, { s1: { opened: one } });
+  assert.deepEqual([twoGone().gave, twoGone().gone("s1"), numbers(twoGone().rows.get("s1")!.gone_opened!)], [{ s1: 2 }, { "a.ts": [1, 1] }, { "a.ts": [1] }]);
+  const oneBack = twoGone().match(one, { s1: { has: one, opened: one } }).again(one, { s1: { has: one, opened: one } });
+  assert.deepEqual([oneBack.gave, oneBack.gone("s1"), numbers(oneBack.rows.get("s1")!.gone_opened!)], [{ s1: 2 }, { "a.ts": [1] }, {}]);
+  // which stays the session's when the first report's turns out to be another's
+  oneBack.match(one, { s1: {}, s2: { has: one, opened: one } });
+  assert.deepEqual(oneBack.gave, { s1: 1, s2: 1 });
+
+  // the first report's two copies are one session's, which moves one of them to another file as the
+  // other goes, and a third copy there, another session's from a later push, goes too: that one is
+  // not the first report's, and stays its session's
+  const c = { "c.ts": [1, 1] };
+  const three = { "c.ts": [1, 1, 1] };
+  const moving = new Pull(c).match(c, { s3: { has: c, opened: c } }).match(three, { s3: { has: c, opened: c }, s2: { has: { "c.ts": [1] } } });
+  moving.match({ "b.ts": [1] }, { s3: { has: { "b.ts": [1] }, opened: c } });
+  assert.deepEqual([moving.gave, moving.gone("s2")], [{ s2: 1, s3: 2 }, { "c.ts": [1] }]);
+
+  // two of a line in the first report, one each of two sessions, and both went: each keeps its own,
+  // and when one of them turns out to be a third session's, only that one is given up
+  const two = { "a.ts": [1, 1] };
+  const each = { a: { has: { "a.ts": [1] }, opened: { "a.ts": [1] } }, b: { has: { "a.ts": [1] }, opened: { "a.ts": [1] } } };
+  const pair = new Pull(two).match(two, each).match({}, { a: { opened: { "a.ts": [1] } }, b: { opened: { "a.ts": [1] } } });
+  assert.deepEqual(pair.gave, { a: 1, b: 1 });
+  pair.match({}, { b: { opened: { "a.ts": [1] } }, c: { opened: { "a.ts": [1] } } }).again({}, { b: { opened: { "a.ts": [1] } }, c: { opened: { "a.ts": [1] } } });
+  assert.deepEqual([pair.gave, pair.gone("b")], [{ b: 1, c: 1 }, { "a.ts": [1] }]);
+});
+
 test("what was kept before is read as it was kept", () => {
   const first = copiesAt(lines({ "a.ts": [1] }));
   const seen = copiesAt(lines({ "a.ts": [1], "b.ts": [2] }));
   const now = [{ key: "s", matched: lines({ "a.ts": [1], "b.ts": [2] }), opened_matched: lines({ "a.ts": [1] }) }];
   const said = (rows: Contributed[]) => rows.map((row) => [row.key, numbers(row.contributed), numbers(row.gone)]);
   // a deleted session's row keeps none of its lines: nothing of it stays
-  const deleted: Held = { key: "d", matched: null, opened_matched: null, contributed: null, gone: null };
+  const deleted: Held = { key: "d", matched: null, opened_matched: null, contributed: null, gone: null, gone_opened: null };
   assert.deepEqual(said(contributedAfter([deleted], now, first, seen)), [["s", { "a.ts": [1], "b.ts": [2] }, {}]]);
   // from before what a session contributed was kept: what it had then, and was opened with
-  const old: Held = { key: "s", matched: lines({ "a.ts": [1], "c.ts": [3] }), opened_matched: lines({ "a.ts": [1] }), contributed: null, gone: null };
+  const old: Held = { key: "s", matched: lines({ "a.ts": [1], "c.ts": [3] }), opened_matched: lines({ "a.ts": [1] }), contributed: null, gone: null, gone_opened: null };
   assert.deepEqual(said(contributedAfter([old], now, first, seen)), [["s", { "a.ts": [1], "b.ts": [2], "c.ts": [3] }, { "c.ts": [3] }]]);
   // from before which of them went was kept: what it contributed and has in neither
-  const between: Held = { key: "s", matched: lines({ "a.ts": [1] }), opened_matched: lines({ "a.ts": [1] }), contributed: lines({ "a.ts": [1], "c.ts": [3] }), gone: null };
+  const between: Held = { key: "s", matched: lines({ "a.ts": [1] }), opened_matched: lines({ "a.ts": [1] }), contributed: lines({ "a.ts": [1], "c.ts": [3] }), gone: null, gone_opened: null };
   assert.deepEqual(said(contributedAfter([between], now, first, seen)), [["s", { "a.ts": [1], "b.ts": [2], "c.ts": [3] }, { "c.ts": [3] }]]);
+  // one whose lines an import took out while what it contributed stayed: it had all of that that had not gone
+  const copied: Held = { key: "s", matched: null, opened_matched: null, contributed: lines({ "a.ts": [1], "c.ts": [3], "d.ts": [4] }), gone: lines({ "d.ts": [4] }), gone_opened: null };
+  assert.deepEqual(said(contributedAfter([copied], now, first, seen)), [["s", { "a.ts": [1], "b.ts": [2], "c.ts": [3], "d.ts": [4] }, { "c.ts": [3], "d.ts": [4] }]]);
+  // which of two sessions keeps the one copy that went of two alike goes by their names, not by the order they are given in
+  const alike = (key: string): Held => ({ key, matched: lines({ "a.ts": [1] }), opened_matched: {}, contributed: lines({ "a.ts": [1] }), gone: {}, gone_opened: {} });
+  const none = new Map<string, number>();
+  for (const rows of [[alike("a"), alike("b")], [alike("b"), alike("a")]]) assert.deepEqual(said(contributedAfter(rows, [], none, first)), [["a", { "a.ts": [1] }, { "a.ts": [1] }]]);
   // the rows come back in the order of the sessions' names, whatever order they were given in
   const some = [{ key: "b", matched: lines({ "b.ts": [2] }), opened_matched: {} }, { key: "a", matched: lines({ "a.ts": [1] }), opened_matched: {} }];
   assert.deepEqual(contributedAfter([], some, first, seen).map((row) => row.key), ["a", "b"]);
@@ -186,7 +262,7 @@ test("through any pushes and uploads, the same match again changes nothing and n
   // The lines are put down to sessions as simply as may be: each copy in a file to the session that
   // wrote that line in that file and started last, as often as it wrote it.
   const PATHS = ["a.ts", "b.ts", "c.ts"];
-  for (let seed = 1; seed <= 300; seed++) {
+  for (let seed = 1; seed <= 1500; seed++) {
     let state = seed;
     const random = (n: number): number => {
       state = (state + 0x6d2b79f5) | 0;
@@ -258,6 +334,62 @@ test("through any pushes and uploads, the same match again changes nothing and n
         for (const [hash, n] of given) assert.ok(n <= (most.get(hash) ?? 0), `${where}, step ${step}: ${key} gave ${n} of ${hash} and wrote ${most.get(hash) ?? 0}`);
         for (const [line, n] of copiesAt(row.gone!)) assert.ok(n <= (ever.get(line) ?? 0), `${where}, step ${step}: ${key} has ${n} gone of ${JSON.stringify(line)}, and there were ${ever.get(line) ?? 0}`);
       }
+    }
+  }
+});
+
+test("while a pull request has no more of a line than it was opened with, the sessions give no more of it between them than that", () => {
+  // Review only takes lines out and puts them back; sessions are uploaded meanwhile, now and then
+  // with a push before the pull request is matched again for them. Each copy is put down to the
+  // session that wrote the line in that file and started last, the first report's copies too.
+  for (let seed = 1; seed <= 1500; seed++) {
+    let state = seed * 7919;
+    const random = (n: number): number => {
+      state = (state + 0x6d2b79f5) | 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return Math.floor((((t ^ (t >>> 14)) >>> 0) / 4294967296) * n);
+    };
+    const first: Files = { "a.ts": Array.from({ length: 1 + random(3) }, () => 1 + random(2)), "b.ts": Array.from({ length: random(3) }, () => 1 + random(2)) };
+    // (In the order they started, whenever they are uploaded.)
+    const wrote: (Files | null)[] = Array.from({ length: 4 }, () => null);
+    const credit = (files: Files): Files[] => {
+      const whose: Files[] = wrote.map(() => ({}));
+      for (const [path, hashes] of Object.entries(files)) {
+        const left = wrote.map((s) => [...(s?.[path] ?? [])]);
+        for (const hash of hashes) {
+          for (let i = wrote.length - 1; i >= 0; i--) {
+            const at = left[i]!.indexOf(hash);
+            if (at < 0) continue;
+            left[i]!.splice(at, 1);
+            (whose[i]![path] ??= []).push(hash);
+            break;
+          }
+        }
+      }
+      return whose;
+    };
+    const most = new Map<string, number>();
+    for (const hash of Object.values(first).flat()) most.set(String(hash), (most.get(String(hash)) ?? 0) + 1);
+    const pull = new Pull(first);
+    let files: Files = first;
+    for (let step = 0; step < 12; step++) {
+      const what = step === 0 ? 0 : random(4);
+      if (what <= 1) {
+        // A session that wrote some of its lines is uploaded, in any order of when they started.
+        const i = random(wrote.length);
+        wrote[i] = Object.fromEntries(Object.entries(first).map(([path, hashes]) => [path, hashes.filter(() => random(3) > 0)]));
+      }
+      // (And with it, or by itself, a push: some of the lines out, the others in again.)
+      if (what >= 1) files = Object.fromEntries(Object.entries(first).map(([path, hashes]) => [path, hashes.filter(() => random(2))]));
+      const [has, opened] = [credit(files), credit(first)];
+      const credits = Object.fromEntries(
+        wrote.map((_, i) => [`s${i}`, { has: has[i]!, opened: opened[i]! }] as const).filter(([, s]) => countLines(lines(s.has)) + countLines(lines(s.opened)) > 0),
+      );
+      pull.match(files, credits).again(files, credits);
+      const given = new Map<string, number>();
+      for (const row of pull.rows.values()) for (const hash of Object.values(row.contributed!).flat()) given.set(hash, (given.get(hash) ?? 0) + 1);
+      for (const [hash, n] of given) assert.ok(n <= most.get(hash)!, `seed ${seed}, step ${step}: ${n} of ${hash} between them, and it was opened with ${most.get(hash)}`);
     }
   }
 });

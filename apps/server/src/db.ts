@@ -879,6 +879,10 @@ const MIGRATIONS: string[] = [
   // they stay the session's whatever is matched after (see `contributedAfter`).
   // Null from before, and with `contributed`.
   `ALTER TABLE pull_sessions ADD COLUMN gone jsonb`,
+  // And which of those are lines the pull request was first reported with:
+  // they are there to match by still, and stay the session's only while the
+  // match gives it them. Null from before, and with `gone`.
+  `ALTER TABLE pull_sessions ADD COLUMN gone_opened jsonb`,
 ];
 
 /**

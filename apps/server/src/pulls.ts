@@ -1344,7 +1344,7 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   // The pull request's own row is held by whoever got here, so these are not
   // changing under it.
   const had = await db.query(
-    `SELECT s.machine_id, s.source, s.session_id, s.lines, s.opened_lines, s.matched, s.opened_matched, s.contributed, s.gone,
+    `SELECT s.machine_id, s.source, s.session_id, s.lines, s.opened_lines, s.matched, s.opened_matched, s.contributed, s.gone, s.gone_opened,
             (r.first_event = 'opened' AND s.opened_matched IS NOT NULL AND s.opened_kept IS NULL) OR s.contributed_lines IS NULL AS unweighed
      FROM pull_sessions s JOIN pull_requests r USING (org_id, repo, number)
      WHERE s.org_id = $1 AND s.repo = $2 AND s.number = $3`,
@@ -1354,14 +1354,14 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   const before = new Map(had.map((row) => [sessionKey(row as never), row]));
   const matched = new Map(sessions.map((s) => [sessionKey(s), s]));
   const after = contributedAfter(
-    [...before].map(([key, row]) => ({ key, matched: kept(row.matched), opened_matched: kept(row.opened_matched), contributed: kept(row.contributed), gone: kept(row.gone) })),
+    [...before].map(([key, row]) => ({ key, matched: kept(row.matched), opened_matched: kept(row.opened_matched), contributed: kept(row.contributed), gone: kept(row.gone), gone_opened: kept(row.gone_opened) })),
     [...matched].map(([key, s]) => ({ key, matched: s.matched, opened_matched: s.opened_matched })),
     copies.first,
     copies.seen,
   );
   // (One of before that this match gives no lines stays for those of its own that went.)
-  const next = new Map<string, Kept & { contributed: Lines; gone: Lines }>(
-    after.map(({ key, contributed, gone }) => {
+  const next = new Map<string, Kept & { contributed: Lines; gone: Lines; gone_opened: Lines }>(
+    after.map(({ key, contributed, gone, gone_opened }) => {
       const row = before.get(key)!;
       const s = matched.get(key) ?? {
         machine_id: String(row.machine_id),
@@ -1372,11 +1372,11 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
         opened_lines: 0,
         opened_matched: {},
       };
-      return [key, { ...s, contributed, gone }];
+      return [key, { ...s, contributed, gone, gone_opened }];
     }),
   );
   const files = (lines: Lines | null) => lines && Object.keys(lines).sort().map((path) => [path, [...lines[path]!].sort()]);
-  const said = (s: { lines: unknown; opened_lines: unknown; matched: unknown; opened_matched: unknown; contributed: unknown; gone: unknown }) =>
+  const said = (s: { lines: unknown; opened_lines: unknown; matched: unknown; opened_matched: unknown; contributed: unknown; gone: unknown; gone_opened: unknown }) =>
     JSON.stringify([
       s.lines == null ? null : num(s.lines),
       s.opened_lines == null ? null : num(s.opened_lines),
@@ -1385,6 +1385,7 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
       files(kept(s.contributed)),
       // (None kept, of one from before they were: none.)
       files(kept(s.gone) ?? {}),
+      files(kept(s.gone_opened) ?? {}),
     ]);
   const was = new Map(had.map((row) => [sessionKey(row as never), said(row as never)]));
   // (One kept before what its opening lines still there count as was, or what it contributed, is weighed again.)
@@ -1401,13 +1402,14 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
     await db.query(
       `INSERT INTO pull_sessions
          (org_id, repo, number, machine_id, source, session_id, lines, weight, matched, opened_lines, opened_weight, opened_matched,
-          contributed, gone, contributed_lines)
+          contributed, gone, gone_opened, contributed_lines)
        SELECT $1, $2, $3, s.machine_id, s.source, s.session_id, s.lines, s.lines, CASE WHEN here.is THEN s.matched END,
               s.opened_lines, s.opened_lines, CASE WHEN here.is THEN s.opened_matched END,
-              CASE WHEN here.is THEN s.contributed END, CASE WHEN here.is THEN s.gone END, s.contributed_lines
+              CASE WHEN here.is THEN s.contributed END, CASE WHEN here.is THEN s.gone END,
+              CASE WHEN here.is THEN s.gone_opened END, s.contributed_lines
        FROM jsonb_to_recordset($4::jsonb)
          AS s(machine_id text, source text, session_id text, lines integer, matched jsonb, opened_lines integer, opened_matched jsonb,
-              contributed jsonb, gone jsonb, contributed_lines integer),
+              contributed jsonb, gone jsonb, gone_opened jsonb, contributed_lines integer),
        LATERAL (SELECT EXISTS (SELECT 1 FROM sessions x WHERE x.org_id = $1 AND x.machine_id = s.machine_id
                                AND x.source = s.source AND x.session_id = s.session_id) AS is) here`,
       [db.orgId, repo, number, JSON.stringify([...next.values()].map((s) => ({ ...s, contributed_lines: countLines(s.contributed) })))],
