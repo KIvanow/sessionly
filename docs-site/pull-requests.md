@@ -279,18 +279,24 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     shared out between them. The split does not move when review removes lines, nor when one
     of them is merged or closed: it moves only when the session gives a pull request more
     lines, is uploaded with another cost, or is deleted.
-  - **Only what was spent on the pull request's branch counts**, where that is known.
-    Claude Code says which branch was checked out at every turn, so only those turns count:
-    what the same session spent on another branch is that branch's pull request's, or no
-    one's. Codex, Grok and a Cursor cloud agent name one branch for a whole session (a
-    local Cursor session names none): the **whole session** is charged when that branch is
-    the pull request's, or when either side names no branch, and nothing when it is another
-    branch. **This is a known limit**: for those agents, other work done on the same branch
-    in the same session is charged to the pull request too. A session whose lines are in
-    the pull request and whose money was spent on another branch is listed with "on another
-    branch" in place of a cost, and the tile says how many there are. A Claude Code session
-    uploaded before turns were kept by branch counts by the branch it began on, until its
-    machine uploads it again.
+  - **Having lines in the pull request is what makes a session pay for it**, whatever branch
+    it began on. Codex, Grok and a Cursor cloud agent name one branch for a whole session (a
+    local Cursor session names none), and that is often the branch the session started on
+    and not the one its work ended up on: so the **whole session** is charged to the pull
+    requests it gave lines to. **This is a known limit**: other work done in the same
+    session is charged to them too.
+  - **For Claude Code, other branches' work is left out.** It says which branch was checked
+    out at every turn, so a pull request is charged what was spent on its own branch, and
+    what was spent on the branch it is based on before its own was made: the planning on
+    `main` that led to it is part of what it cost. (When a pull request on that base branch
+    itself has the session's lines, what was spent there is that one's.) What the session
+    spent on any other branch is that branch's pull request's, or no one's. A session with
+    lines in the pull request and nothing spent on its branch or its base (the branch was
+    renamed before it was pushed, say) is listed with "on another branch" in place of a
+    cost, and the tile says how many there are. A report from an Action too old to say what
+    the pull request is based on is taken to be based on `main` or `master`. A Claude Code
+    session uploaded before turns were kept by branch is charged whole, as the other
+    agents' are, until its machine uploads it again.
   - **The cost of a line.** Divided by the agent lines the pull request has now (of the
     sessions that have a cost figure, a line that is in two pull requests being half a line
     in each), the cost gives the cost of an agent line. The **cost of a line that got through

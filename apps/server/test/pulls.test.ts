@@ -1744,15 +1744,16 @@ test("a line opened in two pull requests survives once between them, wherever it
   assert.deepEqual(after.map((row) => [row.session_id, Number(row.opened_kept)]), [["c-old", 0], ["c-solo", 5]]);
 });
 
-test("a session's cost is split between the pull requests on its branch by what it contributed to each", () => {
+test("a session's cost is split between the pull requests it has lines in by what it contributed to each", () => {
   const lines = (path: string, ...numbers: number[]) => ({ [path]: numbers.map(h) });
-  const row = (head_ref: string | null, contributed: Record<string, string[]> | null, count = 0) => ({
+  const row = (head_ref: string | null, contributed: Record<string, string[]> | null, count = 0, base_ref: string | null = null) => ({
     head_ref,
+    base_ref,
     lines: contributed ? Object.values(contributed).flat().length : count,
     contributed,
   });
   const usd = (charged: { usd: number | null }[]) => charged.map((one) => one.usd && Math.round(one.usd * 1e6) / 1e6);
-  const whole = { cost_usd: 10, branch: null, by_branch: null };
+  const whole = { cost_usd: 10, by_branch: null };
   // no cost figure, or no session: nothing is said
   assert.deepEqual(charge(null, [row(null, lines("a.ts", 1))]), [{ usd: null, off_branch: false }]);
   assert.deepEqual(charge({ ...whole, cost_usd: null }, [row(null, lines("a.ts", 1))]), [{ usd: null, off_branch: false }]);
@@ -1762,28 +1763,28 @@ test("a session's cost is split between the pull requests on its branch by what 
   // the same lines in two are half a line in each; one whose lines were not kept counts as many as it had
   assert.deepEqual(usd(charge(whole, [row("a", lines("a.ts", 1, 2)), row("b", lines("a.ts", 1, 2))])), [5, 5]);
   assert.deepEqual(usd(charge(whole, [row("a", null, 3), row("b", lines("a.ts", 1))])), [7.5, 2.5]);
-  // one branch for the session: all of it where that is the pull request's, nothing elsewhere,
-  // and where either names none there is nothing to tell by
-  const one = { cost_usd: 10, branch: "feat", by_branch: null };
-  assert.deepEqual(charge(one, [row("feat", lines("a.ts", 1)), row("other", lines("b.ts", 2, 3, 4))]), [
-    { usd: 10, off_branch: false },
+  // its turns name their branches: what was spent on each is its pull requests', and what was spent
+  // on the branch they are based on, before theirs was made, is theirs too; the rest is no one's
+  const turns = { cost_usd: 10, by_branch: [{ branch: "feat", usd: 6 }, { branch: "main", usd: 3 }, { branch: null, usd: 1 }] };
+  assert.deepEqual(charge(turns, [row("feat", lines("a.ts", 1)), row("other", lines("b.ts", 2), 0, "develop")]), [
+    { usd: 9, off_branch: false },
     { usd: 0, off_branch: true },
   ]);
-  assert.deepEqual(usd(charge(one, [row(null, lines("a.ts", 1)), row("feat", lines("b.ts", 2))])), [5, 5]);
-  // its turns name their branches: what was spent on each is its pull requests', and the rest no one's
-  const turns = { cost_usd: 10, branch: "main", by_branch: [{ branch: "feat", usd: 6 }, { branch: "main", usd: 3 }, { branch: null, usd: 1 }] };
-  assert.deepEqual(charge(turns, [row("feat", lines("a.ts", 1)), row("other", lines("b.ts", 2))]), [
-    { usd: 6, off_branch: false },
-    { usd: 0, off_branch: true },
-  ]);
-  // two on the one branch share what was spent on it, three lines to one
-  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3)), row("feat", lines("b.ts", 4)), row("main", lines("c.ts", 5))])), [4.5, 1.5, 3]);
+  // a report that does not say what it is based on is taken to be based on main
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1))])), [9]);
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1), 0, "develop")])), [6]);
+  // two that are based on it share what was spent there by their lines, three to one,
+  // and each has what was spent on its own branch
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3), 0, "main"), row("other", lines("b.ts", 4), 0, "main")])), [8.25, 0.75]);
+  // two on the one branch share what was spent on it; a branch that is a pull request's own
+  // is not also the base of the ones stacked on it
+  assert.deepEqual(usd(charge(turns, [row("feat", lines("a.ts", 1, 2, 3), 0, "main"), row("feat", lines("b.ts", 4), 0, "main"), row("main", lines("c.ts", 5), 0, "release")])), [4.5, 1.5, 3]);
   // never more than it cost, whatever the turns add up to, or with one that names no branch beside them
-  assert.deepEqual(usd(charge({ ...turns, cost_usd: 4 }, [row("feat", lines("a.ts", 1))])), [4]);
+  assert.deepEqual(usd(charge({ ...turns, cost_usd: 4 }, [row("feat", lines("a.ts", 1), 0, "develop")])), [4]);
   const beside = charge(turns, [row("feat", lines("a.ts", 1)), row(null, lines("b.ts", 2))]);
   assert.equal(Math.round((beside[0]!.usd! + beside[1]!.usd!) * 1e6) / 1e6, 10);
   // turns that name no branch say no more than the session does
-  assert.deepEqual(usd(charge({ cost_usd: 10, branch: null, by_branch: [{ branch: null, usd: 10 }] }, [row("feat", lines("a.ts", 1))])), [10]);
+  assert.deepEqual(usd(charge({ cost_usd: 10, by_branch: [{ branch: null, usd: 10 }] }, [row("feat", lines("a.ts", 1))])), [10]);
   // lines together: each as often as the one that has it most
   assert.deepEqual(unionLines({ "a.ts": [h(1), h(1), h(2)] }, { "a.ts": [h(1), h(3)], "constructor": [h(4)] }), { "a.ts": [h(1), h(1), h(2), h(3)], "constructor": [h(4)] });
   assert.deepEqual(unionLines(null, { "a.ts": [h(1)] }), { "a.ts": [h(1)] });
@@ -1837,27 +1838,28 @@ test("what was spent getting a pull request merged stays spent, and every dollar
   await sent(4, [file("e.ts", 500, 9998)], { event: "synchronize" });
   assert.deepEqual([(await cost(3)).usd, (await cost(4)).usd, (await cost(3)).opened_usd, (await cost(3)).per_surviving_line_usd], [6, 4, 6, 3]);
 
-  // Claude Code says which branch each turn ran on: only what was spent on the pull request's counts,
-  // whatever branch the session began on, and a pull request on another branch is charged nothing
-  await put("sp-turns", 10, { "f.ts": range(600, 3), "g.ts": range(700, 2) }, { branch: "main", by_branch: [{ branch: "feat-f", usd: 7 }, { branch: "main", usd: 3 }] });
-  await sent(5, [file("f.ts", ...range(600, 3))], { head_ref: "feat-f" });
-  await sent(6, [file("g.ts", ...range(700, 2))], { head_ref: "feat-g" });
+  // Claude Code says which branch each turn ran on: what was spent on the pull request's counts, and
+  // what was spent on main before the branch was made; a pull request with nothing spent on its
+  // branch nor on the one it is based on is charged nothing
+  await put("sp-turns", 10, { "f.ts": range(600, 3), "g.ts": range(700, 2) }, { branch: "main", by_branch: [{ branch: "feat-f", usd: 6 }, { branch: "main", usd: 3 }, { branch: "spike", usd: 1 }] });
+  await sent(5, [file("f.ts", ...range(600, 3))], { head_ref: "feat-f", base_ref: "main" });
+  await sent(6, [file("g.ts", ...range(700, 2))], { head_ref: "feat-g", base_ref: "develop" });
   const five = await pull(5);
-  assert.deepEqual([five.cost.usd, five.cost.opened_usd, five.cost.sessions_off_branch, five.sessions[0].cost_share_usd, five.sessions[0].off_branch], [7, 7, 0, 7, false]);
+  assert.deepEqual([five.cost.usd, five.cost.opened_usd, five.cost.sessions_off_branch, five.sessions[0].cost_share_usd, five.sessions[0].off_branch], [9, 9, 0, 9, false]);
   const six = await pull(6);
   assert.deepEqual([six.cost.usd, six.cost.sessions, six.cost.sessions_off_branch, six.cost.sessions_without_cost], [null, 1, 1, 0]);
   assert.deepEqual([six.sessions[0].lines, six.sessions[0].cost_share_usd, six.sessions[0].off_branch], [2, 0, true]);
 
-  // Codex names one branch for a session: on the pull request's, all of it is charged, though two of its
-  // ten lines are there and the rest was other work; one on another branch is charged nothing there
+  // Codex names one branch for a session: all of it is charged where its lines are, though two of its
+  // ten lines are there and the rest was other work, and so is one that began on main
   await put("sp-codex", 5, { "h.ts": range(800, 10) }, { source: "codex", branch: "feat-h" });
   await put("sp-main", 1.25, { "i.ts": range(900, 2) }, { source: "codex", branch: "main" });
   await sent(7, [file("h.ts", 800, 801), file("i.ts", ...range(900, 2))], { head_ref: "feat-h" });
   const seven = await pull(7);
-  assert.deepEqual([seven.cost.usd, seven.cost.sessions, seven.cost.sessions_off_branch], [5, 2, 1]);
+  assert.deepEqual([seven.cost.usd, seven.cost.sessions, seven.cost.sessions_off_branch], [6.25, 2, 0]);
   assert.deepEqual(
     seven.sessions.map((s: any) => [s.session_id, s.cost_share_usd, s.off_branch]).sort(),
-    [["sp-codex", 5, false], ["sp-main", 0, true]],
+    [["sp-codex", 5, false], ["sp-main", 1.25, false]],
   );
 
   // one closed without merging, one session that reached no pull request, and one whose lines
@@ -1876,8 +1878,8 @@ test("what was spent getting a pull request merged stays spent, and every dollar
   const { total, groups } = await spent();
   assert.deepEqual(
     [total.in_pr_usd, total.closed_unmerged_usd, total.not_in_pr_usd, total.cost_usd],
-    // sp-all, sp-open and sp-fix, sp-split, seven of sp-turns, sp-codex, sp-late; sp-closed; the rest of sp-turns, sp-main, sp-none, sp-early
-    [10 + 9 + 10 + 7 + 5 + 2.03, 2.57, 3 + 1.25 + 1.11 + 4, 54.96],
+    // sp-all, sp-open and sp-fix, sp-split, nine of sp-turns, sp-codex and sp-main, sp-late; sp-closed; the rest of sp-turns, sp-none, sp-early
+    [10 + 9 + 10 + 9 + 5 + 1.25 + 2.03, 2.57, 1 + 1.11 + 4, 54.96],
   );
   addsUp(total, "total");
   assert.deepEqual(groups.map((g: any) => g.key).sort(), ["claude-code", "codex"]);
@@ -1896,8 +1898,8 @@ test("what was spent getting a pull request merged stays spent, and every dollar
   const openedFor = open.reduce((n: number, p: any) => n + p.cost.opened_usd, 0);
   assert.deepEqual(open.map((p: any) => p.number).sort(), [1, 2, 3, 4, 5, 7, 9]);
   assert.equal(summary.per_surviving_line_usd, Math.round((openedFor / summary.agent_lines_surviving_once) * 1e6) / 1e6);
-  // (ten lines went from #1 with ten dollars: 4 + 2 + 1 + 3 + 2 + 2 are left of the rest)
-  assert.deepEqual([openedFor, summary.agent_lines_surviving_once], [10 + 6 + 6 + 4 + 7 + 5 + 2.03, 14]);
+  // (ten lines went from #1 with ten dollars: 4 + 2 + 1 + 3 + 2 + 2 + 2 are left of the rest)
+  assert.deepEqual([openedFor, summary.agent_lines_surviving_once], [10 + 6 + 6 + 4 + 9 + 5 + 1.25 + 2.03, 16]);
 
   // closing one moves its money from one place to the other, and no charge
   await sent(4, [file("e.ts", 500, 9998)], { event: "closed", state: "closed" });

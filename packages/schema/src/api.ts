@@ -177,8 +177,9 @@ export interface Totals {
    * charged to pull requests that are merged or open (see `PullCost`), to
    * ones closed without merging, or to none. The last is the sessions whose
    * work has not reached a pull request: exploration, abandoned branches,
-   * work whose pull request is not open yet, and what a session spent on
-   * another branch than its pull request's. The three add up to `cost_usd`.
+   * work whose pull request is not open yet, and what a Claude Code session
+   * spent on a branch that is neither its pull request's nor the one that
+   * is based on. The three add up to `cost_usd`.
    */
   in_pr_usd: number;
   closed_unmerged_usd: number;
@@ -545,9 +546,10 @@ export interface PullCost {
    */
   sessions_uncounted: number;
   /**
-   * How many of them have lines here and are charged nothing: what they
-   * spent was spent on another branch than this pull request's. They are in
-   * no figure of cost here.
+   * How many of them have lines here and are charged nothing: their turns
+   * name their branches (Claude Code), and nothing was spent on this pull
+   * request's branch nor on the one it is based on. They are in no figure
+   * of cost here.
    */
   sessions_off_branch: number;
   /**
@@ -675,10 +677,12 @@ export interface PullSession {
   /** Line hashes the session uploaded: the lines of it that could be matched to any pull request. Null once it has been deleted, or while they are still to be counted after an upgrade. */
   hashed_lines: number | null;
   /**
-   * What it is charged in this pull request: all of what it spent on the
-   * pull request's branch, or its share of that by `contributed_lines` when
-   * it contributed to other pull requests too (a line in several being
-   * shared out between them). It does not shrink when lines are taken out.
+   * What it is charged in this pull request: all of what it spent, or its
+   * share of that by `contributed_lines` when it contributed to other pull
+   * requests too (a line in several being shared out between them). Of a
+   * session whose turns name their branches (Claude Code), that is what it
+   * spent on the pull request's branch and on the one it is based on. It
+   * does not shrink when lines are taken out.
    * Nothing for one that is `off_branch`. Null where the session has no
    * cost figure, or has been deleted, or is `uncounted`.
    */
@@ -696,9 +700,9 @@ export interface PullSession {
    */
   unshared: boolean;
   /**
-   * What it spent was spent on another branch than this pull request's: its
-   * turns name their branches and none is this one (Claude Code), or the
-   * one branch the session names is another. It is charged nothing here.
+   * What it spent was spent on other branches: its turns name their
+   * branches (Claude Code), and none is this pull request's nor the one it
+   * is based on. It is charged nothing here.
    */
   off_branch: boolean;
   session: Pick<

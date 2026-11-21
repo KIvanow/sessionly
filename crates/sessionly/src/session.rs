@@ -147,11 +147,12 @@ pub struct Cost {
     pub prompts_covered: Option<u64>,
     /// `total_usd` by the branch that was checked out when it was spent,
     /// where the agent says which with every response (Claude Code): a
-    /// server then counts for a pull request only what was spent on its
-    /// branch. Shared out as the estimates of the responses on each branch
-    /// are; a branch of null is the responses that named none. Left out
-    /// where that is not known, and of a session in the cloud, whose
-    /// sandbox holds the one branch.
+    /// server then counts for a pull request what was spent on its branch
+    /// and on the one it is based on, and not what was spent on others.
+    /// Shared out as the estimates of the responses on each branch are; a
+    /// branch of null is the responses that named none. Left out where
+    /// that is not known, and of a session in the cloud, whose sandbox
+    /// holds the one branch.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub by_branch: Vec<BranchCost>,
 }

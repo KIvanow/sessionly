@@ -415,28 +415,36 @@ const countLines = (lines: Lines): number => Object.values(lines).reduce((sum, h
 /** What a session is known to have cost, and where: all a pull request's share of it is worked out from. */
 export interface Spent {
   cost_usd: number | null;
-  /** The one branch it names, where it names one. */
-  branch: string | null;
   /** Its cost by the branch checked out when it was spent, where its agent says (an upload's `cost.by_branch`). */
   by_branch: { branch?: string | null; usd?: number }[] | null;
 }
 
+/** The branch a pull request is taken to be based on when its report did not say. */
+const DEFAULT_BASES = ["main", "master"];
+
 /**
  * What a session is charged to each of the pull requests it contributed
- * lines to: all of what it spent on their branch, split between them as the
- * lines it contributed to each at any time (`contributed`) count, a line in
- * several being shared out between them (see `weigh`). Merged, open or
- * closed, they share alike: which of them a charge is in does not move it.
+ * lines to, split between them as the lines it contributed to each at any
+ * time (`contributed`) count, a line in several being shared out between
+ * them (see `weigh`). Merged, open or closed, they share alike: which of
+ * them a charge is in does not move it.
  *
- * What it spent on a pull request's branch is known turn by turn where its
- * agent says (`by_branch`): the rest of it is no pull request's. Of another
- * session it is all of its cost when the one branch it names is the pull
- * request's, or when either names none, and nothing otherwise: such a one
- * is `off_branch` there. Null for a session with no cost figure, or none.
+ * Having lines in a pull request is what makes a session pay for it. Of a
+ * session that says no more than one branch for all of it, or none, all of
+ * its cost is shared out so, whatever that branch is: it may have begun on
+ * another and its lines came to this one all the same.
+ *
+ * Where its agent says the branch turn by turn (`by_branch`), what was spent
+ * on a branch is the pull requests' whose branch it is. What was spent on
+ * one that is no such pull request's and that some are based on (`main`,
+ * before the branch was made: the planning, the first edits) is theirs
+ * too. What was spent on any other branch is no pull request's, and one
+ * with nothing spent on its branch or its base is `off_branch`: charged
+ * nothing. Null for a session with no cost figure, or none.
  */
 export function charge(
   session: Spent | null,
-  rows: { head_ref: string | null; lines: number; contributed: Lines | null }[],
+  rows: { head_ref: string | null; base_ref?: string | null; lines: number; contributed: Lines | null }[],
 ): { usd: number | null; off_branch: boolean }[] {
   const cost = session?.cost_usd;
   if (session == null || cost == null) return rows.map(() => ({ usd: null, off_branch: false }));
@@ -446,31 +454,31 @@ export function charge(
       named.set(spent.branch, (named.get(spent.branch) ?? 0) + spent.usd);
     }
   }
-  // Turns that name no branch at all say no more than a session that names none.
-  const turns = named.size > 0 ? named : null;
-  // Which of its money a pull request shares in: that of a branch, all of it ("" is no branch's name), or none.
-  const WHOLE = "";
-  const pool = (head: string | null): string | null => {
-    if (head == null) return WHOLE;
-    if (turns) return turns.has(head) ? head : null;
-    return session.branch == null || session.branch === head ? WHOLE : null;
-  };
-  const pools = new Map<string, number[]>();
-  rows.forEach((row, i) => {
-    const key = pool(row.head_ref);
-    if (key == null) return;
-    const list = pools.get(key);
-    if (list) list.push(i);
-    else pools.set(key, [i]);
-  });
-  const charged = rows.map((row): { usd: number | null; off_branch: boolean } => ({ usd: 0, off_branch: pool(row.head_ref) == null }));
-  for (const [key, among] of pools) {
-    const spent = key === WHOLE ? cost : Math.min(cost, turns!.get(key)!);
+  const charged = rows.map((): { usd: number | null; off_branch: boolean } => ({ usd: 0, off_branch: true }));
+  const share = (spent: number, among: number[]) => {
     const weights = weigh(among.map((i) => ({ live: true, lines: rows[i]!.lines, matched: rows[i]!.contributed })));
     const all = weights.reduce((sum, weight) => sum + weight, 0);
-    among.forEach((i, at) => (charged[i]!.usd = all > 0 ? (spent * weights[at]!) / all : 0));
+    among.forEach((i, at) => {
+      charged[i]!.usd! += all > 0 ? (spent * weights[at]!) / all : 0;
+      charged[i]!.off_branch = false;
+    });
+  };
+  const every = rows.map((_, i) => i);
+  // Turns that name no branch at all say no more than a session that names none.
+  if (named.size === 0) {
+    share(cost, every);
+    return charged;
   }
-  // One that names no branch shares in all of it beside those that share a branch's: never more than was spent.
+  const basedOn = (row: (typeof rows)[number], branch: string) => (row.base_ref != null ? row.base_ref === branch : DEFAULT_BASES.includes(branch));
+  for (const [branch, spent] of named) {
+    const heads = every.filter((i) => rows[i]!.head_ref === branch);
+    const among = heads.length > 0 ? heads : every.filter((i) => basedOn(rows[i]!, branch));
+    if (among.length > 0) share(Math.min(cost, spent), among);
+  }
+  // A pull request that names no branch shares in all of it, beside those that share a branch's.
+  const unnamed = every.filter((i) => rows[i]!.head_ref == null);
+  if (unnamed.length > 0) share(cost, unnamed);
+  // Never more than was spent.
   const total = charged.reduce((sum, one) => sum + one.usd!, 0);
   if (total > cost && total > 0) for (const one of charged) one.usd = (one.usd! * cost) / total;
   return charged;
@@ -1377,7 +1385,7 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
   const rows = await db.query(
     `SELECT o.repo, o.number, o.machine_id, o.source, o.session_id, o.lines, o.weight, o.matched,
             o.opened_lines, o.opened_weight, o.opened_matched, o.opened_kept, o.opened_here, o.contributed, o.contributed_lines,
-            o.charged_usd, o.off_branch, r.state <> 'closed' AS live, r.first_event = 'opened' AS from_open, r.head_ref
+            o.charged_usd, o.off_branch, r.state <> 'closed' AS live, r.first_event = 'opened' AS from_open, r.head_ref, r.base_ref
      FROM jsonb_to_recordset($2::jsonb) AS k(machine_id text, source text, session_id text)
      JOIN pull_sessions o ON o.org_id = $1 AND o.machine_id = k.machine_id AND o.source = k.source AND o.session_id = k.session_id
      JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number`,
@@ -1386,7 +1394,7 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
   if (rows.length === 0) return;
   // What each cost, once for a session however many pull requests it is in: its payload is opened for the turns' branches.
   const held = await db.query(
-    `SELECT x.machine_id, x.source, x.session_id, x.cost_usd, x.branch, x.payload #> '{session,cost,by_branch}' AS by_branch
+    `SELECT x.machine_id, x.source, x.session_id, x.cost_usd, x.payload #> '{session,cost,by_branch}' AS by_branch
      FROM jsonb_to_recordset($2::jsonb) AS k(machine_id text, source text, session_id text)
      JOIN sessions x ON x.org_id = $1 AND x.machine_id = k.machine_id AND x.source = k.source AND x.session_id = k.session_id`,
     [db.orgId, JSON.stringify(touched)],
@@ -1396,7 +1404,6 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
       sessionKey(row as never),
       {
         cost_usd: row.cost_usd == null ? null : Number(row.cost_usd),
-        branch: (row.branch as string) ?? null,
         by_branch: row.by_branch == null ? null : json<Spent["by_branch"]>(row.by_branch),
       },
     ]),
@@ -1437,7 +1444,7 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
     const kept = new Map(keptWith.map((weight, i) => [fromOpen[i]!, weight]));
     const charged = charge(
       spent.get(key) ?? null,
-      its.map((row, i) => ({ head_ref: (row.head_ref as string) ?? null, lines: gave[i]!.lines, contributed: gave[i]!.contributed })),
+      its.map((row, i) => ({ head_ref: (row.head_ref as string) ?? null, base_ref: (row.base_ref as string) ?? null, lines: gave[i]!.lines, contributed: gave[i]!.contributed })),
     );
     const unchanged = (stored: unknown, now: number | null) => (now == null ? stored == null : same(stored, now));
     its.forEach((row, i) => {
@@ -1747,7 +1754,7 @@ export async function matchedBy(db: OrgDb, key: SessionKey, { hold = false }: { 
  */
 export async function spentBy(db: OrgDb, key: SessionKey): Promise<string | null> {
   const [row] = await db.query<{ by: string | null }>(
-    `SELECT md5(jsonb_build_array(cost_usd, branch, payload #> '{session,cost,by_branch}')::text) AS by FROM sessions
+    `SELECT md5(jsonb_build_array(cost_usd, payload #> '{session,cost,by_branch}')::text) AS by FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
     [db.orgId, key.machine_id, key.source, key.session_id],
   );
