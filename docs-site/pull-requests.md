@@ -265,7 +265,8 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
 - **Agent cost** is what was spent getting the pull request to where it is, not what the lines
   it still has cost. Every session that gave it lines at any time, when it was opened or in a
   later push, is charged to it, and stays charged when review takes those lines out again: a
-  $10 session all of whose lines went in review still cost the pull request $10. So the cost
+  $10 session charged to this pull request alone, all of whose lines went in review, still
+  cost the pull request $10. So the cost
   does not shrink during review, rewrites on the way to a few lines are in it, and so is a
   session that only pushed review fixes.
   - **Two figures.** The headline is everything spent, review rounds included. Under it,
@@ -279,15 +280,18 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     counts in the one that **had it first**, and a later one is charged only for the lines
     that are new in it: a release pull request of work that earlier ones brought is charged
     nothing for it, and takes nothing from them. The one that had it first is taken to be
-    the one merged (or closed) first, and of those still open the one opened first: a line
-    gets from one pull request into another by the first being merged into the other's
-    branch. The split does not move when
-    review removes lines, when a file is renamed, nor when one of them is merged or closed.
+    the one merged first, and of those still open the one opened first: a line gets from
+    one pull request into another by the first being merged into the other's branch. A
+    pull request **closed without merging** comes after all of those: when it is done
+    again as another, the new one is charged for the lines, and the closed one keeps only
+    what was spent on lines that no merged or open pull request has. The split does not move when
+    review removes lines or when a file is renamed.
     It moves when the session gives a pull request more lines, is uploaded with another
     cost or is deleted, when a pull request's head or base branch changes, when a line
     still in a pull request turns out to be another session's, uploaded later, and when the
-    order of two pull requests that share lines changes: one of two open ones is merged, or
-    one that was merged earlier is reported after the others (a backfill).
+    order of two pull requests that share lines changes: one of two open ones is merged or
+    closed without merging, or one that was merged earlier is reported after the others
+    (a backfill).
   - **Having lines in the pull request is what makes a session pay for it**, whatever branch
     it began on. Codex, Grok and a Cursor cloud agent name one branch for a whole session (a
     local Cursor session names none), and that is often the branch the session started on
@@ -326,9 +330,8 @@ The counts [after merge](#after-merge) are rows here too, and stay however many 
     removing lines lowers no cost: it leaves fewer lines to divide by, so this figure goes up.
     That is the sign of money that bought less. When no line of the first version is left
     there is no figure, and the tile says what those lines cost. A line that was opened in
-    two pull requests is paid for in part by each and counts as that part of a line in each,
-    and it counts as surviving while either keeps it: between them it is one line, paid for
-    once, wherever it ended up. The summary of several pull requests divides what their first
+    two pull requests is paid for in the one that had it first, and counts as surviving there
+    while either keeps it: between them it is one line, paid for once, wherever it ended up. The summary of several pull requests divides what their first
     versions cost by the lines of them that survived, each counted once, which is the same
     sum each page does; where that is not how many survived (a line in two of them is in
     each one's count), the "Agent lines that survived review" tile says what it is beside

@@ -246,17 +246,16 @@ type Wrote = Pick<PullSession, "machine_id" | "source" | "session_id" | "lines">
 /** And which of the lines the pull request was first reported with are its own. */
 type Kept = Wrote & { opened_lines: number; opened_matched: Lines };
 
-/**
- * How often each line is in a pull request's files, first or now: as often
- * as the one that has it most. Whatever file it is in: a file renamed, or a
- * line moved to another, is the same line still.
- */
+/** A line of a file, as the lines seen are keyed. */
+const lineKey = (path: string, hash: string): string => `${path}\n${hash}`;
+
+/** How often each line of each file is in a pull request's files, first or now: as often as the one that has it most. */
 function copiesIn(...reports: FileHashes[][]): Map<string, number> {
   const most = new Map<string, number>();
   for (const files of reports) {
     const here = new Map<string, number>();
-    for (const file of files) for (const hash of file.hashes) here.set(hash, (here.get(hash) ?? 0) + 1);
-    for (const [hash, n] of here) if (n > (most.get(hash) ?? 0)) most.set(hash, n);
+    for (const file of files) for (const hash of file.hashes) here.set(lineKey(file.path, hash), (here.get(lineKey(file.path, hash)) ?? 0) + 1);
+    for (const [key, n] of here) if (n > (most.get(key) ?? 0)) most.set(key, n);
   }
   return most;
 }
@@ -317,8 +316,9 @@ export function breakdown(now: FileHashes[], lines: (Writer | null)[][]): { file
  * charged for a line stays there, and a later one is charged for what is
  * new in it. A pull request closed without merging takes nothing from the
  * others: its lines count as if it were one of them, and those of the
- * others as if it were not there. One whose lines were not kept (`matched`
- * null) counts all of them.
+ * others as if it were not there. (Where a session is charged, `charge`,
+ * such a one is put after the others, so it has only what none of them
+ * has.) One whose lines were not kept (`matched` null) counts all of them.
  */
 export function weigh(rows: { live: boolean; lines: number; matched: Lines | null }[]): number[] {
   const { counted, pooled } = linesOf(rows);
@@ -469,8 +469,8 @@ const DEFAULT_BASES = ["main", "master"];
  * the lines it contributed to each at any time (`contributed`) count, a line
  * in several counting in the first of them (see `weigh`): a later one that
  * brings the same lines again, a release of what was merged before, takes
- * nothing from it. Merged, open or closed, they count alike: which of them
- * a charge is in does not move it.
+ * nothing from it. One closed without merging comes after the others: it
+ * is charged for the lines that no merged or open one has.
  *
  * Having lines in a pull request is what makes a session pay for it. Of a
  * session that says no more than one branch for all of it, or none, all of
@@ -1249,8 +1249,8 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   // read here, or is looked for in this pull request once this is committed
   // (`pullsAddedTo` waits for it).
   await holdPullSessions(db);
-  const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string; head_ref: string | null; base_ref: string | null; ended: boolean }>(
-    `SELECT first_files, first_event, state, head_ref, base_ref, coalesce(merged_at, closed_at) IS NOT NULL AS ended FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
+  const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string; head_ref: string | null; base_ref: string | null; merged_at: unknown }>(
+    `SELECT first_files, first_event, state, head_ref, base_ref, merged_at FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
     [db.orgId, report.repo, report.number],
   );
   const first = existing ? json<FileHashes[]>(existing.first_files) : report.files;
@@ -1329,9 +1329,11 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   // Its branch, or the one it is based on, is another (one stacked on a pull request that was merged
   // is based on what that one was): what its sessions spent on which branch is its own is another too.
   const moved = existing != null && ((existing.head_ref ?? null) !== (report.head_ref ?? null) || (existing.base_ref ?? null) !== (report.base_ref ?? null));
-  // Merged, or closed, where it was open, or the other way: it had its lines before those that are open still
-  // (see `weighAgain`), so which of them a line in several is in may be another.
-  const ended = existing != null && existing.ended !== ((report.merged_at ?? report.closed_at ?? null) != null);
+  // Merged where it was open, or the other way, or merged at another time than was known: it had
+  // its lines before those that are open still, and after those merged before it (see
+  // `weighAgain`), so which of them a line in several is in may be another.
+  const at = (when: unknown) => (when == null ? null : new Date(when as string).getTime());
+  const ended = existing != null && (existing.state !== report.state || at(existing.merged_at) !== at(report.merged_at));
   await keepSessions(db, report.repo, report.number, sessions, turned || moved || ended, seen);
   await recordReport(db, {
     repo: report.repo,
@@ -1404,11 +1406,27 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   // review took one): the copies that are in neither are gone. They stay with the sessions
   // that this match gives fewer of than they had given, so that what a session gave does not
   // shrink when review takes its lines out, while a line that is still there is whose this
-  // match says it is.
+  // match says it is. A copy is still there when its file has it, or when this match puts it
+  // down to a session in whatever file: one whose file someone renamed, with no session that
+  // wrote it under the new name, is in neither, and stays with the session that gave it.
   const given = new Map<string, number>();
-  for (const { before } of gave) for (const [line, n] of copiesOf(before)) given.set(line, (given.get(line) ?? 0) + n);
-  const left = new Map([...given].map(([line, n]) => [line, Math.max(0, n - (seen.get(line) ?? 0))]));
+  const there = new Map<string, number>();
+  for (const { before } of gave) {
+    for (const [line, n] of copiesOf(before)) given.set(line, (given.get(line) ?? 0) + n);
+    for (const [path, hashes] of Object.entries(before ?? {})) {
+      for (const [hash, n] of copiesOf({ [path]: hashes })) there.set(lineKey(path, hash), (there.get(lineKey(path, hash)) ?? 0) + n);
+    }
+  }
+  // (In the files it was given in: no more of them than were given there.)
+  const inPlace = new Map<string, number>();
+  for (const [key, n] of there) {
+    const hash = key.slice(key.lastIndexOf("\n") + 1);
+    inPlace.set(hash, (inPlace.get(hash) ?? 0) + Math.min(n, seen.get(key) ?? 0));
+  }
   const matchedNow = new Map([...next].map(([key, s]) => [key, copiesOf(s.contributed)]));
+  const matched = new Map<string, number>();
+  for (const has of matchedNow.values()) for (const [hash, n] of has) matched.set(hash, (matched.get(hash) ?? 0) + n);
+  const left = new Map([...given].map(([hash, n]) => [hash, Math.max(0, n - Math.max(inPlace.get(hash) ?? 0, matched.get(hash) ?? 0))]));
   for (const { row, key, before } of gave) {
     if (!before) continue;
     const has = matchedNow.get(key);
@@ -1420,12 +1438,14 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
       left.set(hash, left.get(hash)! - some);
       take.set(hash, some);
     }
+    if (take.size === 0) continue;
     const still = new Map(Object.entries(next.get(key)?.contributed ?? {}));
     const gone = new Map<string, string[]>();
     for (const [path, hashes] of Object.entries(before)) {
-      for (const hash of new Set(hashes)) {
-        const copies = (list: string[] | undefined) => (list ?? []).filter((one) => one === hash).length;
-        const some = Math.min(copies(hashes) - copies(still.get(path)), take.get(hash) ?? 0);
+      const had = copiesOf({ [path]: hashes });
+      const stays = copiesOf({ [path]: still.get(path) ?? [] });
+      for (const [hash, n] of had) {
+        const some = Math.min(n - (stays.get(hash) ?? 0), take.get(hash) ?? 0);
         if (some <= 0) continue;
         take.set(hash, take.get(hash)! - some);
         gone.set(path, [...(gone.get(path) ?? []), ...Array<string>(some).fill(hash)]);
@@ -1496,7 +1516,8 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
      FROM jsonb_to_recordset($2::jsonb) AS k(machine_id text, source text, session_id text)
      JOIN pull_sessions o ON o.org_id = $1 AND o.machine_id = k.machine_id AND o.source = k.source AND o.session_id = k.session_id
      JOIN pull_requests r ON r.org_id = o.org_id AND r.repo = o.repo AND r.number = o.number
-     ORDER BY coalesce(r.merged_at, r.closed_at) NULLS LAST, coalesce(r.created_at, r.first_seen_at), o.repo, o.number`,
+     ORDER BY CASE r.state WHEN 'merged' THEN 0 WHEN 'closed' THEN 2 ELSE 1 END, r.merged_at NULLS LAST,
+              coalesce(r.created_at, r.first_seen_at), o.repo, o.number`,
     [db.orgId, JSON.stringify(touched)],
   );
   if (rows.length === 0) return;
@@ -1525,10 +1546,12 @@ async function weighAgain(db: OrgDb, touched: { machine_id: unknown; source: unk
   const lines = (kept: unknown) => (kept == null ? null : json<Lines>(kept));
   const same = (stored: unknown, now: number) => stored != null && Math.abs(num(stored) - now) < 1e-9;
   const changed: Record<string, unknown>[] = [];
-  // (Each session's pull requests in the order they had their lines, as near as is known: the one
-  // merged or closed first, and of those still open the one opened first. A line gets into another
-  // by the one it is in being merged there, a stack merged from the top or a release, so the one
-  // merged first had it first. A line in several is the first one's.)
+  // (Each session's pull requests in the order they had their lines, as near as is known: the
+  // merged ones as they were merged, then the open ones as they were opened. A line gets into
+  // another by the one it is in being merged there, a stack merged from the top or a release, so
+  // the one merged first had it first. Those closed without merging come last: one done again as
+  // another is not what shipped, and keeps only the lines that no other has. A line in several is
+  // the first one's.)
   for (const [key, its] of bySession) {
     const weights = weigh(its.map((row) => ({ live: row.live === true, lines: num(row.lines), matched: lines(row.matched) })));
     // The lines each was first reported with count likewise: ones that moved from

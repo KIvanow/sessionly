@@ -261,7 +261,7 @@ export interface Options {
   hashKey?: string;
   /** In place of `CHARGE_RETRIES_MS`: tests do not wait that long. */
   chargeRetriesMs?: number[];
-  /** Handed what goes on after a request was answered (charging a session's pull requests again): tests wait for it. */
+  /** Handed what goes on after an upload was answered (its pull requests matched and charged again): tests wait for it. */
   background?: (work: Promise<void>) => void;
   /**
    * The organisation one repository is shown in (demo.ts), and the paths of
@@ -434,43 +434,45 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
 
   // The pull requests a session just stored adds lines to are found and
   // matched again once it is committed, each in a transaction of its own, as
-  // above. What fails is logged: the session is stored all the same.
+  // above. What fails is logged: the session is stored all the same. The
+  // upload is not kept waiting for any of it: a report may hold the
+  // organisation's lines for longer than whoever uploads waits for an answer,
+  // and the session is stored. Its pull requests are a moment behind it.
   api.put("/sessions/:machine/:source/:session", async (c, next) => {
     await next();
     const stored = c.get("stored");
     const spent = c.get("spent");
-    if (c.res.status !== 200) return;
-    // What it cost, or where, is another: its pull requests are charged again, whether or not
-    // any of them has other lines of it now. The upload is not kept waiting for that: a report
-    // may hold the organisation's lines for longer than whoever uploads waits for an answer, and
-    // the session is stored. What its pull requests cost is a moment behind it.
-    if (spent) {
-      // What fails (a report held the organisation's lines for too long) is tried again, later each
-      // time: a session's last upload is followed by no other that would charge it.
-      const charging = async (tries: number[]): Promise<void> => {
-        try {
-          await ownerDb.asOrg(c.get("principal").orgId, (db) => chargeSession(db, spent));
-        } catch (err) {
-          failed(err);
-          const [wait, ...rest] = tries;
-          if (wait != null) setTimeout(() => void charging(rest), wait).unref();
-        }
-      };
-      const work = charging(options.chargeRetriesMs ?? CHARGE_RETRIES_MS);
-      options.background?.(work);
-    }
-    if (!stored) return;
-    try {
-      for (const { repo, number } of await ownerDb.asOrg(c.get("principal").orgId, (db) => pullsAddedTo(db, stored, options.hashKey))) {
-        try {
-          await ownerDb.asOrg(c.get("principal").orgId, (db) => rematchPull(db, repo, number, options.hashKey, { uploaded: true }));
-        } catch (err) {
-          failed(err);
-        }
+    if (c.res.status !== 200 || (!spent && !stored)) return;
+    // What fails (a report held the organisation's lines for too long) is tried again, later each
+    // time: a session's last upload is followed by no other that would charge it.
+    const charging = async (key: NonNullable<typeof spent>, tries: number[]): Promise<void> => {
+      try {
+        await ownerDb.asOrg(c.get("principal").orgId, (db) => chargeSession(db, key));
+      } catch (err) {
+        failed(err);
+        const [wait, ...rest] = tries;
+        if (wait != null) setTimeout(() => void charging(key, rest), wait).unref();
       }
-    } catch (err) {
-      failed(err);
-    }
+    };
+    const after = async (): Promise<void> => {
+      // What it cost, or where, is another: its pull requests are charged again, whether or not
+      // any of them has other lines of it now.
+      if (spent) await charging(spent, options.chargeRetriesMs ?? CHARGE_RETRIES_MS);
+      if (!stored) return;
+      try {
+        for (const { repo, number } of await ownerDb.asOrg(c.get("principal").orgId, (db) => pullsAddedTo(db, stored, options.hashKey))) {
+          try {
+            await ownerDb.asOrg(c.get("principal").orgId, (db) => rematchPull(db, repo, number, options.hashKey, { uploaded: true }));
+          } catch (err) {
+            failed(err);
+          }
+        }
+      } catch (err) {
+        failed(err);
+      }
+    };
+    const work = after();
+    options.background?.(work);
   });
 
   // Adding a person puts an organisation in front of them the next time

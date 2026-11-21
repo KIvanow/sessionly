@@ -509,8 +509,8 @@ export interface PullCloud {
  * A session is charged to the pull requests it contributed lines to, split
  * between them by the lines it contributed to each at any time, at its
  * opening or in a later push; a line in several counts in the one that had
- * it first (merged first, or of those open, opened first), so a later one
- * is charged for what is new in it. Review taking
+ * it first (merged first, or of those open, opened first; one closed without
+ * merging last), so a later one is charged for what is new in it. Review taking
  * lines out does not lower it.
  * Having lines in a pull request is what makes a session pay for it,
  * whatever branch it began on: a session of an agent that names one branch
@@ -527,7 +527,7 @@ export interface PullCloud {
 export interface PullCost {
   /** Everything spent on it, review rounds included: the sum of what its sessions are charged here. Null when none of them has a cost figure, or there are none. */
   usd: number | null;
-  /** Whether any of those charges is of a cost that is estimated, wholly or in part. */
+  /** Whether any of those charges is of a cost that is estimated, wholly or in part, or of a session whose split with other pull requests is unsure (see `sessions_unshared`). */
   estimated: boolean;
   /** Sessions that contributed lines to it, now or once, and how many of those have no cost figure or were deleted: `usd` is then a floor. */
   sessions: number;

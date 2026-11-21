@@ -1704,6 +1704,7 @@ test("a line opened in two pull requests survives once between them, wherever it
   await db.query(`UPDATE pull_sessions SET opened_kept = NULL WHERE repo = $1 AND number = 2`, [repo]);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 2 })).status, 200);
   const [weighed] = await db.query(`SELECT opened_kept FROM pull_sessions WHERE repo = $1 AND number = 2`, [repo]);
+  assert.notEqual(weighed!.opened_kept, null);
   assert.equal(Number(weighed!.opened_kept), 0);
 
   // a pull request not seen from the start (a release of what was merged) keeps lines that went in
@@ -2036,6 +2037,16 @@ test("what a session gave and is charged holds through copies of a line and a la
   await sent(7, [file("newer.ts", 1900), file("apart.ts", 1901)], { event: "synchronize" });
   assert.deepEqual(await moved(), [[[2, 3, 6]], [[3, 3, 6]]]);
 
+  // a file of its lines from a later push that someone renames, with no session that wrote it under
+  // the new name: the lines are in the pull request and no one's now, and what the session gave stays
+  await sent(15, [file("y.ts", 9004)]);
+  await put("h-lone", 3, { "lone.ts": [2300, 2301] });
+  await sent(15, [file("y.ts", 9004), file("lone.ts", 2300, 2301)], { event: "synchronize" });
+  const lone = async () => (await pull(15)).sessions.map((x: any) => [x.lines, x.contributed_lines, x.cost_share_usd]);
+  assert.deepEqual(await lone(), [[2, 2, 3]]);
+  await sent(15, [file("y.ts", 9004), file("alone.ts", 2300, 2301)], { event: "synchronize" });
+  assert.deepEqual(await lone(), [[0, 2, 3]]);
+
   // one stacked on another: what was spent on main is the one's that is based on it, until the first
   // is merged and the second is based on main as well, with not a line of either changed
   await put("h-stack", 10, { "p.ts": [1500, 1501], "q.ts": [1600, 1601] }, [{ branch: "main", usd: 4 }, { branch: "st1", usd: 3 }, { branch: "st2", usd: 3 }]);
@@ -2064,6 +2075,27 @@ test("what a session gave and is charged holds through copies of a line and a la
   // as it did before one merged after it
   await sent(12, [file("u.ts", 2100, 2101)], { created_at: "2026-11-11T12:00:00Z", event: "closed", state: "merged", merged_at: "2026-11-14T12:00:00Z" });
   assert.deepEqual([(await pull(11)).cost.usd, (await pull(12)).cost.usd], [4, 0]);
+
+  // one closed without merging keeps what it cost while no other has its lines; done again as
+  // another, the one that may ship has them, and the closed one keeps the line that only it has
+  await put("h-redo", 6, { "w.ts": [2200, 2201, 2202] });
+  await sent(13, [file("w.ts", 2200, 2201, 2202)]);
+  await sent(13, [file("w.ts", 2200, 2201, 2202)], { event: "closed", state: "closed", closed_at: "2026-11-12T12:00:00Z" });
+  assert.equal((await pull(13)).cost.usd, 6);
+  await sent(14, [file("w.ts", 2200, 2201)], { created_at: "2026-11-13T12:00:00Z" });
+  assert.deepEqual([(await pull(13)).cost.usd, (await pull(14)).cost.usd], [2, 4]);
+  const buckets = async () => {
+    const { total } = (await call(tokens.admin, "GET", `/summary?by=tool&repo=acme/held`)).body;
+    return [total.in_pr_usd, total.closed_unmerged_usd, total.not_in_pr_usd].map((usd: number) => Math.round(usd * 100) / 100);
+  };
+  const before = await buckets();
+  // merged, it has them still; and opened again, the closed one is before it once more
+  await sent(14, [file("w.ts", 2200, 2201)], { created_at: "2026-11-13T12:00:00Z", event: "closed", state: "merged", merged_at: "2026-11-14T12:00:00Z" });
+  assert.deepEqual([(await pull(13)).cost.usd, (await pull(14)).cost.usd], [2, 4]);
+  assert.deepEqual(await buckets(), before);
+  await sent(13, [file("w.ts", 2200, 2201, 2202)], { event: "reopened", state: "open" });
+  await sent(14, [file("w.ts", 2200, 2201)], { created_at: "2026-11-13T12:00:00Z", event: "reopened", state: "open" });
+  assert.deepEqual([(await pull(13)).cost.usd, (await pull(14)).cost.usd], [6, 0]);
 });
 
 test("a share is unsure when a pull request it is split with did not keep which lines are whose", async () => {
