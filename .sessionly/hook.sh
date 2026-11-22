@@ -1,7 +1,7 @@
 #!/bin/sh
 # Sessionly capture for cloud agent sessions. https://sessionly.dev
 #
-# Written by `sessionly install --repo` (sessionly 0.4.0). To update it,
+# Written by `sessionly install --repo` (sessionly 0.7.0). To update it,
 # run that again with a newer sessionly rather than editing it.
 #
 # The hooks in .claude/settings.json and .cursor/hooks.json run this on every
@@ -18,10 +18,10 @@
 #
 # It prints nothing and always exits 0, so it cannot block or change a session.
 
-VERSION=0.4.0
+VERSION=0.7.0
 BASE=https://github.com/KIvanow/sessionly/releases/download
-SHA256_X86_64=dbf0db71b65d51d28215cd54f88efce0590625136cdfa78ccddcd1acf4c85bea
-SHA256_AARCH64=c5b5f4950c69d483d6bd74aaba90cf531c0795d458e732a22959633ce3e0f558
+SHA256_X86_64=a4a3fa88775cb07acd72975972062d895f21f280ffbd0a20e39504a907e56505
+SHA256_AARCH64=5f84b9e406ed260f998c23d2e0a56cba3f0992c6727e6369acaf64f5977f545b
 
 case "${1:-}" in
   # Cursor's cloud also runs the hooks in .claude/settings.json. There the
