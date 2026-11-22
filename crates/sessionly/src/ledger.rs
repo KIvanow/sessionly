@@ -17,7 +17,7 @@ use crate::rewrite::{FileLines, CHECKPOINTS, REWRITTEN_BELOW};
 use crate::session::{RewriteCheckpoint, Session};
 
 /// Bump to change the table layout; older ledgers are rebuilt on open.
-const DB_VERSION: i64 = 5;
+const DB_VERSION: i64 = 6;
 
 const TABLES: &str = "
 CREATE TABLE sessions (
@@ -49,6 +49,7 @@ CREATE TABLE sessions (
     files_changed    INTEGER NOT NULL,
     lines_added      INTEGER NOT NULL,
     lines_removed    INTEGER NOT NULL,
+    reviews          INTEGER NOT NULL,
     search_text      TEXT NOT NULL,
     record           TEXT NOT NULL,
     raw_bytes        INTEGER NOT NULL,
@@ -263,6 +264,8 @@ pub struct Listed {
     pub files_changed: u64,
     pub lines_added: u64,
     pub lines_removed: u64,
+    /// Review runs (`/code-review` and the like).
+    pub reviews: u64,
     pub repo: Option<String>,
     pub branch: Option<String>,
     pub user: Option<String>,
@@ -297,6 +300,7 @@ pub struct Group {
     pub files_changed: u64,
     pub lines_added: u64,
     pub lines_removed: u64,
+    pub reviews: u64,
     pub rewrite: Rewrite,
 }
 
@@ -491,10 +495,11 @@ impl Ledger {
                 duration_ms, active_ms, cwd, repo_root, repo_remote, branch, user_name,
                 user_email, title, first_prompt, models, primary_model, cost_usd, cost_source,
                 input_tokens, output_tokens, prompts, tool_calls, tool_failures, files_changed,
-                lines_added, lines_removed, search_text, record, raw_bytes, transcript_path,
-                transcript_bytes, synced_at)
+                lines_added, lines_removed, reviews, search_text, record, raw_bytes,
+                transcript_path, transcript_bytes, synced_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)",
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34,
+                ?35)",
             params![
                 s.session_id,
                 s.source,
@@ -529,6 +534,7 @@ impl Ledger {
                 s.counts.files_changed,
                 s.counts.lines_added,
                 s.counts.lines_removed,
+                s.counts.reviews.unwrap_or(0),
                 search_text(s),
                 serde_json::to_string(s)?,
                 built_from.raw_bytes,
@@ -958,7 +964,8 @@ impl Ledger {
                     s.files_changed, s.lines_added, s.lines_removed,
                     coalesce(s.repo_remote, s.repo_root, s.cwd), s.branch,
                     coalesce(s.user_email, s.user_name), s.title, s.first_prompt,
-                    r.rw_measured_at, r.rw_files, r.rw_rewritten, r.rw_added, r.rw_surviving
+                    r.rw_measured_at, r.rw_files, r.rw_rewritten, r.rw_added, r.rw_surviving,
+                    s.reviews
              FROM sessions s LEFT JOIN {REWRITE_TOTALS} ON r.session_id = s.session_id
              {clause} ORDER BY s.started_at DESC, s.session_id LIMIT ?{}",
             values.len()
@@ -981,6 +988,7 @@ impl Ledger {
                     files_changed: r.get(11)?,
                     lines_added: r.get(12)?,
                     lines_removed: r.get(13)?,
+                    reviews: r.get(24)?,
                     repo: r.get(14)?,
                     branch: r.get(15)?,
                     user: r.get(16)?,
@@ -1020,7 +1028,8 @@ impl Ledger {
                         sum(s.cost_usd IS NULL), sum(s.active_ms), sum(s.prompts),
                         sum(s.tool_calls), sum(s.tool_failures), sum(s.files_changed),
                         sum(s.lines_added), sum(s.lines_removed),
-                        sum(r.rw_files), sum(r.rw_rewritten), sum(r.rw_added), sum(r.rw_surviving)
+                        sum(r.rw_files), sum(r.rw_rewritten), sum(r.rw_added), sum(r.rw_surviving),
+                        sum(s.reviews)
                  FROM sessions s LEFT JOIN {REWRITE_TOTALS} ON r.session_id = s.session_id
                  {clause} {tail}"
             )
@@ -1038,6 +1047,7 @@ impl Ledger {
                 files_changed: r.get::<_, Option<u64>>(8)?.unwrap_or(0),
                 lines_added: r.get::<_, Option<u64>>(9)?.unwrap_or(0),
                 lines_removed: r.get::<_, Option<u64>>(10)?.unwrap_or(0),
+                reviews: r.get::<_, Option<u64>>(15)?.unwrap_or(0),
                 rewrite: rewrite_from(r, 11)?,
             })
         };
@@ -1089,6 +1099,74 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ledger = Ledger::open(&dir.path().join("l.db")).unwrap();
         (dir, ledger)
+    }
+
+    #[test]
+    fn review_runs_are_counted_in_the_list_the_summary_and_the_session() {
+        use crate::session::{ReviewRan, ReviewRun};
+        let (_dir, mut ledger) = open();
+        let mut s = session("rev-1");
+        s.reviews = vec![
+            ReviewRun {
+                id: "t1".into(),
+                command: "code-review".into(),
+                effort: Some("xhigh".into()),
+                pull_number: Some(621),
+                subagents: 2,
+                estimated_cost_usd: Some(1.5),
+                ..Default::default()
+            },
+            ReviewRun {
+                id: "t2".into(),
+                command: "ultrareview".into(),
+                ran: ReviewRan::Cloud,
+                ..Default::default()
+            },
+        ];
+        s.counts.reviews = Some(2);
+        ledger.upsert(&s, &fingerprint(10), &[]).unwrap();
+        ledger
+            .upsert(&session("plain"), &fingerprint(10), &[])
+            .unwrap();
+        let listed = ledger.list(&Filter::default(), None).unwrap();
+        let reviews: Vec<_> = listed
+            .iter()
+            .map(|r| (r.session_id.as_str(), r.reviews))
+            .collect();
+        assert!(reviews.contains(&("rev-1", 2)) && reviews.contains(&("plain", 0)));
+        let groups = ledger.summary(&Filter::default(), GroupBy::Tool).unwrap();
+        assert_eq!(groups.last().unwrap().reviews, 2);
+        let table = crate::report::summary(&groups, GroupBy::Tool);
+        assert!(
+            table.lines().next().unwrap().ends_with("REVIEWS"),
+            "{table}"
+        );
+
+        let shown = crate::report::session(&s, &[], None, &[]);
+        assert!(shown.contains("/code-review xhigh #621"), "{shown}");
+        assert!(
+            shown.contains("$1.50")
+                && shown.contains("not known")
+                && shown.contains("in the cloud")
+        );
+
+        // none in the filter: no column
+        let none = ledger
+            .summary(
+                &Filter {
+                    text: Some("nothing matches this".into()),
+                    ..Default::default()
+                },
+                GroupBy::Tool,
+            )
+            .unwrap();
+        let plain = vec![Group {
+            key: "claude-code".into(),
+            sessions: 1,
+            ..Default::default()
+        }];
+        assert!(none.is_empty());
+        assert!(!crate::report::summary(&plain, GroupBy::Tool).contains("REVIEWS"));
     }
 
     #[test]

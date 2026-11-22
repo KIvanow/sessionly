@@ -23,6 +23,7 @@ mod paths;
 mod pricing;
 mod repo;
 mod report;
+mod reviews;
 mod rewrite;
 mod runtime;
 mod session;

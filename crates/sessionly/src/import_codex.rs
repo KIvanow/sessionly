@@ -1582,6 +1582,7 @@ pub fn session(
         usage,
         subagents: subagent_facts,
         tool_models,
+        ..Default::default()
     };
     Ok((out.finish(), Some(facts)))
 }

@@ -139,6 +139,12 @@ export interface Session {
   files?: FileTouched[];
   subagents?: Subagent[];
   /**
+   * Times a review command ran in the session (see `reviews`): the same
+   * in every content mode, since nothing of a run's arguments is kept but
+   * the effort and a pull request number.
+   */
+  reviews?: ReviewRun[];
+  /**
    * Instruction files (CLAUDE.md, rules) loaded into the session.
    */
   instruction_files?: string[];
@@ -260,6 +266,12 @@ export interface Counts {
    */
   permission_denials?: number;
   subagents?: number;
+  /**
+   * Review runs: the length of `Session::reviews`. Left out for an agent
+   * whose review commands are not read (all but Claude Code): not known,
+   * which is not none.
+   */
+  reviews?: number | null;
   compactions?: number;
   /**
    * Turns that ended in an API error.
@@ -313,6 +325,12 @@ export interface ToolCall {
    */
   agent_id?: string | null;
   tool?: string;
+  /**
+   * For a `Skill` call, the skill's name as written (`code-review`,
+   * `plugin:name`). A name, like the tool's, so it is kept in every
+   * content mode; its arguments are not.
+   */
+  skill?: string | null;
   /**
    * Model that made the call. Null where the agent does not say: Grok, and
    * Cursor turns the hooks did not see.
@@ -374,6 +392,71 @@ export interface Subagent {
   input_tokens?: number;
   output_tokens?: number;
   estimated_cost_usd?: number | null;
+}
+/**
+ * One run of a review command: `/code-review` and the like (the names are
+ * in `reviews`).
+ */
+export interface ReviewRun {
+  /**
+   * The tool-use id of the Skill call; for a slash command, the turn's
+   * prompt id, or one made from its time where there is none.
+   */
+  id?: string;
+  at?: string | null;
+  /**
+   * What was run, as written: "code-review", "ultrareview", "review",
+   * "security-review", or a plugin's "name:code-review".
+   */
+  command?: string;
+  /**
+   * How it was started.
+   */
+  via?: "skill" | "slash_command" | "codex_review" | "unknown";
+  /**
+   * Where the review itself ran.
+   */
+  ran?: "local" | "cloud" | "unknown";
+  /**
+   * The first argument when it is one of low, medium, high, xhigh, max
+   * or ultra. Else none.
+   */
+  effort?: string | null;
+  /**
+   * A pull request number among the arguments: `621`, `#528` or a pull
+   * request's URL. Else none.
+   */
+  pull_number?: number | null;
+  /**
+   * Set when a subagent ran it.
+   */
+  agent_id?: string | null;
+  /**
+   * How a tool call ended.
+   */
+  status?: ("ok" | "failed") | "interrupted" | "denied" | "rejected" | "no_result" | "unknown";
+  /**
+   * From the start to the end of the last of its subagents, or the
+   * call's own duration where it had none.
+   */
+  duration_ms?: number | null;
+  /**
+   * Subagents that did the review: the one a skill forks to run in, and
+   * those started from the review's thread before the person's next
+   * prompt, with the subagents they started in turn.
+   */
+  subagents?: number;
+  /**
+   * Those subagents' estimated cost. A floor: the main thread's own
+   * tokens during the review are not in it. Null when none has a cost,
+   * and for a review that ran in the cloud, which is billed apart.
+   */
+  estimated_cost_usd?: number | null;
+  /**
+   * Findings reported at the end, where the agent reports them as a
+   * list (`ReportFindings`). Else none.
+   */
+  findings?: number | null;
 }
 /**
  * How much of a session's changes is still in the files, measured later.

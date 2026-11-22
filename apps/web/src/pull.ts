@@ -1,6 +1,6 @@
 // A pull request's page: where it is, how current its figures are, and its
 // reviews and comments counted by whose they are.
-import type { PullCost, PullFeedback, PullMatches, PullRow, PullSession } from "@sessionly/schema";
+import type { LocalReviewRun, LocalReviews, PullCost, PullFeedback, PullMatches, PullRow, PullSession } from "@sessionly/schema";
 import { count, dateTime, usd, usdEach } from "./format.ts";
 
 /** Whether a cost is a floor: a session of it has no cost figure, or one that leaves requests out. */
@@ -17,6 +17,44 @@ const unsure = (floor: boolean, estimated: boolean, word = "at least "): string 
 export function costText(cost: number | null, estimated: boolean, floor: boolean, word?: string): string {
   if (cost == null) return "–";
   return `${unsure(floor, estimated, word)}${usdOf(cost)}`;
+}
+
+/**
+ * How long after the run before it each review run started, in milliseconds:
+ * the time one iteration took. Null for the first, and where a time is missing.
+ */
+export function reviewGaps(each: readonly Pick<LocalReviewRun, "at">[]): (number | null)[] {
+  return each.map((run, i) => {
+    const before = i > 0 ? each[i - 1]!.at : null;
+    if (!run.at || !before) return null;
+    const gap = Date.parse(run.at) - Date.parse(before);
+    return Number.isFinite(gap) && gap >= 0 ? gap : null;
+  });
+}
+
+/**
+ * The review runs of a pull request's sessions in a sentence: "Reviewed 3 times
+ * before and during review (2 xhigh, 1 high), 1 of them in the cloud. Review
+ * subagents: $12.40 of the $85.43." `spent` is the pull request's cost.
+ */
+export function localReviewsLine(r: LocalReviews | null, spent: number | null): string {
+  if (!r) return "No session of it is known.";
+  const unknown =
+    r.sessions_unknown > 0
+      ? ` ${count(r.sessions_unknown)} of its ${r.sessions_unknown === 1 ? "sessions was" : "sessions were"} from an older Sessionly or an agent whose review commands are not read: not known for ${r.sessions_unknown === 1 ? "it" : "them"}.`
+      : "";
+  if (r.runs === 0) return `No review command ran in its sessions.${unknown}`;
+  const efforts = Object.entries(r.by_effort)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([effort, n]) => `${count(n)} ${effort}`);
+  const parts = [`Reviewed ${r.runs === 1 ? "once" : `${count(r.runs)} times`} before and during review${efforts.length ? ` (${efforts.join(", ")})` : ""}`];
+  if (r.cloud > 0) parts.push(`${count(r.cloud)} of them in the cloud`);
+  let line = `${parts.join(", ")}.`;
+  if (r.findings != null) line += ` ${count(r.findings)} findings reported.`;
+  if (r.cost_usd != null) line += ` Review subagents: ${usdOf(r.cost_usd)}${spent != null ? ` of the ${usdOf(spent)}` : ""}.`;
+  if (r.shared_with > 0)
+    line += ` Some of those ran in sessions it shares with ${count(r.shared_with)} other pull ${r.shared_with === 1 ? "request" : "requests"}, and name none: they are counted on each.`;
+  return line + unknown;
 }
 
 /** What a pull request's sessions cost it. */

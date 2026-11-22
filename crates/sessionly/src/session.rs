@@ -86,6 +86,10 @@ pub struct Session {
     /// changed meanwhile, with `off` nothing.
     pub files: Vec<FileTouched>,
     pub subagents: Vec<Subagent>,
+    /// Times a review command ran in the session (see `reviews`): the same
+    /// in every content mode, since nothing of a run's arguments is kept but
+    /// the effort and a pull request number.
+    pub reviews: Vec<ReviewRun>,
     /// Instruction files (CLAUDE.md, rules) loaded into the session.
     pub instruction_files: Vec<String>,
 }
@@ -219,6 +223,11 @@ pub struct Counts {
     /// Tool calls refused by auto mode.
     pub permission_denials: u64,
     pub subagents: u64,
+    /// Review runs: the length of `Session::reviews`. Left out for an agent
+    /// whose review commands are not read (all but Claude Code): not known,
+    /// which is not none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviews: Option<u64>,
     pub compactions: u64,
     /// Turns that ended in an API error.
     pub api_errors: u64,
@@ -263,6 +272,10 @@ pub struct ToolCall {
     /// Set when a subagent made the call.
     pub agent_id: Option<String>,
     pub tool: String,
+    /// For a `Skill` call, the skill's name as written (`code-review`,
+    /// `plugin:name`). A name, like the tool's, so it is kept in every
+    /// content mode; its arguments are not.
+    pub skill: Option<String>,
     /// Model that made the call. Null where the agent does not say: Grok, and
     /// Cursor turns the hooks did not see.
     pub model: Option<String>,
@@ -311,6 +324,75 @@ pub struct Subagent {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub estimated_cost_usd: Option<f64>,
+}
+
+/// One run of a review command: `/code-review` and the like (the names are
+/// in `reviews`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct ReviewRun {
+    /// The tool-use id of the Skill call; for a slash command, the turn's
+    /// prompt id, or one made from its time where there is none.
+    pub id: String,
+    pub at: Option<DateTime<Utc>>,
+    /// What was run, as written: "code-review", "ultrareview", "review",
+    /// "security-review", or a plugin's "name:code-review".
+    pub command: String,
+    /// How it was started.
+    pub via: ReviewVia,
+    /// Where the review itself ran.
+    pub ran: ReviewRan,
+    /// The first argument when it is one of low, medium, high, xhigh, max
+    /// or ultra. Else none.
+    pub effort: Option<String>,
+    /// A pull request number among the arguments: `621`, `#528` or a pull
+    /// request's URL. Else none.
+    pub pull_number: Option<u64>,
+    /// Set when a subagent ran it.
+    pub agent_id: Option<String>,
+    pub status: ToolStatus,
+    /// From the start to the end of the last of its subagents, or the
+    /// call's own duration where it had none.
+    pub duration_ms: Option<u64>,
+    /// Subagents that did the review: the one a skill forks to run in, and
+    /// those started from the review's thread before the person's next
+    /// prompt, with the subagents they started in turn.
+    pub subagents: u64,
+    /// Those subagents' estimated cost. A floor: the main thread's own
+    /// tokens during the review are not in it. Null when none has a cost,
+    /// and for a review that ran in the cloud, which is billed apart.
+    pub estimated_cost_usd: Option<f64>,
+    /// Findings reported at the end, where the agent reports them as a
+    /// list (`ReportFindings`). Else none.
+    pub findings: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewVia {
+    /// The model called the `Skill` tool.
+    #[default]
+    Skill,
+    /// The person typed the command.
+    SlashCommand,
+    /// Codex's `/review`.
+    CodexReview,
+    /// A value written by a newer version.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewRan {
+    /// On the machine (or sandbox) the session ran in.
+    #[default]
+    Local,
+    /// In the cloud: `/ultrareview`, `/code-review ultra`.
+    Cloud,
+    /// A value written by a newer version.
+    #[serde(other)]
+    Unknown,
 }
 
 /// How a tool call ended.

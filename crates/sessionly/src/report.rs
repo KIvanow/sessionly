@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use crate::ledger::{Group, GroupBy, Listed, Rewrite, RewriteRow};
 use crate::rewrite::{CHECKPOINTS, REWRITTEN_BELOW};
-use crate::session::{Outcome, RewriteCheckpoint, Session, ToolStatus};
+use crate::session::{Outcome, ReviewRan, ReviewVia, RewriteCheckpoint, Session, ToolStatus};
 use crate::transcript::{CostSource, TranscriptSummary, Usage, UsageByModel};
 
 pub fn transcript(s: &TranscriptSummary) -> String {
@@ -483,6 +483,57 @@ pub fn session(
         }
     }
 
+    if !s.reviews.is_empty() {
+        out.push_str("\nReviews\n");
+        for run in &s.reviews {
+            let mut command = format!("/{}", run.command);
+            if let Some(effort) = &run.effort {
+                let _ = write!(command, " {effort}");
+            }
+            if let Some(n) = run.pull_number {
+                let _ = write!(command, " #{n}");
+            }
+            let mut notes: Vec<String> = Vec::new();
+            if run.ran == ReviewRan::Cloud {
+                notes.push("in the cloud".into());
+            }
+            if run.via == ReviewVia::Skill {
+                notes.push("as a skill".into());
+            }
+            if let Some(agent) = &run.agent_id {
+                notes.push(format!("by subagent {}", short(agent)));
+            }
+            if let Some(n) = run.findings {
+                notes.push(format!("{n} findings"));
+            }
+            if !matches!(run.status, ToolStatus::Ok) {
+                notes.push(format!("{:?}", run.status).to_lowercase());
+            }
+            let cost = match (run.estimated_cost_usd, run.ran) {
+                (Some(cost), _) => usd(cost),
+                (None, ReviewRan::Cloud) => "not known".into(),
+                (None, _) => "-".into(),
+            };
+            let _ = writeln!(
+                out,
+                "  {}  {:<28} {:>2} subagents  {:>9}  {:>8}  {}",
+                run.at
+                    .map(|t| t.format("%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "           ".into()),
+                clip(&command, 28),
+                run.subagents,
+                cost,
+                run.duration_ms
+                    .map(|ms| duration(ms as i64))
+                    .unwrap_or_else(|| "-".into()),
+                notes.join(", ")
+            );
+        }
+        if s.reviews.iter().any(|r| r.estimated_cost_usd.is_some()) {
+            out.push_str("  (cost: the review's subagents only, part of the session's cost)\n");
+        }
+    }
+
     if !s.subagents.is_empty() {
         out.push_str("\nSubagents\n");
         for sub in &s.subagents {
@@ -650,10 +701,19 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
         .max()
         .unwrap_or(0)
         .clamp(heading.len(), 40);
+    // Shown only where a session in the filter has a review run.
+    let reviews = groups.iter().any(|g| g.reviews > 0);
+    let reviews_column = |text: String| {
+        if reviews {
+            format!("  {text:>7}")
+        } else {
+            String::new()
+        }
+    };
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{:<width$}  {:>8}  {:>9}  {:>8}  {:>7}  {:>14}  {:>5}  {:>14}  {:>13}  {:>10}",
+        "{:<width$}  {:>8}  {:>9}  {:>8}  {:>7}  {:>14}  {:>5}  {:>14}  {:>13}  {:>10}{}",
         heading,
         "SESSIONS",
         "COST",
@@ -663,12 +723,17 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
         "FILES",
         "LINES",
         "REWRITTEN",
-        "LINES KEPT"
+        "LINES KEPT",
+        reviews_column("REVIEWS".into())
     );
     let mut without_cost = 0;
     for g in groups {
         if g.key == "total" {
-            let _ = writeln!(out, "{}", "-".repeat(width + 106));
+            let _ = writeln!(
+                out,
+                "{}",
+                "-".repeat(width + 106 + if reviews { 9 } else { 0 })
+            );
             without_cost = g.sessions_without_cost;
         }
         let rewritten = match g.rewrite.rate() {
@@ -682,7 +747,7 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
         };
         let _ = writeln!(
             out,
-            "{:<width$}  {:>8}  {:>9}  {:>8}  {:>7}  {:>14}  {:>5}  {:>14}  {:>13}  {:>10}",
+            "{:<width$}  {:>8}  {:>9}  {:>8}  {:>7}  {:>14}  {:>5}  {:>14}  {:>13}  {:>10}{}",
             fit(&label(g), width),
             g.sessions,
             if g.sessions_without_cost == g.sessions && g.sessions > 0 {
@@ -696,7 +761,8 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
             g.files_changed,
             format!("+{} -{}", g.lines_added, g.lines_removed),
             rewritten,
-            percent(g.rewrite.line_survival())
+            percent(g.rewrite.line_survival()),
+            reviews_column(g.reviews.to_string())
         );
     }
     if without_cost > 0 {

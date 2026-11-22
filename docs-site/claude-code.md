@@ -29,6 +29,18 @@ Tool events are hooked for every tool. Events that change Claude Code's behaviou
 (WorktreeCreate, WorktreeRemove, PreModelSwitch) are left out on purpose, and so is
 MessageDisplay, which fires for every piece of a reply as it arrives.
 
+## Review runs
+
+A session's record counts the review commands that ran in it, `/code-review` and the like,
+with their effort, the pull request they named, whether they ran in the cloud, and what their
+subagents cost (see [Review runs](session-record.md#review-runs)). They come from the `Skill`
+tool's calls, from `UserPromptExpansion` and the prompts for a typed command, and in an
+imported transcript from the rows Claude Code writes for a command it runs itself
+(`/ultrareview`) and for a skill it forks. The transcript, which is read for cost anyway, adds
+three things the hooks do not have: the subagent a typed command forked, the effort Claude
+Code reused for a command typed without one, and the number of findings the review's last
+reply names.
+
 ## Hook overhead
 
 The capture hook runs on every event, and tool calls fire two or three events each, so it has to

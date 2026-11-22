@@ -330,6 +330,7 @@ fn facts(
         usage: models,
         subagents: Vec::new(),
         tool_models: HashMap::new(),
+        ..Default::default()
     }
 }
 

@@ -1,0 +1,1041 @@
+//! Review runs: the times a review command ran in a session, at what effort,
+//! on the machine or in the cloud, and what its subagents cost.
+//!
+//! A run starts in one of three ways, all seen in Claude Code transcripts:
+//! - The model calls the `Skill` tool with `skill: "code-review"`. The skill
+//!   forks a subagent to run in, and the call's result names it (`agentId`).
+//!   One run is one tool-use id: a transcript repeats the call's row.
+//! - The person types `/code-review xhigh #590`: a prompt with that text, and
+//!   for the hooks a `UserPromptExpansion` naming the command.
+//! - A command Claude Code runs itself, `/ultrareview`: a row of its own,
+//!   which the import turns into a `UserPromptExpansion` as the hooks have it.
+//!
+//! Reviews started by a prompt in words ("review this branch") leave no
+//! command and are not counted: they can't be told from any other subagent
+//! without reading text.
+//!
+//! Nothing of a command's arguments is kept but the effort and a pull request
+//! number, parsed here on the machine.
+
+use std::collections::{HashMap, HashSet};
+
+use chrono::{DateTime, Utc};
+use serde_json::Value;
+
+use crate::session::{ReviewRan, ReviewRun, ReviewVia, Session, ToolStatus};
+use crate::transcript::Facts;
+
+/// The commands that are reviews. A plugin's skill matches on its last part
+/// (`anything:code-review`). A team's own review skill under another name is
+/// not counted.
+pub const COMMANDS: &[&str] = &["code-review", "review", "security-review", "ultrareview"];
+
+/// The efforts a review command takes as its first argument.
+const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
+
+/// A typed command and the prompt it is in, taken as one start within this.
+const SAME_START_SECONDS: i64 = 5;
+
+/// True for the name of a review command, with or without its slash.
+pub fn is_review(name: &str) -> bool {
+    let name = name.trim().trim_start_matches('/');
+    let last = name.rsplit(':').next().unwrap_or(name);
+    COMMANDS.contains(&last)
+}
+
+/// The command and its arguments, if `text` is a slash command.
+pub fn slash_command(text: &str) -> Option<(&str, &str)> {
+    let text = text.trim_start().strip_prefix('/')?;
+    let (name, args) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    (!name.is_empty()).then_some((name, args.trim()))
+}
+
+/// The effort and the pull request number in a review command's arguments.
+/// Everything else in them (free text, paths) is left where it is.
+///
+/// A bare number is a pull request's only as the first or second argument
+/// (`621`, `xhigh 621`): further on it is a number in a sentence ("the last
+/// 3 commits"). `#528` and a pull request's URL are one wherever they are.
+pub fn parse_args(args: &str) -> (Option<String>, Option<u64>) {
+    let (mut effort, mut number) = (None, None);
+    let mut position = 0;
+    let mut words = args.split_whitespace();
+    while let Some(word) = words.next() {
+        if word == "--max-findings" {
+            words.next();
+            continue;
+        }
+        if word.starts_with("--") {
+            continue;
+        }
+        position += 1;
+        let bare = word.trim_end_matches(|c: char| ".,;:".contains(c));
+        if position == 1 {
+            let lower = bare.to_ascii_lowercase();
+            if EFFORTS.contains(&lower.as_str()) {
+                effort = Some(lower);
+                continue;
+            }
+        }
+        let named = bare.starts_with('#') || bare.contains("/pull/");
+        if number.is_none() && (named || position <= 2) {
+            number = pull_number(bare);
+        }
+    }
+    (effort, number)
+}
+
+/// `621`, `#528`, or `https://github.com/o/r/pull/621`.
+fn pull_number(word: &str) -> Option<u64> {
+    let digits = match word.split_once("/pull/") {
+        Some((_, rest)) => rest.split(|c: char| !c.is_ascii_digit()).next()?,
+        None => word.strip_prefix('#').unwrap_or(word),
+    };
+    let plain = !digits.is_empty() && digits.len() <= 9;
+    if plain && digits.bytes().all(|b| b.is_ascii_digit()) {
+        digits.parse().ok().filter(|n| *n > 0)
+    } else {
+        None
+    }
+}
+
+fn ran(command: &str, effort: Option<&str>) -> ReviewRan {
+    let last = command.rsplit(':').next().unwrap_or(command);
+    if last == "ultrareview" || effort == Some("ultra") {
+        ReviewRan::Cloud
+    } else {
+        ReviewRan::Local
+    }
+}
+
+/// How many findings a review's last reply says it has, where it says so in
+/// one of the ways the review skills end: a JSON list of them, "I found 3
+/// issues in …", "15 findings, most severe first". Read here on the machine;
+/// only the number is kept. None when the reply says it another way.
+pub fn findings_in(reply: &str) -> Option<u64> {
+    let reply = reply.trim();
+    if let Some(block) = reply.strip_prefix("```json") {
+        let list = block.rsplit_once("```").map_or(block, |(list, _)| list);
+        return match serde_json::from_str::<Value>(list.trim()).ok()? {
+            Value::Array(found) => Some(found.len() as u64),
+            _ => None,
+        };
+    }
+    let mut words = reply.split_whitespace().map(|w| {
+        w.trim_matches(|c: char| !c.is_alphanumeric())
+            .to_ascii_lowercase()
+    });
+    let mut first = words.next()?;
+    if first == "i" {
+        if words.next()? != "found" {
+            return None;
+        }
+        first = words.next()?;
+    }
+    let count = match first.as_str() {
+        "no" => 0,
+        digits => digits.parse().ok().filter(|_| digits.len() <= 4)?,
+    };
+    const THINGS: &[&str] = &[
+        "finding", "findings", "issue", "issues", "problem", "problems", "bug", "bugs",
+    ];
+    THINGS.contains(&words.next()?.as_str()).then_some(count)
+}
+
+/// The effort Claude Code says it reused for a command typed without one:
+/// "Reusing high effort, the level you typed last time."
+pub fn reused_effort(said: &str) -> Option<String> {
+    let mut words = said.split_whitespace();
+    if words.next()? != "Reusing" {
+        return None;
+    }
+    let effort = words.next()?.to_ascii_lowercase();
+    (words.next()? == "effort," && EFFORTS.contains(&effort.as_str())).then_some(effort)
+}
+
+/// A command the person typed, or that Claude Code ran.
+#[derive(Debug, Clone)]
+struct Typed {
+    prompt_id: Option<String>,
+    at: Option<DateTime<Utc>>,
+    command: String,
+    effort: Option<String>,
+    pull_number: Option<u64>,
+    /// The subagent the command forked to run in, where that is known.
+    fork: Option<String>,
+}
+
+/// What the events show about review runs, gathered while they are read.
+#[derive(Debug, Default)]
+pub struct Seen {
+    /// Skill calls of a review command: tool-use id → effort and number.
+    skill_calls: HashMap<String, (Option<String>, Option<u64>)>,
+    /// Subagents a call started (an `Agent` call, or a skill that forked):
+    /// the subagent's id → the call's tool-use id.
+    started_by: HashMap<String, String>,
+    /// `ReportFindings` calls: tool-use id → how many findings.
+    findings: HashMap<String, u64>,
+    typed: Vec<Typed>,
+}
+
+impl Seen {
+    /// Take in one event of a session from `source`.
+    pub fn event(&mut self, source: &str, hook: &str, p: &Value, at: Option<DateTime<Utc>>) {
+        let id = p["tool_use_id"].as_str().filter(|id| !id.is_empty());
+        match (hook, id) {
+            ("PreToolUse" | "PostToolUse" | "PostToolUseFailure", Some(id)) => {
+                let input = &p["tool_input"];
+                match p["tool_name"].as_str() {
+                    Some("Skill") => {
+                        if input["skill"].as_str().is_some_and(is_review) {
+                            let args = input["args"].as_str().unwrap_or_default();
+                            self.skill_calls.insert(id.into(), parse_args(args));
+                        }
+                    }
+                    Some("ReportFindings") => {
+                        if let Some(list) = input["findings"].as_array() {
+                            self.findings.insert(id.into(), list.len() as u64);
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(agent) = p["tool_response"]["agentId"].as_str() {
+                    self.started_by.insert(agent.into(), id.into());
+                }
+            }
+            // Only Claude Code's commands are known; Codex's `/review` is
+            // recorded otherwise.
+            _ if source != crate::paths::CLAUDE_CODE => {}
+            ("UserPromptSubmit", _) => {
+                if let Some((name, args)) = p["prompt"].as_str().and_then(slash_command) {
+                    self.typed(p, at, name, args);
+                }
+            }
+            ("UserPromptExpansion", _) => {
+                let kind = p["expansion_type"].as_str().unwrap_or("slash_command");
+                if let (Some(name), "slash_command") = (p["command_name"].as_str(), kind) {
+                    let args = p["command_args"].as_str().unwrap_or_default();
+                    self.typed(p, at, name.trim_start_matches('/'), args);
+                    // Written by the import, from the row that says where it forked.
+                    if let (Some(fork), Some(typed)) =
+                        (p["forked_agent_id"].as_str(), self.typed.last_mut())
+                    {
+                        typed.fork.get_or_insert_with(|| fork.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn typed(&mut self, p: &Value, at: Option<DateTime<Utc>>, name: &str, args: &str) {
+        if !is_review(name) {
+            return;
+        }
+        let prompt_id = p["prompt_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(String::from);
+        let (effort, pull_number) = parse_args(args);
+        // The hooks see a typed command twice: as the prompt and as its
+        // expansion. The same command with other arguments, typed a moment
+        // later, is another run.
+        let again = self.typed.iter().position(|t| {
+            t.command == name
+                && match (&t.prompt_id, &prompt_id) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => match (t.at, at) {
+                        (Some(a), Some(b)) => {
+                            (a - b).num_seconds().abs() <= SAME_START_SECONDS
+                                && (&t.effort, t.pull_number) == (&effort, pull_number)
+                        }
+                        _ => false,
+                    },
+                }
+        });
+        if let Some(i) = again {
+            // Last, so that what is said of it next is said of this one.
+            let typed = self.typed.remove(i);
+            self.typed.push(typed);
+            return;
+        }
+        self.typed.push(Typed {
+            prompt_id,
+            at,
+            command: name.to_string(),
+            effort,
+            pull_number,
+            fork: None,
+        });
+    }
+}
+
+/// The session's review runs, in the order they started. `s` is complete:
+/// its tool calls, prompts and subagents with their costs. `facts` are what
+/// the transcript adds, where there is one: the subagent a typed command
+/// forked, the effort Claude Code reused for one typed without, and how many
+/// findings a review's last reply names.
+pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
+    let mut runs: Vec<ReviewRun> = Vec::new();
+    // The subagent a run forked to run in, by the run's id.
+    let mut forks: HashMap<String, &str> = HashMap::new();
+    for (agent, call) in &seen.started_by {
+        if seen.skill_calls.contains_key(call) {
+            forks.insert(call.clone(), agent);
+        }
+    }
+    for call in &s.tool_calls {
+        let Some((effort, pull_number)) = seen.skill_calls.get(&call.tool_use_id) else {
+            continue;
+        };
+        let command = call.skill.clone().unwrap_or_default();
+        runs.push(ReviewRun {
+            id: call.tool_use_id.clone(),
+            at: call.at,
+            ran: ran(&command, effort.as_deref()),
+            command,
+            via: ReviewVia::Skill,
+            effort: effort.clone(),
+            pull_number: *pull_number,
+            agent_id: call.agent_id.clone(),
+            status: call.status,
+            duration_ms: call.duration_ms,
+            ..Default::default()
+        });
+    }
+
+    let next_prompt = |at: Option<DateTime<Utc>>| {
+        let at = at?;
+        s.prompts
+            .iter()
+            .filter_map(|p| p.at)
+            .filter(|t| *t > at)
+            .min()
+    };
+    let typed = typed_with(seen, facts, &next_prompt);
+    for typed in &typed {
+        let ran_at = ran(&typed.command, typed.effort.as_deref());
+        // `/ultrareview` leads to a skill call in the same turn: one start.
+        // A command that forked ran where it forked, and led to no call.
+        let end = next_prompt(typed.at);
+        let same_start = runs.iter_mut().find(|r| {
+            typed.fork.is_none()
+                && r.via == ReviewVia::Skill
+                && r.agent_id.is_none()
+                && r.ran == ran_at
+                && (r.ran == ReviewRan::Cloud || r.command == typed.command)
+                && match (r.at, typed.at) {
+                    (Some(call), Some(start)) => call >= start && end.is_none_or(|e| call < e),
+                    _ => false,
+                }
+        });
+        if let Some(run) = same_start {
+            run.via = ReviewVia::SlashCommand;
+            run.at = typed.at;
+            run.command = typed.command.clone();
+            run.effort = run.effort.take().or(typed.effort.clone());
+            run.pull_number = run.pull_number.or(typed.pull_number);
+            continue;
+        }
+        let id = match &typed.prompt_id {
+            Some(id) => id.clone(),
+            None => format!(
+                "{}@{}",
+                typed.command,
+                typed.at.map(|t| t.to_rfc3339()).unwrap_or_default()
+            ),
+        };
+        if let Some(fork) = &typed.fork {
+            forks.insert(id.clone(), fork);
+        }
+        runs.push(ReviewRun {
+            id,
+            at: typed.at,
+            command: typed.command.clone(),
+            via: ReviewVia::SlashCommand,
+            ran: ran_at,
+            effort: typed.effort.clone(),
+            pull_number: typed.pull_number,
+            status: ToolStatus::Ok,
+            ..Default::default()
+        });
+    }
+    runs.sort_by(|a, b| a.at.cmp(&b.at).then(a.id.cmp(&b.id)));
+    measure(&mut runs, s, seen, &forks, facts);
+    runs
+}
+
+/// The typed commands, with what the transcript says of each: where it
+/// forked, if the events did not say, and the effort it reused.
+fn typed_with(
+    seen: &Seen,
+    facts: Option<&Facts>,
+    next_prompt: &dyn Fn(Option<DateTime<Utc>>) -> Option<DateTime<Utc>>,
+) -> Vec<Typed> {
+    let mut typed = seen.typed.clone();
+    let Some(facts) = facts else {
+        return typed;
+    };
+    let mut taken: HashSet<String> = typed.iter().filter_map(|t| t.fork.clone()).collect();
+    for t in &mut typed {
+        let Some(start) = t.at else {
+            continue;
+        };
+        let end = next_prompt(t.at);
+        // The row is written as the command starts, a moment either side of
+        // the prompt's own time.
+        let in_turn = |at: Option<DateTime<Utc>>| {
+            at.is_some_and(|at| {
+                (start - at).num_seconds() <= SAME_START_SECONDS && end.is_none_or(|e| at < e)
+            })
+        };
+        if t.fork.is_none() {
+            let launch = facts.review_launches.iter().find(|l| {
+                !taken.contains(l.agent_id.as_str())
+                    && l.command == t.command
+                    && in_turn(l.at)
+                    && (&l.effort, l.pull_number) == (&t.effort, t.pull_number)
+            });
+            if let Some(launch) = launch {
+                taken.insert(launch.agent_id.clone());
+                t.fork = Some(launch.agent_id.clone());
+            }
+        }
+        if t.effort.is_none() {
+            let reused = facts.reused_efforts.iter().find(|r| in_turn(r.at));
+            t.effort = reused.map(|r| r.effort.clone());
+        }
+    }
+    typed
+}
+
+/// Each run's subagents, their cost and time, and its findings.
+fn measure(
+    runs: &mut [ReviewRun],
+    s: &Session,
+    seen: &Seen,
+    forks: &HashMap<String, &str>,
+    facts: Option<&Facts>,
+) {
+    let calls: HashMap<&str, &crate::session::ToolCall> = s
+        .tool_calls
+        .iter()
+        .map(|c| (c.tool_use_id.as_str(), c))
+        .collect();
+    // A subagent's thread (none: the main one) and when it was started from
+    // there, where a call says it started it.
+    let parent: HashMap<&str, (Option<&str>, Option<DateTime<Utc>>)> = seen
+        .started_by
+        .iter()
+        .filter_map(|(agent, call)| {
+            let call = calls.get(call.as_str())?;
+            Some((agent.as_str(), (call.agent_id.as_deref(), call.at)))
+        })
+        .collect();
+    let forked: HashSet<&str> = forks.values().copied().collect();
+    let next_prompt = |at: DateTime<Utc>| s.prompts.iter().filter_map(|p| p.at).find(|t| *t > at);
+    // The run a thing that happened at `at` in `thread` belongs to: the
+    // latest run of that thread started before it, and in the main thread
+    // before the person's next prompt. A review in the cloud has no
+    // subagents here but the one it forked (`local`).
+    let owner = |thread: Option<&str>, at: Option<DateTime<Utc>>, local: bool| -> Option<usize> {
+        let at = at?;
+        let i = runs.iter().rposition(|r| {
+            r.agent_id.as_deref() == thread
+                && r.at.is_some_and(|t| t <= at)
+                && !(local && r.ran == ReviewRan::Cloud)
+        })?;
+        let start = runs[i].at?;
+        let in_turn = thread.is_some() || next_prompt(start).is_none_or(|end| at < end);
+        in_turn.then_some(i)
+    };
+
+    let mut members: Vec<HashSet<&str>> = vec![HashSet::new(); runs.len()];
+    for (i, run) in runs.iter().enumerate() {
+        if let Some(fork) = forks.get(run.id.as_str()) {
+            members[i].insert(fork);
+        }
+    }
+    for sub in &s.subagents {
+        let id = sub.agent_id.as_str();
+        if forked.contains(id) {
+            continue;
+        }
+        // Not known who started it: by time, and only for the main thread.
+        let i = match parent.get(id) {
+            Some((thread, at)) => owner(*thread, *at, true),
+            None => owner(None, sub.started_at, true),
+        };
+        if let Some(i) = i.filter(|i| !forks.contains_key(runs[*i].id.as_str())) {
+            members[i].insert(id);
+        }
+    }
+    // And whatever those subagents started in turn.
+    for set in &mut members {
+        loop {
+            let more: Vec<&str> = parent
+                .iter()
+                .filter(|(agent, (thread, _))| {
+                    !set.contains(*agent) && thread.is_some_and(|t| set.contains(t))
+                })
+                .map(|(agent, _)| *agent)
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            set.extend(more);
+        }
+    }
+
+    let mut findings: Vec<Option<u64>> = vec![None; runs.len()];
+    for (call, n) in &seen.findings {
+        let Some(call) = calls.get(call.as_str()) else {
+            continue;
+        };
+        let thread = call.agent_id.as_deref();
+        let i = thread
+            .and_then(|t| members.iter().position(|m| m.contains(t)))
+            .or_else(|| owner(thread, call.at, false));
+        if let Some(i) = i {
+            *findings[i].get_or_insert(0) += n;
+        }
+    }
+
+    for (i, run) in runs.iter_mut().enumerate() {
+        let subs: Vec<_> = s
+            .subagents
+            .iter()
+            .filter(|sub| members[i].contains(sub.agent_id.as_str()))
+            .collect();
+        run.subagents = subs.len() as u64;
+        let costs: Vec<f64> = subs.iter().filter_map(|s| s.estimated_cost_usd).collect();
+        run.estimated_cost_usd = match run.ran {
+            ReviewRan::Local if !costs.is_empty() => {
+                // To a millionth of a dollar: the same session gives the same upload.
+                Some((costs.iter().sum::<f64>() * 1e6).round() / 1e6)
+            }
+            _ => None,
+        };
+        let last_end = subs.iter().filter_map(|s| s.ended_at).max();
+        if let (Some(start), Some(end)) = (run.at, last_end) {
+            if end > start {
+                run.duration_ms = Some((end - start).num_milliseconds() as u64);
+            }
+        }
+        // Reported as a list, or else what the last reply of the subagent
+        // the review ran in says.
+        run.findings = findings[i].or_else(|| {
+            let fork = forks.get(run.id.as_str())?;
+            let said = facts?.subagents.iter().find(|sub| sub.agent_id == *fork)?;
+            said.findings
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::normalize::from_events;
+    use crate::transcript::{Facts, SubagentFacts};
+    use serde_json::json;
+
+    fn event(second: u32, hook: &str, mut payload: Value) -> Value {
+        payload["session_id"] = json!("s1");
+        json!({
+            "v": 1, "source": "claude-code", "hook": hook, "session_id": "s1",
+            "received_at": format!("2026-11-20T10:{:02}:{:02}.000000Z", second / 60, second % 60),
+            "payload": payload,
+        })
+    }
+
+    fn prompt(second: u32, id: &str, text: &str) -> Value {
+        event(
+            second,
+            "UserPromptSubmit",
+            json!({ "prompt_id": id, "prompt": text }),
+        )
+    }
+
+    /// A Skill call and its result; `fork` is the subagent it forked.
+    fn skill(second: u32, id: &str, name: &str, args: &str, fork: Option<&str>) -> [Value; 2] {
+        let input = json!({ "skill": name, "args": args });
+        let mut response = json!({ "success": true, "commandName": name });
+        if let Some(fork) = fork {
+            response["status"] = json!("forked");
+            response["agentId"] = json!(fork);
+        }
+        let call = json!({ "tool_use_id": id, "tool_name": "Skill", "tool_input": input });
+        let mut done = call.clone();
+        done["tool_response"] = response;
+        [
+            event(second, "PreToolUse", call),
+            event(second, "PostToolUse", done),
+        ]
+    }
+
+    /// An Agent call from `thread` (none: the main one) that started `agent`.
+    fn agent_call(second: u32, id: &str, thread: Option<&str>, agent: &str) -> [Value; 2] {
+        let mut call = json!({ "tool_use_id": id, "tool_name": "Agent",
+                               "tool_input": { "description": "look" } });
+        if let Some(thread) = thread {
+            call["agent_id"] = json!(thread);
+        }
+        let mut done = call.clone();
+        done["tool_response"] = json!({ "status": "completed", "agentId": agent });
+        [
+            event(second, "PreToolUse", call),
+            event(second, "PostToolUse", done),
+        ]
+    }
+
+    fn subagent(start: u32, end: u32, id: &str) -> [Value; 2] {
+        let who = json!({ "agent_id": id, "agent_type": "general-purpose" });
+        [
+            event(start, "SubagentStart", who.clone()),
+            event(end, "SubagentStop", who),
+        ]
+    }
+
+    fn costs(of: &[(&str, f64)]) -> Facts {
+        Facts {
+            subagents: of
+                .iter()
+                .map(|(id, usd)| SubagentFacts {
+                    agent_id: id.to_string(),
+                    estimated_cost_usd: Some(*usd),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn session(events: Vec<Vec<Value>>, facts: Option<&Facts>) -> Session {
+        let events: Vec<Value> = events.into_iter().flatten().collect();
+        from_events(&events, facts, "claude-code").unwrap()
+    }
+
+    #[test]
+    fn a_review_skill_call_is_a_run_and_another_skill_is_not() {
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "review it")],
+                skill(1, "t1", "code-review", "xhigh #621", None).into(),
+                skill(2, "t2", "simplify", "", None).into(),
+            ],
+            None,
+        );
+        assert_eq!(s.counts.reviews, Some(1));
+        let run = &s.reviews[0];
+        assert_eq!(
+            (
+                run.id.as_str(),
+                run.command.as_str(),
+                run.via,
+                run.ran,
+                run.effort.as_deref(),
+                run.pull_number,
+                run.status
+            ),
+            (
+                "t1",
+                "code-review",
+                ReviewVia::Skill,
+                ReviewRan::Local,
+                Some("xhigh"),
+                Some(621),
+                ToolStatus::Ok
+            )
+        );
+        let skills: Vec<_> = s.tool_calls.iter().map(|c| c.skill.as_deref()).collect();
+        assert_eq!(skills, [Some("code-review"), Some("simplify")]);
+    }
+
+    #[test]
+    fn the_same_call_on_several_rows_is_one_run() {
+        let [pre, post] = skill(1, "t1", "code-review", "high", None);
+        let s = session(vec![vec![pre.clone(), pre, post.clone(), post]], None);
+        assert_eq!(s.reviews.len(), 1);
+    }
+
+    #[test]
+    fn a_forked_review_costs_what_its_subagents_cost() {
+        let facts = costs(&[
+            ("fork", 1.5),
+            ("child", 0.25),
+            ("other", 9.0),
+            ("later", 4.0),
+        ]);
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "review the pull request")],
+                skill(1, "t1", "code-review", "high 7", Some("fork")).into(),
+                subagent(2, 60, "fork").into(),
+                // the fork's own subagent, started after the person's next prompt
+                agent_call(45, "a1", Some("fork"), "child").into(),
+                subagent(45, 90, "child").into(),
+                // the main thread's own subagent in the same turn
+                agent_call(5, "a2", None, "other").into(),
+                subagent(5, 8, "other").into(),
+                vec![prompt(40, "p2", "next")],
+                subagent(50, 55, "later").into(),
+            ],
+            Some(&facts),
+        );
+        let run = &s.reviews[0];
+        assert_eq!(run.subagents, 2);
+        assert_eq!(run.estimated_cost_usd, Some(1.75));
+        assert_eq!(
+            run.duration_ms,
+            Some(89_000),
+            "until its last subagent ended"
+        );
+    }
+
+    #[test]
+    fn without_a_fork_the_subagents_are_those_of_its_turn() {
+        let facts = costs(&[("in", 2.0), ("deep", 0.5), ("out", 3.0), ("none", 0.0)]);
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "go")],
+                subagent(1, 2, "before").into(),
+                skill(3, "t1", "code-review", "", None).into(),
+                agent_call(4, "a1", None, "in").into(),
+                subagent(4, 20, "in").into(),
+                agent_call(6, "a2", Some("in"), "deep").into(),
+                subagent(6, 10, "deep").into(),
+                vec![prompt(30, "p2", "thanks")],
+                subagent(31, 32, "out").into(),
+            ],
+            Some(&facts),
+        );
+        let run = &s.reviews[0];
+        assert_eq!(run.subagents, 2);
+        assert_eq!(run.estimated_cost_usd, Some(2.5));
+    }
+
+    #[test]
+    fn a_review_with_no_priced_subagent_has_no_cost() {
+        let s = session(
+            vec![
+                skill(1, "t1", "code-review", "", Some("fork")).into(),
+                subagent(2, 3, "fork").into(),
+            ],
+            None,
+        );
+        assert_eq!(
+            (s.reviews[0].subagents, s.reviews[0].estimated_cost_usd),
+            (1, None)
+        );
+    }
+
+    #[test]
+    fn a_run_in_a_subagent_is_marked_and_owns_what_it_started() {
+        let facts = costs(&[("rev", 1.0), ("fork", 2.0), ("sibling", 5.0)]);
+        let [pre, post] = skill(10, "t1", "code-review", "high #751", Some("fork"));
+        let in_sub = |mut e: Value| {
+            e["payload"]["agent_id"] = json!("rev");
+            e
+        };
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "review 751 and 752")],
+                agent_call(1, "a1", None, "rev").into(),
+                agent_call(1, "a2", None, "sibling").into(),
+                subagent(2, 100, "rev").into(),
+                subagent(2, 100, "sibling").into(),
+                vec![in_sub(pre), in_sub(post)],
+                subagent(11, 50, "fork").into(),
+            ],
+            Some(&facts),
+        );
+        let run = &s.reviews[0];
+        assert_eq!(run.agent_id.as_deref(), Some("rev"));
+        assert_eq!((run.subagents, run.estimated_cost_usd), (1, Some(2.0)));
+    }
+
+    #[test]
+    fn a_typed_command_is_one_run_however_the_hooks_see_it() {
+        let s = session(
+            vec![
+                vec![
+                    prompt(0, "p1", "/code-review xhigh #590"),
+                    event(
+                        0,
+                        "UserPromptExpansion",
+                        json!({ "prompt_id": "p1", "expansion_type": "slash_command",
+                                "command_name": "code-review", "command_args": "xhigh #590" }),
+                    ),
+                    prompt(5, "p2", "/model"),
+                    event(
+                        5,
+                        "UserPromptExpansion",
+                        json!({ "prompt_id": "p2", "command_name": "model" }),
+                    ),
+                ],
+                subagent(1, 30, "fork").into(),
+            ],
+            Some(&costs(&[("fork", 3.0)])),
+        );
+        assert_eq!(s.reviews.len(), 1);
+        let run = &s.reviews[0];
+        assert_eq!(
+            (
+                run.id.as_str(),
+                run.via,
+                run.effort.as_deref(),
+                run.pull_number
+            ),
+            ("p1", ReviewVia::SlashCommand, Some("xhigh"), Some(590))
+        );
+        assert_eq!(run.estimated_cost_usd, Some(3.0));
+    }
+
+    #[test]
+    fn ultrareview_runs_in_the_cloud_and_its_skill_call_is_the_same_start() {
+        let expansion = |second: u32, args: &str| {
+            event(
+                second,
+                "UserPromptExpansion",
+                json!({ "command_name": "ultrareview", "command_args": args }),
+            )
+        };
+        let alone = session(
+            vec![vec![expansion(1, "#2")], subagent(2, 3, "nearby").into()],
+            None,
+        );
+        let run = &alone.reviews[0];
+        assert_eq!(
+            (run.ran, run.via, run.pull_number, run.estimated_cost_usd),
+            (ReviewRan::Cloud, ReviewVia::SlashCommand, Some(2), None)
+        );
+        assert_eq!(run.subagents, 0, "what runs here is not the cloud's");
+
+        let facts = costs(&[("fork", 1.0)]);
+        let s = session(
+            vec![
+                vec![expansion(1, "#2")],
+                skill(2, "t1", "code-review", "ultra #2", Some("fork")).into(),
+                subagent(3, 4, "fork").into(),
+                // a later turn's cloud review is a run of its own
+                vec![prompt(10, "p2", "again")],
+                skill(11, "t2", "code-review", "ultra", None).into(),
+            ],
+            Some(&facts),
+        );
+        assert_eq!(s.reviews.len(), 2);
+        let first = &s.reviews[0];
+        assert_eq!(
+            (
+                first.id.as_str(),
+                first.command.as_str(),
+                first.via,
+                first.ran
+            ),
+            (
+                "t1",
+                "ultrareview",
+                ReviewVia::SlashCommand,
+                ReviewRan::Cloud
+            )
+        );
+        assert_eq!(first.at, alone.reviews[0].at);
+        // a cloud review's cost is not known, even with a local subagent
+        assert_eq!((first.subagents, first.estimated_cost_usd), (1, None));
+        assert_eq!(s.reviews[1].via, ReviewVia::Skill);
+    }
+
+    #[test]
+    fn findings_are_counted_where_the_review_reports_them() {
+        let report = |second: u32, id: &str, thread: Option<&str>, n: usize| {
+            let mut call = json!({ "tool_use_id": id, "tool_name": "ReportFindings",
+                                   "tool_input": { "findings": vec![json!({}); n] } });
+            if let Some(thread) = thread {
+                call["agent_id"] = json!(thread);
+            }
+            event(second, "PreToolUse", call)
+        };
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "review both")],
+                skill(1, "t1", "code-review", "", Some("fork")).into(),
+                subagent(2, 9, "fork").into(),
+                vec![report(8, "r1", Some("fork"), 3)],
+                skill(10, "t2", "code-review", "", None).into(),
+                vec![report(12, "r2", None, 2), prompt(20, "p2", "ok")],
+                skill(21, "t3", "code-review", "", None).into(),
+                // a later turn reports nothing for t3
+                vec![prompt(30, "p3", "and?"), report(31, "r3", None, 5)],
+            ],
+            None,
+        );
+        let found: Vec<_> = s.reviews.iter().map(|r| r.findings).collect();
+        assert_eq!(found, [Some(3), Some(2), None]);
+    }
+
+    #[test]
+    fn only_claude_codes_commands_are_read_from_prompts() {
+        let mut e = prompt(0, "p1", "/review");
+        e["source"] = json!("codex");
+        let s = from_events(&[e], None, "codex").unwrap();
+        assert!(s.reviews.is_empty());
+    }
+
+    #[test]
+    fn names_on_the_list_are_reviews() {
+        for name in ["code-review", "/ultrareview", "review", "security-review"] {
+            assert!(is_review(name), "{name}");
+        }
+        assert!(is_review("some-plugin:code-review"));
+        for name in ["model", "clear", "code-reviewer", "my-review", ""] {
+            assert!(!is_review(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn arguments_give_an_effort_and_a_number_and_nothing_else() {
+        let parse = |a: &str| parse_args(a);
+        assert_eq!(parse("xhigh 621"), (Some("xhigh".into()), Some(621)));
+        assert_eq!(parse("xhigh #528"), (Some("xhigh".into()), Some(528)));
+        assert_eq!(parse("high"), (Some("high".into()), None));
+        assert_eq!(parse("ultra"), (Some("ultra".into()), None));
+        assert_eq!(parse(""), (None, None));
+        assert_eq!(parse("#12"), (None, Some(12)));
+        assert_eq!(
+            parse("xhigh. Review the repo at /home/ann/src/web-621 for leaks"),
+            (Some("xhigh".into()), None)
+        );
+        assert_eq!(
+            parse("medium /home/ann/projects/valkey"),
+            (Some("medium".into()), None)
+        );
+        assert_eq!(parse("xhigh demo-mirror"), (Some("xhigh".into()), None));
+        assert_eq!(
+            parse("--max-findings 5 high https://github.com/o/r/pull/77/files"),
+            (Some("high".into()), Some(77))
+        );
+        assert_eq!(parse("--comment XHigh 9"), (Some("xhigh".into()), Some(9)));
+        // the effort is the first argument only
+        assert_eq!(parse("621 high"), (None, Some(621)));
+        // a bare number further on is a number in a sentence
+        assert_eq!(
+            parse("xhigh check the last 3 commits"),
+            (Some("xhigh".into()), None)
+        );
+        assert_eq!(
+            parse("medium look at 12 files"),
+            (Some("medium".into()), None)
+        );
+        assert_eq!(
+            parse("high the fix for #88 again"),
+            (Some("high".into()), Some(88))
+        );
+    }
+
+    #[test]
+    fn a_reply_says_how_many_findings_in_a_few_known_ways() {
+        assert_eq!(
+            findings_in("```json\n[{\"file\":\"a.rs\"},{\"file\":\"b.rs\"}]\n```"),
+            Some(2)
+        );
+        assert_eq!(findings_in("```json\n[]\n```"), Some(0));
+        assert_eq!(findings_in("```json\n{\"ok\":true}\n```"), None);
+        assert_eq!(findings_in("I found 3 issues in PR #50."), Some(3));
+        assert_eq!(findings_in("I found no problems in the diff."), Some(0));
+        assert_eq!(
+            findings_in("15 findings, most severe first:\n\n1. ..."),
+            Some(15)
+        );
+        assert_eq!(findings_in("No findings."), Some(0));
+        for other in [
+            "I reviewed PR #50 at high effort and 3 things stand out.",
+            "I found the 2 callers.",
+            "2026 was a long year",
+            "",
+        ] {
+            assert_eq!(findings_in(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn the_transcript_says_where_a_typed_command_forked_and_what_effort_it_reused() {
+        use crate::transcript::{ReusedEffort, ReviewLaunch};
+        let at = |second: u32| {
+            format!("2026-11-20T10:00:{second:02}Z")
+                .parse::<DateTime<Utc>>()
+                .ok()
+        };
+        let mut facts = costs(&[("f1", 2.0), ("f2", 1.0), ("stray", 9.0)]);
+        facts.subagents[0].findings = Some(4);
+        facts.review_launches = vec![
+            ReviewLaunch {
+                at: at(1),
+                command: "code-review".into(),
+                agent_id: "f1".into(),
+                ..Default::default()
+            },
+            ReviewLaunch {
+                at: at(31),
+                command: "code-review".into(),
+                effort: Some("xhigh".into()),
+                pull_number: Some(7),
+                agent_id: "f2".into(),
+            },
+        ];
+        facts.reused_efforts = vec![ReusedEffort {
+            at: at(1),
+            effort: "high".into(),
+        }];
+        // As the hooks have it: nothing says which subagent a command forked.
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "/code-review")],
+                subagent(1, 20, "f1").into(),
+                subagent(2, 3, "stray").into(),
+                vec![prompt(30, "p2", "/code-review xhigh 7")],
+                subagent(31, 40, "f2").into(),
+            ],
+            Some(&facts),
+        );
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| {
+                (
+                    r.effort.as_deref(),
+                    r.subagents,
+                    r.estimated_cost_usd,
+                    r.findings,
+                )
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (Some("high"), 1, Some(2.0), Some(4)),
+                (Some("xhigh"), 1, Some(1.0), None)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_agent_whose_commands_are_not_read_has_no_count() {
+        let mut e = prompt(0, "p1", "hello");
+        e["source"] = json!("codex");
+        let s = from_events(&[e], None, "codex").unwrap();
+        assert_eq!(s.counts.reviews, None);
+        let s = session(vec![vec![prompt(0, "p1", "hello")]], None);
+        assert_eq!(s.counts.reviews, Some(0));
+    }
+
+    #[test]
+    fn slash_commands_are_split_from_their_arguments() {
+        assert_eq!(
+            slash_command("/code-review xhigh #590"),
+            Some(("code-review", "xhigh #590"))
+        );
+        assert_eq!(slash_command("  /ultrareview"), Some(("ultrareview", "")));
+        assert_eq!(slash_command("review /code-review"), None);
+        assert_eq!(slash_command("/"), None);
+    }
+}

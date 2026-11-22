@@ -161,7 +161,7 @@ export function Pulls({ token, scope, setScope, repos, readOnly = false, onSignO
             <table className="rows">
               {/* The column groups the grouped headings name: six columns, Review, Cost, Comments. */}
               <colgroup span={6} />
-              <colgroup span={2} />
+              <colgroup span={3} />
               <colgroup />
               <colgroup span={2} />
               <thead>
@@ -173,13 +173,14 @@ export function Pulls({ token, scope, setScope, repos, readOnly = false, onSignO
                   <th scope="col" rowSpan={2} className="num" title="Lines the pull request adds">Lines</th>
                   <th scope="col" rowSpan={2} className="num" title="Of those lines, written by a coding agent">By agents</th>
                   <th scope="col" rowSpan={2}>Written with</th>
-                  <th scope="colgroup" colSpan={2} className="group">Review</th>
+                  <th scope="colgroup" colSpan={3} className="group">Review</th>
                   <th scope="col" rowSpan={2} className="num" title="What was spent on it by the sessions that gave it lines">Cost</th>
                   <th scope="colgroup" colSpan={2} className="group">Comments</th>
                 </tr>
                 <tr>
                   <th scope="col" className="num" title="Agent lines that survived review, of those it was opened with">Kept</th>
                   <th scope="col" className="num" title="Times review feedback was followed by a new commit">Rounds</th>
+                  <th scope="col" className="num" title="Review commands (/code-review and the like) run in its sessions">Local</th>
                   <th scope="col" className="num" title="Comments on the diff by people other than the author">People</th>
                   <th scope="col" className="num" title="Comments on the diff by review bots">Bots</th>
                 </tr>
@@ -189,8 +190,9 @@ export function Pulls({ token, scope, setScope, repos, readOnly = false, onSignO
           </div>
           <p className="muted hint">
             Kept: agent lines that survived review, of those the pull request was opened with. Rounds: times
-            review feedback was followed by a new commit. Comments are those on the diff, by people other than
-            the author and by review bots.
+            review feedback was followed by a new commit. Local: review commands (/code-review and the like)
+            run in its sessions. Comments are those on the diff, by people other than the author and by review
+            bots.
           </p>
           {total && total.cloud_pulls_without_session > 0 && (
             <p className="muted hint">
@@ -242,7 +244,7 @@ function ByModel({ summary }: { summary: PullSummary }) {
       <div className="scroll">
         <table>
           <colgroup span={6} />
-          <colgroup span={3} />
+          <colgroup span={4} />
           <thead>
             <tr>
               <th scope="col" rowSpan={2}>Tool</th>
@@ -251,12 +253,13 @@ function ByModel({ summary }: { summary: PullSummary }) {
               <th scope="col" rowSpan={2} className="num">Agent lines</th>
               <th scope="col" rowSpan={2} className="num" title="Agent lines that survived review, of those the pull requests were opened with">Survived review</th>
               <th scope="col" rowSpan={2} className="num" title="Reviews that asked for changes">Changes requested</th>
-              <th scope="colgroup" colSpan={3} className="group">Per pull request</th>
+              <th scope="colgroup" colSpan={4} className="group">Per pull request</th>
             </tr>
             <tr>
               <th scope="col" className="num" title="Review rounds per pull request">Rounds</th>
               <th scope="col" className="num" title="Comments on the diff per pull request, by people">Comments</th>
               <th scope="col" className="num" title="Comments on the diff per pull request, by review bots">By bots</th>
+              <th scope="col" className="num" title="Review commands run in its sessions per pull request, of those where all of its sessions counted them">Local reviews</th>
             </tr>
           </thead>
           <tbody>
@@ -283,6 +286,7 @@ function ByModel({ summary }: { summary: PullSummary }) {
                   <td className="num">{average(m.review_rounds, m.pulls)}</td>
                   <td className="num">{average(m.review_comments, m.pulls)}</td>
                   <td className="num">{average(m.bot_review_comments, m.pulls)}</td>
+                  <td className="num">{average(m.local_reviews, m.local_reviews_pulls)}</td>
                 </tr>
               );
             })}
@@ -347,6 +351,12 @@ function Row({ p }: { p: PullRow }) {
           : "–"}
       </td>
       <td className="num">{count(p.review_rounds)}</td>
+      <td
+        className="num"
+        title={p.local_reviews && p.local_reviews.sessions_unknown > 0 ? "Not all known: some of its sessions are from an older Sessionly, or an agent whose review commands are not read" : undefined}
+      >
+        {p.local_reviews == null ? "–" : `${count(p.local_reviews.runs)}${p.local_reviews.sessions_unknown > 0 ? "+?" : ""}`}
+      </td>
       <td
         className="num nowrap"
         title={p.cost && p.cost.usd != null && costIsFloor(p.cost) ? "At least: a session of it has no cost figure, or one that leaves requests out" : undefined}

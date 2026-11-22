@@ -34,11 +34,70 @@ The record holds metadata and short previews, not full content:
   A failed call also keeps the first 200 characters of its error, which for a shell command is
   the start of its output (for a command of Codex's, the end of it).
 - **Files:** absolute path, read and write counts, lines added and removed.
+- **Skills:** a `Skill` call keeps the skill's name (`code-review`, `plugin:name`), not its
+  arguments.
+- **Review runs** (`reviews`): see [below](#review-runs).
 - Full prompts, file contents and successful command output stay in the raw capture.
 
 The previews and paths are still sensitive: a command can contain a token, a path contains a
 user name. The local record keeps them; what may leave the machine is decided separately (see
 [What an upload contains](upload-contents.md)).
+
+## Review runs
+
+`reviews` lists each time a review command ran in a Claude Code session, and `counts.reviews`
+how many. For the other agents, whose review commands are not read yet, `counts.reviews` is
+left out: not known, which is not none. The commands are `/code-review`, `/review`, `/security-review` and `/ultrareview`
+(a plugin's `anything:code-review` too). A run starts in one of three ways:
+
+- the agent calls the `Skill` tool with one of them (`via: skill`),
+- you type it (`via: slash_command`), or
+- Claude Code runs its own command, `/ultrareview`.
+
+Each run has:
+
+- `command`, as written.
+- `effort`: the first argument, when it is `low`, `medium`, `high`, `xhigh`, `max` or `ultra`.
+  For a command typed without one, the effort Claude Code says it reused ("Reusing high
+  effort, the level you typed last time"), where the transcript is there to say so.
+- `pull_number`: a pull request number among the arguments: `#528` or a pull request's URL
+  anywhere in them, a bare `621` only as the first or second argument. A number further on
+  is a number in a sentence ("the last 3 commits") and is not taken for one.
+- `ran`: `cloud` for `/ultrareview` and `/code-review ultra`, else `local`.
+- `agent_id`, when a subagent ran it.
+- `status` and `duration_ms`: from the start to the end of the last of its subagents.
+- `subagents` and `estimated_cost_usd`: the subagents that did the review. That is the one a
+  review skill forks to run in, or, where none is known, those started from the same thread
+  before your next prompt, with the subagents they started in turn.
+- `findings`: how many it reported, where that can be told: from a list it reports
+  (`ReportFindings`), or else from the last reply of the subagent it ran in, when that reply
+  is a JSON list of findings or opens with their number ("I found 3 issues in …", "15
+  findings, most severe first"). The reply is read on your machine and only the number is
+  kept. A review that words its result another way has none (`null`), which is not zero: on
+  one machine about a third of the runs had a number.
+
+Nothing else of the arguments is kept: no free text, no path. A run is the same record in
+every content mode.
+
+Known limits:
+
+- A review started with a prompt in words ("review this branch with medium effort") runs as
+  plain subagents and leaves no command: it is not counted.
+- Whether you typed the command or the agent chose the skill is told only where the transcript
+  or the hooks show a typed command. Both are a review that ran.
+- The cost of a run is its subagents' only, without the main thread's own tokens: a floor. It
+  is already part of the session's cost.
+- A review in the cloud is billed apart: its cost is not known (`null`).
+- A team's own review skill under another name is not counted.
+- A typed command's fork is known from the transcript, which is read for a session captured
+  by the hooks too. Where the transcript is gone before it was read, the hooks alone do not
+  say which subagent the command forked, and it is found by time.
+- A transcript copied into a resumed session (`--fork-session`) may count the earlier runs in
+  both sessions.
+- A record built by a Sessionly that did not count review runs has none (`counts.reviews` is
+  missing, which a server shows as "not known"). After an update, the next `sessionly sync`
+  imports again the sessions that were imported before; `sessionly import` brings in the rest
+  from their transcripts.
 
 ## Limits to know about
 

@@ -287,6 +287,53 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
         </section>
       )}
 
+      {(s.reviews ?? []).length > 0 && (
+        <section className="card">
+          <h2>Reviews</h2>
+          <p className="muted">
+            Each time a review command ran. Its cost is its subagents' only, already part of the session's cost: a floor, without
+            the main thread's own tokens. A review in the cloud is billed apart, and what it cost is not known.
+          </p>
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">When</th>
+                  <th scope="col">Command</th>
+                  <th scope="col">Effort</th>
+                  <th scope="col">Where</th>
+                  <th scope="col" className="num">Subagents</th>
+                  <th scope="col" className="num">Cost</th>
+                  <th scope="col" className="num">Took</th>
+                  <th scope="col" className="num">Findings</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(s.reviews ?? []).map((r) => (
+                  <tr key={r.id}>
+                    <td className="nowrap">{dateTime(r.at)}</td>
+                    <th scope="row">
+                      /{r.command}
+                      {r.pull_number != null && ` #${r.pull_number}`}
+                      <span className="muted">
+                        {r.via === "skill" ? ", by the agent" : r.via === "slash_command" ? ", typed" : ""}
+                        {r.agent_id ? ", in a subagent" : ""}
+                      </span>
+                    </th>
+                    <td>{r.effort ?? "–"}</td>
+                    <td>{r.ran === "cloud" ? "the cloud" : "here"}</td>
+                    <td className="num">{count(r.subagents ?? 0)}</td>
+                    <td className="num">{r.estimated_cost_usd != null ? usd(r.estimated_cost_usd) : r.ran === "cloud" ? "not known" : "–"}</td>
+                    <td className="num">{r.duration_ms != null ? duration(r.duration_ms) : "–"}</td>
+                    <td className="num">{r.findings != null ? count(r.findings) : "–"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
       {(s.subagents ?? []).length > 0 && (
         <section className="card">
           <h2>Subagents</h2>

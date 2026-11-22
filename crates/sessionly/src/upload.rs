@@ -229,17 +229,26 @@ mod tests {
                 outcome: Some(Outcome::Completed),
                 ..Default::default()
             }],
-            tool_calls: vec![ToolCall {
-                tool_use_id: "t1".into(),
-                tool: "Bash".into(),
-                status: ToolStatus::Failed,
-                file_path: Some("/home/ann/src/web/app/main.rs".into()),
-                input_sha256: "def456".into(),
-                input_summary: Some(format!("curl -H 'Authorization: {secret}'")),
-                error: Some(format!("denied: {secret}")),
-                output_bytes: Some(12),
-                ..Default::default()
-            }],
+            tool_calls: vec![
+                ToolCall {
+                    tool_use_id: "t1".into(),
+                    tool: "Bash".into(),
+                    status: ToolStatus::Failed,
+                    file_path: Some("/home/ann/src/web/app/main.rs".into()),
+                    input_sha256: "def456".into(),
+                    input_summary: Some(format!("curl -H 'Authorization: {secret}'")),
+                    error: Some(format!("denied: {secret}")),
+                    output_bytes: Some(12),
+                    ..Default::default()
+                },
+                ToolCall {
+                    tool_use_id: "t2".into(),
+                    tool: "Skill".into(),
+                    skill: Some("code-review".into()),
+                    status: ToolStatus::Ok,
+                    ..Default::default()
+                },
+            ],
             files: vec![FileTouched {
                 path: "/home/ann/src/web/app/main.rs".into(),
                 writes: 1,
@@ -250,12 +259,26 @@ mod tests {
                 description: Some(format!("look for {secret}")),
                 ..Default::default()
             }],
+            reviews: vec![review()],
             instruction_files: vec!["/home/ann/.claude/CLAUDE.md".into()],
             counts: Counts {
                 prompts: 1,
                 tool_calls: 1,
                 ..Default::default()
             },
+            ..Default::default()
+        }
+    }
+
+    fn review() -> ReviewRun {
+        ReviewRun {
+            id: "t2".into(),
+            command: "code-review".into(),
+            effort: Some("xhigh".into()),
+            pull_number: Some(621),
+            subagents: 2,
+            estimated_cost_usd: Some(1.5),
+            findings: Some(3),
             ..Default::default()
         }
     }
@@ -278,6 +301,9 @@ mod tests {
             Some("app/main.rs")
         );
         assert_eq!(record.files[0].path, "app/main.rs");
+        // skill names and review runs are names and numbers: kept as they are
+        assert_eq!(record.tool_calls[1].skill.as_deref(), Some("code-review"));
+        assert_eq!(record.reviews, [review()]);
         assert_eq!(record.instruction_files, ["~/.claude/CLAUDE.md"]);
         assert_eq!(record.cwd.as_deref(), Some("~/src/web/sub"));
         let repo = record.repo.unwrap();

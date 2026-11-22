@@ -71,6 +71,11 @@ function session(id: string, remote: string, lines: number[] = [1, 2, 3]) {
       tool_calls: [
         { tool_use_id: "t1", prompt_id: "p1", tool: "Edit", model: "claude-opus-5-5", status: "ok", file_path: "src/a.ts", input_sha256: "b".repeat(64), input_summary: "SECRET what it was given", lines_added: 3 },
         { tool_use_id: "t2", prompt_id: "p1", tool: "Bash", status: "failed", file_path: "/home/ann/SECRET-client/.env", input_summary: "SECRET cat .env", error: "SECRET output" },
+        { tool_use_id: "t3", prompt_id: "p1", tool: "Skill", skill: "acme:code-review", status: "ok" },
+        { tool_use_id: "t4", prompt_id: "p1", tool: "Skill", skill: "SECRET-team-skill", status: "ok" },
+      ],
+      reviews: [
+        { id: "t3", at: "2026-11-10T09:10:00Z", command: "acme:code-review", via: "skill", ran: "local", effort: "xhigh", pull_number: 7, status: "ok", subagents: 2, estimated_cost_usd: 1.5, findings: 3 },
       ],
       files: [
         { path: "src/a.ts", writes: 1, lines_added: 3 },
@@ -122,6 +127,18 @@ test("nothing a later version of the record adds, at any depth, is shown before 
   assert.deepEqual(JSON.parse(made), JSON.parse(JSON.stringify(shown(session("s1", REPO) as never, KNOWN))));
 });
 
+test("a session's review runs are shown, and of skills only a review's name", () => {
+  const made = JSON.parse(JSON.stringify(shown(session("s1", REPO) as never, KNOWN))).session;
+  assert.deepEqual(made.reviews, [
+    { id: "t3", at: "2026-11-10T09:10:00Z", command: "code-review", via: "skill", ran: "local", effort: "xhigh", pull_number: 7, status: "ok", subagents: 2, estimated_cost_usd: 1.5, findings: 3 },
+  ]);
+  assert.deepEqual(made.tool_calls.map((t: any) => t.skill ?? null), [null, null, "acme:code-review", null]);
+  // From a collector that did not count them: still not known.
+  const older = session("s2", REPO) as any;
+  delete older.session.reviews;
+  assert.equal(shown(older, KNOWN).session?.counts?.reviews, undefined);
+});
+
 test("a pull request's report is kept without the files that are not shown", () => {
   const report = {
     repo: REPO, number: 9, author: "ann", state: "open", created_at: "2026-11-10T12:00:00Z", event: "opened", commits: 1,
@@ -151,7 +168,7 @@ test("a session as it is shown holds nothing that was typed or run, and nothing 
     [{ name: "Ann", email: "ann@example.com" }, ["claude-opus-5-5"], { total_usd: 6, source: "recorded" }, { remote: REPO, branch: null }, "metadata", null, null],
   );
   assert.deepEqual(s.prompts, [{ prompt_id: "p1", at: "2026-11-10T09:00:00Z", ended_at: "2026-11-10T09:30:00Z", outcome: "completed" }]);
-  assert.deepEqual(s.tool_calls!.map((t: any) => [t.tool, t.status, t.file_path]), [["Edit", "ok", "src/a.ts"], ["Bash", "failed", null]]);
+  assert.deepEqual(s.tool_calls!.map((t: any) => [t.tool, t.status, t.file_path]), [["Edit", "ok", "src/a.ts"], ["Bash", "failed", null], ["Skill", "ok", null], ["Skill", "ok", null]]);
   assert.deepEqual(s.files!.map((f: any) => f.path), ["src/a.ts"]);
   // a subagent's type may be the name of one the person made
   assert.deepEqual(s.subagents, [{ agent_id: "a1", agent_type: null, description: null, tool_calls: 4 }]);
@@ -166,7 +183,7 @@ test("a session as it is shown holds nothing that was typed or run, and nothing 
   assert.doesNotMatch(JSON.stringify(bare), /src|CLAUDE|[0-9a-f]{16}/);
   assert.deepEqual(
     [bare.session.files, bare.session.tool_calls.map((t: any) => t.file_path), bare.session.instruction_files, bare.rewrite.files, bare.lines],
-    [[], [null, null], [], [], [{ path: "", model: null, hashes: ["", "", "", ""] }]],
+    [[], [null, null, null, null], [], [], [{ path: "", model: null, hashes: ["", "", "", ""] }]],
   );
   // a worktree's copy of a known file is that file
   const inWorktree = session("s1", REPO);
@@ -191,7 +208,7 @@ test("a session as it is shown holds nothing that was typed or run, and nothing 
   more.rewrite = { ...more.rewrite, branch: "work", head: "abc123" };
   const madeMore = shown(more, KNOWN);
   assert.doesNotMatch(JSON.stringify(madeMore.session), /SECRET/);
-  assert.deepEqual([madeMore.session!.runtime, madeMore.session!.tool_calls!.map((t) => t.tool)], [{ kind: "cloud", id: null }, ["Edit", "Bash", "mcp", "mcp"]]);
+  assert.deepEqual([madeMore.session!.runtime, madeMore.session!.tool_calls!.map((t) => t.tool)], [{ kind: "cloud", id: null }, ["Edit", "Bash", "Skill", "Skill", "mcp", "mcp"]]);
   // a cloud agent's branch is how its pull request is found, and the agent named it; a person's own is theirs
   assert.deepEqual([madeMore.session!.repo!.branch, madeMore.rewrite!.branch, madeMore.rewrite!.head], ["work", "work", "abc123"]);
   const local = session("s1", REPO) as any;

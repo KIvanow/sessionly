@@ -193,6 +193,12 @@ export interface Totals {
   lines_removed: number;
   input_tokens: number;
   output_tokens: number;
+  /**
+   * Review runs (`/code-review` and the like) in the sessions that count
+   * them; `sessions_reviews_unknown` are from a collector that did not.
+   */
+  review_runs: number;
+  sessions_reviews_unknown: number;
   /** The agents the sessions ran in (`claude-code`, `cursor`, `grok`, `codex`), in name order. */
   tools: string[];
   /** The main model of each session, in name order. Agents that record none add nothing. */
@@ -243,6 +249,8 @@ export interface SessionRow {
   files_changed: number;
   lines_added: number;
   lines_removed: number;
+  /** Review runs (`/code-review` and the like). Null when the collector that sent it did not count them. */
+  review_runs: number | null;
   content: string;
   captured_by: string | null;
   rewrite: RewriteTotals | null;
@@ -588,6 +596,60 @@ export interface PullCost {
   per_surviving_line_is_floor: boolean;
 }
 
+/**
+ * The review runs (`/code-review` and the like) of a pull request's
+ * sessions, before and during review: those of the sessions matched to it,
+ * and those of a session in its repository that name its number, a
+ * review-only session too. A run that names another pull request is that
+ * one's. Each run counts once. Shown beside the reviews on GitHub, and
+ * never added to them.
+ */
+export interface LocalReviews {
+  runs: number;
+  /** Of `runs`, those that ran in the cloud (`/ultrareview`, `/code-review ultra`). */
+  cloud: number;
+  /** Runs by the effort they were given (`xhigh`, `high`); a run given none is in no entry. */
+  by_effort: Record<string, number>;
+  /** Findings reported, of the runs that reported them as a list. Null when none did. */
+  findings: number | null;
+  /**
+   * What the runs' subagents cost: a floor, without the main thread's own
+   * tokens, and already in the sessions' cost (not on top of it). Null when
+   * none has a cost; a cloud run's is not known.
+   */
+  cost_usd: number | null;
+  /** Matched sessions from a collector that did not count review runs: theirs are not known. */
+  sessions_unknown: number;
+  /**
+   * The most other pull requests a matched session that has a run naming
+   * none is matched to: such a run is shown on each of them. 0 when none.
+   */
+  shared_with: number;
+  /** Each run, oldest first: the order the pull request was reviewed in. On a pull request's own page only. */
+  each?: LocalReviewRun[];
+}
+
+/** One review run of a pull request's sessions (see `LocalReviews`), and the session it ran in. */
+export interface LocalReviewRun {
+  at: string | null;
+  /** What was run: "code-review", "ultrareview". */
+  command: string;
+  effort: string | null;
+  /** "local" or "cloud". */
+  ran: string;
+  /** "skill" (the agent ran it) or "slash_command" (a person typed it). */
+  via: string;
+  /** False for a run that names no pull request, counted here because its session is matched to this one. */
+  names_pull: boolean;
+  subagents: number;
+  /** What its subagents cost: a floor. Null when not known, as for a run in the cloud. */
+  cost_usd: number | null;
+  findings: number | null;
+  machine_id: string;
+  source: string;
+  session_id: string;
+}
+
 export interface PullRow {
   repo: string;
   number: number;
@@ -609,6 +671,8 @@ export interface PullRow {
   attribution: PullAttribution;
   /** Null on a pull request last reported before its sessions were kept. */
   cost: PullCost | null;
+  /** Null when no session is matched to it and none names it. */
+  local_reviews: LocalReviews | null;
   /** When the Action last reported it. */
   updated_at: string;
   /**
@@ -890,6 +954,9 @@ export interface PullsByModel extends LinesBy {
   changes_requested: number;
   review_comments: number;
   bot_review_comments: number;
+  /** Local review runs (see `LocalReviews`), over the `local_reviews_pulls` of its pull requests where they are known. */
+  local_reviews: number;
+  local_reviews_pulls: number;
 }
 
 export interface PullSummary {

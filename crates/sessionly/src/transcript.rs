@@ -149,6 +149,8 @@ pub struct Subagent {
     pub agent_type: Option<String>,
     pub description: Option<String>,
     pub usage: UsageByModel,
+    /// How many findings its last reply names (see `reviews::findings_in`).
+    pub findings: Option<u64>,
 }
 
 /// Claude Code's own totals from the last `cost-state` row.
@@ -222,6 +224,10 @@ pub struct TranscriptSummary {
     pub skipped_lines: u64,
     /// The model behind each tool call, by tool use id, subagents included.
     pub tool_models: HashMap<String, String>,
+    /// Typed review commands that forked a subagent to run in.
+    pub review_launches: Vec<ReviewLaunch>,
+    /// Efforts Claude Code said it reused for a review typed without one.
+    pub reused_efforts: Vec<ReusedEffort>,
     messages: Vec<Message>,
 }
 
@@ -375,10 +381,13 @@ impl TranscriptSummary {
                         input_tokens: total.input,
                         output_tokens: total.output,
                         estimated_cost_usd: total.priced_cost(),
+                        findings: sub.findings,
                     }
                 })
                 .collect(),
             tool_models: self.tool_models.clone(),
+            review_launches: self.review_launches.clone(),
+            reused_efforts: self.reused_efforts.clone(),
         }
     }
 
@@ -448,6 +457,34 @@ pub struct Facts {
     /// The model behind each tool call, by tool use id.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub tool_models: HashMap<String, String>,
+    /// Typed review commands that forked a subagent to run in: the hooks do
+    /// not say which subagent that is.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review_launches: Vec<ReviewLaunch>,
+    /// Efforts Claude Code said it reused for a review typed without one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reused_efforts: Vec<ReusedEffort>,
+}
+
+/// A typed review command that forked: the row Claude Code writes as it
+/// starts. Of the command's arguments, the effort and a pull request number.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewLaunch {
+    pub at: Option<DateTime<Utc>>,
+    pub command: String,
+    pub effort: Option<String>,
+    pub pull_number: Option<u64>,
+    /// The subagent the review runs in.
+    pub agent_id: String,
+}
+
+/// "Reusing high effort, the level you typed last time."
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReusedEffort {
+    pub at: Option<DateTime<Utc>>,
+    pub effort: String,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -460,6 +497,9 @@ pub struct SubagentFacts {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub estimated_cost_usd: Option<f64>,
+    /// How many findings its last reply names, where it says so (see
+    /// `reviews::findings_in`): used for the subagent a review ran in.
+    pub findings: Option<u64>,
 }
 
 impl Facts {
@@ -512,9 +552,9 @@ pub fn parse(path: &Path) -> Result<TranscriptSummary> {
     };
     // A message id found in more than one file is counted in the first only.
     let mut seen = HashSet::new();
-    summary.main = scan(path, &mut summary, &mut seen, true)?;
+    (summary.main, _) = scan(path, &mut summary, &mut seen, true)?;
     for file in subagent_files(path) {
-        let usage = scan(&file, &mut summary, &mut seen, false)?;
+        let (usage, last_reply) = scan(&file, &mut summary, &mut seen, false)?;
         let stem = file
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -529,6 +569,7 @@ pub fn parse(path: &Path) -> Result<TranscriptSummary> {
             agent_type: text("agentType"),
             description: text("description"),
             usage,
+            findings: last_reply.as_deref().and_then(crate::reviews::findings_in),
         });
     }
     Ok(summary)
@@ -543,17 +584,19 @@ struct Response {
     branch: Option<String>,
 }
 
-/// Read one transcript file into `summary` and return its usage per model.
+/// Read one transcript file into `summary` and return its usage per model,
+/// and the text of its last reply.
 fn scan(
     path: &Path,
     summary: &mut TranscriptSummary,
     seen: &mut HashSet<String>,
     is_main: bool,
-) -> Result<UsageByModel> {
+) -> Result<(UsageByModel, Option<String>)> {
     // in order of first appearance
     let mut responses: Vec<Response> = Vec::new();
     let mut by_id: HashMap<String, usize> = HashMap::new();
     let mut latest: Option<DateTime<Utc>> = None;
+    let mut last_reply: Option<String> = None;
 
     let skipped = crate::jsonl::for_each(path, |row| {
         let text = |k: &str| {
@@ -587,6 +630,15 @@ fn scan(
         match row.get("type").and_then(Value::as_str) {
             Some("assistant") => {
                 let message = &row["message"];
+                if !is_main {
+                    let texts = message["content"].as_array().into_iter().flatten();
+                    let said = texts
+                        .filter_map(|b| b["text"].as_str().filter(|_| b["type"] == "text"))
+                        .rfind(|t| !t.trim().is_empty());
+                    if let Some(said) = said {
+                        last_reply = Some(said.to_string());
+                    }
+                }
                 if let Some(model) = message["model"].as_str().filter(|m| *m != "<synthetic>") {
                     let calls = message["content"].as_array().into_iter().flatten();
                     for call in calls.filter(|b| b["type"] == "tool_use") {
@@ -635,6 +687,22 @@ fn scan(
                     });
                 }
             }
+            Some("system") if is_main => {
+                let said = row["content"].as_str().unwrap_or_default();
+                if let Some(launch) = review_launch(said) {
+                    let known = |l: &ReviewLaunch| l.agent_id == launch.agent_id;
+                    if !summary.review_launches.iter().any(known) {
+                        summary.review_launches.push(ReviewLaunch {
+                            at: row_ts,
+                            ..launch
+                        });
+                    }
+                } else if let Some(effort) = crate::reviews::reused_effort(said) {
+                    summary
+                        .reused_efforts
+                        .push(ReusedEffort { at: row_ts, effort });
+                }
+            }
             _ => {}
         }
     })?;
@@ -652,7 +720,30 @@ fn scan(
             branch: response.branch,
         });
     }
-    Ok(usage)
+    Ok((usage, last_reply))
+}
+
+/// A review command that forked, from the row that says where:
+/// `<forked-skill-launch>{"agentId":…,"skillName":…,"description":"/code-review high"}`.
+fn review_launch(said: &str) -> Option<ReviewLaunch> {
+    const OPEN: &str = "<forked-skill-launch>";
+    let start = said.find(OPEN)? + OPEN.len();
+    let end = said[start..].find("</forked-skill-launch>")? + start;
+    let launch: Value = serde_json::from_str(said[start..end].trim()).ok()?;
+    let command = launch["skillName"].as_str()?;
+    if !crate::reviews::is_review(command) {
+        return None;
+    }
+    let typed = launch["description"].as_str().unwrap_or_default();
+    let args = crate::reviews::slash_command(typed).map_or("", |(_, args)| args);
+    let (effort, pull_number) = crate::reviews::parse_args(args);
+    Some(ReviewLaunch {
+        at: None,
+        command: command.to_string(),
+        effort,
+        pull_number,
+        agent_id: launch["agentId"].as_str()?.to_string(),
+    })
 }
 
 /// Claude Code's config directory: `$CLAUDE_CONFIG_DIR`, or `~/.claude`.

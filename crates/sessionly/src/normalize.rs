@@ -167,6 +167,7 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
     let mut created: HashSet<String> = HashSet::new();
     // What shell commands changed, by the call's place in `tool_calls`.
     let mut by_shell: HashMap<usize, Vec<FileTouched>> = HashMap::new();
+    let mut reviews = crate::reviews::Seen::default();
     let mut start_model = None;
     let (mut first, mut last) = (None::<DateTime<Utc>>, None::<DateTime<Utc>>);
 
@@ -209,6 +210,7 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
         }
 
         let hook = record["hook"].as_str().unwrap_or_default();
+        reviews.event(source, hook, p, at);
         // A shell command says nothing of what it changed. In a sandbox the
         // capture looked at the working tree around it (see `changes`).
         if matches!(hook, "PostToolUse" | "PostToolUseFailure") {
@@ -374,6 +376,7 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
     if s.models.is_empty() {
         s.models.extend(start_model);
     }
+    s.reviews = crate::reviews::runs(&s, &reviews, facts);
     s.started_at = first;
     s.ended_at = last;
     s.duration_ms = first.zip(last).map(|(f, l)| (l - f).num_milliseconds());
@@ -386,6 +389,7 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
         .filter(|c| c.status == ToolStatus::Failed)
         .count() as u64;
     s.counts.subagents = s.subagents.len() as u64;
+    s.counts.reviews = (source == crate::paths::CLAUDE_CODE).then_some(s.reviews.len() as u64);
     s.counts.files_read = s.files.iter().filter(|f| f.reads > 0).count() as u64;
     s.counts.files_changed = s.files.iter().filter(|f| f.writes > 0).count() as u64;
     s.counts.lines_added = s.files.iter().map(|f| f.lines_added).sum();
@@ -429,6 +433,10 @@ fn tool_call<'a>(
                     .map(String::from),
                 input_sha256: sha256_hex(input.to_string().as_bytes()),
                 input_summary: input_summary(&tool, input),
+                skill: (tool == "Skill")
+                    .then(|| input["skill"].as_str().filter(|v| !v.is_empty()))
+                    .flatten()
+                    .map(String::from),
                 tool,
                 ..Default::default()
             });

@@ -221,6 +221,30 @@ changed, or that it was matched again and nothing new turned up). A session name
 links to it. When the agent lines moved, the figure says what they were until this report.
 The counts [after merge](#after-merge) are rows here too, and stay however many reports follow.
 
+## Review runs
+
+A pull request's page has, beside its reviews on GitHub, the review commands run in its
+sessions before and during review (`/code-review` and the like; see
+[Review runs](session-record.md#review-runs)): how many, at which effort, how many in the
+cloud, the findings they reported, and what their subagents cost. They are of:
+
+1. the sessions matched to it, and
+2. sessions of its repository (or its fork, or an old name of it) with a run that names its
+   number, a review-only session with no line in it too.
+
+The page lists each run in the order they ran, as the pull request's iterations: run 2 of
+5, how long after the one before it, its effort, cost and findings, and the session it ran
+in.
+
+A run that names another pull request is that one's, and each run counts once. A matched
+session with a run that names none, matched to other pull requests too, gives that run to
+each of them, and the page says so. The two sides are not added up: a run in a session and a
+bot's comments are different things. The cost of the runs is already in the pull request's
+cost, not on top of it, and is a floor: their subagents only. A review in the cloud is billed
+apart and has none. The list has a Local column, and **by model** the runs per pull request.
+A session from a Sessionly that did not count review runs, or from an agent other than
+Claude Code, is said to be not known.
+
 ## How to read it
 
 - **A line is an agent's** when a session added that line to that file, the session is by

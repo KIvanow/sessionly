@@ -200,6 +200,10 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     tool_calls: counts.tool_calls ?? 0,
     tool_failures: counts.tool_failures ?? 0,
     subagents: counts.subagents ?? 0,
+    // A collector that counts an agent's review runs sends the count, 0 too;
+    // one that does not read that agent's review commands sends none.
+    review_runs: counts.reviews ?? null,
+    review_pulls: JSON.stringify([...new Set((s.reviews ?? []).flatMap((run) => (run.pull_number != null ? [run.pull_number] : [])))].sort((a, b) => a - b)),
     files_changed: counts.files_changed ?? 0,
     lines_added: counts.lines_added ?? 0,
     lines_removed: counts.lines_removed ?? 0,
@@ -218,7 +222,7 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     copied: copy,
   };
   const names = Object.keys(columns);
-  const casts: Record<string, string> = { models: "::jsonb", payload: "::jsonb", checkpoints: "::jsonb" };
+  const casts: Record<string, string> = { models: "::jsonb", payload: "::jsonb", checkpoints: "::jsonb", review_pulls: "::jsonb" };
   const placeholders = names.map((name, i) => `$${i + 1}${casts[name] ?? ""}`);
   const updates = names
     .filter((name) => !["org_id", "machine_id", "source", "session_id"].includes(name))
@@ -538,6 +542,7 @@ const TOTAL_COLUMNS = `
   sum(tool_failures) AS tool_failures, sum(files_changed) AS files_changed,
   sum(lines_added) AS lines_added, sum(lines_removed) AS lines_removed,
   sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens,
+  sum(review_runs) AS review_runs, count(*) FILTER (WHERE review_runs IS NULL) AS sessions_reviews_unknown,
   jsonb_agg(DISTINCT source) AS tools,
   jsonb_agg(DISTINCT primary_model) FILTER (WHERE primary_model IS NOT NULL) AS models,
   sum(rw_files_measured) AS rw_files_measured, sum(rw_files_rewritten) AS rw_files_rewritten,
@@ -579,6 +584,8 @@ function totals(row: Record<string, unknown>): Totals {
     lines_removed: num(row.lines_removed),
     input_tokens: num(row.input_tokens),
     output_tokens: num(row.output_tokens),
+    review_runs: num(row.review_runs),
+    sessions_reviews_unknown: num(row.sessions_reviews_unknown),
     tools: strings(row.tools).sort(),
     models: strings(row.models).sort(),
     rewrite: {
@@ -628,7 +635,7 @@ export async function listSessions(
               WHERE coalesce(p->'text'->>'preview', '') <> ''
               ORDER BY n LIMIT 1) AS first_prompt,
             started_at, duration_ms, active_ms, cost_usd, cost_source, primary_model, prompts,
-            tool_calls, tool_failures, files_changed, lines_added, lines_removed, content,
+            tool_calls, tool_failures, files_changed, lines_added, lines_removed, review_runs, content,
             captured_by, rw_files_measured, rw_files_rewritten, rw_lines_added,
             rw_lines_surviving, updated_at
      FROM sessions ${sql}
@@ -661,6 +668,7 @@ export async function listSessions(
       files_changed: num(r.files_changed),
       lines_added: num(r.lines_added),
       lines_removed: num(r.lines_removed),
+      review_runs: numOrNull(r.review_runs),
       content: String(r.content),
       captured_by: (r.captured_by as string) ?? null,
       rewrite:

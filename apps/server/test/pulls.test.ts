@@ -361,6 +361,9 @@ test("the Action reports a pull request through review; admins read how the agen
     changes_requested: 1,
     review_comments: 2,
     bot_review_comments: 5,
+    // its sessions came from a collector that did not count review runs
+    local_reviews: 0,
+    local_reviews_pulls: 0,
   });
   assert.equal(summary.by_model.length, 3);
   assert.equal((await call(tokens.admin, "GET", "/prs/summary")).body.total.pulls, 2);
@@ -2527,4 +2530,72 @@ test("pull requests and sessions from before the cost was shown have one after t
   } finally {
     await upgraded.close();
   }
+});
+
+test("a pull request's local review runs: its sessions', and those of a session in its repository that names it", async () => {
+  const run = (id: string, more: Record<string, unknown>) => ({
+    id, command: "code-review", via: "skill", ran: "local", status: "ok", subagents: 1, ...more,
+  });
+  const put = (id: string, lines: number[], reviews: unknown[] | null, remote = "github.com/acme/web") => {
+    const s = session(id, "claude-code", "claude-opus-5-5", "2026-11-10T09:00:00Z", lines.length ? [{ path: "rv.ts", model: null, hashes: lines.map(h) }] : []) as any;
+    s.session.repo.remote = remote;
+    // From a collector that counts review runs: the count is always there.
+    if (reviews) Object.assign(s.session, { reviews, counts: { reviews: reviews.length } });
+    return call(tokens.ann, "PUT", `/sessions/m1/claude-code/${id}`, s);
+  };
+  await put("rv-a", [4101], [
+    run("t1", { at: "2026-11-10T09:30:00Z", effort: "xhigh", findings: 4, estimated_cost_usd: 1.25 }),
+    run("t2", { at: "2026-11-10T09:10:00Z", effort: "high", pull_number: 41, estimated_cost_usd: 0.5 }),
+    // another pull request's
+    run("t3", { effort: "high", pull_number: 42, estimated_cost_usd: 9 }),
+  ]);
+  // review-only: no line in it
+  await put("rv-b", [], [run("u1", { at: "2026-11-10T09:20:00Z", command: "ultrareview", via: "slash_command", ran: "cloud", pull_number: 41 })]);
+  // the same number in another repository
+  await put("rv-c", [], [run("x1", { pull_number: 41, estimated_cost_usd: 5 })], "github.com/acme/api");
+  // from a collector that did not count them
+  await put("rv-d", [4102], null);
+  await call(tokens.ci, "PUT", "/prs", report({ number: 41, files: [file("rv.ts", 4101, 4102)] }));
+
+  const expected = {
+    runs: 3,
+    cloud: 1,
+    by_effort: { xhigh: 1, high: 1 },
+    findings: 4,
+    cost_usd: 1.75,
+    sessions_unknown: 1,
+    shared_with: 0,
+  };
+  const detail = await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent("github.com/acme/web")}&number=41`);
+  // The page has each run too, in the order the pull request was reviewed in.
+  const { each, ...summed } = detail.body.local_reviews;
+  assert.deepEqual(summed, expected);
+  assert.deepEqual(
+    each.map((r: any) => [r.at.slice(11, 16), r.command, r.effort, r.ran, r.names_pull, r.cost_usd, r.findings, r.session_id]),
+    [
+      ["09:10", "code-review", "high", "local", true, 0.5, null, "rv-a"],
+      ["09:20", "ultrareview", null, "cloud", true, null, null, "rv-b"],
+      ["09:30", "code-review", "xhigh", "local", false, 1.25, 4, "rv-a"],
+    ],
+  );
+  const listed = (await call(tokens.admin, "GET", "/prs?limit=500")).body.pulls.find((p: any) => p.repo === "github.com/acme/web" && p.number === 41);
+  assert.deepEqual(listed.local_reviews, expected);
+  // a pull request with no session at all says nothing
+  await call(tokens.ci, "PUT", "/prs", report({ number: 44, files: [file("none.ts", 4401)] }));
+  assert.equal((await call(tokens.admin, "GET", "/prs?limit=500")).body.pulls.find((p: any) => p.repo === "github.com/acme/web" && p.number === 44).local_reviews, null);
+
+  const rows = (await call(tokens.admin, "GET", "/sessions?limit=200")).body.sessions;
+  const runs = (id: string) => rows.find((r: any) => r.session_id === id).review_runs;
+  assert.deepEqual([runs("rv-a"), runs("rv-b"), runs("rv-d")], [3, 1, null]);
+  // The numbers a session's runs name are kept beside it, each once.
+  const named = await db.query<{ session_id: string; review_pulls: unknown }>(
+    `SELECT session_id, review_pulls FROM sessions WHERE session_id IN ('rv-a', 'rv-d') ORDER BY session_id`,
+  );
+  assert.deepEqual(named.map((row) => (typeof row.review_pulls === "string" ? JSON.parse(row.review_pulls) : row.review_pulls)), [[41, 42], []]);
+
+  // Matched to a second pull request too: its runs that name none are on each.
+  await put("rv-a", [4101, 4301], [run("t1", { effort: "xhigh" })]);
+  await call(tokens.ci, "PUT", "/prs", report({ number: 43, files: [file("rv.ts", 4301)] }));
+  const again = (await call(tokens.admin, "GET", "/prs?limit=500")).body.pulls.filter((p: any) => p.repo === "github.com/acme/web" && [41, 43].includes(p.number));
+  assert.deepEqual(again.map((p: any) => [p.number, p.local_reviews.runs, p.local_reviews.shared_with]), [[43, 1, 1], [41, 2, 1]]);
 });

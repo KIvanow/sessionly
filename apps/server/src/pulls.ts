@@ -5,6 +5,7 @@
 import type {
   FileHashes,
   LinesBy,
+  LocalReviews,
   PullAttribution,
   PullCost,
   PullCloud,
@@ -21,6 +22,7 @@ import type {
   PullSession,
   PullSummary,
   PullsByModel,
+  ReviewRun,
 } from "@sessionly/schema";
 import { createHash, createHmac } from "node:crypto";
 import type { OrgDb } from "./db.ts";
@@ -2166,13 +2168,103 @@ async function costed(
   rows: Record<string, unknown>[],
   chosen: { sql: string; params: unknown[] },
 ): Promise<{ pull: PullRow; opened: Opened | null }[]> {
-  const shares = rows.length > 0 ? await sharesIn(db, chosen) : new Map<string, Share[]>();
+  const [shares, reviews] =
+    rows.length > 0 ? await Promise.all([sharesIn(db, chosen), localReviewsIn(db, chosen)]) : [new Map<string, Share[]>(), new Map()];
   return rows.map((r) => {
-    const pull = pullRow(r);
+    const row = pullRow(r);
+    const pull = { ...row, local_reviews: reviews.get(pullKey(row)) ?? null };
     if (r.detailed !== true) return { pull, opened: null };
     const { cost, opened } = costOf(pull, shares.get(pullKey(pull)) ?? []);
     return { pull: { ...pull, cost }, opened };
   });
+}
+
+/**
+ * The local review runs of the chosen pull requests (`repo`, `number`), by
+ * `pullKey`: of the sessions matched to each (as `sharesIn` has them), and
+ * of the sessions of its repository with a run that names its number. One
+ * with neither is not in the map.
+ */
+async function localReviewsIn(
+  db: OrgDb,
+  chosen: { sql: string; params: unknown[] },
+  { each = false }: { each?: boolean } = {},
+): Promise<Map<string, LocalReviews>> {
+  const rows = await db.query(
+    `WITH pulls AS (
+       SELECT r.repo, r.number, r.head_repo, r.aliases FROM (${chosen.sql}) c
+       JOIN pull_requests r ON r.org_id = $1 AND r.repo = c.repo AND r.number = c.number),
+     theirs AS (
+       SELECT pulls.repo, pulls.number, p.machine_id, p.source, p.session_id, true AS matched
+       FROM pulls JOIN pull_sessions p ON p.org_id = $1 AND p.repo = pulls.repo AND p.number = pulls.number
+       WHERE p.lines > 0 OR p.opened_lines > 0 OR p.contributed_lines > 0
+       UNION ALL
+       -- A session names a repository by its clone's origin: the pull request's, its fork's, or an old name of it.
+       SELECT pulls.repo, pulls.number, s.machine_id, s.source, s.session_id, false
+       FROM pulls JOIN sessions s ON s.org_id = $1 AND s.review_runs > 0
+         AND (lower(s.repo) = lower(pulls.repo) OR lower(s.repo) = lower(pulls.head_repo)
+              OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(coalesce(pulls.aliases, '[]'::jsonb)) AS a(name)
+                         WHERE lower(a.name) = lower(s.repo)))
+         AND s.review_pulls @> to_jsonb(pulls.number)),
+     one AS (
+       SELECT repo, number, machine_id, source, session_id, bool_or(matched) AS matched
+       FROM theirs GROUP BY repo, number, machine_id, source, session_id)
+     SELECT one.repo, one.number, one.matched, one.machine_id, one.source, one.session_id,
+            s.session_id IS NOT NULL AS held, s.review_runs,
+            CASE WHEN s.review_runs > 0 THEN s.payload->'session'->'reviews' END AS runs,
+            (SELECT count(*) FROM pull_sessions o
+              WHERE o.org_id = $1 AND o.machine_id = one.machine_id AND o.source = one.source
+                AND o.session_id = one.session_id AND (o.lines > 0 OR o.opened_lines > 0 OR o.contributed_lines > 0)) AS pulls
+     FROM one
+     LEFT JOIN sessions s ON s.org_id = $1 AND s.machine_id = one.machine_id AND s.source = one.source
+       AND s.session_id = one.session_id`,
+    chosen.params,
+  );
+  const found = new Map<string, LocalReviews>();
+  for (const row of rows) {
+    const key = pullKey({ repo: row.repo, number: row.number });
+    let into = found.get(key);
+    if (!into) {
+      into = { runs: 0, cloud: 0, by_effort: {}, findings: null, cost_usd: null, sessions_unknown: 0, shared_with: 0 };
+      found.set(key, into);
+    }
+    if (row.held !== true) continue;
+    if (row.review_runs == null) {
+      if (row.matched === true) into.sessions_unknown += 1;
+      continue;
+    }
+    const number = num(row.number);
+    for (const run of row.runs == null ? [] : json<ReviewRun[]>(row.runs)) {
+      const named = run.pull_number ?? null;
+      // A run that names another pull request is that one's.
+      if (named !== number && !(named === null && row.matched === true)) continue;
+      into.runs += 1;
+      if (run.ran === "cloud") into.cloud += 1;
+      if (run.effort) into.by_effort[run.effort] = (into.by_effort[run.effort] ?? 0) + 1;
+      if (run.findings != null) into.findings = (into.findings ?? 0) + run.findings;
+      if (run.estimated_cost_usd != null) into.cost_usd = money((into.cost_usd ?? 0) + run.estimated_cost_usd);
+      if (named === null) into.shared_with = Math.max(into.shared_with, num(row.pulls) - 1);
+      if (each) {
+        (into.each ??= []).push({
+          at: run.at ?? null,
+          command: run.command ?? "",
+          effort: run.effort ?? null,
+          ran: run.ran ?? "local",
+          via: run.via ?? "skill",
+          names_pull: named !== null,
+          subagents: run.subagents ?? 0,
+          cost_usd: run.estimated_cost_usd ?? null,
+          findings: run.findings ?? null,
+          machine_id: String(row.machine_id),
+          source: String(row.source),
+          session_id: String(row.session_id),
+        });
+      }
+    }
+  }
+  // Oldest first: the order the pull request was reviewed in. One without a time is last.
+  for (const into of found.values()) into.each?.sort((a, b) => (a.at ?? "9").localeCompare(b.at ?? "9") || a.session_id.localeCompare(b.session_id));
+  return found;
 }
 
 const ROW_COLUMNS = `repo, number, title, url, author, state, created_at, merged_at, first_event, commits,
@@ -2201,6 +2293,7 @@ function pullRow(r: Record<string, unknown>): PullRow {
     files_without_diff: num(r.files_without_diff),
     attribution: json<PullAttribution>(r.attribution),
     cost: null,
+    local_reviews: null,
     updated_at: iso(r.updated_at) ?? "",
     matched_at: iso(r.matched_at),
     matchable: r.matchable === true,
@@ -2226,8 +2319,9 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
   );
   if (!r) return null;
   const detail = r.detail == null ? null : json<{ files: PullFile[] }>(r.detail);
+  const chosen = { sql: `SELECT $2::text AS repo, $3::integer AS number`, params: [db.orgId, repo, number] };
   const row = pullRow(r);
-  const [reporter, shares, history] = await Promise.all([
+  const [reporter, shares, history, reviews] = await Promise.all([
     repoReporters(db, [repo]).then((found) => found.get(repo)),
     detail
       ? sharesIn(db, { sql: `SELECT $2::text AS repo, $3::integer AS number`, params: [db.orgId, repo, number] }, true).then(
@@ -2235,9 +2329,11 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
         )
       : Promise.resolve(null),
     pullHistory(db, repo, number),
+    localReviewsIn(db, chosen, { each: true }),
   ]);
   return {
     ...row,
+    local_reviews: reviews.get(pullKey(row)) ?? null,
     cost: shares && costOf(row, shares).cost,
     reporter_current: CURRENT_ACTION,
     repo_reporter_older: reporter?.older ?? false,
@@ -2403,6 +2499,8 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       changes_requested: 0,
       review_comments: 0,
       bot_review_comments: 0,
+      local_reviews: 0,
+      local_reviews_pulls: 0,
     }));
   for (const { pull, opened: its } of rows) {
     const a = pull.attribution;
@@ -2442,6 +2540,11 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
       row.changes_requested += pull.changes_requested;
       row.review_comments += pull.review_comments;
       row.bot_review_comments += pull.bot_review_comments;
+      // Known when no matched session is from a collector that did not count them.
+      if (pull.local_reviews && pull.local_reviews.sessions_unknown === 0) {
+        row.local_reviews += pull.local_reviews.runs;
+        row.local_reviews_pulls += 1;
+      }
     }
     // What review changed can only be said of a pull request seen from the start.
     if (pull.first_event !== "opened") continue;

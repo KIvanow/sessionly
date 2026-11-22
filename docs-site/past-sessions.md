@@ -13,8 +13,8 @@ sessionly import --tool cursor   # only one agent's; give --tool again for anoth
 ```
 
 `import` rebuilds a session's activity from Claude Code's transcript: prompts, tool calls with
-their outcome, files changed with line counts, subagents, and the lines needed for the rewrite
-rate. Cost and tokens come from the transcript as usual. On one machine it turned 2.5 GB of
+their outcome, files changed with line counts, subagents, [review runs](session-record.md#review-runs),
+and the lines needed for the rewrite rate. Cost and tokens come from the transcript as usual. On one machine it turned 2.5 GB of
 transcripts (100 sessions) into 99 MB in about a minute.
 
 - Each agent's files are read from where it keeps them: `~/.claude/projects` (or

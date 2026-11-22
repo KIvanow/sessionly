@@ -883,6 +883,12 @@ const MIGRATIONS: string[] = [
   // they are there to match by still, and stay the session's only while the
   // match gives it them. Null from before, and with `gone`.
   `ALTER TABLE pull_sessions ADD COLUMN gone_opened jsonb`,
+  // Review runs (`/code-review` and the like). Null for a session from a
+  // collector that did not count them: not known, which is not none.
+  `ALTER TABLE sessions ADD COLUMN review_runs integer`,
+  // The pull request numbers its review runs name, as a list: a pull request
+  // finds the sessions that reviewed it without reading every session's record.
+  `ALTER TABLE sessions ADD COLUMN review_pulls jsonb`,
 ];
 
 /**
