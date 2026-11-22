@@ -160,18 +160,23 @@ export function Pulls({ token, scope, setScope, repos, readOnly = false, onSignO
           <div className="scroll">
             <table className="rows">
               <thead>
+                {/* Short headings on one line, grouped: what each is in full is in its title. */}
                 <tr>
-                  <th scope="col">Pull request</th>
-                  <th scope="col">Opened by</th>
-                  <th scope="col">Created</th>
-                  <th scope="col" className="num">Lines added</th>
-                  <th scope="col" className="num">By agents</th>
-                  <th scope="col">Written with</th>
-                  <th scope="col" className="num">Agent lines that survived review</th>
-                  <th scope="col" className="num">Agent cost</th>
-                  <th scope="col" className="num">Review rounds</th>
-                  <th scope="col" className="num">Comments by people</th>
-                  <th scope="col" className="num">by bots</th>
+                  <th scope="col" rowSpan={2}>Pull request</th>
+                  <th scope="col" rowSpan={2}>Author</th>
+                  <th scope="col" rowSpan={2}>Created</th>
+                  <th scope="col" rowSpan={2} className="num" title="Lines the pull request adds">Lines</th>
+                  <th scope="col" rowSpan={2} className="num" title="Of those lines, written by a coding agent">By agents</th>
+                  <th scope="col" rowSpan={2}>Written with</th>
+                  <th scope="colgroup" colSpan={2} className="group">Review</th>
+                  <th scope="col" rowSpan={2} className="num" title="What was spent on it by the sessions that gave it lines">Cost</th>
+                  <th scope="colgroup" colSpan={2} className="group">Comments</th>
+                </tr>
+                <tr>
+                  <th scope="col" className="num" title="Agent lines that survived review, of those it was opened with">Kept</th>
+                  <th scope="col" className="num" title="Times review feedback was followed by a new commit">Rounds</th>
+                  <th scope="col" className="num" title="Comments on the diff by people other than the author">People</th>
+                  <th scope="col" className="num" title="Comments on the diff by review bots">Bots</th>
                 </tr>
               </thead>
               <tbody>{list.data.pulls.map((p) => <Row key={`${p.repo}#${p.number}`} p={p} />)}</tbody>
@@ -228,15 +233,18 @@ function ByModel({ summary }: { summary: PullSummary }) {
         <table>
           <thead>
             <tr>
-              <th scope="col">Tool</th>
-              <th scope="col">Model</th>
-              <th scope="col" className="num">Pull requests</th>
-              <th scope="col" className="num">Agent lines</th>
-              <th scope="col" className="num">Survived review</th>
-              <th scope="col" className="num">Review rounds per pull request</th>
-              <th scope="col" className="num">Changes requested</th>
-              <th scope="col" className="num">Comments per pull request, by people</th>
-              <th scope="col" className="num">by bots</th>
+              <th scope="col" rowSpan={2}>Tool</th>
+              <th scope="col" rowSpan={2}>Model</th>
+              <th scope="col" rowSpan={2} className="num">Pull requests</th>
+              <th scope="col" rowSpan={2} className="num">Agent lines</th>
+              <th scope="col" rowSpan={2} className="num" title="Agent lines that survived review, of those the pull requests were opened with">Survived review</th>
+              <th scope="col" rowSpan={2} className="num" title="Reviews that asked for changes">Changes requested</th>
+              <th scope="colgroup" colSpan={3} className="group">Per pull request</th>
+            </tr>
+            <tr>
+              <th scope="col" className="num" title="Review rounds per pull request">Rounds</th>
+              <th scope="col" className="num" title="Comments on the diff per pull request, by people">Comments</th>
+              <th scope="col" className="num" title="Comments on the diff per pull request, by review bots">By bots</th>
             </tr>
           </thead>
           <tbody>
@@ -259,8 +267,8 @@ function ByModel({ summary }: { summary: PullSummary }) {
                       </span>
                     </span>
                   </td>
-                  <td className="num">{average(m.review_rounds, m.pulls)}</td>
                   <td className="num">{count(m.changes_requested)}</td>
+                  <td className="num">{average(m.review_rounds, m.pulls)}</td>
                   <td className="num">{average(m.review_comments, m.pulls)}</td>
                   <td className="num">{average(m.bot_review_comments, m.pulls)}</td>
                 </tr>
@@ -326,13 +334,13 @@ function Row({ p }: { p: PullRow }) {
           ? `${shareOf(surviving, a.first.agent_lines)} of ${count(a.first.agent_lines)}`
           : "–"}
       </td>
+      <td className="num">{count(p.review_rounds)}</td>
       <td
         className="num nowrap"
         title={p.cost && p.cost.usd != null && costIsFloor(p.cost) ? "At least: a session of it has no cost figure, or one that leaves requests out" : undefined}
       >
         {pullCost(p.cost, "≥ ")}
       </td>
-      <td className="num">{count(p.review_rounds)}</td>
       <td className="num">{count(p.review_comments)}</td>
       <td className="num">{count(p.bot_review_comments)}</td>
     </tr>
