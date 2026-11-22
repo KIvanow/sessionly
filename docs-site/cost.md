@@ -8,7 +8,15 @@ parent: Command line
 
 ## How cost is calculated
 
-This is how the cost of a Claude Code session is worked out.
+Where a session's cost comes from depends on the agent:
+
+- **Claude Code:** its own recorded total, combined with an estimate from the tokens. The rest
+  of this section is how.
+- **Grok:** Grok's own cost figure.
+- **Codex:** an estimate, its tokens at OpenAI's API list prices and not what a ChatGPT plan
+  bills (see [Codex](codex.md)).
+- **Cursor:** an estimate at API list prices, for the turns the hooks saw (see
+  [Cursor and Grok](cursor-and-grok.md)).
 
 Claude Code records its own cost total in the transcript, but only for one run of a session
 (from the last start or resume until the total was last written). Sessionly combines that with
@@ -23,8 +31,10 @@ The record says which of these a cost is, in `cost.source`: `recorded`,
 `recorded_and_estimated`, `estimated`, or `partial_estimate` when some requests had no price
 (see below). `list` and `summary` mark any cost that is or includes an estimate with `~`.
 
-Estimates use Anthropic's published API prices in
-[`pricing.rs`](https://github.com/KIvanow/sessionly/blob/main/crates/sessionly/src/pricing.rs). Each API response is counted once, with its
+Every agent's estimates use the published API list prices in
+[`pricing.rs`](https://github.com/KIvanow/sessionly/blob/main/crates/sessionly/src/pricing.rs):
+Anthropic's, OpenAI's and those of Cursor's own models. For Claude Code, each API response is
+counted once, with its
 final token counts, even when it appears in several transcript files. A request made in fast
 mode costs twice the usual, and a write to the cache 1.25 times the input price (kept five
 minutes) or twice (kept an hour). Requests to a model that isn't in the price table are left
