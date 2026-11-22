@@ -151,7 +151,7 @@
           <div class="sheet blue">
             <div class="sheet-head">
               <b>KIvanow/sessionly · by tool · last 30 days</b>
-              <span>The live demo, as of 19 Nov 2026</span>
+              <span>The live demo, as of 22 Nov 2026</span>
             </div>
             <div class="scroll">
               <table>
@@ -166,23 +166,23 @@
                 <tbody>
                   <tr>
                     <th scope="row">Claude Code</th>
-                    <td class="num">12</td>
-                    <td class="num">$555.02</td>
+                    <td class="num">16</td>
+                    <td class="num">$888.06</td>
                     <td>
                       <div class="share">
-                        <div class="track"><i class="w68"></i></div>
-                        <b>68%</b>
+                        <div class="track"><i class="w73"></i></div>
+                        <b>73%</b>
                       </div>
                     </td>
                   </tr>
                   <tr>
                     <th scope="row">Grok</th>
-                    <td class="num">6</td>
-                    <td class="num">$39.07</td>
+                    <td class="num">8</td>
+                    <td class="num">$40.65</td>
                     <td>
                       <div class="share">
-                        <div class="track"><i class="w12"></i></div>
-                        <b>12%</b>
+                        <div class="track"><i class="w17"></i></div>
+                        <b>17%</b>
                       </div>
                     </td>
                   </tr>
@@ -210,12 +210,12 @@
                   </tr>
                   <tr class="total">
                     <th scope="row">Total</th>
-                    <td class="num">21</td>
-                    <td class="num">$594.09</td>
+                    <td class="num">27</td>
+                    <td class="num">$928.71</td>
                     <td>
                       <div class="share">
-                        <div class="track"><i class="all w56"></i></div>
-                        <b>56%</b>
+                        <div class="track"><i class="all w63"></i></div>
+                        <b>63%</b>
                       </div>
                     </td>
                   </tr>
@@ -224,11 +224,12 @@
             </div>
             <div class="sheet-foot">
               <p>
-                21 sessions, 29h 50m active, 480 files changed. 5 of the 21 costs are estimates and
-                3 sessions have no cost figure: the Codex ones were imported before Sessionly
-                estimated Codex costs from their tokens, and the Cursor session reported none. One
-                repository and one developer over one week: a record of this work, not
-                a benchmark of the agents.
+                27 sessions, 37h 12m active, 688 files changed. 5 of the 27 costs are estimates and
+                4 sessions have no cost figure: the Codex ones were imported before Sessionly
+                estimated Codex costs from their tokens, and the Cursor session and one Grok
+                session reported none. One repository and one developer over nine days: a record
+                of this work, not a benchmark of the agents. The demo is brought up to date every
+                day, so its figures have moved on since.
               </p>
               <a href="https://app.sessionly.dev/#/demo">Open these figures in the demo →</a>
             </div>
@@ -440,8 +441,10 @@
             <div class="cell">
               <h3>What a pull request cost</h3>
               <p>
-                The cost of the sessions matched to a pull request, each counted for its share of
-                the lines, and the cost of an agent line that got through review. Marked
+                What was spent getting a pull request merged: the cost of every session that gave
+                it lines, review rounds included, and still counted when review takes those lines
+                out. A session that worked on several is split between them. Beside it, the cost
+                of an agent line that got through review. Marked
                 "at least" where it is a floor and <code>~</code> where it is an estimate.
               </p>
             </div>
@@ -711,8 +714,10 @@ SESSIONLY_LINE_HASHES=on</pre>
                 comment on GitHub: their text stays there.
               </li>
               <li>
-                <b>What it cost:</b> the matched sessions' cost, each counted for its share of the
-                lines, and the cost of an agent line that got through review. It reads "at least"
+                <b>What it cost:</b> what was spent on it, not what its remaining lines cost. Every
+                session that gave it lines is counted, also when review removes them, and one that
+                worked on several pull requests is split between them. With it, the cost of an
+                agent line that got through review. It reads "at least"
                 when a session has no cost figure, and is marked ~ when it is an estimate.
               </li>
               <li>
@@ -915,7 +920,8 @@ SESSIONLY_LINE_HASHES=on</pre>
           <p class="note">
             Sessionly is early. A
             <a href="https://github.com/KIvanow/sessionly/releases">release</a> is a binary for
-            Linux or macOS to unpack, with no installer yet. On a server of your own, sign-in to
+            Linux or macOS to unpack, or <code>cargo install sessionly</code>; there is no
+            installer yet. On a server of your own, sign-in to
             the dashboard is by token unless you set up Google or GitHub. The
             <a href="https://github.com/KIvanow/sessionly#readme">README</a> says what works today.
           </p>
@@ -931,7 +937,7 @@ SESSIONLY_LINE_HASHES=on</pre>
               <p class="lede">
                 Unpack the binary from a
                 <a href="https://github.com/KIvanow/sessionly/releases">release</a> (Linux or
-                macOS) or build it with Cargo, install the hooks and import the sessions your
+                macOS) or install it with <code>cargo install sessionly</code>, then install the hooks and import the sessions your
                 agents still have. Listing, search, summaries and the rewrite rate all work
                 without a server.
               </p>
@@ -959,6 +965,8 @@ SESSIONLY_LINE_HASHES=on</pre>
               <pre><span class="c"># a release's archive for your system, from GitHub</span>
 <span class="c">$</span> tar -xzf sessionly-*.tar.gz
 <span class="c">$</span> mv sessionly ~/.local/bin/   <span class="c"># or anywhere on your PATH</span>
+<span class="c"># or, with Rust installed, from crates.io</span>
+<span class="c">$</span> cargo install sessionly
 <span class="c">$</span> sessionly install   <span class="c"># adds the agents' hooks</span>
 <span class="c">$</span> sessionly import    <span class="c"># past sessions of all four agents</span>
 <span class="c">$</span> sessionly list
