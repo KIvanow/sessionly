@@ -162,6 +162,7 @@ jobs:
           if [ -f "repo/release-notes/$GITHUB_REF_NAME.md" ]; then
             cat "repo/release-notes/$GITHUB_REF_NAME.md" > notes.md
           else
+            echo "::warning title=No release notes::release-notes/$GITHUB_REF_NAME.md does not exist, so this release uses GitHub's generated notes. Add release-notes/$GITHUB_REF_NAME.md to write them by hand."
             gh api "repos/$GH_REPO/releases/generate-notes" -f tag_name="$GITHUB_REF_NAME" --jq .body > notes.md
           fi
           printf '\n' >> notes.md
