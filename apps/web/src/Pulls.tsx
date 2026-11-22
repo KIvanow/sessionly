@@ -159,8 +159,13 @@ export function Pulls({ token, scope, setScope, repos, readOnly = false, onSignO
           <OlderActions repos={older} />
           <div className="scroll">
             <table className="rows">
+              {/* The column groups the grouped headings name: six columns, Review, Cost, Comments. */}
+              <colgroup span={6} />
+              <colgroup span={2} />
+              <colgroup />
+              <colgroup span={2} />
               <thead>
-                {/* Short headings on one line, grouped: what each is in full is in its title. */}
+                {/* Short headings on one line, grouped: what each is in full is in its title and under the table. */}
                 <tr>
                   <th scope="col" rowSpan={2}>Pull request</th>
                   <th scope="col" rowSpan={2}>Author</th>
@@ -182,6 +187,11 @@ export function Pulls({ token, scope, setScope, repos, readOnly = false, onSignO
               <tbody>{list.data.pulls.map((p) => <Row key={`${p.repo}#${p.number}`} p={p} />)}</tbody>
             </table>
           </div>
+          <p className="muted hint">
+            Kept: agent lines that survived review, of those the pull request was opened with. Rounds: times
+            review feedback was followed by a new commit. Comments are those on the diff, by people other than
+            the author and by review bots.
+          </p>
           {total && total.cloud_pulls_without_session > 0 && (
             <p className="muted hint">
               {count(total.cloud_pulls_without_session)} of these pull requests were worked on by a cloud agent
@@ -231,6 +241,8 @@ function ByModel({ summary }: { summary: PullSummary }) {
       </p>
       <div className="scroll">
         <table>
+          <colgroup span={6} />
+          <colgroup span={3} />
           <thead>
             <tr>
               <th scope="col" rowSpan={2}>Tool</th>
