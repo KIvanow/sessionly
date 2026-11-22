@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://app.sessionly.dev/#/demo"><img src="https://img.shields.io/badge/live_demo-open-5b9df3?style=flat-square" alt="Live demo"></a>
   <a href="https://github.com/KIvanow/sessionly/releases/latest"><img src="https://img.shields.io/github/v/release/KIvanow/sessionly?style=flat-square&color=5b9df3" alt="Latest release"></a>
+  <a href="https://crates.io/crates/sessionly"><img src="https://img.shields.io/crates/v/sessionly?style=flat-square&color=5b9df3" alt="crates.io"></a>
   <a href="https://github.com/KIvanow/sessionly/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/KIvanow/sessionly/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-f6f5f0?style=flat-square" alt="License: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/rust-1.89%2B-f6f5f0?style=flat-square&logo=rust" alt="Rust 1.89+">
