@@ -558,13 +558,13 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   const versionOf = async (number: number) => (await at(number)).body.reporter_version as string | null;
   const pinned = (overrides: Record<string, unknown> = {}) => report({ repo, ...overrides });
 
-  const sent = await call(tokens.ci, "PUT", "/prs", pinned({ number: 40, reporter: { name: "sessionly-action", version: "0.2.0" } }));
+  const sent = await call(tokens.ci, "PUT", "/prs", pinned({ number: 40, reporter: { name: "sessionly-action", version: CURRENT_ACTION } }));
   assert.equal(sent.status, 200);
   const page = (await at(40)).body;
-  assert.deepEqual([page.reporter_version, page.reporter_current], ["0.2.0", CURRENT_ACTION]);
+  assert.deepEqual([page.reporter_version, page.reporter_current], [CURRENT_ACTION, CURRENT_ACTION]);
   assert.equal(page.reporter_older, false);
   const listed = (await call(tokens.admin, "GET", "/prs?repo=acme/pinned")).body.pulls.find((p: { number: number }) => p.number === 40);
-  assert.equal(listed.reporter_version, "0.2.0");
+  assert.equal(listed.reporter_version, CURRENT_ACTION);
   assert.equal(listed.reporter_older, false);
   assert.equal("reporter_current" in listed, false);
 
@@ -579,10 +579,10 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   // release, and an earlier one is too.
   const pre = await call(tokens.ci, "PUT", "/prs", pinned({
     number: 42,
-    reporter: { name: "sessionly-action", version: "0.2.0-rc.1" },
+    reporter: { name: "sessionly-action", version: `${CURRENT_ACTION}-rc.1` },
   }));
   assert.equal(pre.status, 200);
-  assert.equal(await versionOf(42), "0.2.0-rc.1");
+  assert.equal(await versionOf(42), `${CURRENT_ACTION}-rc.1`);
   assert.equal((await at(42)).body.reporter_older, true);
   assert.equal((await call(tokens.ci, "PUT", "/prs", pinned({
     number: 42, event: "synchronize", reporter: { name: "sessionly-action", version: "0.1.0-rc.1" },
@@ -847,13 +847,13 @@ test("a report's Action version is kept, and one that does not fit is ignored", 
   // A newer pre-release is not a reason to downgrade.
   const ahead = "github.com/acme/ahead";
   assert.equal((await call(tokens.ci, "PUT", "/prs", report({
-    repo: ahead, number: 1, reporter: { name: "sessionly-action", version: "0.3.0-rc.1" },
+    repo: ahead, number: 1, reporter: { name: "sessionly-action", version: "99.0.0-rc.1" },
   }))).status, 200);
   const aheadPage = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(ahead)}&number=1`)).body;
-  assert.equal(aheadPage.reporter_version, "0.3.0-rc.1");
+  assert.equal(aheadPage.reporter_version, "99.0.0-rc.1");
   assert.equal(aheadPage.reporter_older, false);
   assert.equal(aheadPage.repo_reporter_older, false);
-  assert.equal(aheadPage.repo_reporter_version, "0.3.0-rc.1");
+  assert.equal(aheadPage.repo_reporter_version, "99.0.0-rc.1");
   assert.deepEqual((await call(tokens.admin, "GET", "/prs/summary?repo=acme/ahead")).body.older_actions, []);
 
   // A row stored before reports said who sent them is marked with an empty

@@ -33,7 +33,7 @@ export class BadReport extends Error {}
  * string as `version` in `action/package.json`: a test fails when the two
  * differ. Bump both with every change to what a report contains.
  */
-export const CURRENT_ACTION = "0.2.0";
+export const CURRENT_ACTION = "0.3.0";
 
 /** Sessions that started longer than this before a pull request was opened are not looked at. */
 const LOOK_BACK_DAYS = 90;
