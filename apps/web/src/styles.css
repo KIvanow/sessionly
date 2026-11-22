@@ -410,6 +410,10 @@ thead th, thead th.num {
   white-space: normal;
   vertical-align: bottom;
 }
+/* A heading over several columns: on one line, centred over them, with a lighter rule
+   under it than the one that ends the head. The headings under it are one word each. */
+thead th.group { text-align: center; white-space: nowrap; border-bottom-color: var(--rule); padding-bottom: 4px; }
+thead tr + tr th, thead tr + tr th.num { white-space: nowrap; padding-top: 4px; }
 tbody th { font-weight: 600; }
 tbody tr:last-child > * { border-bottom: none; }
 table.rows tbody tr:hover > * { background: var(--tint); }
