@@ -72,10 +72,11 @@ one developer over one week: a record of this work, not a benchmark of the agent
 ## Install
 
 Each [release](https://github.com/KIvanow/sessionly/releases) has a binary for Linux and macOS.
-Unpack it and put `sessionly` on your `PATH`, or build it with Rust 1.89 or later:
+Unpack it and put `sessionly` on your `PATH`, or install it from crates.io with Rust 1.89 or
+later:
 
 ```sh
-cargo install --path crates/sessionly
+cargo install sessionly
 ```
 
 Then:

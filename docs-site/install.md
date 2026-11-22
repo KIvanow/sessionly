@@ -8,11 +8,14 @@ nav_order: 2
 Each [release](https://github.com/KIvanow/sessionly/releases) has a binary for Linux (x86_64
 and arm64, statically linked) and macOS (Apple silicon and Intel), as
 `sessionly-<target>.tar.gz`, with their SHA-256 checksums in `SHA256SUMS`. Unpack one and put
-`sessionly` on your `PATH`. Or build it, which needs Rust 1.89 or later:
+`sessionly` on your `PATH`. Or install it from crates.io, which needs Rust 1.89 or later:
 
 ```sh
-cargo install --path crates/sessionly   # or: cargo build --release
+cargo install sessionly                  # from a checkout: cargo install --path crates/sessionly
 ```
+
+Installed with cargo, it is updated with `cargo install sessionly` again, so that cargo's record
+of it stays right; `sessionly update` works too, but cargo will still list the old version.
 
 Then:
 

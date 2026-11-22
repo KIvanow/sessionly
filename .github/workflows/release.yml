@@ -9,7 +9,7 @@ name: Release
 # run, without publishing anything: a way to try the build.
 #
 # The same tag builds the server's container image and pushes it to
-# ghcr.io/kivanow/sessionly-server.
+# ghcr.io/kivanow/sessionly-server, and publishes the crate to crates.io.
 on:
   push:
     tags: ["v*"]
@@ -155,3 +155,18 @@ jobs:
             --title "Sessionly ${GITHUB_REF_NAME#v}" \
             --notes "Binaries for Linux (statically linked) and macOS, each as \`sessionly-<target>.tar.gz\`, with their SHA-256 checksums in \`SHA256SUMS\`. See the README for how to install." \
             sessionly-*.tar.gz SHA256SUMS
+
+  # The crate, for `cargo install sessionly`. After the GitHub release, so
+  # that a release that failed is not on crates.io, where a version can never
+  # be replaced.
+  crate:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - run: cargo publish --locked -p sessionly
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

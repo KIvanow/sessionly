@@ -35,6 +35,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      # What a release publishes to crates.io builds on its own.
+      - run: cargo package --locked -p sessionly
       - name: What the hooks noted, if two of them each downloaded the binary
         if: always()
         run: |
