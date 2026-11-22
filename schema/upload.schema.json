@@ -665,7 +665,7 @@
           "default": 0
         },
         "reviews": {
-          "description": "Review runs: the length of `Session::reviews`. Left out for an agent\nwhose review commands are not read (Cursor and Grok): not known,\nwhich is not none.",
+          "description": "Review runs: the length of `Session::reviews`. Left out for an agent\nwhose review commands are not read (none of the four today): not\nknown, which is not none.",
           "type": [
             "integer",
             "null"

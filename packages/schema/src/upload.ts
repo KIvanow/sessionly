@@ -268,8 +268,8 @@ export interface Counts {
   subagents?: number;
   /**
    * Review runs: the length of `Session::reviews`. Left out for an agent
-   * whose review commands are not read (Cursor and Grok): not known,
-   * which is not none.
+   * whose review commands are not read (none of the four today): not
+   * known, which is not none.
    */
   reviews?: number | null;
   compactions?: number;

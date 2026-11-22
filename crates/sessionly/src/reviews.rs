@@ -43,7 +43,7 @@ const SAME_START_SECONDS: i64 = 5;
 /// True for an agent whose review commands are read. A session of another
 /// has no count: not known, which is not none.
 pub fn counted(source: &str) -> bool {
-    [crate::paths::CLAUDE_CODE, crate::paths::CODEX].contains(&source)
+    crate::paths::SOURCES.contains(&source)
 }
 
 /// True for the name of a review command, with or without its slash.
@@ -258,14 +258,18 @@ impl Seen {
                     agent: p["agent_id"].as_str().map(String::from),
                 });
             }
-            // Of typed commands, only Claude Code's are known.
-            _ if source != crate::paths::CLAUDE_CODE => {}
+            // Codex's own command is not in what it writes down; a prompt
+            // that names it would count the review above a second time.
+            _ if source == crate::paths::CODEX => {}
+            // Typed in Claude Code, Cursor or Grok: the prompt is the command.
+            // Cursor's files wrap it in `<user_query>`, which the import has
+            // taken off, and its hooks have it bare.
             ("UserPromptSubmit", _) => {
                 if let Some((name, args)) = p["prompt"].as_str().and_then(slash_command) {
                     self.typed(p, at, name, args);
                 }
             }
-            ("UserPromptExpansion", _) => {
+            ("UserPromptExpansion", _) if source == crate::paths::CLAUDE_CODE => {
                 let kind = p["expansion_type"].as_str().unwrap_or("slash_command");
                 if let (Some(name), "slash_command") = (p["command_name"].as_str(), kind) {
                     let args = p["command_args"].as_str().unwrap_or_default();
@@ -954,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn only_claude_codes_commands_are_read_from_prompts() {
+    fn a_prompt_that_names_codexs_review_is_not_a_run_of_its_own() {
         let mut e = prompt(0, "p1", "/review");
         e["source"] = json!("codex");
         let s = from_events(&[e], None, "codex").unwrap();
@@ -1099,10 +1103,58 @@ mod tests {
     }
 
     #[test]
+    fn a_command_typed_in_cursor_or_grok_is_a_run() {
+        for source in ["cursor", "grok"] {
+            let of = |mut e: Value| {
+                e["source"] = json!(source);
+                e
+            };
+            let events = [
+                of(prompt(0, "p1", "/code-review #41")),
+                of(prompt(30, "p2", "now fix the first one")),
+                of(prompt(
+                    60,
+                    "p3",
+                    "/code-review https://github.com/acme/web/pull/42 again",
+                )),
+                of(prompt(90, "p4", "/model")),
+            ];
+            let s = from_events(&events, None, source).unwrap();
+            assert_eq!(s.counts.reviews, Some(2), "{source}");
+            let runs: Vec<_> = s
+                .reviews
+                .iter()
+                .map(|r| (r.command.as_str(), r.via, r.ran, r.pull_number, r.subagents))
+                .collect();
+            assert_eq!(
+                runs,
+                [
+                    (
+                        "code-review",
+                        ReviewVia::SlashCommand,
+                        ReviewRan::Local,
+                        Some(41),
+                        0
+                    ),
+                    (
+                        "code-review",
+                        ReviewVia::SlashCommand,
+                        ReviewRan::Local,
+                        Some(42),
+                        0
+                    ),
+                ],
+                "{source}"
+            );
+            assert_eq!(s.reviews[0].estimated_cost_usd, None);
+        }
+    }
+
+    #[test]
     fn an_agent_whose_commands_are_not_read_has_no_count() {
         let mut e = prompt(0, "p1", "hello");
-        e["source"] = json!("grok");
-        let s = from_events(&[e], None, "grok").unwrap();
+        e["source"] = json!("another");
+        let s = from_events(&[e], None, "another").unwrap();
         assert_eq!(s.counts.reviews, None);
         let s = session(vec![vec![prompt(0, "p1", "hello")]], None);
         assert_eq!(s.counts.reviews, Some(0));

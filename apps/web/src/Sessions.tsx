@@ -122,7 +122,7 @@ function Row({ s, reviews }: { s: SessionRow; reviews: boolean }) {
           : "–"}
       </td>
       {reviews && (
-        <td className="num" title={s.review_runs == null ? "Not known: captured by an older Sessionly, or by an agent whose review commands are not read" : undefined}>
+        <td className="num" title={s.review_runs == null ? "Not known: captured by an older Sessionly, which did not count reviews" : undefined}>
           {s.review_runs == null ? "?" : s.review_runs > 0 ? count(s.review_runs) : "–"}
         </td>
       )}

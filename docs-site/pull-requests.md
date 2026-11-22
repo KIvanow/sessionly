@@ -246,8 +246,7 @@ each of them, and the page says so. The two sides are not added up: a run in a s
 bot's comments are different things. The cost of the runs is already in the pull request's
 cost, not on top of it, and is a floor: their subagents only. A review in the cloud is billed
 apart and has none. The list has a Local column, and **by model** the runs per pull request.
-A session from a Sessionly that did not count review runs, or from Cursor or Grok,
-whose review commands are not read yet, is said to be not known.
+A session from a Sessionly that did not count review runs is said to be not known.
 
 ## How to read it
 

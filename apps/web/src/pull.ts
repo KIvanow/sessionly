@@ -53,7 +53,7 @@ export function localReviewsLine(r: LocalReviews | null, spent: number | null): 
   if (!r) return "No session of it is known.";
   const unknown =
     r.sessions_unknown > 0
-      ? ` ${count(r.sessions_unknown)} of its ${r.sessions_unknown === 1 ? "sessions was" : "sessions were"} from an older Sessionly or an agent whose review commands are not read: not known for ${r.sessions_unknown === 1 ? "it" : "them"}.`
+      ? ` ${count(r.sessions_unknown)} of its ${r.sessions_unknown === 1 ? "sessions was" : "sessions were"} captured by an older Sessionly, which did not count reviews: not known for ${r.sessions_unknown === 1 ? "it" : "them"}.`
       : "";
   if (r.runs === 0) return `No review command ran in its sessions.${unknown}`;
   const efforts = Object.entries(r.by_effort)

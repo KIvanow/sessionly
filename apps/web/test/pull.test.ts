@@ -311,6 +311,6 @@ test("a pull request's local review runs in a sentence, and what is not known sa
   );
   assert.equal(
     localReviewsLine({ ...none, runs: 1, findings: 3, shared_with: 2, sessions_unknown: 1 }, null),
-    "Reviewed once before and during review. 3 findings reported. Some of those ran in sessions it shares with 2 other pull requests, and name none: they are counted on each. 1 of its sessions was from an older Sessionly or an agent whose review commands are not read: not known for it.",
+    "Reviewed once before and during review. 3 findings reported. Some of those ran in sessions it shares with 2 other pull requests, and name none: they are counted on each. 1 of its sessions was captured by an older Sessionly, which did not count reviews: not known for it.",
   );
 });
