@@ -113,16 +113,37 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
     let (mut first, mut last) = (None::<i64>, None::<i64>);
     let mut model: Option<String> = None;
 
-    // A prompt arrives in chunks: it is pushed once the next thing happens.
-    fn flush_prompt(out: &mut Builder, id: &Option<String>, text: &mut String, at: i64) {
-        if !text.is_empty() {
-            out.push(
-                &time_of(at),
-                "UserPromptSubmit",
-                json!({ "prompt_id": id, "prompt": text }),
-            );
-            text.clear();
+    // The prompt last pushed and what has been said in answer to it since
+    // the last tool call: a review's reply says how many findings it has.
+    let mut asked: Option<(String, String)> = None;
+    let mut reply = String::new();
+
+    // A prompt arrives in chunks: it is pushed once the next thing happens,
+    // and handed back as the one now being answered.
+    fn flush_prompt(
+        out: &mut Builder,
+        id: &Option<String>,
+        text: &mut String,
+        at: i64,
+    ) -> Option<(String, String)> {
+        if text.is_empty() {
+            return None;
         }
+        out.push(
+            &time_of(at),
+            "UserPromptSubmit",
+            json!({ "prompt_id": id, "prompt": text }),
+        );
+        Some((id.clone().unwrap_or_default(), std::mem::take(text)))
+    }
+    // What the answer to a review command says it found, once it is over.
+    fn flush_reply(out: &mut Builder, asked: &mut Option<(String, String)>, reply: &mut String) {
+        if let Some((id, prompt)) = asked.take() {
+            if let Some(said) = crate::reviews::reply_event(&id, &prompt, reply) {
+                out.push("", "ReviewReply", said);
+            }
+        }
+        reply.clear();
     }
 
     crate::jsonl::for_each(updates, |row| {
@@ -134,14 +155,26 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
         let update = &row["params"]["update"];
         let kind = update["sessionUpdate"].as_str().unwrap_or_default();
         if kind != "user_message_chunk" {
-            flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started);
+            if let Some(now) = flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started)
+            {
+                flush_reply(&mut out, &mut asked, &mut reply);
+                asked = Some(now);
+            }
         }
         match kind {
+            "agent_message_chunk" => {
+                reply.push_str(update["content"]["text"].as_str().unwrap_or_default());
+            }
             "user_message_chunk" => {
                 let index = update["_meta"]["promptIndex"].as_u64().unwrap_or(0);
                 let id = Some(format!("p{index}"));
                 if id != prompt_id {
-                    flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started);
+                    if let Some(now) =
+                        flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started)
+                    {
+                        flush_reply(&mut out, &mut asked, &mut reply);
+                        asked = Some(now);
+                    }
                     prompt_id = id;
                     prompt_started = at;
                 }
@@ -151,6 +184,8 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
                 }
             }
             "tool_call" | "tool_call_update" => {
+                // What was said before a tool call is not the last word.
+                reply.clear();
                 let Some(id) = update["toolCallId"].as_str() else {
                     return;
                 };
@@ -231,7 +266,11 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
             _ => {}
         }
     })?;
-    flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started);
+    if let Some(now) = flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started) {
+        flush_reply(&mut out, &mut asked, &mut reply);
+        asked = Some(now);
+    }
+    flush_reply(&mut out, &mut asked, &mut reply);
     // Calls that never reported an outcome.
     let mut open: Vec<(String, Call)> = calls.into_iter().collect();
     open.sort_by_key(|(_, call)| call.started);

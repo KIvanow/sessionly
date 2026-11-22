@@ -211,6 +211,10 @@ fn read_file(
     let mut current: Option<usize> = None;
     let mut next_tool = 0usize;
     let mut open: Option<usize> = None;
+    // The prompt being read and the last thing said in answer to it: a
+    // review's reply says how many findings it has.
+    let mut asked: Option<(String, String)> = None;
+    let mut reply: Option<String> = None;
     let stem = path
         .file_stem()
         .unwrap_or_default()
@@ -232,7 +236,13 @@ fn read_file(
                     if let Some(i) = open.take() {
                         end_turn(out, &hooked[i], format!("p{prompts}"));
                     }
+                    if let (Some((id, asked)), Some(reply)) = (asked.take(), reply.take()) {
+                        if let Some(said) = crate::reviews::reply_event(&id, &asked, &reply) {
+                            out.push("", "ReviewReply", said);
+                        }
+                    }
                     prompts += 1;
+                    asked = Some((format!("p{prompts}"), prompt.clone()));
                     let minute = prompt_time(&text);
                     current = find_turn(hooked, &prompt, minute);
                     next_tool = 0;
@@ -252,6 +262,15 @@ fn read_file(
                 }
             }
             (Some("assistant"), _) => {
+                if agent_id.is_none() {
+                    let texts = blocks.into_iter().flatten();
+                    let said = texts
+                        .filter_map(|b| b["text"].as_str().filter(|_| b["type"] == "text"))
+                        .rfind(|t| !t.trim().is_empty());
+                    if let Some(said) = said {
+                        reply = Some(said.to_string());
+                    }
+                }
                 for block in blocks
                     .into_iter()
                     .flatten()
@@ -329,6 +348,11 @@ fn read_file(
     })?;
     if let Some(i) = open {
         end_turn(out, &hooked[i], format!("p{prompts}"));
+    }
+    if let (Some((id, asked)), Some(reply)) = (asked, reply) {
+        if let Some(said) = crate::reviews::reply_event(&id, &asked, &reply) {
+            out.push("", "ReviewReply", said);
+        }
     }
     Ok((calls, prompts))
 }

@@ -37,6 +37,9 @@ pub const COMMANDS: &[&str] = &["code-review", "review", "security-review", "ult
 /// The efforts a review command takes as its first argument.
 const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 
+/// How far into a reply its number of findings is looked for: its first lines.
+const FINDINGS_WITHIN: usize = 400;
+
 /// A typed command and the prompt it is in, taken as one start within this.
 const SAME_START_SECONDS: i64 = 5;
 
@@ -130,10 +133,16 @@ fn ran(command: &str, effort: Option<&str>) -> ReviewRan {
     }
 }
 
-/// How many findings a review's last reply says it has, where it says so in
-/// one of the ways the review skills end: a JSON list of them, "I found 3
-/// issues in …", "15 findings, most severe first". Read here on the machine;
-/// only the number is kept. None when the reply says it another way.
+/// How many findings a review's reply says it has, where its first lines say
+/// so in a way that can be relied on: a JSON list of them, or a number of
+/// findings, issues, problems or bugs that the reply opens a sentence with or
+/// says it found, kept or has ("15 findings, most severe first", "I reviewed
+/// PR #50 and found 4 issues", "there are no blocking bugs"). Read here on
+/// the machine; only the number is kept.
+///
+/// None when the reply words it another way, and when it is not clear which
+/// number is meant: "the two earlier findings are fixed" counts nothing, and
+/// two different numbers are none unless one is what was kept.
 pub fn findings_in(reply: &str) -> Option<u64> {
     let reply = reply.trim();
     if let Some(block) = reply.strip_prefix("```json") {
@@ -143,25 +152,98 @@ pub fn findings_in(reply: &str) -> Option<u64> {
             _ => None,
         };
     }
-    let mut words = reply.split_whitespace().map(|w| {
-        w.trim_matches(|c: char| !c.is_alphanumeric())
-            .to_ascii_lowercase()
-    });
-    let mut first = words.next()?;
-    if first == "i" {
-        if words.next()? != "found" {
-            return None;
-        }
-        first = words.next()?;
-    }
-    let count = match first.as_str() {
-        "no" => 0,
-        digits => digits.parse().ok().filter(|_| digits.len() <= 4)?,
-    };
     const THINGS: &[&str] = &[
         "finding", "findings", "issue", "issues", "problem", "problems", "bug", "bugs",
     ];
-    THINGS.contains(&words.next()?.as_str()).then_some(count)
+    // What says that the number after it is this review's.
+    const FRAMES: &[&str] = &[
+        "found",
+        "kept",
+        "keeping",
+        "are",
+        "is",
+        "has",
+        "have",
+        "with",
+        "reports",
+        "reporting",
+    ];
+    const NOT_A_KIND: &[&str] = &["of", "the", "in", "and", "or", "to", "for", "on", "from"];
+    const WORDS: &[&str] = &[
+        "no",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+        "twenty",
+    ];
+    let head: String = reply.chars().take(FINDINGS_WITHIN).collect();
+    let raw: Vec<&str> = head.split_whitespace().collect();
+    let clean = |word: &str| {
+        word.trim_matches(|c: char| !c.is_alphanumeric())
+            .to_ascii_lowercase()
+    };
+    let number = |word: &str| -> Option<u64> {
+        if word.starts_with('#') {
+            return None;
+        }
+        let word = clean(word);
+        match WORDS.iter().position(|w| *w == word) {
+            Some(n) => Some(n as u64),
+            None => word.parse().ok().filter(|_| word.len() <= 4),
+        }
+    };
+    let (mut kept, mut counts): (Vec<u64>, Vec<u64>) = (Vec::new(), Vec::new());
+    for (i, word) in raw.iter().enumerate() {
+        if !THINGS.contains(&clean(word).as_str()) || i == 0 {
+            continue;
+        }
+        // "4 issues", or with what kind between: "4 blocking issues".
+        let at = match number(raw[i - 1]) {
+            Some(_) => i - 1,
+            None if i >= 2 && !NOT_A_KIND.contains(&clean(raw[i - 1]).as_str()) => i - 2,
+            None => continue,
+        };
+        let Some(count) = number(raw[at]) else {
+            continue;
+        };
+        let before = at.checked_sub(1).map(|b| raw[b]);
+        let frame = before.map(clean).unwrap_or_default();
+        let opens = before.is_none_or(|b| b.ends_with(['.', ':', '!', '?']));
+        if frame == "kept" || frame == "keeping" {
+            kept.push(count);
+        } else if opens || FRAMES.contains(&frame.as_str()) {
+            counts.push(count);
+        }
+    }
+    let one = |of: &[u64]| of.first().copied().filter(|n| of.iter().all(|m| m == n));
+    one(&kept).or_else(|| one(&counts).filter(|_| kept.is_empty()))
+}
+
+/// What an import writes for a turn that a review command started, where
+/// its last reply says how many findings it has: read by `Seen::event`.
+pub fn reply_event(prompt_id: &str, prompt: &str, reply: &str) -> Option<Value> {
+    let (command, _) = slash_command(prompt)?;
+    if !is_review(command) {
+        return None;
+    }
+    let findings = findings_in(reply)?;
+    Some(serde_json::json!({ "prompt_id": prompt_id, "findings": findings }))
 }
 
 /// The effort Claude Code says it reused for a command typed without one:
@@ -197,6 +279,10 @@ pub struct Seen {
     started_by: HashMap<String, String>,
     /// `ReportFindings` calls: tool-use id → how many findings.
     findings: HashMap<String, u64>,
+    /// What the last reply of a review's turn says it found, by prompt id:
+    /// written by the imports of the agents whose reviews run in the
+    /// session's own thread.
+    said: HashMap<String, u64>,
     typed: Vec<Typed>,
     /// Codex's `/review` runs, as its rollout has them.
     codex: Vec<CodexReview>,
@@ -257,6 +343,11 @@ impl Seen {
                     findings: p["findings"].as_u64(),
                     agent: p["agent_id"].as_str().map(String::from),
                 });
+            }
+            ("ReviewReply", _) => {
+                if let (Some(prompt), Some(n)) = (p["prompt_id"].as_str(), p["findings"].as_u64()) {
+                    self.said.insert(prompt.to_string(), n);
+                }
             }
             // Codex's own command is not in what it writes down; a prompt
             // that names it would count the review above a second time.
@@ -415,6 +506,11 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             effort: typed.effort.clone(),
             pull_number: typed.pull_number,
             status: ToolStatus::Ok,
+            findings: typed
+                .prompt_id
+                .as_ref()
+                .and_then(|p| seen.said.get(p))
+                .copied(),
             ..Default::default()
         });
     }
@@ -1031,10 +1127,38 @@ mod tests {
             Some(15)
         );
         assert_eq!(findings_in("No findings."), Some(0));
+        // further into the first lines, said as found, kept or had
+        for (reply, n) in [
+            ("I reviewed PR #50 at high effort and found 4 issues.", 4),
+            (
+                "I reviewed PR 12 (`feat/x`, 9 files). There are 7 findings.",
+                7,
+            ),
+            (
+                "Review of PR #3 is done. Ten findings, most severe first.",
+                10,
+            ),
+            ("I reviewed 14 files and found 3 confirmed problems.", 3),
+            ("PR #77 has no blocking bugs.", 0),
+            ("Of 20 candidates I verified each and kept 5 findings.", 5),
+            (
+                "I found 9 issues and, after checking each, kept 6 findings.",
+                6,
+            ),
+        ] {
+            assert_eq!(findings_in(reply), Some(n), "{reply}");
+        }
         for other in [
             "I reviewed PR #50 at high effort and 3 things stand out.",
             "I found the 2 callers.",
             "2026 was a long year",
+            // another review's findings
+            "The two earlier findings are fixed.",
+            "Both of the 3 issues from the last round are gone.",
+            // two numbers, and nothing says which
+            "I found 3 issues in the server. The CLI has 2 problems.",
+            // a pull request's number is no count
+            "This closes #12 issues aside.",
             "",
         ] {
             assert_eq!(findings_in(other), None, "{other}");
@@ -1148,6 +1272,35 @@ mod tests {
             );
             assert_eq!(s.reviews[0].estimated_cost_usd, None);
         }
+    }
+
+    #[test]
+    fn what_a_review_turns_last_reply_found_is_the_runs_findings() {
+        assert_eq!(
+            reply_event("p1", "/code-review #41", "I found 2 issues in #41."),
+            Some(json!({ "prompt_id": "p1", "findings": 2 }))
+        );
+        assert_eq!(reply_event("p1", "fix it", "I found 2 issues."), None);
+        assert_eq!(
+            reply_event("p1", "/code-review", "Do not merge this yet."),
+            None
+        );
+        let of = |mut e: Value| {
+            e["source"] = json!("grok");
+            e
+        };
+        let events = [
+            of(prompt(0, "p1", "/code-review #41")),
+            of(event(
+                9,
+                "ReviewReply",
+                json!({ "prompt_id": "p1", "findings": 2 }),
+            )),
+            of(prompt(30, "p2", "/code-review #41")),
+        ];
+        let s = from_events(&events, None, "grok").unwrap();
+        let found: Vec<_> = s.reviews.iter().map(|r| r.findings).collect();
+        assert_eq!(found, [Some(2), None]);
     }
 
     #[test]

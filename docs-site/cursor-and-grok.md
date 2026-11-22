@@ -51,8 +51,8 @@ transcript is there.
 
 A `/code-review` typed in Cursor or Grok (`/review` and `/security-review` too) is a
 [review run](session-record.md#review-runs) of the session: when it ran and the pull request
-it named. Neither agent says what a review cost apart from the rest of the session, or how
-many findings it had.
+it named, and how many findings it had where the reply says so in its first lines. Neither
+agent says what a review cost apart from the rest of the session.
 
 ## Reading a Cursor session's figures
 

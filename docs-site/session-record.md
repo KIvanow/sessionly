@@ -58,8 +58,8 @@ In Claude Code the commands are `/code-review`, `/review`, `/security-review` an
 
 In Cursor and Grok a run is the command typed as a prompt (`/code-review #41`, `via:
 slash_command`), on a machine or in Cursor's cloud. The review there runs in the session's
-own thread: such a run has when it ran and a pull request number, and no cost, findings or
-subagents of its own. The agent choosing to review without the command being typed is not
+own thread: such a run has when it ran and a pull request number, its findings where the
+reply says how many (seldom, in practice), and no cost or subagents of its own. The agent choosing to review without the command being typed is not
 seen.
 
 In Codex it is `/review` (`via: codex_review`): the rollout says when review mode was entered
@@ -84,11 +84,13 @@ Each run has:
   review skill forks to run in, or, where none is known, those started from the same thread
   before your next prompt, with the subagents they started in turn.
 - `findings`: how many it reported, where that can be told: from a list it reports
-  (`ReportFindings`), or else from the last reply of the subagent it ran in, when that reply
-  is a JSON list of findings or opens with their number ("I found 3 issues in …", "15
-  findings, most severe first"). The reply is read on your machine and only the number is
-  kept. A review that words its result another way has none (`null`), which is not zero: on
-  one machine about a third of the runs had a number.
+  (`ReportFindings`, or Codex's own), or else from the reply that ends the review, when that
+  reply is a JSON list of findings or its first lines say how many it found, kept or has
+  ("15 findings, most severe first", "I reviewed PR #50 and found 4 issues", "no blocking
+  bugs"). The reply is read on your machine and only the number is kept. It is the reply
+  of the subagent a Claude Code review ran in, and in Cursor and Grok the last thing said in
+  the turn. A reply that words its result another way, or names two different numbers, has
+  none (`null`), which is not zero.
 
 Nothing else of the arguments is kept: no free text, no path. A run is the same record in
 every content mode.
