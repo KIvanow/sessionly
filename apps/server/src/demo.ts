@@ -222,6 +222,7 @@ const reviewOf = (r: ReviewRun): ReviewRun => ({
   ran: r.ran,
   effort: r.effort,
   pull_number: r.pull_number,
+  target: r.target,
   agent_id: r.agent_id,
   status: r.status,
   duration_ms: r.duration_ms,

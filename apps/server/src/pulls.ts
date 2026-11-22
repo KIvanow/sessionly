@@ -2181,10 +2181,16 @@ async function costed(
 
 /**
  * The local review runs of the chosen pull requests (`repo`, `number`), by
- * `pullKey`: of the sessions matched to each (as `sharesIn` has them), and
- * of the sessions of its repository with a run that names its number. One
+ * `pullKey`: of the sessions matched to each (as `sharesIn` has them), of
+ * the sessions of its repository with a run that names its number, and of
+ * the sessions of its repository on its branch, for runs that name none. One
  * with neither is not in the map.
  */
+/** A session `s` is of the repository of `pulls`: it names one by its clone's origin, the pull request's, its fork's, or an old name of it. */
+const OF_ITS_REPO = `(lower(s.repo) = lower(pulls.repo) OR lower(s.repo) = lower(pulls.head_repo)
+              OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(coalesce(pulls.aliases, '[]'::jsonb)) AS a(name)
+                         WHERE lower(a.name) = lower(s.repo)))`;
+
 async function localReviewsIn(
   db: OrgDb,
   chosen: { sql: string; params: unknown[] },
@@ -2192,24 +2198,32 @@ async function localReviewsIn(
 ): Promise<Map<string, LocalReviews>> {
   const rows = await db.query(
     `WITH pulls AS (
-       SELECT r.repo, r.number, r.head_repo, r.aliases FROM (${chosen.sql}) c
+       SELECT r.repo, r.number, r.head_repo, r.aliases, r.head_ref, r.base_ref, coalesce(r.merged_at, r.closed_at) AS ended_at
+       FROM (${chosen.sql}) c
        JOIN pull_requests r ON r.org_id = $1 AND r.repo = c.repo AND r.number = c.number),
      theirs AS (
-       SELECT pulls.repo, pulls.number, p.machine_id, p.source, p.session_id, true AS matched
+       SELECT pulls.repo, pulls.number, p.machine_id, p.source, p.session_id, true AS matched, false AS on_branch
        FROM pulls JOIN pull_sessions p ON p.org_id = $1 AND p.repo = pulls.repo AND p.number = pulls.number
        WHERE p.lines > 0 OR p.opened_lines > 0 OR p.contributed_lines > 0
        UNION ALL
        -- A session names a repository by its clone's origin: the pull request's, its fork's, or an old name of it.
-       SELECT pulls.repo, pulls.number, s.machine_id, s.source, s.session_id, false
+       SELECT pulls.repo, pulls.number, s.machine_id, s.source, s.session_id, false, false
        FROM pulls JOIN sessions s ON s.org_id = $1 AND s.review_runs > 0
-         AND (lower(s.repo) = lower(pulls.repo) OR lower(s.repo) = lower(pulls.head_repo)
-              OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(coalesce(pulls.aliases, '[]'::jsonb)) AS a(name)
-                         WHERE lower(a.name) = lower(s.repo)))
-         AND s.review_pulls @> to_jsonb(pulls.number)),
+         AND ${OF_ITS_REPO}
+         AND s.review_pulls @> to_jsonb(pulls.number)
+       UNION ALL
+       -- A session on the pull request's own branch: a review there is of this pull request, whether
+       -- or not it names it (Codex's /review names a branch or the uncommitted changes, never a number).
+       -- Not where the branch is the one it merges into, as a fork's main is.
+       SELECT pulls.repo, pulls.number, s.machine_id, s.source, s.session_id, false, true
+       FROM pulls JOIN sessions s ON s.org_id = $1 AND s.review_runs > 0
+         AND ${OF_ITS_REPO}
+         AND s.branch = pulls.head_ref AND pulls.head_ref IS DISTINCT FROM pulls.base_ref),
      one AS (
-       SELECT repo, number, machine_id, source, session_id, bool_or(matched) AS matched
+       SELECT repo, number, machine_id, source, session_id, bool_or(matched) AS matched, bool_or(on_branch) AS on_branch
        FROM theirs GROUP BY repo, number, machine_id, source, session_id)
-     SELECT one.repo, one.number, one.matched, one.machine_id, one.source, one.session_id,
+     SELECT one.repo, one.number, one.matched, one.on_branch, one.machine_id, one.source, one.session_id,
+            (SELECT ended_at FROM pulls WHERE pulls.repo = one.repo AND pulls.number = one.number) AS ended_at,
             s.session_id IS NOT NULL AS held, s.review_runs,
             CASE WHEN s.review_runs > 0 THEN s.payload->'session'->'reviews' END AS runs,
             (SELECT count(*) FROM pull_sessions o
@@ -2234,16 +2248,19 @@ async function localReviewsIn(
       continue;
     }
     const number = num(row.number);
+    const ended = row.ended_at == null ? null : new Date(row.ended_at as string | Date).getTime();
     for (const run of row.runs == null ? [] : json<ReviewRun[]>(row.runs)) {
       const named = run.pull_number ?? null;
+      // On its branch, and not after it was merged or closed: the branch's name may be used again.
+      const onBranch = row.on_branch === true && !(run.at != null && ended !== null && Date.parse(run.at) > ended);
       // A run that names another pull request is that one's.
-      if (named !== number && !(named === null && row.matched === true)) continue;
+      if (named !== number && !(named === null && (row.matched === true || onBranch))) continue;
       into.runs += 1;
       if (run.ran === "cloud") into.cloud += 1;
       if (run.effort) into.by_effort[run.effort] = (into.by_effort[run.effort] ?? 0) + 1;
       if (run.findings != null) into.findings = (into.findings ?? 0) + run.findings;
       if (run.estimated_cost_usd != null) into.cost_usd = money((into.cost_usd ?? 0) + run.estimated_cost_usd);
-      if (named === null) into.shared_with = Math.max(into.shared_with, num(row.pulls) - 1);
+      if (named === null && row.matched === true) into.shared_with = Math.max(into.shared_with, num(row.pulls) - 1);
       if (each) {
         (into.each ??= []).push({
           at: run.at ?? null,
@@ -2251,6 +2268,7 @@ async function localReviewsIn(
           effort: run.effort ?? null,
           ran: run.ran ?? "local",
           via: run.via ?? "skill",
+          target: run.target ?? null,
           names_pull: named !== null,
           subagents: run.subagents ?? 0,
           cost_usd: run.estimated_cost_usd ?? null,

@@ -230,7 +230,11 @@ cloud, the findings they reported, and what their subagents cost. They are of:
 
 1. the sessions matched to it, and
 2. sessions of its repository (or its fork, or an old name of it) with a run that names its
-   number, a review-only session with no line in it too.
+   number, a review-only session with no line in it too, and
+3. sessions of its repository on its branch, for runs that name no pull request: a review
+   there is work on this pull request. Codex's `/review` never names one. A run made after
+   the pull request was merged or closed is left out, since a branch's name can be used
+   again, and so is a branch that is the one the pull request merges into.
 
 The page lists each run in the order they ran, as the pull request's iterations: run 2 of
 5, how long after the one before it, its effort, cost and findings, and the session it ran
@@ -242,8 +246,8 @@ each of them, and the page says so. The two sides are not added up: a run in a s
 bot's comments are different things. The cost of the runs is already in the pull request's
 cost, not on top of it, and is a floor: their subagents only. A review in the cloud is billed
 apart and has none. The list has a Local column, and **by model** the runs per pull request.
-A session from a Sessionly that did not count review runs, or from an agent other than
-Claude Code, is said to be not known.
+A session from a Sessionly that did not count review runs, or from Cursor or Grok,
+whose review commands are not read yet, is said to be not known.
 
 ## How to read it
 

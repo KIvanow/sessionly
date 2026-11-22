@@ -599,8 +599,9 @@ export interface PullCost {
 /**
  * The review runs (`/code-review` and the like) of a pull request's
  * sessions, before and during review: those of the sessions matched to it,
- * and those of a session in its repository that name its number, a
- * review-only session too. A run that names another pull request is that
+ * those of a session in its repository that name its number, and those of
+ * a session in its repository on its branch that name none (Codex's
+ * `/review` never names one), a review-only session too. A run that names another pull request is that
  * one's. Each run counts once. Shown beside the reviews on GitHub, and
  * never added to them.
  */
@@ -639,7 +640,9 @@ export interface LocalReviewRun {
   ran: string;
   /** "skill" (the agent ran it) or "slash_command" (a person typed it). */
   via: string;
-  /** False for a run that names no pull request, counted here because its session is matched to this one. */
+  /** What Codex's `/review` was pointed at: "base_branch", "uncommitted_changes", "commit", "custom". Null for the others. */
+  target: string | null;
+  /** False for a run that names no pull request, counted here because its session is matched to this one or is on its branch. */
   names_pull: boolean;
   subagents: number;
   /** What its subagents cost: a floor. Null when not known, as for a run in the cloud. */

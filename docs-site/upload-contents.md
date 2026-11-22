@@ -62,6 +62,7 @@ know to `unknown`, and ignores fields it doesn't know.
 | `runtime.kind` | `cloud`, `unknown` |
 | a review run's `via` | `skill`, `slash_command`, `codex_review`, `unknown` |
 | a review run's `ran` | `local`, `cloud`, `unknown` |
+| a review run's `target` (Codex) | `base_branch`, `uncommitted_changes`, `commit`, `custom` |
 
 The agent (`source`) and a tool's name are plain text: `claude-code`, `cursor`, `grok` or
 `codex`, and whatever the tool is called. So is a skill's name (`code-review`, or a plugin's

@@ -268,7 +268,7 @@ export interface Counts {
   subagents?: number;
   /**
    * Review runs: the length of `Session::reviews`. Left out for an agent
-   * whose review commands are not read (all but Claude Code): not known,
+   * whose review commands are not read (Cursor and Grok): not known,
    * which is not none.
    */
   reviews?: number | null;
@@ -427,6 +427,12 @@ export interface ReviewRun {
    * request's URL. Else none.
    */
   pull_number?: number | null;
+  /**
+   * What Codex's `/review` was pointed at: `base_branch` (the changes
+   * against a branch), `uncommitted_changes`, `commit` or `custom`. None
+   * for the other agents, whose commands take a pull request.
+   */
+  target?: string | null;
   /**
    * Set when a subagent ran it.
    */

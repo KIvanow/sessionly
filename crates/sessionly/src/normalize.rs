@@ -389,7 +389,7 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
         .filter(|c| c.status == ToolStatus::Failed)
         .count() as u64;
     s.counts.subagents = s.subagents.len() as u64;
-    s.counts.reviews = (source == crate::paths::CLAUDE_CODE).then_some(s.reviews.len() as u64);
+    s.counts.reviews = crate::reviews::counted(source).then_some(s.reviews.len() as u64);
     s.counts.files_read = s.files.iter().filter(|f| f.reads > 0).count() as u64;
     s.counts.files_changed = s.files.iter().filter(|f| f.writes > 0).count() as u64;
     s.counts.lines_added = s.files.iter().map(|f| f.lines_added).sum();

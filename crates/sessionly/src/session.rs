@@ -224,7 +224,7 @@ pub struct Counts {
     pub permission_denials: u64,
     pub subagents: u64,
     /// Review runs: the length of `Session::reviews`. Left out for an agent
-    /// whose review commands are not read (all but Claude Code): not known,
+    /// whose review commands are not read (Cursor and Grok): not known,
     /// which is not none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reviews: Option<u64>,
@@ -348,6 +348,10 @@ pub struct ReviewRun {
     /// A pull request number among the arguments: `621`, `#528` or a pull
     /// request's URL. Else none.
     pub pull_number: Option<u64>,
+    /// What Codex's `/review` was pointed at: `base_branch` (the changes
+    /// against a branch), `uncommitted_changes`, `commit` or `custom`. None
+    /// for the other agents, whose commands take a pull request.
+    pub target: Option<String>,
     /// Set when a subagent ran it.
     pub agent_id: Option<String>,
     pub status: ToolStatus,

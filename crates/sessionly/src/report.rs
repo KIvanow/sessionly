@@ -500,6 +500,9 @@ pub fn session(
             if run.via == ReviewVia::Skill {
                 notes.push("as a skill".into());
             }
+            if let Some(target) = &run.target {
+                notes.push(format!("of {}", target.replace('_', " ")));
+            }
             if let Some(agent) = &run.agent_id {
                 notes.push(format!("by subagent {}", short(agent)));
             }

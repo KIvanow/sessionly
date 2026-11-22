@@ -10,6 +10,10 @@
 //! - A command Claude Code runs itself, `/ultrareview`: a row of its own,
 //!   which the import turns into a `UserPromptExpansion` as the hooks have it.
 //!
+//! Codex's `/review` is its review mode: the rollout says when it was
+//! entered and left, what it was pointed at, how many findings came back, and
+//! the reviewer's thread, whose tokens give its cost.
+//!
 //! Reviews started by a prompt in words ("review this branch") leave no
 //! command and are not counted: they can't be told from any other subagent
 //! without reading text.
@@ -35,6 +39,12 @@ const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 
 /// A typed command and the prompt it is in, taken as one start within this.
 const SAME_START_SECONDS: i64 = 5;
+
+/// True for an agent whose review commands are read. A session of another
+/// has no count: not known, which is not none.
+pub fn counted(source: &str) -> bool {
+    [crate::paths::CLAUDE_CODE, crate::paths::CODEX].contains(&source)
+}
 
 /// True for the name of a review command, with or without its slash.
 pub fn is_review(name: &str) -> bool {
@@ -97,6 +107,18 @@ fn pull_number(word: &str) -> Option<u64> {
     } else {
         None
     }
+}
+
+/// A review target as the record names it: `baseBranch` → `base_branch`.
+fn target_name(written: &str) -> String {
+    let mut name = String::new();
+    for c in written.chars() {
+        if c.is_ascii_uppercase() && !name.is_empty() {
+            name.push('_');
+        }
+        name.push(c.to_ascii_lowercase());
+    }
+    name
 }
 
 fn ran(command: &str, effort: Option<&str>) -> ReviewRan {
@@ -176,6 +198,20 @@ pub struct Seen {
     /// `ReportFindings` calls: tool-use id → how many findings.
     findings: HashMap<String, u64>,
     typed: Vec<Typed>,
+    /// Codex's `/review` runs, as its rollout has them.
+    codex: Vec<CodexReview>,
+}
+
+/// One run of Codex's `/review`: review mode entered and left.
+#[derive(Debug, Clone)]
+struct CodexReview {
+    id: String,
+    at: Option<DateTime<Utc>>,
+    target: Option<String>,
+    ended: Option<DateTime<Utc>>,
+    findings: Option<u64>,
+    /// The thread the reviewer ran in.
+    agent: Option<String>,
 }
 
 impl Seen {
@@ -203,8 +239,26 @@ impl Seen {
                     self.started_by.insert(agent.into(), id.into());
                 }
             }
-            // Only Claude Code's commands are known; Codex's `/review` is
-            // recorded otherwise.
+            // Codex's `/review` is no prompt: the import writes this from the
+            // rollout's review mode.
+            ("CodexReview", _) if source == crate::paths::CODEX => {
+                let Some(id) = p["review_id"].as_str() else {
+                    return;
+                };
+                if self.codex.iter().any(|r| r.id == id) {
+                    return;
+                }
+                let time = |v: &Value| v.as_str().and_then(|t| t.parse::<DateTime<Utc>>().ok());
+                self.codex.push(CodexReview {
+                    id: id.to_string(),
+                    at,
+                    target: p["target"].as_str().map(target_name),
+                    ended: time(&p["ended_at"]),
+                    findings: p["findings"].as_u64(),
+                    agent: p["agent_id"].as_str().map(String::from),
+                });
+            }
+            // Of typed commands, only Claude Code's are known.
             _ if source != crate::paths::CLAUDE_CODE => {}
             ("UserPromptSubmit", _) => {
                 if let Some((name, args)) = p["prompt"].as_str().and_then(slash_command) {
@@ -357,6 +411,30 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             effort: typed.effort.clone(),
             pull_number: typed.pull_number,
             status: ToolStatus::Ok,
+            ..Default::default()
+        });
+    }
+    for review in &seen.codex {
+        if let Some(agent) = &review.agent {
+            forks.insert(review.id.clone(), agent);
+        }
+        runs.push(ReviewRun {
+            id: review.id.clone(),
+            at: review.at,
+            command: "review".into(),
+            via: ReviewVia::CodexReview,
+            ran: ReviewRan::Local,
+            target: review.target.clone(),
+            // Left without an end: the session stopped while it ran.
+            status: match review.ended {
+                Some(_) => ToolStatus::Ok,
+                None => ToolStatus::NoResult,
+            },
+            duration_ms: review
+                .at
+                .zip(review.ended)
+                .map(|(start, end)| (end - start).num_milliseconds().max(0) as u64),
+            findings: review.findings,
             ..Default::default()
         });
     }
@@ -517,14 +595,16 @@ fn measure(
             _ => None,
         };
         let last_end = subs.iter().filter_map(|s| s.ended_at).max();
-        if let (Some(start), Some(end)) = (run.at, last_end) {
+        // Codex says itself when a review ended.
+        let timed = run.via == ReviewVia::CodexReview && run.duration_ms.is_some();
+        if let (Some(start), Some(end), false) = (run.at, last_end, timed) {
             if end > start {
                 run.duration_ms = Some((end - start).num_milliseconds() as u64);
             }
         }
         // Reported as a list, or else what the last reply of the subagent
         // the review ran in says.
-        run.findings = findings[i].or_else(|| {
+        run.findings = run.findings.or(findings[i]).or_else(|| {
             let fork = forks.get(run.id.as_str())?;
             let said = facts?.subagents.iter().find(|sub| sub.agent_id == *fork)?;
             said.findings
@@ -1021,8 +1101,8 @@ mod tests {
     #[test]
     fn an_agent_whose_commands_are_not_read_has_no_count() {
         let mut e = prompt(0, "p1", "hello");
-        e["source"] = json!("codex");
-        let s = from_events(&[e], None, "codex").unwrap();
+        e["source"] = json!("grok");
+        let s = from_events(&[e], None, "grok").unwrap();
         assert_eq!(s.counts.reviews, None);
         let s = session(vec![vec![prompt(0, "p1", "hello")]], None);
         assert_eq!(s.counts.reviews, Some(0));

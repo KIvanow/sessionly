@@ -523,6 +523,19 @@ struct Thread {
     /// Model responses: the model (where known) and the tokens.
     responses: Vec<(Option<String>, Tokens)>,
     model: Option<String>,
+    /// Times `/review` ran: Codex's review mode, entered and left.
+    reviews: Vec<Review>,
+}
+
+/// One run of `/review`: an `EnteredReviewMode` item, and the
+/// `ExitedReviewMode` that ends it with what the reviewer found.
+struct Review {
+    id: String,
+    at: String,
+    /// What was reviewed: `baseBranch`, `uncommittedChanges`, `commit`, `custom`.
+    target: Option<String>,
+    ended: Option<String>,
+    findings: Option<u64>,
 }
 
 fn text_of(output: &Value) -> String {
@@ -885,6 +898,21 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
                                     id.or(turn.clone()),
                                     message.into(),
                                 ));
+                            }
+                        }
+                        "EnteredReviewMode" => t.reviews.push(Review {
+                            id: id.clone(),
+                            at: time_of(&p["started_at_ms"]).unwrap_or(at.to_string()),
+                            target: item["target"]["type"].as_str().map(String::from),
+                            ended: None,
+                            findings: None,
+                        }),
+                        "ExitedReviewMode" => {
+                            if let Some(review) = t.reviews.iter_mut().rfind(|r| r.ended.is_none())
+                            {
+                                review.ended = Some(at.to_string());
+                                let found = item["review_output"]["findings"].as_array();
+                                review.findings = found.map(|list| list.len() as u64);
                             }
                         }
                         _ => {
@@ -1519,6 +1547,8 @@ pub fn session(
     }
 
     let mut subagent_facts = Vec::new();
+    // The threads `/review` ran in, and when each began.
+    let mut reviewers: Vec<(String, String)> = Vec::new();
     for file in subagents {
         let Some(agent_id) = thread_id(file) else {
             continue;
@@ -1531,7 +1561,15 @@ pub fn session(
         let (Some(first), Some(last)) = (&thread.first_at, &thread.last_at) else {
             continue;
         };
-        let role = thread.meta["agent_role"].as_str().unwrap_or_default();
+        // The reviewer of `/review` has no role of its own: `source` says what it is.
+        let reviewer = thread.meta["source"]["subagent"] == "review";
+        if reviewer {
+            reviewers.push((agent_id.clone(), first.clone()));
+        }
+        let role = match thread.meta["agent_role"].as_str().unwrap_or_default() {
+            "" if reviewer => "review",
+            role => role,
+        };
         let identity = json!({ "agent_id": agent_id, "agent_type": role });
         out.push(first, "SubagentStart", identity.clone());
         out.push(last, "SubagentStop", identity);
@@ -1551,6 +1589,27 @@ pub fn session(
         }
         facts.estimated_cost_usd = own.cost().map(|c| c.total_usd);
         subagent_facts.push(facts);
+    }
+
+    // Each review with the thread it ran in: the reviewer that began while
+    // the review was on, each one once.
+    reviewers.sort_by(|a, b| a.1.cmp(&b.1));
+    for review in &main.reviews {
+        let within = |began: &str| {
+            let (Some(began), Some(start)) = (parse_time(began), parse_time(&review.at)) else {
+                return false;
+            };
+            let end = review.ended.as_deref().and_then(parse_time);
+            (start - began).num_seconds() <= 5 && end.is_none_or(|end| began <= end)
+        };
+        let ran_in = reviewers.iter().position(|(_, began)| within(began));
+        let agent = ran_in.map(|i| reviewers.remove(i).0);
+        out.push(
+            &review.at,
+            "CodexReview",
+            json!({ "review_id": review.id, "target": review.target, "ended_at": review.ended,
+                    "findings": review.findings, "agent_id": agent }),
+        );
     }
 
     let mut start = json!({ "source": "startup" });
@@ -1772,6 +1831,123 @@ pub(crate) mod tests {
             ],
         );
         path
+    }
+
+    #[test]
+    fn review_mode_is_a_review_run_with_its_reviewer_and_findings() {
+        use crate::session::{ReviewVia, ToolStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let file = |thread: &str| {
+            dir.path().join(format!(
+                "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{thread}.jsonl"
+            ))
+        };
+        let mode = |second: u32, id: &str, kind: &str, more: Value| {
+            let mut item = json!({ "type": kind, "id": id });
+            for (k, v) in more.as_object().unwrap() {
+                item[k] = v.clone();
+            }
+            event(
+                second,
+                "item_completed",
+                json!({ "turn_id": "t1", "item": item }),
+            )
+        };
+        let found =
+            |n: usize| json!({ "review_output": { "findings": vec![json!({ "title": "x" }); n] } });
+        let main = file(MAIN);
+        write(
+            &main,
+            &[
+                meta(MAIN, json!({ "history_mode": "paginated" })),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                mode(
+                    1,
+                    "r1",
+                    "EnteredReviewMode",
+                    json!({ "target": { "type": "baseBranch", "branch": "main" } }),
+                ),
+                mode(9, "r1x", "ExitedReviewMode", found(3)),
+                event(9, "task_complete", json!({ "turn_id": "t1" })),
+                // left running when the session stopped
+                mode(
+                    20,
+                    "r2",
+                    "EnteredReviewMode",
+                    json!({ "target": { "type": "uncommittedChanges" } }),
+                ),
+            ],
+        );
+        let reviewer = file(CHILD);
+        write(
+            &reviewer,
+            &[
+                meta(
+                    CHILD,
+                    json!({ "parent_thread_id": MAIN, "thread_source": "subagent",
+                            "source": { "subagent": "review" } }),
+                ),
+                event(2, "task_started", json!({ "turn_id": "s1" })),
+                row(
+                    2,
+                    "turn_context",
+                    json!({ "turn_id": "s1", "model": "gpt-6-luna" }),
+                ),
+                tokens(3, "s1", "r9", CHILD, 800),
+                event(8, "task_complete", json!({ "turn_id": "s1" })),
+            ],
+        );
+        let (events, facts) = session(&main, &[reviewer], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        assert_eq!(s.counts.reviews, Some(2));
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| {
+                (
+                    r.command.as_str(),
+                    r.via,
+                    r.target.as_deref(),
+                    r.status,
+                    r.duration_ms,
+                    r.subagents,
+                    r.findings,
+                )
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (
+                    "review",
+                    ReviewVia::CodexReview,
+                    Some("base_branch"),
+                    ToolStatus::Ok,
+                    Some(8000),
+                    1,
+                    Some(3)
+                ),
+                (
+                    "review",
+                    ReviewVia::CodexReview,
+                    Some("uncommitted_changes"),
+                    ToolStatus::NoResult,
+                    None,
+                    0,
+                    None
+                ),
+            ]
+        );
+        // what the reviewer's tokens cost, and it is named for what it is
+        assert!(s.reviews[0].estimated_cost_usd.is_some());
+        assert_eq!(s.subagents[0].agent_type.as_deref(), Some("review"));
+        // the same rollout read again gives the same runs
+        let again = crate::normalize::from_events(
+            &[events.clone(), events].concat(),
+            facts.as_ref(),
+            CODEX,
+        );
+        assert_eq!(again.unwrap().reviews.len(), 2);
     }
 
     #[test]

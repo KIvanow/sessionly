@@ -576,7 +576,7 @@
           "default": 0
         },
         "reviews": {
-          "description": "Review runs: the length of `Session::reviews`. Left out for an agent\nwhose review commands are not read (all but Claude Code): not known,\nwhich is not none.",
+          "description": "Review runs: the length of `Session::reviews`. Left out for an agent\nwhose review commands are not read (Cursor and Grok): not known,\nwhich is not none.",
           "type": [
             "integer",
             "null"
@@ -1031,6 +1031,14 @@
           ],
           "format": "uint64",
           "minimum": 0,
+          "default": null
+        },
+        "target": {
+          "description": "What Codex's `/review` was pointed at: `base_branch` (the changes\nagainst a branch), `uncommitted_changes`, `commit` or `custom`. None\nfor the other agents, whose commands take a pull request.",
+          "type": [
+            "string",
+            "null"
+          ],
           "default": null
         },
         "agent_id": {

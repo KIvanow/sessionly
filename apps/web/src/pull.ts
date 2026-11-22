@@ -19,6 +19,18 @@ export function costText(cost: number | null, estimated: boolean, floor: boolean
   return `${unsure(floor, estimated, word)}${usdOf(cost)}`;
 }
 
+/** What Codex's `/review` was pointed at, in words; "" for a run of another agent. */
+export function reviewTarget(target: string | null | undefined): string {
+  if (!target) return "";
+  const known: Record<string, string> = {
+    base_branch: "the changes against a branch",
+    uncommitted_changes: "the uncommitted changes",
+    commit: "a commit",
+    custom: "what it was told to",
+  };
+  return known[target] ?? target.replaceAll("_", " ");
+}
+
 /**
  * How long after the run before it each review run started, in milliseconds:
  * the time one iteration took. Null for the first, and where a time is missing.

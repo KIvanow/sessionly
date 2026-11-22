@@ -2593,6 +2593,30 @@ test("a pull request's local review runs: its sessions', and those of a session 
   );
   assert.deepEqual(named.map((row) => (typeof row.review_pulls === "string" ? JSON.parse(row.review_pulls) : row.review_pulls)), [[41, 42], []]);
 
+  // On a pull request's own branch, a run that names none is of it: Codex's /review names a branch, not a number.
+  const onBranch = (id: string, branch: string, at: string) => {
+    const s = session(id, "codex", "gpt-6-luna", at, []) as any;
+    s.session.repo.branch = branch;
+    const reviews = [{ id: `${id}-r`, at, command: "review", via: "codex_review", ran: "local", target: "base_branch", status: "ok", subagents: 1, findings: 2, estimated_cost_usd: 0.2 }];
+    Object.assign(s.session, { reviews, counts: { reviews: 1 } });
+    return call(tokens.ann, "PUT", `/sessions/m1/codex/${id}`, s);
+  };
+  await call(tokens.ci, "PUT", "/prs", report({ number: 45, head_ref: "feat/branch", base_ref: "main", files: [file("br.ts", 4501)] }));
+  await onBranch("cx-on", "feat/branch", "2026-11-10T13:00:00Z");
+  await onBranch("cx-other", "feat/elsewhere", "2026-11-10T13:00:00Z");
+  const ofBranch = async () => (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent("github.com/acme/web")}&number=45`)).body.local_reviews;
+  const before = await ofBranch();
+  assert.deepEqual([before.runs, before.findings, before.cost_usd, before.shared_with], [1, 2, 0.2, 0]);
+  assert.deepEqual(before.each.map((r: any) => [r.command, r.via, r.target, r.names_pull, r.session_id]), [["review", "codex_review", "base_branch", false, "cx-on"]]);
+  // After it is merged, the branch's name may be used again: a later run there is not of it.
+  await call(tokens.ci, "PUT", "/prs", report({ number: 45, head_ref: "feat/branch", base_ref: "main", state: "merged", merged_at: "2026-11-10T14:00:00Z", event: "closed", files: [file("br.ts", 4501)] }));
+  await onBranch("cx-late", "feat/branch", "2026-11-10T15:00:00Z");
+  assert.equal((await ofBranch()).runs, 1);
+  // Not where the branch is the one it merges into, as a fork's main is.
+  await call(tokens.ci, "PUT", "/prs", report({ number: 46, head_ref: "main", base_ref: "main", files: [file("mn.ts", 4601)] }));
+  await onBranch("cx-main", "main", "2026-11-10T13:00:00Z");
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent("github.com/acme/web")}&number=46`)).body.local_reviews, null);
+
   // Matched to a second pull request too: its runs that name none are on each.
   await put("rv-a", [4101, 4301], [run("t1", { effort: "xhigh" })]);
   await call(tokens.ci, "PUT", "/prs", report({ number: 43, files: [file("rv.ts", 4301)] }));

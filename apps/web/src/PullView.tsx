@@ -2,7 +2,7 @@ import type { LocalReviewRun, PullAfterMerge, PullDetail, PullHistory, PullHisto
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { afterMergeLine, afterMergeName, afterMergeTile, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewTarget, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
 import { cost, count, dateTime, duration, modelName, usd, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -551,7 +551,7 @@ function ReviewRuns({ each }: { each: LocalReviewRun[] }) {
                 /{r.command}
                 <span className="muted">
                   {r.via === "skill" ? ", by the agent" : r.via === "slash_command" ? ", typed" : ""}
-                  {r.names_pull ? "" : ", names no pull request"}
+                  {r.target ? `, of ${reviewTarget(r.target)}` : r.names_pull ? "" : ", names no pull request"}
                 </span>
               </th>
               <td>{r.effort ?? "–"}</td>

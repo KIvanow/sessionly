@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { afterMergeLine, afterMergeName, afterMergeTile, timeline, byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, localReviewsLine, matchAll, reviewGaps, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web, survivingOnce } from "../src/pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, timeline, byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, localReviewsLine, matchAll, reviewGaps, reviewTarget, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web, survivingOnce } from "../src/pull.ts";
 
 test("a moved agent figure says what it was, and why", () => {
   const history = [
@@ -286,6 +286,13 @@ test("reports and the counts made after merging are one list by time, and stay t
   );
   assert.deepEqual(timeline(history, undefined).map((row) => row.report?.event), ["match", "closed"]);
   assert.deepEqual(timeline([], []), []);
+});
+
+test("what Codex's review was pointed at is said in words", () => {
+  assert.equal(reviewTarget("base_branch"), "the changes against a branch");
+  assert.equal(reviewTarget("uncommitted_changes"), "the uncommitted changes");
+  assert.equal(reviewTarget("something_new"), "something new");
+  assert.equal(reviewTarget(null), "");
 });
 
 test("each review run says how long after the one before it started", () => {

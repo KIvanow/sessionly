@@ -45,14 +45,22 @@ user name. The local record keeps them; what may leave the machine is decided se
 
 ## Review runs
 
-`reviews` lists each time a review command ran in a Claude Code session, and `counts.reviews`
-how many. For the other agents, whose review commands are not read yet, `counts.reviews` is
-left out: not known, which is not none. The commands are `/code-review`, `/review`, `/security-review` and `/ultrareview`
-(a plugin's `anything:code-review` too). A run starts in one of three ways:
+`reviews` lists each time a review command ran in a Claude Code or Codex session, and
+`counts.reviews` how many. For Cursor and Grok, whose review commands are not read yet,
+`counts.reviews` is left out: not known, which is not none.
+
+In Claude Code the commands are `/code-review`, `/review`, `/security-review` and
+`/ultrareview` (a plugin's `anything:code-review` too). A run starts in one of three ways:
 
 - the agent calls the `Skill` tool with one of them (`via: skill`),
 - you type it (`via: slash_command`), or
 - Claude Code runs its own command, `/ultrareview`.
+
+In Codex it is `/review` (`via: codex_review`): the rollout says when review mode was entered
+and left. Such a run has no effort and no pull request number. It has a `target`, the kind
+of change it was pointed at (`base_branch`, `uncommitted_changes`, `commit` or `custom`; the
+branch's name is not kept), the exact number of findings the reviewer returned, and as its
+cost what the reviewer's thread spent, at API list prices like the rest of a Codex session.
 
 Each run has:
 

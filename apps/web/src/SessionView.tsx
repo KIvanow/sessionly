@@ -1,5 +1,6 @@
 import type { SessionDetail } from "@sessionly/schema";
 import { compact, cost, count, dateTime, duration, keptAges, percent, repoName, share, toolName, usd } from "./format.ts";
+import { reviewTarget } from "./pull.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
 import { useApi } from "./useApi.ts";
@@ -317,6 +318,7 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
                       {r.pull_number != null && ` #${r.pull_number}`}
                       <span className="muted">
                         {r.via === "skill" ? ", by the agent" : r.via === "slash_command" ? ", typed" : ""}
+                        {r.target ? `, of ${reviewTarget(r.target)}` : ""}
                         {r.agent_id ? ", in a subagent" : ""}
                       </span>
                     </th>
