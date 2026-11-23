@@ -57,7 +57,7 @@ use serde_json::{json, Value};
 use crate::import::{edit_result, slim_input, Builder};
 use crate::paths::CODEX;
 use crate::session::{Cost, ModelUsage};
-use crate::transcript::{Facts, SubagentFacts};
+use crate::transcript::{Facts, ReviewMode, ReviewerThread, SubagentFacts};
 
 /// What is between `rollout-` and `.jsonl` (or `.jsonl.zst`) in a rollout's
 /// file name.
@@ -523,6 +523,31 @@ struct Thread {
     /// Model responses: the model (where known) and the tokens.
     responses: Vec<(Option<String>, Tokens)>,
     model: Option<String>,
+    /// Times `/review` ran: Codex's review mode, entered and left.
+    reviews: Vec<Review>,
+}
+
+/// One run of `/review`: an `EnteredReviewMode` item, and the
+/// `ExitedReviewMode` that ends it with what the reviewer found.
+struct Review {
+    id: String,
+    at: String,
+    /// What was reviewed: `baseBranch`, `uncommittedChanges`, `commit`, `custom`.
+    target: Option<String>,
+    ended: Option<String>,
+    findings: Option<u64>,
+    /// Left with nothing returned, as Codex leaves one that was interrupted.
+    interrupted: bool,
+}
+
+impl Review {
+    /// Review mode was left at `at`, with what `output` says was found.
+    fn left(&mut self, at: &str, output: &Value) {
+        self.ended = Some(at.to_string());
+        self.interrupted = output.is_null();
+        let found = output["findings"].as_array();
+        self.findings = found.map(|list| list.len() as u64);
+    }
 }
 
 fn text_of(output: &Value) -> String {
@@ -830,6 +855,24 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
                 }
             }
             "event_msg" => match p["type"].as_str().unwrap_or_default() {
+                // The older layout has review mode as events of its own, and
+                // no item for it; the paginated one has the items below.
+                "entered_review_mode" if !paginated && !other_thread(&p["thread_id"]) => {
+                    let nth = t.reviews.len();
+                    t.reviews.push(Review {
+                        id: format!("{thread}-review-{nth}"),
+                        at: at.to_string(),
+                        target: p["target"]["type"].as_str().map(String::from),
+                        ended: None,
+                        findings: None,
+                        interrupted: false,
+                    });
+                }
+                "exited_review_mode" if !paginated && !other_thread(&p["thread_id"]) => {
+                    if let Some(review) = t.reviews.iter_mut().rfind(|r| r.ended.is_none()) {
+                        review.left(at, &p["review_output"]);
+                    }
+                }
                 "task_started" | "turn_started" => {
                     turn = p["turn_id"].as_str().map(String::from);
                     // A prompt written down before its turn began.
@@ -863,7 +906,9 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
                     // told apart by it.
                     let mut item = p["item"].clone();
                     if item["id"].as_str().is_none_or(str::is_empty) {
-                        item["id"] = json!(format!("{thread}-item-{}", t.parts.len()));
+                        // Reviews are counted too: one adds no part.
+                        let nth = t.parts.len() + t.reviews.len();
+                        item["id"] = json!(format!("{thread}-item-{nth}"));
                     }
                     let item = &item;
                     let id = item["id"].as_str().unwrap_or_default().to_string();
@@ -885,6 +930,20 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
                                     id.or(turn.clone()),
                                     message.into(),
                                 ));
+                            }
+                        }
+                        "EnteredReviewMode" => t.reviews.push(Review {
+                            id: id.clone(),
+                            at: time_of(&p["started_at_ms"]).unwrap_or(at.to_string()),
+                            target: item["target"]["type"].as_str().map(String::from),
+                            ended: None,
+                            findings: None,
+                            interrupted: false,
+                        }),
+                        "ExitedReviewMode" => {
+                            if let Some(review) = t.reviews.iter_mut().rfind(|r| r.ended.is_none())
+                            {
+                                review.left(at, &item["review_output"]);
                             }
                         }
                         _ => {
@@ -1519,6 +1578,8 @@ pub fn session(
     }
 
     let mut subagent_facts = Vec::new();
+    // The threads `/review` ran in, and when each began.
+    let mut reviewers: Vec<(String, String)> = Vec::new();
     for file in subagents {
         let Some(agent_id) = thread_id(file) else {
             continue;
@@ -1531,7 +1592,15 @@ pub fn session(
         let (Some(first), Some(last)) = (&thread.first_at, &thread.last_at) else {
             continue;
         };
-        let role = thread.meta["agent_role"].as_str().unwrap_or_default();
+        // The reviewer of `/review` has no role of its own: `source` says what it is.
+        let reviewer = thread.meta["source"]["subagent"] == "review";
+        if reviewer {
+            reviewers.push((agent_id.clone(), first.clone()));
+        }
+        let role = match thread.meta["agent_role"].as_str().unwrap_or_default() {
+            "" if reviewer => "review",
+            role => role,
+        };
         let identity = json!({ "agent_id": agent_id, "agent_type": role });
         out.push(first, "SubagentStart", identity.clone());
         out.push(last, "SubagentStop", identity);
@@ -1552,6 +1621,28 @@ pub fn session(
         facts.estimated_cost_usd = own.cost().map(|c| c.total_usd);
         subagent_facts.push(facts);
     }
+
+    // Each `/review` as the rollout has it, and the threads reviewers ran in:
+    // which review each is of is told where the runs are built.
+    let review_modes = main
+        .reviews
+        .iter()
+        .map(|review| ReviewMode {
+            id: review.id.clone(),
+            at: parse_time(&review.at),
+            target: review.target.clone(),
+            ended_at: review.ended.as_deref().and_then(parse_time),
+            findings: review.findings,
+            interrupted: review.interrupted,
+        })
+        .collect();
+    let reviewer_threads = reviewers
+        .into_iter()
+        .map(|(agent_id, began)| ReviewerThread {
+            agent_id,
+            began: parse_time(&began),
+        })
+        .collect();
 
     let mut start = json!({ "source": "startup" });
     if let Some(cwd) = main.meta["cwd"].as_str() {
@@ -1582,6 +1673,10 @@ pub fn session(
         usage,
         subagents: subagent_facts,
         tool_models,
+        review_modes,
+        review_modes_read: true,
+        reviewer_threads,
+        ..Default::default()
     };
     Ok((out.finish(), Some(facts)))
 }
@@ -1771,6 +1866,309 @@ pub(crate) mod tests {
             ],
         );
         path
+    }
+
+    #[test]
+    fn a_review_that_was_never_left_does_not_take_the_next_ones_reviewer() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |thread: &str| {
+            dir.path().join(format!(
+                "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{thread}.jsonl"
+            ))
+        };
+        let mode = |second: u32, id: &str, kind: &str| {
+            let item =
+                json!({ "type": kind, "id": id, "target": { "type": "uncommittedChanges" } });
+            event(
+                second,
+                "item_completed",
+                json!({ "turn_id": "t1", "item": item }),
+            )
+        };
+        let main = file(MAIN);
+        write(
+            &main,
+            &[
+                meta(MAIN, json!({ "history_mode": "paginated" })),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                // never left
+                mode(1, "r1", "EnteredReviewMode"),
+                mode(30, "r2", "EnteredReviewMode"),
+                mode(39, "r2x", "ExitedReviewMode"),
+            ],
+        );
+        let reviewer = file(CHILD);
+        write(
+            &reviewer,
+            &[
+                meta(
+                    CHILD,
+                    json!({ "parent_thread_id": MAIN, "thread_source": "subagent",
+                            "source": { "subagent": "review" } }),
+                ),
+                event(31, "task_started", json!({ "turn_id": "s1" })),
+                row(
+                    31,
+                    "turn_context",
+                    json!({ "turn_id": "s1", "model": "gpt-6-luna" }),
+                ),
+                tokens(32, "s1", "r9", CHILD, 800),
+                event(38, "task_complete", json!({ "turn_id": "s1" })),
+            ],
+        );
+        let (events, facts) = session(&main, &[reviewer], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.subagents, r.duration_ms))
+            .collect();
+        assert_eq!(runs, [(0, None), (1, Some(9000))]);
+    }
+
+    #[test]
+    fn the_older_layout_has_review_mode_as_events_and_one_left_with_nothing_was_interrupted() {
+        use crate::session::ToolStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join(format!(
+            "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{MAIN}.jsonl"
+        ));
+        let found = json!({ "findings": [{ "title": "x" }, { "title": "y" }] });
+        write(
+            &main,
+            &[
+                // no `history_mode`: the older layout
+                meta(MAIN, json!({})),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                event(
+                    1,
+                    "entered_review_mode",
+                    json!({ "target": { "type": "uncommittedChanges" } }),
+                ),
+                event(9, "exited_review_mode", json!({ "review_output": found })),
+                event(
+                    20,
+                    "entered_review_mode",
+                    json!({ "target": { "type": "custom" } }),
+                ),
+                // interrupted: left with nothing returned
+                event(25, "exited_review_mode", json!({ "review_output": null })),
+            ],
+        );
+        let (events, facts) = session(&main, &[], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.target.as_deref(), r.status, r.findings, r.duration_ms))
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (
+                    Some("uncommitted_changes"),
+                    ToolStatus::Ok,
+                    Some(2),
+                    Some(8000)
+                ),
+                (Some("custom"), ToolStatus::Interrupted, None, Some(5000)),
+            ]
+        );
+        assert_eq!(s.counts.reviews, Some(2));
+    }
+
+    #[test]
+    fn review_events_of_another_thread_or_beside_the_items_are_not_more_reviews() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str| {
+            dir.path().join(format!(
+                "sessions/2026/11/16/rollout-2026-11-16T12-00-0{name}-{MAIN}.jsonl"
+            ))
+        };
+        let entered = |second: u32, more: Value| event(second, "entered_review_mode", more);
+        let count = |path: &Path| {
+            let (events, facts) = session(path, &[], None).unwrap();
+            let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+            s.counts.reviews
+        };
+        // The paginated layout has an item for each review: an event beside
+        // it is the same review.
+        let item = json!({ "type": "EnteredReviewMode", "id": "r1" });
+        let paginated = file("1");
+        write(
+            &paginated,
+            &[
+                meta(MAIN, json!({ "history_mode": "paginated" })),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                entered(1, json!({})),
+                event(
+                    1,
+                    "item_completed",
+                    json!({ "turn_id": "t1", "item": item }),
+                ),
+            ],
+        );
+        assert_eq!(count(&paginated), Some(1));
+        // The older layout: an event of another thread is that thread's review.
+        let older = file("2");
+        write(
+            &older,
+            &[
+                meta(MAIN, json!({})),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                entered(1, json!({})),
+                entered(5, json!({ "thread_id": CHILD })),
+                event(
+                    6,
+                    "exited_review_mode",
+                    json!({ "thread_id": CHILD, "review_output": null }),
+                ),
+            ],
+        );
+        let (events, facts) = session(&older, &[], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        assert_eq!(s.counts.reviews, Some(1));
+        // Still running: the other thread's leaving did not end it.
+        assert_eq!(s.reviews[0].duration_ms, None);
+    }
+
+    #[test]
+    fn two_reviews_whose_items_have_no_id_are_two_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join(format!(
+            "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{MAIN}.jsonl"
+        ));
+        let mode = |second: u32, kind: &str| {
+            event(
+                second,
+                "item_completed",
+                json!({ "turn_id": "t1", "item": { "type": kind } }),
+            )
+        };
+        write(
+            &main,
+            &[
+                meta(MAIN, json!({ "history_mode": "paginated" })),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                mode(1, "EnteredReviewMode"),
+                mode(9, "ExitedReviewMode"),
+                mode(20, "EnteredReviewMode"),
+                mode(29, "ExitedReviewMode"),
+            ],
+        );
+        let (events, facts) = session(&main, &[], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        assert_eq!(s.counts.reviews, Some(2));
+    }
+
+    #[test]
+    fn review_mode_is_a_review_run_with_its_reviewer_and_findings() {
+        use crate::session::{ReviewVia, ToolStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let file = |thread: &str| {
+            dir.path().join(format!(
+                "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{thread}.jsonl"
+            ))
+        };
+        let mode = |second: u32, id: &str, kind: &str, more: Value| {
+            let mut item = json!({ "type": kind, "id": id });
+            for (k, v) in more.as_object().unwrap() {
+                item[k] = v.clone();
+            }
+            event(
+                second,
+                "item_completed",
+                json!({ "turn_id": "t1", "item": item }),
+            )
+        };
+        let found =
+            |n: usize| json!({ "review_output": { "findings": vec![json!({ "title": "x" }); n] } });
+        let main = file(MAIN);
+        write(
+            &main,
+            &[
+                meta(MAIN, json!({ "history_mode": "paginated" })),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                mode(
+                    1,
+                    "r1",
+                    "EnteredReviewMode",
+                    json!({ "target": { "type": "baseBranch", "branch": "main" } }),
+                ),
+                mode(9, "r1x", "ExitedReviewMode", found(3)),
+                event(9, "task_complete", json!({ "turn_id": "t1" })),
+                // left running when the session stopped
+                mode(
+                    20,
+                    "r2",
+                    "EnteredReviewMode",
+                    json!({ "target": { "type": "uncommittedChanges" } }),
+                ),
+            ],
+        );
+        let reviewer = file(CHILD);
+        write(
+            &reviewer,
+            &[
+                meta(
+                    CHILD,
+                    json!({ "parent_thread_id": MAIN, "thread_source": "subagent",
+                            "source": { "subagent": "review" } }),
+                ),
+                event(2, "task_started", json!({ "turn_id": "s1" })),
+                row(
+                    2,
+                    "turn_context",
+                    json!({ "turn_id": "s1", "model": "gpt-6-luna" }),
+                ),
+                tokens(3, "s1", "r9", CHILD, 800),
+                event(8, "task_complete", json!({ "turn_id": "s1" })),
+            ],
+        );
+        let (events, facts) = session(&main, &[reviewer], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        assert_eq!(s.counts.reviews, Some(2));
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| {
+                (
+                    r.command.as_str(),
+                    r.via,
+                    r.target.as_deref(),
+                    r.status,
+                    r.duration_ms,
+                    r.subagents,
+                    r.findings,
+                )
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (
+                    "review",
+                    ReviewVia::CodexReview,
+                    Some("base_branch"),
+                    ToolStatus::Ok,
+                    Some(8000),
+                    1,
+                    Some(3)
+                ),
+                (
+                    "review",
+                    ReviewVia::CodexReview,
+                    Some("uncommitted_changes"),
+                    ToolStatus::NoResult,
+                    None,
+                    0,
+                    None
+                ),
+            ]
+        );
+        // what the reviewer's tokens cost, and it is named for what it is
+        assert!(s.reviews[0].estimated_cost_usd.is_some());
+        assert_eq!(s.subagents[0].agent_type.as_deref(), Some("review"));
     }
 
     #[test]

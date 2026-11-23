@@ -232,6 +232,14 @@
       },
       "default": []
     },
+    "reviews": {
+      "description": "Times a review command ran in the session (see `reviews`): the same\nin every content mode, since nothing of a run's arguments is kept but\nthe effort and a pull request number.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReviewRun"
+      },
+      "default": []
+    },
     "instruction_files": {
       "description": "Instruction files (CLAUDE.md, rules) loaded into the session.",
       "type": "array",
@@ -567,6 +575,15 @@
           "minimum": 0,
           "default": 0
         },
+        "reviews": {
+          "description": "Review runs: the length of `Session::reviews`. Left out where they\ncould not be read: for an agent whose review commands are not read\n(none of the four today), and for a Codex session whose rollout,\nwhich alone has them, was not there to read. Not known, which is not\nnone.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "compactions": {
           "type": "integer",
           "format": "uint64",
@@ -728,6 +745,14 @@
         "tool": {
           "type": "string",
           "default": ""
+        },
+        "skill": {
+          "description": "For a `Skill` call, the skill's name (`code-review`, `plugin:name`),\nwithout the slash it may be written with. A name, like the tool's, so it is kept in every\ncontent mode; its arguments are not.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "model": {
           "description": "Model that made the call. Null where the agent does not say: Grok, and\nCursor turns the hooks did not see.",
@@ -957,6 +982,157 @@
           "default": null
         }
       }
+    },
+    "ReviewRun": {
+      "description": "One run of a review command: `/code-review` and the like (the names are\nin `reviews`).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The tool-use id of the Skill call; for a slash command, the turn's\nprompt id, or one made from its time where there is none.",
+          "type": "string",
+          "default": ""
+        },
+        "at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "command": {
+          "description": "What was run, as written: \"code-review\", \"ultrareview\", \"review\",\n\"security-review\", or a plugin's \"name:code-review\".",
+          "type": "string",
+          "default": ""
+        },
+        "via": {
+          "description": "How it was started.",
+          "$ref": "#/$defs/ReviewVia",
+          "default": "skill"
+        },
+        "ran": {
+          "description": "Where the review itself ran.",
+          "$ref": "#/$defs/ReviewRan",
+          "default": "local"
+        },
+        "effort": {
+          "description": "The first argument when it is one of low, medium, high, xhigh, max\nor ultra. Else none.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "pull_number": {
+          "description": "A pull request number among the arguments: `621`, `#528` or a pull\nrequest's URL. Else none.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        },
+        "target": {
+          "description": "What Codex's `/review` was pointed at: `base_branch` (the changes\nagainst a branch), `uncommitted_changes`, `commit` or `custom`. For\nthe other agents, whose commands take a pull request:\n`other_repository` where a URL named one of another repository than\nthe session's (which is not kept), else none.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "agent_id": {
+          "description": "Set when a subagent ran it.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "status": {
+          "$ref": "#/$defs/ToolStatus",
+          "default": "no_result"
+        },
+        "duration_ms": {
+          "description": "From the start to the end of the last of its subagents, or the\ncall's own duration where it had none.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        },
+        "subagents": {
+          "description": "Subagents that did the review: the one a skill forks to run in, and\nthose started from the review's thread before the person's next\nprompt, with the subagents they started in turn.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "estimated_cost_usd": {
+          "description": "Those subagents' estimated cost. A floor: the main thread's own\ntokens during the review are not in it. Null when none has a cost,\nand for a review that ran in the cloud, which is billed apart.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "findings": {
+          "description": "How many findings it reported, where that can be told: from a list\nthe agent reports (`ReportFindings`, or Codex's own), or else from\nthe reply that ends the review, where it says how many. Null when\nneither says: not known, which is not zero.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        }
+      }
+    },
+    "ReviewVia": {
+      "oneOf": [
+        {
+          "description": "The model called the `Skill` tool.",
+          "type": "string",
+          "const": "skill"
+        },
+        {
+          "description": "The person typed the command.",
+          "type": "string",
+          "const": "slash_command"
+        },
+        {
+          "description": "Codex's `/review`.",
+          "type": "string",
+          "const": "codex_review"
+        },
+        {
+          "description": "A value written by a newer version.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "ReviewRan": {
+      "oneOf": [
+        {
+          "description": "On the machine (or sandbox) the session ran in.",
+          "type": "string",
+          "const": "local"
+        },
+        {
+          "description": "In the cloud: `/ultrareview`, `/code-review ultra`.",
+          "type": "string",
+          "const": "cloud"
+        },
+        {
+          "description": "A value written by a newer version.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
     }
   }
 }

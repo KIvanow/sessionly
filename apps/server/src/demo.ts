@@ -21,6 +21,7 @@ import {
   type PullFeedback,
   type PullFile,
   type PullReport,
+  type ReviewRun,
   type RewriteMeasurement,
   type Session,
   type Subagent,
@@ -178,6 +179,9 @@ const usageOf = (u: ModelUsage): ModelUsage => ({
   estimated_cost_usd: u.estimated_cost_usd,
 });
 
+/** The commands that are reviews, as the collector has them (`crates/sessionly/src/reviews.rs`). */
+const REVIEW_COMMANDS = ["code-review", "review", "security-review", "ultrareview"];
+
 const countsOf = (c: Counts | undefined): Counts | undefined =>
   c && {
     events: c.events,
@@ -193,6 +197,8 @@ const countsOf = (c: Counts | undefined): Counts | undefined =>
     files_changed: c.files_changed,
     lines_added: c.lines_added,
     lines_removed: c.lines_removed,
+    // Left out, as from an older collector: not known.
+    reviews: c.reviews,
   };
 
 const fileOf = (f: FileTouched, rules: Rules): FileTouched => ({
@@ -207,6 +213,30 @@ const fileOf = (f: FileTouched, rules: Rules): FileTouched => ({
 // What a subagent was asked to do is a prompt too. Its type may be the name
 // of an agent the person made: the agents' own types are not listed
 // anywhere this could tell them from one, so none is shown.
+/** A review run: names, numbers and times, and a plugin's name for the command left out. */
+const reviewOf = (r: ReviewRun): ReviewRun => ({
+  id: r.id,
+  at: r.at,
+  command: r.command?.split(":").pop(),
+  via: r.via,
+  ran: r.ran,
+  effort: r.effort,
+  pull_number: r.pull_number,
+  target: r.target,
+  agent_id: r.agent_id,
+  status: r.status,
+  duration_ms: r.duration_ms,
+  subagents: r.subagents,
+  estimated_cost_usd: r.estimated_cost_usd,
+  findings: r.findings,
+});
+
+/** A review skill's name without its plugin's (`acme:code-review` → `code-review`); null for any other skill. */
+function reviewSkill(skill: string | null | undefined): string | null {
+  const last = skill?.split(":").pop() ?? "";
+  return REVIEW_COMMANDS.includes(last) ? last : null;
+}
+
 const subagentOf = (a: Subagent): Subagent => ({
   agent_id: a.agent_id,
   agent_type: null,
@@ -290,6 +320,8 @@ export function shown(upload: Upload, rules: Rules): Upload {
         prompt_id: t.prompt_id,
         agent_id: t.agent_id,
         tool: toolOf(t.tool),
+        // A team's own skill is named by it; a review's is one of a known few, and a plugin's name for it is left out.
+        skill: reviewSkill(t.skill),
         model: t.model,
         at: t.at,
         status: t.status,
@@ -301,6 +333,7 @@ export function shown(upload: Upload, rules: Rules): Upload {
       })),
       files: (s.files ?? []).filter((f) => showable(f.path, rules)).map((f) => fileOf(f, rules)),
       subagents: (s.subagents ?? []).map(subagentOf),
+      reviews: (s.reviews ?? []).map(reviewOf),
       instruction_files: (s.instruction_files ?? []).filter((path) => showable(path, rules)).map((path) => pathShown(path, rules)),
     },
     rewrite: rewriteOf(upload.rewrite, rules, cloud),

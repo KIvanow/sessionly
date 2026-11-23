@@ -11,13 +11,15 @@ sessionly watch                  # pretty-print hook events live, in a second te
 sessionly status                 # hooks installed? how many sessions captured?
 sessionly list                   # sessions, newest first, with filters and text search
 sessionly summary                # totals per user, repo, model, tool or day
-sessionly show <session>         # one session: cost, prompts, files changed, tools, subagents
+sessionly show <session>         # one session: cost, prompts, files changed, tools, reviews, subagents
 sessionly transcript <session>   # tokens and cost per model, straight from a transcript
 sessionly sync                   # bring the ledger up to date (list, summary and show do this too)
 ```
 
 `<session>` is a session id or a unique prefix of one. `list`, `summary`, `show` and
-`transcript` take `--json`.
+`transcript` take `--json`. `show` lists the session's [review runs](session-record.md#review-runs),
+`summary` adds a REVIEWS column when a session in it has one, and `list --json` has each
+session's `reviews`.
 
 - [List, search and summary](sessions.md): finding sessions and adding them up.
 - [Rewrite rate](rewrite-rate.md): how much of what the agent wrote is still there.

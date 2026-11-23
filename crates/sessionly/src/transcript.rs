@@ -149,6 +149,8 @@ pub struct Subagent {
     pub agent_type: Option<String>,
     pub description: Option<String>,
     pub usage: UsageByModel,
+    /// How many findings its last reply names (see `reviews::findings_in`).
+    pub findings: Option<u64>,
 }
 
 /// Claude Code's own totals from the last `cost-state` row.
@@ -222,6 +224,12 @@ pub struct TranscriptSummary {
     pub skipped_lines: u64,
     /// The model behind each tool call, by tool use id, subagents included.
     pub tool_models: HashMap<String, String>,
+    /// Typed review commands that forked a subagent to run in.
+    pub review_launches: Vec<ReviewLaunch>,
+    /// Efforts Claude Code said it reused for a review typed without one.
+    pub reused_efforts: Vec<ReusedEffort>,
+    /// What the main thread's last reply to a typed review says it found.
+    pub review_replies: Vec<ReviewSaid>,
     messages: Vec<Message>,
 }
 
@@ -375,10 +383,17 @@ impl TranscriptSummary {
                         input_tokens: total.input,
                         output_tokens: total.output,
                         estimated_cost_usd: total.priced_cost(),
+                        findings: sub.findings,
                     }
                 })
                 .collect(),
             tool_models: self.tool_models.clone(),
+            review_launches: self.review_launches.clone(),
+            reused_efforts: self.reused_efforts.clone(),
+            review_replies: self.review_replies.clone(),
+            review_modes: Vec::new(),
+            review_modes_read: false,
+            reviewer_threads: Vec::new(),
         }
     }
 
@@ -448,6 +463,88 @@ pub struct Facts {
     /// The model behind each tool call, by tool use id.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub tool_models: HashMap<String, String>,
+    /// Typed review commands that forked a subagent to run in: the hooks do
+    /// not say which subagent that is.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review_launches: Vec<ReviewLaunch>,
+    /// Efforts Claude Code said it reused for a review typed without one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reused_efforts: Vec<ReusedEffort>,
+    /// How many findings the main thread's last reply to a typed review
+    /// names, for a review that ran there and not in a subagent.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review_replies: Vec<ReviewSaid>,
+    /// Codex's `/review` runs, as its rollout has them: review mode entered
+    /// and left.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review_modes: Vec<ReviewMode>,
+    /// The rollout was read for them. False in facts saved before they were:
+    /// how many there were is then not known.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub review_modes_read: bool,
+    /// The threads Codex's reviewers ran in, and when each began: which
+    /// review each is of is told from the times (`reviews::runs`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reviewer_threads: Vec<ReviewerThread>,
+}
+
+/// A typed review command that forked: the row Claude Code writes as it
+/// starts. Of the command's arguments, the effort and a pull request number.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewLaunch {
+    pub at: Option<DateTime<Utc>>,
+    pub command: String,
+    pub effort: Option<String>,
+    pub pull_number: Option<u64>,
+    /// The subagent the review runs in.
+    pub agent_id: String,
+}
+
+/// One run of Codex's `/review`: an `EnteredReviewMode` item, and the
+/// `ExitedReviewMode` that ends it with what the reviewer found.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewMode {
+    pub id: String,
+    pub at: Option<DateTime<Utc>>,
+    /// What was reviewed, as Codex writes it: `baseBranch`,
+    /// `uncommittedChanges`, `commit`, `custom`.
+    pub target: Option<String>,
+    /// None when the session stopped while it ran.
+    pub ended_at: Option<DateTime<Utc>>,
+    /// How many findings the reviewer returned.
+    pub findings: Option<u64>,
+    /// It was left with nothing returned: Codex does that when a review is
+    /// interrupted.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
+}
+
+/// A thread a reviewer of Codex's `/review` ran in.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewerThread {
+    pub agent_id: String,
+    pub began: Option<DateTime<Utc>>,
+}
+
+/// The number of findings the reply to a typed review names (see
+/// `reviews::findings_in`), by the prompt the command was: the reply itself
+/// is not kept.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewSaid {
+    pub prompt_id: String,
+    pub findings: u64,
+}
+
+/// "Reusing high effort, the level you typed last time."
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReusedEffort {
+    pub at: Option<DateTime<Utc>>,
+    pub effort: String,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -460,6 +557,9 @@ pub struct SubagentFacts {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub estimated_cost_usd: Option<f64>,
+    /// How many findings its last reply names, where it says so (see
+    /// `reviews::findings_in`): used for the subagent a review ran in.
+    pub findings: Option<u64>,
 }
 
 impl Facts {
@@ -512,9 +612,9 @@ pub fn parse(path: &Path) -> Result<TranscriptSummary> {
     };
     // A message id found in more than one file is counted in the first only.
     let mut seen = HashSet::new();
-    summary.main = scan(path, &mut summary, &mut seen, true)?;
+    (summary.main, _) = scan(path, &mut summary, &mut seen, true)?;
     for file in subagent_files(path) {
-        let usage = scan(&file, &mut summary, &mut seen, false)?;
+        let (usage, last_reply) = scan(&file, &mut summary, &mut seen, false)?;
         let stem = file
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -529,6 +629,7 @@ pub fn parse(path: &Path) -> Result<TranscriptSummary> {
             agent_type: text("agentType"),
             description: text("description"),
             usage,
+            findings: last_reply.as_deref().and_then(crate::reviews::findings_in),
         });
     }
     Ok(summary)
@@ -543,17 +644,43 @@ struct Response {
     branch: Option<String>,
 }
 
-/// Read one transcript file into `summary` and return its usage per model.
+/// Read one transcript file into `summary` and return its usage per model,
+/// and the text of its last reply.
 fn scan(
     path: &Path,
     summary: &mut TranscriptSummary,
     seen: &mut HashSet<String>,
     is_main: bool,
-) -> Result<UsageByModel> {
+) -> Result<(UsageByModel, Option<String>)> {
     // in order of first appearance
     let mut responses: Vec<Response> = Vec::new();
     let mut by_id: HashMap<String, usize> = HashMap::new();
     let mut latest: Option<DateTime<Utc>> = None;
+    let mut last_reply: Option<(Option<String>, Vec<String>)> = None;
+    // In the main thread, the typed review being answered: its prompt.
+    let mut reviewing: Option<String> = None;
+    // Nothing has been said or asked since that command was typed: the
+    // command row that comes now is its own.
+    let mut just_typed = false;
+    // What a reply to a typed review says it found, once the turn is over.
+    fn turn_over(
+        summary: &mut TranscriptSummary,
+        reviewing: &mut Option<String>,
+        reply: &mut Option<(Option<String>, Vec<String>)>,
+    ) {
+        let (prompt, reply) = (reviewing.take(), reply.take());
+        let (Some(prompt_id), Some((_, all))) = (prompt, reply) else {
+            return;
+        };
+        let known = summary
+            .review_replies
+            .iter()
+            .any(|r| r.prompt_id == prompt_id);
+        if !known {
+            let said = crate::reviews::review_said(&prompt_id, &all.join("\n"));
+            summary.review_replies.extend(said);
+        }
+    }
 
     let skipped = crate::jsonl::for_each(path, |row| {
         let text = |k: &str| {
@@ -585,8 +712,55 @@ fn scan(
             latest = Some(latest.map_or(ts, |l| l.max(ts)));
         }
         match row.get("type").and_then(Value::as_str) {
+            // Something asked, and not a tool's result: the turn before it is
+            // over. A review command typed here is the one answered next.
+            Some("user") if is_main => {
+                let blocks = row["message"]["content"].as_array();
+                let result = blocks.is_some_and(|b| b.iter().any(|b| b["type"] == "tool_result"));
+                // Nor is a row Claude Code put in beside the command, under
+                // its prompt: what the command stands for. Another such row
+                // (a message from elsewhere, a task that fired) is a turn of
+                // its own.
+                let beside = row["isMeta"].as_bool() == Some(true)
+                    && reviewing.is_some()
+                    && text("promptId") == reviewing;
+                if !result && !beside {
+                    turn_over(summary, &mut reviewing, &mut last_reply);
+                    if crate::reviews::typed_row(&row) {
+                        reviewing = text("promptId");
+                    }
+                    just_typed = reviewing.is_some();
+                }
+            }
             Some("assistant") => {
                 let message = &row["message"];
+                if is_main {
+                    just_typed = false;
+                }
+                if !is_main || reviewing.is_some() {
+                    let texts = message["content"].as_array().into_iter().flatten();
+                    // All it said in its last message, in order: the number
+                    // of findings may be in a block before the last, and a
+                    // message's blocks are written a row each.
+                    let said: Vec<&str> = texts
+                        .filter_map(|b| b["text"].as_str().filter(|_| b["type"] == "text"))
+                        .filter(|t| !t.trim().is_empty())
+                        .collect();
+                    if !said.is_empty() {
+                        let id = message["id"].as_str().map(String::from);
+                        let mut all = match last_reply.take() {
+                            Some((before, all)) if id.is_some() && before == id => all,
+                            _ => Vec::new(),
+                        };
+                        for text in said {
+                            // A row may be written twice.
+                            if !all.iter().any(|t| t == text) {
+                                all.push(text.to_string());
+                            }
+                        }
+                        last_reply = Some((id, all));
+                    }
+                }
                 if let Some(model) = message["model"].as_str().filter(|m| *m != "<synthetic>") {
                     let calls = message["content"].as_array().into_iter().flatten();
                     for call in calls.filter(|b| b["type"] == "tool_use") {
@@ -635,6 +809,40 @@ fn scan(
                     });
                 }
             }
+            Some("system") if is_main => {
+                let said = row["content"].as_str().unwrap_or_default();
+                // A typed review that ran where it was typed ends with what
+                // it printed; one that forked says where, and its subagent
+                // has the reply.
+                if row["subtype"] == "local_command" {
+                    if !std::mem::take(&mut just_typed) {
+                        // Another command's row: the turn before it is over.
+                        turn_over(summary, &mut reviewing, &mut last_reply);
+                    } else if let Some(prompt_id) = reviewing.take() {
+                        last_reply = None;
+                        let printed = crate::reviews::command_output(said);
+                        let known = |r: &ReviewSaid| r.prompt_id == prompt_id;
+                        if !summary.review_replies.iter().any(known) {
+                            let found = printed
+                                .and_then(|out| crate::reviews::review_said(&prompt_id, out));
+                            summary.review_replies.extend(found);
+                        }
+                    }
+                }
+                if let Some(launch) = review_launch(said) {
+                    let known = |l: &ReviewLaunch| l.agent_id == launch.agent_id;
+                    if !summary.review_launches.iter().any(known) {
+                        summary.review_launches.push(ReviewLaunch {
+                            at: row_ts,
+                            ..launch
+                        });
+                    }
+                } else if let Some(effort) = crate::reviews::reused_effort(said) {
+                    summary
+                        .reused_efforts
+                        .push(ReusedEffort { at: row_ts, effort });
+                }
+            }
             _ => {}
         }
     })?;
@@ -652,7 +860,24 @@ fn scan(
             branch: response.branch,
         });
     }
-    Ok(usage)
+    if is_main {
+        turn_over(summary, &mut reviewing, &mut last_reply);
+    }
+    Ok((usage, last_reply.map(|(_, all)| all.join("\n"))))
+}
+
+/// A review command that forked, from the row that says where (see
+/// `reviews::forked_launch`).
+fn review_launch(said: &str) -> Option<ReviewLaunch> {
+    let launch = crate::reviews::forked_launch(said)?;
+    let (effort, pull_number) = crate::reviews::parse_args(&launch.args);
+    Some(ReviewLaunch {
+        at: None,
+        command: launch.command,
+        effort,
+        pull_number,
+        agent_id: launch.agent_id?,
+    })
 }
 
 /// Claude Code's config directory: `$CLAUDE_CONFIG_DIR`, or `~/.claude`.
@@ -1061,6 +1286,138 @@ mod tests {
             &json!({ "output_tokens": 1000, "speed": "fast" }),
         );
         assert!((fast.cost_usd - 2.0 * normal.cost_usd).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_typed_review_that_ran_where_it_was_typed_says_what_it_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s1.jsonl");
+        let user = |id: &str, content: Value| {
+            json!({ "type": "user", "promptId": id, "sessionId": "s1",
+                    "message": { "role": "user", "content": content } })
+        };
+        let says = |id: &str, text: &str| {
+            json!({ "type": "assistant", "sessionId": "s1",
+                    "message": { "id": id, "model": "claude-opus-5-5", "usage": {},
+                                 "content": [{ "type": "text", "text": text }] } })
+        };
+        let printed = |text: &str| {
+            json!({ "type": "system", "subtype": "local_command", "sessionId": "s1",
+                    "content": format!("<local-command-stdout>{text}</local-command-stdout>") })
+        };
+        let mut beside = user("p1", json!("Review the changes for security problems."));
+        beside["isMeta"] = json!(true);
+        write_jsonl(
+            &path,
+            &[
+                // typed, as Claude Code writes it, and answered in the main thread
+                user("p1", json!("/security-review")),
+                // what the command stands for, put in beside it: not the next thing asked
+                beside,
+                says("m1", "Looking at the diff."),
+                // nor is a tool's result
+                user(
+                    "p1",
+                    json!([{ "type": "tool_result", "tool_use_id": "t1", "content": "ok" }]),
+                ),
+                says("m2", "I found 3 issues."),
+                says("m2", "The first is in auth.rs."),
+                // not a review: what is said to it is not read
+                user("p2", json!("thanks, fix them")),
+                says("m3", "I found 9 problems on the way."),
+                // ran to its end where it was typed: what it printed
+                user("p3", json!("/code-review high #15")),
+                printed("10 findings, most severe first:\n\n1. `a.rs`: ..."),
+                says("m4", "I found 2 issues of my own."),
+                // forked: its subagent has the reply, and the notice has none
+                user("p4", json!("/code-review high")),
+                printed("Running in the background as @code-review</local-command-stdout>\n<forked-skill-launch>{\"agentId\":\"f1\",\"skillName\":\"code-review\",\"description\":\"/code-review high\"}</forked-skill-launch>"),
+                // the row an older transcript has for a typed command
+                user(
+                    "p5",
+                    json!("<command-name>/security-review</command-name>\n<command-args></command-args>"),
+                ),
+                says("m5", "No findings."),
+            ],
+        );
+        let facts = parse(&path).unwrap().facts();
+        let said: Vec<_> = facts
+            .review_replies
+            .iter()
+            .map(|r| (r.prompt_id.as_str(), r.findings))
+            .collect();
+        assert_eq!(said, [("p1", 3), ("p3", 10), ("p5", 0)]);
+        assert_eq!(facts.review_launches.len(), 1);
+    }
+
+    #[test]
+    fn what_comes_after_a_typed_reviews_turn_is_not_its_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = |id: &str, content: &str| {
+            json!({ "type": "user", "promptId": id, "sessionId": "s1",
+                    "message": { "role": "user", "content": content } })
+        };
+        let says = |id: &str, text: &str| {
+            json!({ "type": "assistant", "sessionId": "s1",
+                    "message": { "id": id, "model": "claude-opus-5-5", "usage": {},
+                                 "content": [{ "type": "text", "text": text }] } })
+        };
+        let command = |content: &str| {
+            json!({ "type": "system", "subtype": "local_command", "sessionId": "s1",
+                    "content": content })
+        };
+        let replies = |name: &str, rows: &[Value]| {
+            let path = dir.path().join(format!("{name}.jsonl"));
+            write_jsonl(&path, rows);
+            let facts = parse(&path).unwrap().facts();
+            let said = facts.review_replies.iter();
+            said.map(|r| (r.prompt_id.clone(), r.findings))
+                .collect::<Vec<_>>()
+        };
+        let found = [("p1".to_string(), 3)];
+        // A message from another session, or a task that fired, is put in as
+        // Claude Code's own row under a prompt of its own: a new turn.
+        let mut peer = user("p2", "A message from another session.");
+        peer["isMeta"] = json!(true);
+        assert_eq!(
+            replies(
+                "peer",
+                &[
+                    user("p1", "/security-review"),
+                    says("m1", "I found 3 issues."),
+                    peer,
+                    says("m2", "I found 5 problems elsewhere."),
+                ]
+            ),
+            found
+        );
+        // Another command typed after it: its rows are not the review's
+        // output, and do not take the review's reply away.
+        assert_eq!(
+            replies(
+                "command",
+                &[
+                    user("p1", "/security-review"),
+                    says("m1", "I found 3 issues."),
+                    command("<command-name>/doctor</command-name>"),
+                    command("<local-command-stdout>Found 2 issues with your configuration</local-command-stdout>"),
+                ]
+            ),
+            found
+        );
+        // Nor is what is said after that command the review's.
+        assert_eq!(
+            replies(
+                "after",
+                &[
+                    user("p1", "/security-review"),
+                    says("m1", "I found 3 issues."),
+                    command("<command-name>/doctor</command-name>"),
+                    says("m2", "I found 5 problems elsewhere."),
+                ]
+            ),
+            found
+        );
     }
 
     #[test]

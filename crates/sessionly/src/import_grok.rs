@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 use crate::import::{edit_result, slim_input, Builder};
 use crate::paths::GROK;
 use crate::session::{Cost, CostSource, ModelUsage};
-use crate::transcript::Facts;
+use crate::transcript::{Facts, ReviewSaid};
 
 /// Grok counts money in ticks: ten billion to the dollar.
 const TICKS_PER_USD: f64 = 1e10;
@@ -113,16 +113,42 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
     let (mut first, mut last) = (None::<i64>, None::<i64>);
     let mut model: Option<String> = None;
 
-    // A prompt arrives in chunks: it is pushed once the next thing happens.
-    fn flush_prompt(out: &mut Builder, id: &Option<String>, text: &mut String, at: i64) {
-        if !text.is_empty() {
-            out.push(
-                &time_of(at),
-                "UserPromptSubmit",
-                json!({ "prompt_id": id, "prompt": text }),
-            );
-            text.clear();
+    // The prompt last pushed and what has been said in answer to it since
+    // the last tool call: a review's reply says how many findings it has.
+    let mut asked: Option<(String, String)> = None;
+    let mut reply = String::new();
+
+    // A prompt arrives in chunks: it is pushed once the next thing happens,
+    // and handed back as the one now being answered.
+    fn flush_prompt(
+        out: &mut Builder,
+        id: &Option<String>,
+        text: &mut String,
+        at: i64,
+    ) -> Option<(String, String)> {
+        if text.is_empty() {
+            return None;
         }
+        out.push(
+            &time_of(at),
+            "UserPromptSubmit",
+            json!({ "prompt_id": id, "prompt": text }),
+        );
+        Some((id.clone().unwrap_or_default(), std::mem::take(text)))
+    }
+    // What the answer to a review command says it found, once it is over.
+    let mut said: Vec<ReviewSaid> = Vec::new();
+    fn flush_reply(
+        said: &mut Vec<ReviewSaid>,
+        asked: &mut Option<(String, String)>,
+        reply: &mut String,
+    ) {
+        if let Some((id, prompt)) = asked.take() {
+            if crate::reviews::is_typed_review(&prompt) {
+                said.extend(crate::reviews::review_said(&id, reply));
+            }
+        }
+        reply.clear();
     }
 
     crate::jsonl::for_each(updates, |row| {
@@ -134,14 +160,26 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
         let update = &row["params"]["update"];
         let kind = update["sessionUpdate"].as_str().unwrap_or_default();
         if kind != "user_message_chunk" {
-            flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started);
+            if let Some(now) = flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started)
+            {
+                flush_reply(&mut said, &mut asked, &mut reply);
+                asked = Some(now);
+            }
         }
         match kind {
+            "agent_message_chunk" => {
+                reply.push_str(update["content"]["text"].as_str().unwrap_or_default());
+            }
             "user_message_chunk" => {
                 let index = update["_meta"]["promptIndex"].as_u64().unwrap_or(0);
                 let id = Some(format!("p{index}"));
                 if id != prompt_id {
-                    flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started);
+                    if let Some(now) =
+                        flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started)
+                    {
+                        flush_reply(&mut said, &mut asked, &mut reply);
+                        asked = Some(now);
+                    }
                     prompt_id = id;
                     prompt_started = at;
                 }
@@ -151,6 +189,8 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
                 }
             }
             "tool_call" | "tool_call_update" => {
+                // What was said before a tool call is not the last word.
+                reply.clear();
                 let Some(id) = update["toolCallId"].as_str() else {
                     return;
                 };
@@ -231,7 +271,11 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
             _ => {}
         }
     })?;
-    flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started);
+    if let Some(now) = flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started) {
+        flush_reply(&mut said, &mut asked, &mut reply);
+        asked = Some(now);
+    }
+    flush_reply(&mut said, &mut asked, &mut reply);
     // Calls that never reported an outcome.
     let mut open: Vec<(String, Call)> = calls.into_iter().collect();
     open.sort_by_key(|(_, call)| call.started);
@@ -265,15 +309,14 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
     let created = parse_time(&summary["created_at"]).or(DateTime::from_timestamp(first, 0));
     let updated =
         parse_time(&summary["updated_at"]).or(last.and_then(|l| DateTime::from_timestamp(l, 0)));
-    Ok((
-        out.finish(),
-        Some(facts(
-            &read_json(&dir.join("usage.json")),
-            &summary,
-            created,
-            updated,
-        )),
-    ))
+    let mut facts = facts(
+        &read_json(&dir.join("usage.json")),
+        &summary,
+        created,
+        updated,
+    );
+    facts.review_replies = said;
+    Ok((out.finish(), Some(facts)))
 }
 
 /// Tokens and cost as Grok recorded them.
@@ -330,6 +373,7 @@ fn facts(
         usage: models,
         subagents: Vec::new(),
         tool_models: HashMap::new(),
+        ..Default::default()
     }
 }
 
@@ -517,6 +561,41 @@ mod tests {
             s.ended_at.unwrap().to_rfc3339(),
             "2026-11-09T09:00:00+00:00"
         );
+    }
+
+    #[test]
+    fn a_reviews_reply_says_what_it_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let updates = sample(dir.path());
+        let t0 = 1_794_212_700;
+        let mut f = fs::OpenOptions::new().append(true).open(&updates).unwrap();
+        for row in [
+            update(
+                t0 + 50,
+                json!({ "sessionUpdate": "user_message_chunk", "_meta": { "promptIndex": 2 },
+                        "content": { "type": "text", "text": "/code-review #41" } }),
+            ),
+            update(
+                t0 + 55,
+                json!({ "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": "I found 2 issues." } }),
+            ),
+            update(t0 + 56, json!({ "sessionUpdate": "turn_completed" })),
+        ] {
+            writeln!(f, "{row}").unwrap();
+        }
+        let (events, facts) = session(&updates).unwrap();
+        // What the reply says is a fact of the session, and no event of it.
+        assert_eq!(events[0]["hook"], "SessionStart");
+        let said = &facts.as_ref().unwrap().review_replies;
+        assert_eq!((said.len(), said[0].findings), (1, 2));
+        let s = crate::normalize::from_events(&events, facts.as_ref(), GROK).unwrap();
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.pull_number, r.findings))
+            .collect();
+        assert_eq!(runs, [(Some(41), Some(2))]);
     }
 
     #[test]

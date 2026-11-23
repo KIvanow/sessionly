@@ -68,17 +68,27 @@ pub fn build_with(
         }
         None => Facts::load(&saved),
     };
-    let Some(mut session) = from_events(&events, facts.as_ref(), source) else {
+    let Some((mut session, reviews)) = assemble(&events, facts.as_ref(), source) else {
         return Ok(None);
     };
     // Nothing was asked and no tool ran: an agent that was opened and closed
     // again, or the blank chat Cursor announces before anyone types.
+    // One in which only a review ran is a session: a command Claude Code
+    // runs itself (`/ultrareview`) is no prompt, and may be all there was.
     let spent = session.cost.as_ref().is_some_and(|c| c.total_usd > 0.0);
-    if session.prompts.is_empty() && session.tool_calls.is_empty() && !spent {
+    let blank = session.prompts.is_empty() && session.tool_calls.is_empty() && !spent;
+    let reviewed =
+        !reviews.is_empty() || facts.as_ref().is_some_and(|f| !f.review_modes.is_empty());
+    if blank && !reviewed {
         return Ok(None);
     }
     let runtime = crate::runtime::Seen::of(&events);
     add_local_context(&mut session, facts.as_ref(), runtime.as_ref());
+    // After the repository is known: a review's runs are read against it.
+    add_reviews(&mut session, &reviews, facts.as_ref());
+    if blank && session.reviews.is_empty() {
+        return Ok(None);
+    }
     // A call whose model is not known is put down to the session's main one.
     let main = session.models.first();
     let models: HashMap<&str, &str> = session
@@ -93,6 +103,17 @@ pub fn build_with(
         added_lines,
         runtime,
     }))
+}
+
+/// What a skill is called (`code-review`, `plugin:name`), which is kept
+/// without the slash it may be written with: the model writes the field, and
+/// anything else in it is text that is not kept.
+fn skill_name(written: &str) -> Option<&str> {
+    let name = written.trim();
+    let name = name.strip_prefix('/').unwrap_or(name);
+    let shaped = |c: char| c.is_alphanumeric() || "_-:.".contains(c);
+    let named = !name.is_empty() && name.chars().count() <= 100 && name.chars().all(shaped);
+    named.then_some(name)
 }
 
 /// Repository and user details read from the local machine, and for a
@@ -154,8 +175,31 @@ pub fn apply_runtime(session: &mut Session, runtime: &crate::runtime::Seen) {
     }
 }
 
-/// Normalize raw capture records (the envelopes written by `sessionly capture`).
+/// Normalize raw capture records (the envelopes written by `sessionly capture`),
+/// where the session ran in no repository that is known.
+#[cfg(test)]
 pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Option<Session> {
+    let (mut s, reviews) = assemble(events, facts, source)?;
+    add_reviews(&mut s, &reviews, facts);
+    Some(s)
+}
+
+/// The session's review runs and their count, from what its events showed.
+pub(crate) fn add_reviews(s: &mut Session, seen: &crate::reviews::Seen, facts: Option<&Facts>) {
+    s.reviews = crate::reviews::runs(s, seen, facts);
+    // Codex's `/review` is in its rollout only: without what that says, how
+    // many there were is not known, which is not none.
+    let unseen = s.source == crate::paths::CODEX && !facts.is_some_and(|f| f.review_modes_read);
+    let counted = crate::reviews::counted(&s.source) && !unseen;
+    s.counts.reviews = counted.then_some(s.reviews.len() as u64);
+}
+
+/// The session without its review runs, and what its events showed of them.
+pub(crate) fn assemble(
+    events: &[Value],
+    facts: Option<&Facts>,
+    source: &str,
+) -> Option<(Session, crate::reviews::Seen)> {
     let mut s = Session {
         schema_version: SCHEMA_VERSION,
         source: source.into(),
@@ -167,6 +211,7 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
     let mut created: HashSet<String> = HashSet::new();
     // What shell commands changed, by the call's place in `tool_calls`.
     let mut by_shell: HashMap<usize, Vec<FileTouched>> = HashMap::new();
+    let mut reviews = crate::reviews::Seen::default();
     let mut start_model = None;
     let (mut first, mut last) = (None::<DateTime<Utc>>, None::<DateTime<Utc>>);
 
@@ -209,6 +254,7 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
         }
 
         let hook = record["hook"].as_str().unwrap_or_default();
+        reviews.event(source, hook, p, at);
         // A shell command says nothing of what it changed. In a sandbox the
         // capture looked at the working tree around it (see `changes`).
         if matches!(hook, "PostToolUse" | "PostToolUseFailure") {
@@ -390,7 +436,7 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
     s.counts.files_changed = s.files.iter().filter(|f| f.writes > 0).count() as u64;
     s.counts.lines_added = s.files.iter().map(|f| f.lines_added).sum();
     s.counts.lines_removed = s.files.iter().map(|f| f.lines_removed).sum();
-    Some(s)
+    Some((s, reviews))
 }
 
 /// The turn a hook event belongs to. Claude Code names it `prompt_id`;
@@ -429,6 +475,10 @@ fn tool_call<'a>(
                     .map(String::from),
                 input_sha256: sha256_hex(input.to_string().as_bytes()),
                 input_summary: input_summary(&tool, input),
+                skill: (tool == "Skill")
+                    .then(|| input["skill"].as_str().and_then(skill_name))
+                    .flatten()
+                    .map(String::from),
                 tool,
                 ..Default::default()
             });
@@ -753,6 +803,53 @@ mod tests {
             ),
             event(22, "SessionEnd", json!({ "reason": "other" })),
         ]
+    }
+
+    #[test]
+    fn a_session_in_which_only_a_review_ran_is_kept_and_a_blank_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let build = |name: &str, events: &[Value]| {
+            let raw = dir.path().join(format!("raw/{name}.jsonl"));
+            std::fs::create_dir_all(raw.parent().unwrap()).unwrap();
+            let lines: Vec<String> = events.iter().map(Value::to_string).collect();
+            std::fs::write(&raw, lines.join("\n") + "\n").unwrap();
+            build_from_raw(&raw, &dir.path().join("facts"), "claude-code").unwrap()
+        };
+        let start = event(0, "SessionStart", json!({ "source": "startup" }));
+        // A command Claude Code runs itself is no prompt, and here all there was.
+        let review = event(
+            1,
+            "UserPromptExpansion",
+            json!({ "expansion_type": "slash_command", "command_name": "ultrareview",
+                    "command_args": "#7" }),
+        );
+        let built = build("reviewed", &[start.clone(), review]).unwrap();
+        assert_eq!(built.session.reviews.len(), 1);
+        assert_eq!(built.session.counts.reviews, Some(1));
+        // Another command is not one, and leaves the session blank.
+        let model = event(
+            1,
+            "UserPromptExpansion",
+            json!({ "expansion_type": "slash_command", "command_name": "model" }),
+        );
+        assert!(build("blank", &[start.clone(), model]).is_none());
+        assert!(build("empty", &[start]).is_none());
+    }
+
+    #[test]
+    fn a_skill_is_kept_by_its_name_and_not_by_text_in_its_place() {
+        assert_eq!(skill_name("code-review"), Some("code-review"));
+        assert_eq!(
+            skill_name("acme_tools:security-review.v2"),
+            Some("acme_tools:security-review.v2")
+        );
+        // written with its slash
+        assert_eq!(skill_name("/code-review"), Some("code-review"));
+        assert_eq!(skill_name(""), None);
+        assert_eq!(skill_name("/"), None);
+        assert_eq!(skill_name("code-review 62 see ~/clients/acme/notes"), None);
+        assert_eq!(skill_name("/home/ann/notes.md"), None);
+        assert_eq!(skill_name(&"a".repeat(101)), None);
     }
 
     #[test]
