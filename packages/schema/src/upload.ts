@@ -459,8 +459,10 @@ export interface ReviewRun {
    */
   estimated_cost_usd?: number | null;
   /**
-   * Findings reported at the end, where the agent reports them as a
-   * list (`ReportFindings`). Else none.
+   * How many findings it reported, where that can be told: from a list
+   * the agent reports (`ReportFindings`, or Codex's own), or else from
+   * the reply that ends the review, where it says how many. Null when
+   * neither says: not known, which is not zero.
    */
   findings?: number | null;
 }

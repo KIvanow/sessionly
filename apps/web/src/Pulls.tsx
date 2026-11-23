@@ -353,7 +353,7 @@ function Row({ p }: { p: PullRow }) {
       <td className="num">{count(p.review_rounds)}</td>
       <td
         className="num"
-        title={p.local_reviews && p.local_reviews.sessions_unknown > 0 ? "Not all known: some of its sessions were captured by an older Sessionly, which did not count reviews" : undefined}
+        title={p.local_reviews && p.local_reviews.sessions_unknown > 0 ? "Not all known: some of its sessions were deleted since, or captured by an older Sessionly, which did not count reviews" : undefined}
       >
         {p.local_reviews == null ? "–" : `${count(p.local_reviews.runs)}${p.local_reviews.sessions_unknown > 0 ? "+?" : ""}`}
       </td>

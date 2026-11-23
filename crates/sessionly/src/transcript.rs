@@ -596,7 +596,7 @@ fn scan(
     let mut responses: Vec<Response> = Vec::new();
     let mut by_id: HashMap<String, usize> = HashMap::new();
     let mut latest: Option<DateTime<Utc>> = None;
-    let mut last_reply: Option<String> = None;
+    let mut last_reply: Option<(Option<String>, Vec<String>)> = None;
 
     let skipped = crate::jsonl::for_each(path, |row| {
         let text = |k: &str| {
@@ -632,11 +632,26 @@ fn scan(
                 let message = &row["message"];
                 if !is_main {
                     let texts = message["content"].as_array().into_iter().flatten();
-                    let said = texts
+                    // All it said in its last message, in order: the number
+                    // of findings may be in a block before the last, and a
+                    // message's blocks are written a row each.
+                    let said: Vec<&str> = texts
                         .filter_map(|b| b["text"].as_str().filter(|_| b["type"] == "text"))
-                        .rfind(|t| !t.trim().is_empty());
-                    if let Some(said) = said {
-                        last_reply = Some(said.to_string());
+                        .filter(|t| !t.trim().is_empty())
+                        .collect();
+                    if !said.is_empty() {
+                        let id = message["id"].as_str().map(String::from);
+                        let mut all = match last_reply.take() {
+                            Some((before, all)) if id.is_some() && before == id => all,
+                            _ => Vec::new(),
+                        };
+                        for text in said {
+                            // A row may be written twice.
+                            if !all.iter().any(|t| t == text) {
+                                all.push(text.to_string());
+                            }
+                        }
+                        last_reply = Some((id, all));
                     }
                 }
                 if let Some(model) = message["model"].as_str().filter(|m| *m != "<synthetic>") {
@@ -720,7 +735,7 @@ fn scan(
             branch: response.branch,
         });
     }
-    Ok((usage, last_reply))
+    Ok((usage, last_reply.map(|(_, all)| all.join("\n"))))
 }
 
 /// A review command that forked, from the row that says where:

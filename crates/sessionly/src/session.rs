@@ -366,8 +366,10 @@ pub struct ReviewRun {
     /// tokens during the review are not in it. Null when none has a cost,
     /// and for a review that ran in the cloud, which is billed apart.
     pub estimated_cost_usd: Option<f64>,
-    /// Findings reported at the end, where the agent reports them as a
-    /// list (`ReportFindings`). Else none.
+    /// How many findings it reported, where that can be told: from a list
+    /// the agent reports (`ReportFindings`, or Codex's own), or else from
+    /// the reply that ends the review, where it says how many. Null when
+    /// neither says: not known, which is not zero.
     pub findings: Option<u64>,
 }
 

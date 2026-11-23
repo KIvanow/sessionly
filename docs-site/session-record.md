@@ -76,21 +76,28 @@ Each run has:
   effort, the level you typed last time"), where the transcript is there to say so.
 - `pull_number`: a pull request number among the arguments: `#528` or a pull request's URL
   anywhere in them, a bare `621` only as the first or second argument. A number further on
-  is a number in a sentence ("the last 3 commits") and is not taken for one.
+  is a number in a sentence ("the last 3 commits") and is not taken for one, nor is one in
+  a path (`/work/pull/42/diff.rs`).
 - `ran`: `cloud` for `/ultrareview` and `/code-review ultra`, else `local`.
 - `agent_id`, when a subagent ran it.
-- `status` and `duration_ms`: from the start to the end of the last of its subagents.
+- `status` and `duration_ms`: from the start to the end of the last of its subagents. A
+  typed command went as its turn did: `failed` where the turn failed, `no_result` where it
+  has no end (still running, or interrupted). A Codex review that was never left has no
+  duration.
 - `subagents` and `estimated_cost_usd`: the subagents that did the review. That is the one a
   review skill forks to run in, or, where none is known, those started from the same thread
-  before your next prompt, with the subagents they started in turn.
+  before your next prompt, with the subagents they started in turn. A review that ran
+  inside another review's subagent has its own subagents, cost and findings, which are not
+  the outer one's too.
 - `findings`: how many it reported, where that can be told: from a list it reports
   (`ReportFindings`, or Codex's own), or else from the reply that ends the review, when that
   reply is a JSON list of findings or its first lines say how many it found, kept or has
-  ("15 findings, most severe first", "I reviewed PR #50 and found 4 issues", "no blocking
-  bugs"). The reply is read on your machine and only the number is kept. It is the reply
+  ("15 findings, most severe first", "I reviewed PR #50 and found 4 issues", "no
+  findings"). The reply is read on your machine and only the number is kept. It is the reply
   of the subagent a Claude Code review ran in, and in Cursor and Grok the last thing said in
-  the turn. A reply that words its result another way, or names two different numbers, has
-  none (`null`), which is not zero.
+  the turn. A reply that words its result another way, names two different numbers, or says
+  there are none of one kind only ("no blocking bugs"), has none (`null`), which is not
+  zero.
 
 Nothing else of the arguments is kept: no free text, no path. A run is the same record in
 every content mode.

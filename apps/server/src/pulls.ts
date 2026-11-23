@@ -2242,8 +2242,8 @@ async function localReviewsIn(
       into = { runs: 0, cloud: 0, by_effort: {}, findings: null, cost_usd: null, sessions_unknown: 0, shared_with: 0 };
       found.set(key, into);
     }
-    if (row.held !== true) continue;
-    if (row.review_runs == null) {
+    // A matched session that is deleted, or from a collector that did not count them: not known, which is not none.
+    if (row.held !== true || row.review_runs == null) {
       if (row.matched === true) into.sessions_unknown += 1;
       continue;
     }
@@ -2281,7 +2281,16 @@ async function localReviewsIn(
     }
   }
   // Oldest first: the order the pull request was reviewed in. One without a time is last.
-  for (const into of found.values()) into.each?.sort((a, b) => (a.at ?? "9").localeCompare(b.at ?? "9") || a.session_id.localeCompare(b.session_id));
+  // By the instant, not the text: two times may be written with different offsets.
+  const instant = (at: string | null) => {
+    const time = at == null ? NaN : Date.parse(at);
+    return Number.isNaN(time) ? Infinity : time;
+  };
+  for (const into of found.values())
+    into.each?.sort((a, b) => {
+      const [first, second] = [instant(a.at), instant(b.at)];
+      return (first === second ? 0 : first < second ? -1 : 1) || a.session_id.localeCompare(b.session_id);
+    });
   return found;
 }
 

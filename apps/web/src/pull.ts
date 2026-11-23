@@ -49,11 +49,11 @@ export function reviewGaps(each: readonly Pick<LocalReviewRun, "at">[]): (number
  * before and during review (2 xhigh, 1 high), 1 of them in the cloud. Review
  * subagents: $12.40 of the $85.43." `spent` is the pull request's cost.
  */
-export function localReviewsLine(r: LocalReviews | null, spent: number | null): string {
+export function localReviewsLine(r: LocalReviews | null): string {
   if (!r) return "No session of it is known.";
   const unknown =
     r.sessions_unknown > 0
-      ? ` ${count(r.sessions_unknown)} of its ${r.sessions_unknown === 1 ? "sessions was" : "sessions were"} captured by an older Sessionly, which did not count reviews: not known for ${r.sessions_unknown === 1 ? "it" : "them"}.`
+      ? ` Not known for ${count(r.sessions_unknown)} of its sessions: deleted since, or captured by an older Sessionly, which did not count reviews.`
       : "";
   if (r.runs === 0) return `No review command ran in its sessions.${unknown}`;
   const efforts = Object.entries(r.by_effort)
@@ -63,7 +63,7 @@ export function localReviewsLine(r: LocalReviews | null, spent: number | null): 
   if (r.cloud > 0) parts.push(`${count(r.cloud)} of them in the cloud`);
   let line = `${parts.join(", ")}.`;
   if (r.findings != null) line += ` ${count(r.findings)} findings reported.`;
-  if (r.cost_usd != null) line += ` Review subagents: ${usdOf(r.cost_usd)}${spent != null ? ` of the ${usdOf(spent)}` : ""}.`;
+  if (r.cost_usd != null) line += ` Review subagents: ${usdOf(r.cost_usd)}.`;
   if (r.shared_with > 0)
     line += ` Some of those ran in sessions it shares with ${count(r.shared_with)} other pull ${r.shared_with === 1 ? "request" : "requests"}, and name none: they are counted on each.`;
   return line + unknown;

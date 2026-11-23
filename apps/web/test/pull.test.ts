@@ -303,14 +303,14 @@ test("each review run says how long after the one before it started", () => {
 
 test("a pull request's local review runs in a sentence, and what is not known said", () => {
   const none = { runs: 0, cloud: 0, by_effort: {}, findings: null, cost_usd: null, sessions_unknown: 0, shared_with: 0 };
-  assert.equal(localReviewsLine(null, null), "No session of it is known.");
-  assert.equal(localReviewsLine(none, 10), "No review command ran in its sessions.");
+  assert.equal(localReviewsLine(null), "No session of it is known.");
+  assert.equal(localReviewsLine(none), "No review command ran in its sessions.");
   assert.equal(
-    localReviewsLine({ ...none, runs: 4, cloud: 1, by_effort: { high: 1, xhigh: 2 }, cost_usd: 12.4 }, 85.43),
-    "Reviewed 4 times before and during review (2 xhigh, 1 high), 1 of them in the cloud. Review subagents: $12.40 of the $85.43.",
+    localReviewsLine({ ...none, runs: 4, cloud: 1, by_effort: { high: 1, xhigh: 2 }, cost_usd: 12.4 }),
+    "Reviewed 4 times before and during review (2 xhigh, 1 high), 1 of them in the cloud. Review subagents: $12.40.",
   );
   assert.equal(
-    localReviewsLine({ ...none, runs: 1, findings: 3, shared_with: 2, sessions_unknown: 1 }, null),
-    "Reviewed once before and during review. 3 findings reported. Some of those ran in sessions it shares with 2 other pull requests, and name none: they are counted on each. 1 of its sessions was captured by an older Sessionly, which did not count reviews: not known for it.",
+    localReviewsLine({ ...none, runs: 1, findings: 3, shared_with: 2, sessions_unknown: 1 }),
+    "Reviewed once before and during review. 3 findings reported. Some of those ran in sessions it shares with 2 other pull requests, and name none: they are counted on each. Not known for 1 of its sessions: deleted since, or captured by an older Sessionly, which did not count reviews.",
   );
 });

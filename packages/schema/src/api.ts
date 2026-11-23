@@ -611,7 +611,7 @@ export interface LocalReviews {
   cloud: number;
   /** Runs by the effort they were given (`xhigh`, `high`); a run given none is in no entry. */
   by_effort: Record<string, number>;
-  /** Findings reported, of the runs that reported them as a list. Null when none did. */
+  /** Findings reported, of the runs whose number of them is known. Null when none is. */
   findings: number | null;
   /**
    * What the runs' subagents cost: a floor, without the main thread's own
@@ -619,7 +619,7 @@ export interface LocalReviews {
    * none has a cost; a cloud run's is not known.
    */
   cost_usd: number | null;
-  /** Matched sessions from a collector that did not count review runs: theirs are not known. */
+  /** Matched sessions that are deleted, or from a collector that did not count review runs: theirs are not known. */
   sessions_unknown: number;
   /**
    * The most other pull requests a matched session that has a run naming

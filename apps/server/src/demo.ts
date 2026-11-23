@@ -231,6 +231,12 @@ const reviewOf = (r: ReviewRun): ReviewRun => ({
   findings: r.findings,
 });
 
+/** A review skill's name without its plugin's (`acme:code-review` → `code-review`); null for any other skill. */
+function reviewSkill(skill: string | null | undefined): string | null {
+  const last = skill?.split(":").pop() ?? "";
+  return REVIEW_COMMANDS.includes(last) ? last : null;
+}
+
 const subagentOf = (a: Subagent): Subagent => ({
   agent_id: a.agent_id,
   agent_type: null,
@@ -314,8 +320,8 @@ export function shown(upload: Upload, rules: Rules): Upload {
         prompt_id: t.prompt_id,
         agent_id: t.agent_id,
         tool: toolOf(t.tool),
-        // A team's own skill is named by it; a review's is one of a known few.
-        skill: t.skill != null && REVIEW_COMMANDS.includes(t.skill.split(":").pop() ?? "") ? t.skill : null,
+        // A team's own skill is named by it; a review's is one of a known few, and a plugin's name for it is left out.
+        skill: reviewSkill(t.skill),
         model: t.model,
         at: t.at,
         status: t.status,

@@ -1594,13 +1594,19 @@ pub fn session(
     // Each review with the thread it ran in: the reviewer that began while
     // the review was on, each one once.
     reviewers.sort_by(|a, b| a.1.cmp(&b.1));
-    for review in &main.reviews {
+    for (i, review) in main.reviews.iter().enumerate() {
+        // One left without an end was on until the next one began.
+        let next = main.reviews.get(i + 1).and_then(|r| parse_time(&r.at));
         let within = |began: &str| {
             let (Some(began), Some(start)) = (parse_time(began), parse_time(&review.at)) else {
                 return false;
             };
             let end = review.ended.as_deref().and_then(parse_time);
-            (start - began).num_seconds() <= 5 && end.is_none_or(|end| began <= end)
+            (start - began).num_seconds() <= 5
+                && match end {
+                    Some(end) => began <= end,
+                    None => next.is_none_or(|next| (next - began).num_seconds() > 5),
+                }
         };
         let ran_in = reviewers.iter().position(|(_, began)| within(began));
         let agent = ran_in.map(|i| reviewers.remove(i).0);
@@ -1831,6 +1837,64 @@ pub(crate) mod tests {
             ],
         );
         path
+    }
+
+    #[test]
+    fn a_review_that_was_never_left_does_not_take_the_next_ones_reviewer() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |thread: &str| {
+            dir.path().join(format!(
+                "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{thread}.jsonl"
+            ))
+        };
+        let mode = |second: u32, id: &str, kind: &str| {
+            let item =
+                json!({ "type": kind, "id": id, "target": { "type": "uncommittedChanges" } });
+            event(
+                second,
+                "item_completed",
+                json!({ "turn_id": "t1", "item": item }),
+            )
+        };
+        let main = file(MAIN);
+        write(
+            &main,
+            &[
+                meta(MAIN, json!({ "history_mode": "paginated" })),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                // never left
+                mode(1, "r1", "EnteredReviewMode"),
+                mode(30, "r2", "EnteredReviewMode"),
+                mode(39, "r2x", "ExitedReviewMode"),
+            ],
+        );
+        let reviewer = file(CHILD);
+        write(
+            &reviewer,
+            &[
+                meta(
+                    CHILD,
+                    json!({ "parent_thread_id": MAIN, "thread_source": "subagent",
+                            "source": { "subagent": "review" } }),
+                ),
+                event(31, "task_started", json!({ "turn_id": "s1" })),
+                row(
+                    31,
+                    "turn_context",
+                    json!({ "turn_id": "s1", "model": "gpt-6-luna" }),
+                ),
+                tokens(32, "s1", "r9", CHILD, 800),
+                event(38, "task_complete", json!({ "turn_id": "s1" })),
+            ],
+        );
+        let (events, facts) = session(&main, &[reviewer], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.subagents, r.duration_ms))
+            .collect();
+        assert_eq!(runs, [(0, None), (1, Some(9000))]);
     }
 
     #[test]

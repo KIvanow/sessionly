@@ -132,7 +132,7 @@ test("a session's review runs are shown, and of skills only a review's name", ()
   assert.deepEqual(made.reviews, [
     { id: "t3", at: "2026-11-10T09:10:00Z", command: "code-review", via: "skill", ran: "local", effort: "xhigh", pull_number: 7, status: "ok", subagents: 2, estimated_cost_usd: 1.5, findings: 3 },
   ]);
-  assert.deepEqual(made.tool_calls.map((t: any) => t.skill ?? null), [null, null, "acme:code-review", null]);
+  assert.deepEqual(made.tool_calls.map((t: any) => t.skill ?? null), [null, null, "code-review", null]);
   // From a collector that did not count them: still not known.
   const older = session("s2", REPO) as any;
   delete older.session.reviews;

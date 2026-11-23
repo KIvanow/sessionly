@@ -2545,7 +2545,8 @@ test("a pull request's local review runs: its sessions', and those of a session 
   };
   await put("rv-a", [4101], [
     run("t1", { at: "2026-11-10T09:30:00Z", effort: "xhigh", findings: 4, estimated_cost_usd: 1.25 }),
-    run("t2", { at: "2026-11-10T09:10:00Z", effort: "high", pull_number: 41, estimated_cost_usd: 0.5 }),
+    // 09:10 as another offset writes it: the order is by the instant, not the text
+    run("t2", { at: "2026-11-10T10:10:00+01:00", effort: "high", pull_number: 41, estimated_cost_usd: 0.5 }),
     // another pull request's
     run("t3", { effort: "high", pull_number: 42, estimated_cost_usd: 9 }),
   ]);
@@ -2573,7 +2574,7 @@ test("a pull request's local review runs: its sessions', and those of a session 
   assert.deepEqual(
     each.map((r: any) => [r.at.slice(11, 16), r.command, r.effort, r.ran, r.names_pull, r.cost_usd, r.findings, r.session_id]),
     [
-      ["09:10", "code-review", "high", "local", true, 0.5, null, "rv-a"],
+      ["10:10", "code-review", "high", "local", true, 0.5, null, "rv-a"],
       ["09:20", "ultrareview", null, "cloud", true, null, null, "rv-b"],
       ["09:30", "code-review", "xhigh", "local", false, 1.25, 4, "rv-a"],
     ],
@@ -2622,4 +2623,9 @@ test("a pull request's local review runs: its sessions', and those of a session 
   await call(tokens.ci, "PUT", "/prs", report({ number: 43, files: [file("rv.ts", 4301)] }));
   const again = (await call(tokens.admin, "GET", "/prs?limit=500")).body.pulls.filter((p: any) => p.repo === "github.com/acme/web" && [41, 43].includes(p.number));
   assert.deepEqual(again.map((p: any) => [p.number, p.local_reviews.runs, p.local_reviews.shared_with]), [[43, 1, 1], [41, 2, 1]]);
+
+  // A matched session that was deleted since: its runs are not known, which is not none.
+  await db.query(`DELETE FROM sessions WHERE session_id = 'rv-a'`);
+  const gone = (await call(tokens.admin, "GET", "/prs?limit=500")).body.pulls.find((p: any) => p.repo === "github.com/acme/web" && p.number === 43);
+  assert.deepEqual([gone.local_reviews.runs, gone.local_reviews.sessions_unknown], [0, 1]);
 });

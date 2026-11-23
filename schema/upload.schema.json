@@ -1169,7 +1169,7 @@
           "default": null
         },
         "findings": {
-          "description": "Findings reported at the end, where the agent reports them as a\nlist (`ReportFindings`). Else none.",
+          "description": "How many findings it reported, where that can be told: from a list\nthe agent reports (`ReportFindings`, or Codex's own), or else from\nthe reply that ends the review, where it says how many. Null when\nneither says: not known, which is not zero.",
           "type": [
             "integer",
             "null"

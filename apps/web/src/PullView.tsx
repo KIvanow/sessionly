@@ -121,7 +121,7 @@ export function PullView({
         <h2>Reviews</h2>
         <dl className="facts">
           <dt>In its sessions</dt>
-          <dd>{localReviewsLine(p.local_reviews, p.cost?.usd ?? null)}</dd>
+          <dd>{localReviewsLine(p.local_reviews)}</dd>
           <dt>On GitHub</dt>
           <dd>
             {count(p.reviews)} {p.reviews === 1 ? "review" : "reviews"} ({count(p.changes_requested)} asking for changes), {count(p.review_rounds)}{" "}

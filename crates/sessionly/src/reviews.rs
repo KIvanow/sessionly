@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::session::{ReviewRan, ReviewRun, ReviewVia, Session, ToolStatus};
+use crate::session::{Outcome, ReviewRan, ReviewRun, ReviewVia, Session, ToolStatus};
 use crate::transcript::Facts;
 
 /// The commands that are reviews. A plugin's skill matches on its last part
@@ -68,7 +68,8 @@ pub fn slash_command(text: &str) -> Option<(&str, &str)> {
 ///
 /// A bare number is a pull request's only as the first or second argument
 /// (`621`, `xhigh 621`): further on it is a number in a sentence ("the last
-/// 3 commits"). `#528` and a pull request's URL are one wherever they are.
+/// 3 commits"). `#528` and a pull request's URL are one wherever they are;
+/// a path with `/pull/` in it (`/work/pull/42/diff.rs`) is not a URL.
 pub fn parse_args(args: &str) -> (Option<String>, Option<u64>) {
     let (mut effort, mut number) = (None, None);
     let mut position = 0;
@@ -90,7 +91,7 @@ pub fn parse_args(args: &str) -> (Option<String>, Option<u64>) {
                 continue;
             }
         }
-        let named = bare.starts_with('#') || bare.contains("/pull/");
+        let named = bare.starts_with('#') || is_pull_url(bare);
         if number.is_none() && (named || position <= 2) {
             number = pull_number(bare);
         }
@@ -98,10 +99,17 @@ pub fn parse_args(args: &str) -> (Option<String>, Option<u64>) {
     (effort, number)
 }
 
+/// True for a pull request's URL, as against a path that has `/pull/` in it.
+fn is_pull_url(word: &str) -> bool {
+    let web = word.starts_with("https://") || word.starts_with("http://");
+    web && word.contains("/pull/")
+}
+
 /// `621`, `#528`, or `https://github.com/o/r/pull/621`.
 fn pull_number(word: &str) -> Option<u64> {
     let digits = match word.split_once("/pull/") {
-        Some((_, rest)) => rest.split(|c: char| !c.is_ascii_digit()).next()?,
+        Some((_, rest)) if is_pull_url(word) => rest.split(|c: char| !c.is_ascii_digit()).next()?,
+        Some(_) => return None,
         None => word.strip_prefix('#').unwrap_or(word),
     };
     let plain = !digits.is_empty() && digits.len() <= 9;
@@ -137,12 +145,13 @@ fn ran(command: &str, effort: Option<&str>) -> ReviewRan {
 /// so in a way that can be relied on: a JSON list of them, or a number of
 /// findings, issues, problems or bugs that the reply opens a sentence with or
 /// says it found, kept or has ("15 findings, most severe first", "I reviewed
-/// PR #50 and found 4 issues", "there are no blocking bugs"). Read here on
-/// the machine; only the number is kept.
+/// PR #50 and found 4 issues", "there are no findings"). Read here on the
+/// machine; only the number is kept.
 ///
 /// None when the reply words it another way, and when it is not clear which
-/// number is meant: "the two earlier findings are fixed" counts nothing, and
-/// two different numbers are none unless one is what was kept.
+/// number is meant: "the two earlier findings are fixed" counts nothing, two
+/// different numbers are none unless one is what was kept, and none of one
+/// kind ("no blocking bugs") is not none at all.
 pub fn findings_in(reply: &str) -> Option<u64> {
     let reply = reply.trim();
     if let Some(block) = reply.strip_prefix("```json") {
@@ -222,6 +231,10 @@ pub fn findings_in(reply: &str) -> Option<u64> {
         let Some(count) = number(raw[at]) else {
             continue;
         };
+        // None of a kind says nothing of the other kinds.
+        if count == 0 && at != i - 1 {
+            continue;
+        }
         let before = at.checked_sub(1).map(|b| raw[b]);
         let frame = before.map(clean).unwrap_or_default();
         let opens = before.is_none_or(|b| b.ends_with(['.', ':', '!', '?']));
@@ -404,7 +417,10 @@ impl Seen {
         });
         if let Some(i) = again {
             // Last, so that what is said of it next is said of this one.
-            let typed = self.typed.remove(i);
+            let mut typed = self.typed.remove(i);
+            // The id of whichever of the two had one: a later prompt with
+            // another id is then another run.
+            typed.prompt_id = typed.prompt_id.or(prompt_id);
             self.typed.push(typed);
             return;
         }
@@ -473,6 +489,10 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
                 && r.agent_id.is_none()
                 && r.ran == ran_at
                 && (r.ran == ReviewRan::Cloud || r.command == typed.command)
+                // One for another pull request is another review.
+                && r.pull_number
+                    .zip(typed.pull_number)
+                    .is_none_or(|(call, start)| call == start)
                 && match (r.at, typed.at) {
                     (Some(call), Some(start)) => call >= start && end.is_none_or(|e| call < e),
                     _ => false,
@@ -505,7 +525,7 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             ran: ran_at,
             effort: typed.effort.clone(),
             pull_number: typed.pull_number,
-            status: ToolStatus::Ok,
+            status: typed_status(s, typed),
             findings: typed
                 .prompt_id
                 .as_ref()
@@ -543,6 +563,23 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
     runs
 }
 
+/// How a typed command went: as its turn did, where the session has it. A
+/// turn that failed is a review that failed, and one with no end yet (still
+/// running, or interrupted) has no result. A command that is no prompt of
+/// the session's (one Claude Code ran itself) is taken to have run.
+fn typed_status(s: &Session, typed: &Typed) -> ToolStatus {
+    let id = typed.prompt_id.as_deref();
+    let turn = s
+        .prompts
+        .iter()
+        .find(|p| id.is_some() && p.prompt_id.as_deref() == id);
+    match turn.map(|p| p.outcome) {
+        Some(Some(Outcome::ApiError)) => ToolStatus::Failed,
+        Some(None) => ToolStatus::NoResult,
+        _ => ToolStatus::Ok,
+    }
+}
+
 /// The typed commands, with what the transcript says of each: where it
 /// forked, if the events did not say, and the effort it reused.
 fn typed_with(
@@ -555,6 +592,8 @@ fn typed_with(
         return typed;
     };
     let mut taken: HashSet<String> = typed.iter().filter_map(|t| t.fork.clone()).collect();
+    // Each note of a reused effort is one turn's.
+    let mut noted: HashSet<usize> = HashSet::new();
     for t in &mut typed {
         let Some(start) = t.at else {
             continue;
@@ -580,8 +619,21 @@ fn typed_with(
             }
         }
         if t.effort.is_none() {
-            let reused = facts.reused_efforts.iter().find(|r| in_turn(r.at));
-            t.effort = reused.map(|r| r.effort.clone());
+            // The one said after the command started, before one a moment
+            // ahead of it; of those, the nearest.
+            let reused = facts
+                .reused_efforts
+                .iter()
+                .enumerate()
+                .filter(|(i, r)| !noted.contains(i) && in_turn(r.at))
+                .min_by_key(|(_, r)| {
+                    let apart = r.at.map_or(0, |at| (at - start).num_milliseconds());
+                    (apart < 0, apart.abs())
+                });
+            if let Some((i, reused)) = reused {
+                noted.insert(i);
+                t.effort = Some(reused.effort.clone());
+            }
         }
     }
     typed
@@ -665,6 +717,21 @@ fn measure(
         }
     }
 
+    // A review that ran inside another's subagent has its own: they are
+    // not the outer one's too, or their cost would be in both.
+    let whole = members.clone();
+    for (i, set) in members.iter_mut().enumerate() {
+        for (j, run) in runs.iter().enumerate() {
+            let inside = run
+                .agent_id
+                .as_deref()
+                .is_some_and(|t| whole[i].contains(t));
+            if i != j && inside {
+                set.retain(|agent| !whole[j].contains(agent));
+            }
+        }
+    }
+
     let mut findings: Vec<Option<u64>> = vec![None; runs.len()];
     for (call, n) in &seen.findings {
         let Some(call) = calls.get(call.as_str()) else {
@@ -695,8 +762,8 @@ fn measure(
             _ => None,
         };
         let last_end = subs.iter().filter_map(|s| s.ended_at).max();
-        // Codex says itself when a review ended.
-        let timed = run.via == ReviewVia::CodexReview && run.duration_ms.is_some();
+        // Codex says itself when a review ended: one it did not end has no duration.
+        let timed = run.via == ReviewVia::CodexReview;
         if let (Some(start), Some(end), false) = (run.at, last_end, timed) {
             if end > start {
                 run.duration_ms = Some((end - start).num_milliseconds() as u64);
@@ -1110,6 +1177,148 @@ mod tests {
             parse("high the fix for #88 again"),
             (Some("high".into()), Some(88))
         );
+        // a path is no pull request's URL
+        assert_eq!(
+            parse("high inspect /work/pull/42/diff.rs"),
+            (Some("high".into()), None)
+        );
+        assert_eq!(parse("src/pull/42"), (None, None));
+    }
+
+    #[test]
+    fn a_review_inside_a_review_has_its_own_subagents_cost_and_findings() {
+        let facts = costs(&[("outer", 1.0), ("helper", 2.0), ("inner", 4.0)]);
+        let in_outer = |mut e: Value| {
+            e["payload"]["agent_id"] = json!("outer");
+            e
+        };
+        let [pre, post] = skill(10, "t2", "security-review", "", Some("inner"));
+        let report = event(
+            20,
+            "PreToolUse",
+            json!({ "tool_use_id": "r1", "tool_name": "ReportFindings", "agent_id": "inner",
+                    "tool_input": { "findings": [{}, {}] } }),
+        );
+        let [look, looked] = agent_call(5, "a1", Some("outer"), "helper");
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "review it")],
+                skill(1, "t1", "code-review", "", Some("outer")).into(),
+                subagent(2, 60, "outer").into(),
+                vec![in_outer(look), in_outer(looked)],
+                subagent(6, 9, "helper").into(),
+                vec![in_outer(pre), in_outer(post)],
+                subagent(11, 30, "inner").into(),
+                vec![report],
+            ],
+            Some(&facts),
+        );
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.id.as_str(), r.subagents, r.estimated_cost_usd, r.findings))
+            .collect();
+        assert_eq!(
+            runs,
+            [("t1", 2, Some(3.0), None), ("t2", 1, Some(4.0), Some(2))]
+        );
+    }
+
+    #[test]
+    fn a_typed_command_and_a_call_for_another_pull_request_are_two_runs() {
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "/code-review #41")],
+                skill(3, "t1", "code-review", "#42", None).into(),
+                vec![prompt(60, "p2", "/code-review #43")],
+                skill(63, "t2", "code-review", "#43", None).into(),
+            ],
+            None,
+        );
+        let runs: Vec<_> = s.reviews.iter().map(|r| (r.via, r.pull_number)).collect();
+        assert_eq!(
+            runs,
+            [
+                (ReviewVia::SlashCommand, Some(41)),
+                (ReviewVia::Skill, Some(42)),
+                (ReviewVia::SlashCommand, Some(43)),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_expansion_without_an_id_takes_its_prompts_and_a_later_prompt_is_another_run() {
+        let s = session(
+            vec![vec![
+                event(
+                    0,
+                    "UserPromptExpansion",
+                    json!({ "command_name": "code-review", "command_args": "" }),
+                ),
+                prompt(0, "p1", "/code-review"),
+                prompt(3, "p2", "/code-review"),
+            ]],
+            None,
+        );
+        let ids: Vec<_> = s.reviews.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["p1", "p2"]);
+    }
+
+    #[test]
+    fn a_typed_review_went_as_its_turn_did() {
+        let of = |mut e: Value| {
+            e["source"] = json!("cursor");
+            e
+        };
+        let events = [
+            of(prompt(0, "p1", "/code-review #1")),
+            of(event(9, "Stop", json!({ "prompt_id": "p1" }))),
+            of(prompt(20, "p2", "/code-review #2")),
+            of(event(
+                29,
+                "StopFailure",
+                json!({ "prompt_id": "p2", "error": "rate_limit" }),
+            )),
+            of(prompt(40, "p3", "/code-review #3")),
+        ];
+        let s = from_events(&events, None, "cursor").unwrap();
+        let went: Vec<_> = s.reviews.iter().map(|r| r.status).collect();
+        assert_eq!(
+            went,
+            [ToolStatus::Ok, ToolStatus::Failed, ToolStatus::NoResult]
+        );
+    }
+
+    #[test]
+    fn a_note_of_a_reused_effort_is_one_turns() {
+        use crate::transcript::ReusedEffort;
+        let at = |second: u32| {
+            format!("2026-11-20T10:00:{second:02}Z")
+                .parse::<DateTime<Utc>>()
+                .ok()
+        };
+        let facts = Facts {
+            reused_efforts: vec![
+                ReusedEffort {
+                    at: at(1),
+                    effort: "high".into(),
+                },
+                ReusedEffort {
+                    at: at(5),
+                    effort: "xhigh".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let s = session(
+            vec![vec![
+                prompt(0, "p1", "/code-review"),
+                prompt(4, "p2", "/code-review #7"),
+            ]],
+            Some(&facts),
+        );
+        let efforts: Vec<_> = s.reviews.iter().map(|r| r.effort.as_deref()).collect();
+        assert_eq!(efforts, [Some("high"), Some("xhigh")]);
     }
 
     #[test]
@@ -1139,7 +1348,7 @@ mod tests {
                 10,
             ),
             ("I reviewed 14 files and found 3 confirmed problems.", 3),
-            ("PR #77 has no blocking bugs.", 0),
+            ("PR #77 has no issues.", 0),
             ("Of 20 candidates I verified each and kept 5 findings.", 5),
             (
                 "I found 9 issues and, after checking each, kept 6 findings.",
@@ -1159,6 +1368,9 @@ mod tests {
             "I found 3 issues in the server. The CLI has 2 problems.",
             // a pull request's number is no count
             "This closes #12 issues aside.",
+            // none of one kind is not none at all
+            "PR #77 has no blocking bugs.",
+            "I found no blocking bugs, but the diff has several minor issues.",
             "",
         ] {
             assert_eq!(findings_in(other), None, "{other}");
