@@ -75,10 +75,15 @@ Opened at any other name (`sessionly.internal`, or through a proxy), it says it 
 opened until `SESSIONLY_PUBLIC_URL` is set to that address. That keeps a page of another site
 whose name is made to point at this server from opening it.
 
-A server that had signing in with Google or GitHub before this, and has members or viewers
-(who see only part of it), does not open without signing in while they are there: each would
-otherwise become its admin. It says so when it starts. Open the dashboard with an admin token
-(`SESSIONLY_ADMIN_TOKEN`) and remove them on the Team page; it then opens for whoever reaches it.
+A server from before this does not open without signing in, and says why when it starts, while:
+
+- **its Google or GitHub settings are still set.** It was signed in to, perhaps from the
+  internet; take them out once whoever reaches it may be its admin.
+- **it has members or viewers** (who see only part of it): people added when it had signing
+  in, or anyone given a member's or viewer's token before. Each would otherwise become its
+  admin. Open the dashboard with an admin token (`SESSIONLY_ADMIN_TOKEN`), and on the Team
+  page remove them or revoke their tokens. A member's token made since does not count: it was
+  made knowing that whoever reaches the server is its admin.
 
 What is sent to it still takes a token: each machine connects with one made on the Connect or
 Team page (see [People, tokens and sign-in](people-and-tokens.md)), and its sessions are filed

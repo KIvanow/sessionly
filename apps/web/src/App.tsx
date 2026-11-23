@@ -30,6 +30,9 @@ import { useApi } from "./useApi.ts";
 /** How long before asking a server that did not answer again. */
 const RETRY_MS = 5_000;
 
+/** What only happened to go wrong: no answer (status 0), too many at once, or the server's own trouble. */
+const passing = (err: Error) => !(err instanceof ApiError) || err.status === 0 || err.status === 429 || err.status >= 500;
+
 export interface Scope {
   /** "7", "30", "90" days back, or "all". */
   period: string;
@@ -172,7 +175,7 @@ export function App() {
           // An older server, or none: a token is the way in. One that did not
           // answer is asked again, as it may open without signing in.
           setOptions((had) => had ?? { hosted: false, providers: [], signup: false, inviteCode: false });
-          if (!(err instanceof ApiError) || err.status >= 500) again = setTimeout(ask, RETRY_MS);
+          if (passing(err)) again = setTimeout(ask, RETRY_MS);
         });
     void ask();
     return () => {
@@ -192,7 +195,7 @@ export function App() {
       .catch((err: Error) => {
         if (!current) return;
         setUnopened(err.message);
-        if (!(err instanceof ApiError) || err.status === 429 || err.status >= 500) {
+        if (passing(err)) {
           setTimeout(() => setUnopened((was) => (was === err.message ? null : was)), RETRY_MS);
         }
       });

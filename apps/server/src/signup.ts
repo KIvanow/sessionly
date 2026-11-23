@@ -62,6 +62,12 @@ export interface Accounts {
   providers?: Provider[];
   /** Whose the dashboard of a server of your own is, opened without signing in (SESSIONLY_ADMIN_EMAIL). */
   admin?: string;
+  /**
+   * Settings for signing in with Google or GitHub on a server of your own,
+   * which does not take them: it was signed in to, and its dashboard does not
+   * open without signing in until they are taken out.
+   */
+  signInLeft?: string[];
   /** Where the dashboard is reached, which is also where a provider sends people back: `https://app.example.com`. */
   publicUrl?: string;
   /** A service many organisations share: signing up creates one. */
@@ -180,16 +186,45 @@ export function opensAt(site: string, publicUrl: string | undefined): boolean {
 
 /**
  * People of the default organisation who see only their own sessions, or see
- * and change nothing: added while this server had signing in. A dashboard
- * opened without signing in would make each of them its admin, so it does
- * not open while there are any.
+ * and change nothing, from before its dashboard opened without signing in:
+ * added while this server had signing in, or given a member's or viewer's
+ * token then. A dashboard opened without signing in would make each of them
+ * its admin, so it does not open while there are any.
  */
 export async function limitedPeople(db: Queryable): Promise<number> {
   const [row] = await db.query<{ n: string | number }>(
-    `SELECT count(*) AS n FROM users WHERE org_id = $1 AND role IN ('member', 'viewer') AND removed_at IS NULL`,
+    `SELECT count(*) AS n FROM (
+       SELECT email FROM users WHERE org_id = $1 AND role IN ('member', 'viewer') AND removed_at IS NULL
+       UNION
+       SELECT email FROM tokens WHERE org_id = $1 AND before_open AND revoked_at IS NULL
+         AND (expires_at IS NULL OR expires_at > now())
+     ) AS limited`,
     [DEFAULT_ORG],
   );
   return Number(row?.n ?? 0);
+}
+
+/**
+ * Why a server of your own does not open its dashboard without signing in,
+ * or null if it does. The one place that decides it, for the dashboard and
+ * for what the server says at its start.
+ */
+export async function whyClosed(db: Queryable, accounts: Accounts): Promise<{ code: string; error: string } | null> {
+  const left = accounts.signInLeft ?? [];
+  if (left.length) {
+    return {
+      code: "sign_in_settings",
+      error: `${left.join(" and ")} ${left.length === 1 ? "is" : "are"} set: this server was signed in to, and signing in is the hosted service's now. Take ${left.length === 1 ? "it" : "them"} out for the dashboard to open without signing in to whoever reaches it, or open it with an admin token`,
+    };
+  }
+  const limited = await limitedPeople(db);
+  if (limited > 0) {
+    return {
+      code: "people",
+      error: `${limited === 1 ? "one person" : `${limited} people`} who see${limited === 1 ? "s" : ""} only part of this server (a member or viewer from before it opened without signing in) would see everything: open it with an admin token, and on the Team page remove them or revoke their tokens`,
+    };
+  }
+  return null;
 }
 
 /**
@@ -628,16 +663,8 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
       );
     }
     if (!(await perMinute(c, "auth-open", 20))) return tooMany(c);
-    const limited = await limitedPeople(db);
-    if (limited > 0) {
-      return c.json(
-        {
-          error: `${limited === 1 ? "one person" : `${limited} people`} added when this server had signing in would see everyone's sessions: open it with an admin token, and remove them on the Team page`,
-          code: "people",
-        },
-        409,
-      );
-    }
+    const closed = await whyClosed(db, accounts);
+    if (closed) return c.json(closed, 409);
     const expiresAt = new Date(Date.now() + SIGN_IN_DAYS * 86_400_000);
     const email = accounts.admin ?? "admin@localhost";
     const [org] = await db.query<{ name: string }>(`SELECT name FROM orgs WHERE id = $1`, [DEFAULT_ORG]);

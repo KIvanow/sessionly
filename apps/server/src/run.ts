@@ -50,7 +50,7 @@ import {
   type Provider,
   type ProviderName,
 } from "./oauth.ts";
-import { limitedPeople, offers, type Accounts } from "./signup.ts";
+import { offers, whyClosed, type Accounts } from "./signup.ts";
 import { telemetryFrom } from "./telemetry.ts";
 
 export interface RunOptions {
@@ -190,6 +190,7 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
         })
       : [],
     admin: env.SESSIONLY_ADMIN_EMAIL?.trim() || undefined,
+    signInLeft: hosted ? [] : PROVIDER_NAMES.flatMap((name) => settingsOf(name).filter((setting) => env[setting]?.trim())),
     publicUrl,
     signup: env.SESSIONLY_SIGNUP === "off" ? "off" : "open",
     signupCode: env.SESSIONLY_SIGNUP_CODE?.trim() || undefined,
@@ -214,7 +215,7 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
       const set = [id, secret].filter((setting) => env[setting]?.trim());
       if (set.length) {
         notes.push(
-          `${set.join(" and ")} ${set.length === 1 ? "is" : "are"} set, but signing in with ${LABELS[name]} is for the hosted service: this server's dashboard opens without signing in, and ${set.length === 1 ? "it is" : "they are"} not used.`,
+          `${set.join(" and ")} ${set.length === 1 ? "is" : "are"} set, but signing in with ${LABELS[name]} is for the hosted service: ${set.length === 1 ? "it is" : "they are"} not used, and the dashboard does not open without signing in until ${set.length === 1 ? "it is" : "they are"} taken out.`,
         );
       }
     } else if (Boolean(env[id]?.trim()) !== Boolean(env[secret]?.trim())) {
@@ -354,8 +355,10 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
     });
   weighing();
 
-  // People added while this server had signing in: an opened dashboard would make them its admins.
-  const limited = offers(accounts).noSignIn ? await limitedPeople(db).catch(() => 0) : 0;
+  // Why the dashboard of a server of your own does not open, said once it listens.
+  const closed = offers(accounts).noSignIn
+    ? await whyClosed(db, accounts).catch((err) => ({ code: "unknown", error: `it could not be told whether it may open (${reason(err)})` }))
+    : null;
 
   const port = Number(process.env.PORT ?? 8080);
   const hostname = process.env.HOST ?? "127.0.0.1";
@@ -376,10 +379,8 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       const ways = offered.providers.map((name) => LABELS[name]).join(" and ");
       console.log(`Signing in with ${ways} is on${offered.signup ? ", and anyone may sign up" : ""}${offered.signup && offered.inviteCode ? " with the invitation code" : ""}.`);
     }
-    if (offered.noSignIn && limited > 0) {
-      console.warn(
-        `The dashboard does not open without signing in while ${limited === 1 ? "one person" : `${limited} people`} added when this server had signing in (members and viewers, who see only part of it) ${limited === 1 ? "is" : "are"} in it: signing in with Google or GitHub is the hosted service's now. Open it with an admin token (SESSIONLY_ADMIN_TOKEN) and remove them on the Team page; their machines' tokens stop with them.`,
-      );
+    if (offered.noSignIn && closed) {
+      console.warn(`The dashboard does not open without signing in: ${closed.error}.`);
     } else if (offered.noSignIn) {
       console.log(
         `The dashboard opens without signing in, as ${accounts.admin ?? "admin@localhost"}: anyone who can reach this server is its admin. Machines connect with a token from its Connect page.`,

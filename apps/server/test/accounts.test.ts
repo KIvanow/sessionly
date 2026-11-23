@@ -13,7 +13,7 @@ import { accountsFrom, hostedProblems, notHostedProblems, unheeded } from "../sr
 import { emailFrom, INVITATIONS_SHOWN, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
 import { forgetAccount } from "../src/users.ts";
 import { storeUpload } from "../src/sessions.ts";
-import { newOrg, testDb, testDbUrl, tokenFor } from "./helpers.ts";
+import { newOrg, testDb, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
 
 let db: Db;
 let app: Hono<Env>;
@@ -293,6 +293,27 @@ test("a server that had signing in does not open while its members are in it", a
   // Once they are removed, it opens.
   await db.asOrg("default", (tx) => tx.query(`UPDATE users SET removed_at = now() WHERE id = $1`, [id]));
   assert.equal((await call(own, "POST", "/auth/open", { body: {} })).status, 200);
+
+  // A member's token from before, given to see only their own sessions, closes it as well, until it is revoked.
+  const { id: old } = await tokenWithId(db, { email: "contractor@example.com", role: "member" });
+  await db.asOrg("default", (tx) => tx.query(`UPDATE tokens SET before_open = true WHERE id = $1`, [old]));
+  const tokened = await call(own, "POST", "/auth/open", { body: {} });
+  assert.deepEqual([tokened.status, tokened.body.code], [409, "people"]);
+  await db.asOrg("default", (tx) => tx.query(`UPDATE tokens SET revoked_at = now() WHERE id = $1`, [old]));
+  // One made since was made knowing whoever reaches the server is its admin.
+  await tokenFor(db, { email: "since@example.com", role: "member" });
+  assert.equal((await call(own, "POST", "/auth/open", { body: {} })).status, 200);
+});
+
+test("a server that keeps the settings of signing in does not open until they are taken out", async () => {
+  const env = { SESSIONLY_GOOGLE_CLIENT_ID: "id", SESSIONLY_GOOGLE_CLIENT_SECRET: "s", SESSIONLY_PUBLIC_URL: "https://s.test" };
+  const own = createApp(db, { accounts: accountsFrom(env) });
+  const closed = await call(own, "POST", "/auth/open", { body: {} });
+  assert.deepEqual([closed.status, closed.body.code], [409, "sign_in_settings"]);
+  assert.match(closed.body.error, /^SESSIONLY_GOOGLE_CLIENT_ID and SESSIONLY_GOOGLE_CLIENT_SECRET are set/);
+  // A hosted service takes them, and has nothing to open.
+  assert.deepEqual(accountsFrom({ ...env, SESSIONLY_HOSTED: "true" }).signInLeft, []);
+  assert.equal((await call(createApp(db, { accounts: accountsFrom({}) }), "POST", "/auth/open", { body: {} })).status, 200);
 });
 
 test("a server is a hosted service only when SESSIONLY_HOSTED says so plainly", () => {
@@ -1563,8 +1584,8 @@ test("a setting that does nothing as it is set is said at the start", () => {
   assert.deepEqual(
     unheeded({ SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "s", SESSIONLY_GOOGLE_CLIENT_SECRET: "s", SESSIONLY_PUBLIC_URL: "http://10.0.0.5:8080" }),
     [
-      "SESSIONLY_GOOGLE_CLIENT_SECRET is set, but signing in with Google is for the hosted service: this server's dashboard opens without signing in, and it is not used.",
-      "SESSIONLY_GITHUB_CLIENT_ID and SESSIONLY_GITHUB_CLIENT_SECRET are set, but signing in with GitHub is for the hosted service: this server's dashboard opens without signing in, and they are not used.",
+      "SESSIONLY_GOOGLE_CLIENT_SECRET is set, but signing in with Google is for the hosted service: it is not used, and the dashboard does not open without signing in until it is taken out.",
+      "SESSIONLY_GITHUB_CLIENT_ID and SESSIONLY_GITHUB_CLIENT_SECRET are set, but signing in with GitHub is for the hosted service: they are not used, and the dashboard does not open without signing in until they are taken out.",
     ],
   );
   // What sent the links that people signed in with before.
