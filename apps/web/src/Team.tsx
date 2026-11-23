@@ -202,7 +202,8 @@ function People({
   }
 
   const people = (list.data?.users ?? []).filter((u) => !u.removed_at);
-  if (!adding && !people.length && !problem) return null;
+  // Nobody from before: nothing to show. A list that could not be loaded says so.
+  if (!adding && !people.length && !problem && !list.error) return null;
   return (
     <section className="card">
       <h2>People</h2>

@@ -74,7 +74,8 @@ account is gone, another admin lets them in with a new one from the Team page.
 
 People then make the tokens for their own machines on the Connect page
 (`POST /api/v1/me/tokens`). Without those settings, or on a server of your own, there are only
-tokens, as above, and the Team page has no list of people.
+tokens, as above, and nobody is added on the Team page. People added when a server of your own
+had signing in are still listed there, so that an admin can remove them.
 
 **Removing a person** ends their sign-in and revokes their `admin` and `member` tokens. A `ci`
 token made under their address keeps reporting pull requests. An `env` token keeps working, and

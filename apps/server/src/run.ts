@@ -308,7 +308,8 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
     telemetry,
     extensions: options.extensions?.(),
     bootstrap: adminToken
-      ? { token: adminToken, email: accounts.admin ?? "admin@localhost" }
+      ? // As written, as it always was: sessions it uploaded before are filed under it.
+        { token: adminToken, email: process.env.SESSIONLY_ADMIN_EMAIL ?? "admin@localhost" }
       : undefined,
   });
 
