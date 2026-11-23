@@ -49,11 +49,8 @@ The server and Postgres together:
 docker compose up -d
 ```
 
-It listens on port 8080 of this machine only (`127.0.0.1`); `SESSIONLY_PORT` names another
-port. For other machines to reach it, set `SESSIONLY_BIND` to an address of this machine they
-can reach (`0.0.0.0` for all of them), on a network you trust: whoever reaches the port is its
-admin (see [below](#nobody-signs-in)). The compose file hands
-the container the admin's address and token, `SESSIONLY_PUBLIC_URL`, the two page-count settings and the four
+It listens on port 8080 of the machine; `SESSIONLY_PORT` names another. The compose file hands
+the container the admin's address and token, the two page-count settings and the four
 `SESSIONLY_DEMO_*` settings (see
 [Server configuration](server-configuration.md#showing-a-repository-in-another-organisation)),
 from the environment or from a `.env` file beside it. Other
@@ -69,26 +66,6 @@ A server of your own has no sign-in: whoever opens the dashboard is its admin, a
 `SESSIONLY_ADMIN_EMAIL` (`admin@localhost` unless set). **Anyone who can reach the server can
 therefore see every session and make tokens**, so keep it where only your team can reach it: on
 this machine, a private network or a VPN, or behind a proxy that asks who is there.
-
-The dashboard opens at `localhost`, at an IP address, or at the host of `SESSIONLY_PUBLIC_URL`.
-Opened at any other name (`sessionly.internal`, or through a proxy), it says it could not be
-opened until `SESSIONLY_PUBLIC_URL` is set to that address. That keeps a page of another site
-whose name is made to point at this server from opening it.
-
-A server from before this does not open without signing in, and says why when it starts, while:
-
-- **`SESSIONLY_ADMIN_TOKEN` is set and it listens beyond this machine** (`HOST` other than
-  `127.0.0.1` or `localhost`, as in the Docker image). Until now that token was the only way
-  in, perhaps from anywhere. Set `SESSIONLY_OPEN_DASHBOARD=true` once whoever reaches it may
-  be its admin; the token keeps working either way.
-- **its Google or GitHub settings are still set.** It was signed in to, perhaps from the
-  internet; take them out once whoever reaches it may be its admin.
-- **it has members or viewers** (who see only part of it): people added when it had signing
-  in, or anyone given a member's or viewer's token before (not the admin's own machines'
-  tokens, under `SESSIONLY_ADMIN_EMAIL` or an admin's address). Each would otherwise become its
-  admin. Open the dashboard with an admin token (`SESSIONLY_ADMIN_TOKEN`), and on the Team
-  page remove them or revoke their tokens. A member's token made since does not count: it was
-  made knowing that whoever reaches the server is its admin.
 
 What is sent to it still takes a token: each machine connects with one made on the Connect or
 Team page (see [People, tokens and sign-in](people-and-tokens.md)), and its sessions are filed

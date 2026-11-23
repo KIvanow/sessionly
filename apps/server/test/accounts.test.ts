@@ -13,7 +13,7 @@ import { accountsFrom, hostedProblems, notHostedProblems, unheeded } from "../sr
 import { emailFrom, INVITATIONS_SHOWN, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
 import { forgetAccount } from "../src/users.ts";
 import { storeUpload } from "../src/sessions.ts";
-import { newOrg, testDb, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
+import { newOrg, testDb, testDbUrl, tokenFor } from "./helpers.ts";
 
 let db: Db;
 let app: Hono<Env>;
@@ -216,7 +216,7 @@ test("what the server offers depends on how it is set up", async () => {
 });
 
 test("a server of your own opens its dashboard as its admin, and a hosted service does not", async () => {
-  const own = createApp(db, { accounts: { admin: "kris@example.com", providers: [provider("google")], publicUrl: "https://s.test", trustProxy: true } });
+  const own = createApp(db, { accounts: { admin: "kris@example.com", providers: [provider("google")], publicUrl: "https://s.test" } });
   assert.equal((await call(own, "GET", "/auth/options")).body.noSignIn, true);
   // Signing in with a provider is the hosted service's, whatever is set up.
   assert.equal((await own.request("/api/v1/auth/google")).status, 404);
@@ -226,12 +226,12 @@ test("a server of your own opens its dashboard as its admin, and a hosted servic
   assert.ok(Date.parse(opened.body.expires_at) > Date.now() + 6 * 86_400_000);
   // As the admin, and the owner, as the admin token is: nobody vouched for the address.
   const me = await call(own, "GET", "/me", { token: opened.body.token });
-  assert.deepEqual([me.body.role, me.body.owner, me.body.signed_in], ["admin", true, false]);
+  assert.deepEqual([me.body.role, me.body.owner, me.body.signed_in, me.body.opened], ["admin", true, false, true]);
   // It is no token of the Team page's, and it ends as a sign-in does.
   const listed = await call(own, "GET", "/tokens", { token: opened.body.token });
   assert.ok(!listed.body.tokens.some((t: { email: string }) => t.email === "kris@example.com"));
   // Without the address, it is the admin's of the environment.
-  assert.equal((await call(createApp(db, { accounts: { trustProxy: true } }), "POST", "/auth/open", { body: {} })).body.email, "admin@localhost");
+  assert.equal((await call(createApp(db, {}), "POST", "/auth/open", { body: {} })).body.email, "admin@localhost");
   // The rest of the API still takes a token: an upload without one is refused.
   assert.equal((await call(own, "GET", "/sessions")).status, 401);
   // Asked by the dashboard only: another site cannot have one made.
@@ -250,96 +250,6 @@ test("a server of your own opens its dashboard as its admin, and a hosted servic
   assert.equal((await call(own, "GET", "/me", { token: opened.body.token })).status, 401);
 });
 
-test("a server of your own opens its dashboard only at its own names", async () => {
-  const own = createApp(db, { accounts: { publicUrl: "https://s.test", trustProxy: true } });
-  const openAt = (site: string, as: "origin" | "url" = "origin") =>
-    own.request(as === "url" ? `${site}/api/v1/auth/open` : "/api/v1/auth/open", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "sec-fetch-site": "same-origin",
-        "x-forwarded-for": nextCaller(),
-        ...(as === "origin" ? { origin: site } : {}),
-      },
-      body: "{}",
-    });
-  // This machine, an IP address, and the public address: none of them a name someone else's DNS can point here.
-  for (const site of ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "http://192.168.1.5:8080", "https://s.test"]) {
-    const opened = await openAt(site);
-    assert.equal(opened.status, 200, site);
-    const me = await call(own, "GET", "/me", { token: ((await opened.json()) as { token: string }).token });
-    assert.equal(me.body.opened, true);
-  }
-  // A page of another site whose name was pointed at this server (DNS rebinding) is of its own name.
-  const rebound = await openAt("http://attacker.example:8080");
-  assert.deepEqual([rebound.status, ((await rebound.json()) as { code: string }).code], [403, "elsewhere"]);
-  // What is not a browser is gone by the host it asked for.
-  assert.equal((await openAt("http://attacker.example:8080", "url")).status, 403);
-  assert.equal((await openAt("http://localhost:8080", "url")).status, 200);
-  // A token of any other kind is not an opened dashboard's.
-  const made = await tokenFor(db, { email: "pasted@example.com", role: "member" });
-  assert.equal((await call(own, "GET", "/me", { token: made })).body.opened, false);
-});
-
-test("a server that had signing in does not open while its members are in it", async () => {
-  const own = createApp(db, { accounts: { trustProxy: true } });
-  const id = `u_open_${Date.now()}`;
-  await db.asOrg("default", (tx) =>
-    tx.query(`INSERT INTO users (id, org_id, email, role) VALUES ($1, 'default', 'member@example.com', 'member')`, [id]),
-  );
-  const closed = await call(own, "POST", "/auth/open", { body: {} });
-  assert.deepEqual([closed.status, closed.body.code], [409, "people"]);
-  assert.match(closed.body.error, /one person/);
-  // Once they are removed, it opens.
-  await db.asOrg("default", (tx) => tx.query(`UPDATE users SET removed_at = now() WHERE id = $1`, [id]));
-  assert.equal((await call(own, "POST", "/auth/open", { body: {} })).status, 200);
-
-  // A member's token from before, given to see only their own sessions, closes it as well, until it is revoked.
-  const { id: old } = await tokenWithId(db, { email: "contractor@example.com", role: "member" });
-  await db.asOrg("default", (tx) => tx.query(`UPDATE tokens SET before_open = true WHERE id = $1`, [old]));
-  const tokened = await call(own, "POST", "/auth/open", { body: {} });
-  assert.deepEqual([tokened.status, tokened.body.code], [409, "people"]);
-  await db.asOrg("default", (tx) => tx.query(`UPDATE tokens SET revoked_at = now() WHERE id = $1`, [old]));
-  // One made since was made knowing whoever reaches the server is its admin.
-  await tokenFor(db, { email: "since@example.com", role: "member" });
-  assert.equal((await call(own, "POST", "/auth/open", { body: {} })).status, 200);
-
-  // The admin's own machines connect with a member's token: under the admin's address, or an admin's, it is no one limited.
-  const mine = createApp(db, { accounts: { admin: "Kris@Example.com", trustProxy: true } });
-  const { id: laptop } = await tokenWithId(db, { email: "kris@example.com", role: "member" });
-  const adminId = `u_admin_${Date.now()}`;
-  await db.asOrg("default", (tx) =>
-    tx.query(`INSERT INTO users (id, org_id, email, role) VALUES ($1, 'default', 'ann@example.com', 'admin')`, [adminId]),
-  );
-  const { id: annsLaptop } = await tokenWithId(db, { email: "ann@example.com", role: "member" });
-  await db.asOrg("default", (tx) => tx.query(`UPDATE tokens SET before_open = true WHERE id = ANY($1)`, [[laptop, annsLaptop]]));
-  assert.equal((await call(mine, "POST", "/auth/open", { body: {} })).status, 200);
-  // admin@localhost's laptop is the admin's only where no other address is set.
-  assert.equal((await call(own, "POST", "/auth/open", { body: {} })).status, 409);
-  await db.asOrg("default", (tx) => tx.query(`UPDATE tokens SET revoked_at = now() WHERE id = ANY($1)`, [[laptop, annsLaptop]]));
-});
-
-test("a server got into with its admin token from beyond this machine opens only when told to", async () => {
-  const token = { SESSIONLY_ADMIN_TOKEN: "sly_env", HOST: "0.0.0.0" };
-  const closed = await call(createApp(db, { accounts: { ...accountsFrom(token), trustProxy: true } }), "POST", "/auth/open", { body: {} });
-  assert.deepEqual([closed.status, closed.body.code], [409, "admin_token"]);
-  for (const env of [{ ...token, SESSIONLY_OPEN_DASHBOARD: "true" }, { ...token, HOST: "127.0.0.1" }, { ...token, HOST: undefined }, { HOST: "0.0.0.0" }]) {
-    assert.equal(accountsFrom(env).guarded, false, JSON.stringify(env));
-  }
-  assert.equal(accountsFrom({ ...token, SESSIONLY_HOSTED: "true", SESSIONLY_PUBLIC_URL: "https://app.test" }).guarded, false);
-});
-
-test("a server that keeps the settings of signing in does not open until they are taken out", async () => {
-  const env = { SESSIONLY_GOOGLE_CLIENT_ID: "id", SESSIONLY_GOOGLE_CLIENT_SECRET: "s", SESSIONLY_PUBLIC_URL: "https://s.test" };
-  const own = createApp(db, { accounts: { ...accountsFrom(env), trustProxy: true } });
-  const closed = await call(own, "POST", "/auth/open", { body: {} });
-  assert.deepEqual([closed.status, closed.body.code], [409, "sign_in_settings"]);
-  assert.match(closed.body.error, /^SESSIONLY_GOOGLE_CLIENT_ID and SESSIONLY_GOOGLE_CLIENT_SECRET are set/);
-  // A hosted service takes them, and has nothing to open.
-  assert.deepEqual(accountsFrom({ ...env, SESSIONLY_HOSTED: "true" }).signInLeft, []);
-  assert.equal((await call(createApp(db, { accounts: { ...accountsFrom({}), trustProxy: true } }), "POST", "/auth/open", { body: {} })).status, 200);
-});
-
 test("a server is a hosted service only when SESSIONLY_HOSTED says so plainly", () => {
   assert.deepEqual(notHostedProblems({}), []);
   assert.deepEqual(notHostedProblems({ SESSIONLY_HOSTED: "true", SESSIONLY_SIGNUP: "open" }), []);
@@ -352,7 +262,6 @@ test("a server is a hosted service only when SESSIONLY_HOSTED says so plainly", 
     notHostedProblems({ SESSIONLY_SIGNUP: "open", SESSIONLY_SIGNUPS_PER_HOUR: "100" }).join(),
     /SESSIONLY_SIGNUP and SESSIONLY_SIGNUPS_PER_HOUR are set/,
   );
-  assert.match(notHostedProblems({ SESSIONLY_HOSTED: "false", SESSIONLY_SIGNUP_CODE: "x" }).join(), /SESSIONLY_SIGNUP_CODE is set/);
 });
 
 test("the browser that comes back from a provider must be the one that left", async () => {
@@ -1608,8 +1517,8 @@ test("a setting that does nothing as it is set is said at the start", () => {
   assert.deepEqual(
     unheeded({ SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "s", SESSIONLY_GOOGLE_CLIENT_SECRET: "s", SESSIONLY_PUBLIC_URL: "http://10.0.0.5:8080" }),
     [
-      "SESSIONLY_GOOGLE_CLIENT_SECRET is set, but signing in with Google is for the hosted service: it is not used, and the dashboard does not open without signing in until it is taken out.",
-      "SESSIONLY_GITHUB_CLIENT_ID and SESSIONLY_GITHUB_CLIENT_SECRET are set, but signing in with GitHub is for the hosted service: they are not used, and the dashboard does not open without signing in until they are taken out.",
+      "SESSIONLY_GOOGLE_CLIENT_SECRET is set, but signing in with Google is for the hosted service: this server's dashboard opens without signing in, and it is not used.",
+      "SESSIONLY_GITHUB_CLIENT_ID and SESSIONLY_GITHUB_CLIENT_SECRET are set, but signing in with GitHub is for the hosted service: this server's dashboard opens without signing in, and they are not used.",
     ],
   );
   // What sent the links that people signed in with before.

@@ -888,12 +888,6 @@ const MIGRATIONS: string[] = [
   // runs out as the others do and is no one's sign-in.
   `ALTER TABLE tokens DROP CONSTRAINT tokens_sign_in_check`,
   `ALTER TABLE tokens ADD CONSTRAINT tokens_sign_in_check CHECK (sign_in IN ('email', 'google', 'github', 'open'))`,
-  // The tokens of members and viewers from before that, who were given one to
-  // see only part of the server: an opened dashboard would make them its
-  // admins, so it does not open while one of them still works. One made
-  // since was made knowing that whoever reaches the server is its admin.
-  `ALTER TABLE tokens ADD COLUMN before_open boolean NOT NULL DEFAULT false`,
-  `UPDATE tokens SET before_open = true WHERE role IN ('member', 'viewer') AND revoked_at IS NULL`,
 ];
 
 /**

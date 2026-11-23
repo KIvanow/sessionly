@@ -216,9 +216,8 @@ function People({
         </p>
       ) : (
         <p className="muted">
-          Added when this server had signing in, which is now the hosted service's. Nobody signs in here any more,
-          and the dashboard opens without signing in only once no member or viewer is left. Removing someone stops
-          the tokens of their machines too.
+          Added when this server had signing in, which is now the hosted service's: nobody signs in here any more.
+          Removing someone stops the tokens of their machines too.
         </p>
       )}
       {adding && (

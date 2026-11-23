@@ -62,19 +62,6 @@ export interface Accounts {
   providers?: Provider[];
   /** Whose the dashboard of a server of your own is, opened without signing in (SESSIONLY_ADMIN_EMAIL). */
   admin?: string;
-  /**
-   * Settings for signing in with Google or GitHub on a server of your own,
-   * which does not take them: it was signed in to, and its dashboard does not
-   * open without signing in until they are taken out.
-   */
-  signInLeft?: string[];
-  /**
-   * A server of your own with SESSIONLY_ADMIN_TOKEN set that listens beyond
-   * this machine, and not told SESSIONLY_OPEN_DASHBOARD=true: it was got
-   * into with that token only, perhaps from anywhere, and does not open
-   * without signing in until it is told to.
-   */
-  guarded?: boolean;
   /** Where the dashboard is reached, which is also where a provider sends people back: `https://app.example.com`. */
   publicUrl?: string;
   /** A service many organisations share: signing up creates one. */
@@ -170,84 +157,6 @@ export function offers(accounts: Accounts) {
     // The one address people sign in at, to tell someone who was added where to go.
     publicUrl: providers.length ? (accounts.publicUrl?.replace(/\/+$/, "") ?? null) : null,
   };
-}
-
-/**
- * Whether a server of your own opens its dashboard for a page of this site
- * (`http://localhost:8080`): this machine's name, an IP address, or the host
- * of SESSIONLY_PUBLIC_URL. Not any other name: a page of someone else's
- * site that their DNS then points at this server (DNS rebinding) is of
- * their name, and must not be handed a session.
- */
-export function opensAt(site: string, publicUrl: string | undefined): boolean {
-  let name: string;
-  try {
-    name = new URL(site).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  if (name === "localhost" || isIPv4(name) || isIPv6(name.replace(/^\[|\]$/g, ""))) return true;
-  if (!publicUrl) return false;
-  return new URL(publicUrl).hostname.toLowerCase() === name;
-}
-
-/** Whose the dashboard of a server of your own is when SESSIONLY_ADMIN_EMAIL is not set. */
-export const DEFAULT_ADMIN = "admin@localhost";
-
-/**
- * People of the default organisation who see only their own sessions, or see
- * and change nothing, from before its dashboard opened without signing in:
- * added while this server had signing in, or given a member's or viewer's
- * token then. A dashboard opened without signing in would make each of them
- * its admin, so it does not open while there are any.
- */
-export async function limitedPeople(db: Queryable, admin: string = DEFAULT_ADMIN): Promise<number> {
-  // A member's token is also what an admin connects their own machine with
-  // (the Connect page, `sessionly token create`): one under the admin's
-  // address, or an admin's, is no one limited.
-  const [row] = await db.query<{ n: string | number }>(
-    `SELECT count(*) AS n FROM (
-       SELECT email FROM users WHERE org_id = $1 AND role IN ('member', 'viewer') AND removed_at IS NULL
-       UNION
-       SELECT t.email FROM tokens t WHERE t.org_id = $1 AND t.before_open AND t.revoked_at IS NULL
-         AND (t.expires_at IS NULL OR t.expires_at > now())
-         AND t.email <> $2
-         AND NOT EXISTS (SELECT 1 FROM users u WHERE u.org_id = $1 AND u.email = t.email
-           AND u.role IN ('owner', 'admin') AND u.removed_at IS NULL)
-     ) AS limited`,
-    [DEFAULT_ORG, admin.trim().toLowerCase()],
-  );
-  return Number(row?.n ?? 0);
-}
-
-
-/**
- * Why a server of your own does not open its dashboard without signing in,
- * or null if it does. The one place that decides it, for the dashboard and
- * for what the server says at its start.
- */
-export async function whyClosed(db: Queryable, accounts: Accounts): Promise<{ code: string; error: string } | null> {
-  const left = accounts.signInLeft ?? [];
-  if (left.length) {
-    return {
-      code: "sign_in_settings",
-      error: `${left.join(" and ")} ${left.length === 1 ? "is" : "are"} set: this server was signed in to, and signing in is the hosted service's now. Take ${left.length === 1 ? "it" : "them"} out for the dashboard to open without signing in to whoever reaches it, or open it with an admin token`,
-    };
-  }
-  if (accounts.guarded) {
-    return {
-      code: "admin_token",
-      error: "SESSIONLY_ADMIN_TOKEN is set and this server listens beyond this machine: until now it was got into with that token only. Set SESSIONLY_OPEN_DASHBOARD=true for the dashboard to open without signing in to whoever reaches it, or open it with the admin token",
-    };
-  }
-  const limited = await limitedPeople(db, accounts.admin);
-  if (limited > 0) {
-    return {
-      code: "people",
-      error: `${limited === 1 ? "one person" : `${limited} people`} who see${limited === 1 ? "s" : ""} only part of this server (a member or viewer from before it opened without signing in) would see everything: open it with an admin token, and on the Team page remove them or revoke their tokens`,
-    };
-  }
-  return null;
 }
 
 /**
@@ -535,8 +444,7 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
   const notSetUp = (c: Context) => c.json({ error: "signing in that way is not set up here", code: "no_sign_in" }, 404);
   /** Back to the dashboard, which says what happened. */
   const back = (c: Context, problem: Problem) => c.redirect(`${home}/#problem=${problem}`);
-  // The address people sign in at. A server of your own has no sign-in, and
-  // is opened at whichever of its names (opensAt says which).
+  // The address people sign in at: a server of your own has none, and is opened at any of its names.
   const origin = home && accounts.hosted === true ? new URL(home).origin : undefined;
   /**
    * What only the dashboard asks: JSON, and from this very site if the
@@ -674,22 +582,9 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
   // who can reach the server can have one; a hosted service has none.
   open.post("/open", async (c) => {
     if (!offers(accounts).noSignIn) return c.json({ error: "this server is signed in to", code: "sign_in" }, 404);
-    // A browser says which site the page is of; what is not a browser, which host it asked for.
-    const site = c.req.header("origin") ?? c.req.url;
-    if (!opensAt(site, accounts.publicUrl)) {
-      return c.json(
-        {
-          error: "the dashboard opens at this machine's name, an IP address, or SESSIONLY_PUBLIC_URL; set that to the address it is opened at",
-          code: "elsewhere",
-        },
-        403,
-      );
-    }
     if (!(await perMinute(c, "auth-open", 20))) return tooMany(c);
-    const closed = await whyClosed(db, accounts);
-    if (closed) return c.json(closed, 409);
     const expiresAt = new Date(Date.now() + SIGN_IN_DAYS * 86_400_000);
-    const email = accounts.admin ?? DEFAULT_ADMIN;
+    const email = accounts.admin ?? "admin@localhost";
     const [org] = await db.query<{ name: string }>(`SELECT name FROM orgs WHERE id = $1`, [DEFAULT_ORG]);
     const { token } = await issueToken(db, DEFAULT_ORG, { email, role: "admin", signIn: "open", expiresAt });
     const opened: SignedIn = {

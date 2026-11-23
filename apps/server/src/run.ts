@@ -5,8 +5,6 @@
 //   SESSIONLY_DB_POOL      Postgres only: connections kept at most (default 10)
 //   SESSIONLY_DB_QUERY_SECONDS  Postgres only: how long a statement may take (default 30, a day at most)
 //   SESSIONLY_ADMIN_TOKEN  an admin token that always works (optional: for scripts and CI)
-//   SESSIONLY_OPEN_DASHBOARD  "true" for the dashboard to open without signing in although
-//                          the admin token is set and HOST is not this machine's alone
 //   SESSIONLY_ADMIN_EMAIL  whose the dashboard is, which opens without signing in, and
 //                          whose sessions uploads with that token belong to
 //   SESSIONLY_HOSTED       "true" for a service that many organisations share
@@ -52,7 +50,7 @@ import {
   type Provider,
   type ProviderName,
 } from "./oauth.ts";
-import { DEFAULT_ADMIN, offers, whyClosed, type Accounts } from "./signup.ts";
+import { offers, type Accounts } from "./signup.ts";
 import { telemetryFrom } from "./telemetry.ts";
 
 export interface RunOptions {
@@ -70,8 +68,6 @@ export interface RunOptions {
 
 /** A plain-HTTP address that leads nowhere but to this machine. */
 const ON_THIS_MACHINE = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/;
-/** A HOST that only this machine reaches. */
-const LOOPBACK = /^(localhost|127(\.\d{1,3}){3}|::1|\[::1\])$/i;
 
 /**
  * What a service shared by many organisations must not be started with. A
@@ -194,13 +190,6 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
         })
       : [],
     admin: env.SESSIONLY_ADMIN_EMAIL?.trim() || undefined,
-    signInLeft: hosted ? [] : PROVIDER_NAMES.flatMap((name) => settingsOf(name).filter((setting) => env[setting]?.trim())),
-    // Got into with the admin token only, from beyond this machine: it opens when it is told to.
-    guarded:
-      !hosted &&
-      Boolean(env.SESSIONLY_ADMIN_TOKEN?.trim()) &&
-      !LOOPBACK.test(env.HOST?.trim() || "127.0.0.1") &&
-      env.SESSIONLY_OPEN_DASHBOARD !== "true",
     publicUrl,
     signup: env.SESSIONLY_SIGNUP === "off" ? "off" : "open",
     signupCode: env.SESSIONLY_SIGNUP_CODE?.trim() || undefined,
@@ -225,7 +214,7 @@ export function unheeded(env: NodeJS.ProcessEnv): string[] {
       const set = [id, secret].filter((setting) => env[setting]?.trim());
       if (set.length) {
         notes.push(
-          `${set.join(" and ")} ${set.length === 1 ? "is" : "are"} set, but signing in with ${LABELS[name]} is for the hosted service: ${set.length === 1 ? "it is" : "they are"} not used, and the dashboard does not open without signing in until ${set.length === 1 ? "it is" : "they are"} taken out.`,
+          `${set.join(" and ")} ${set.length === 1 ? "is" : "are"} set, but signing in with ${LABELS[name]} is for the hosted service: this server's dashboard opens without signing in, and ${set.length === 1 ? "it is" : "they are"} not used.`,
         );
       }
     } else if (Boolean(env[id]?.trim()) !== Boolean(env[secret]?.trim())) {
@@ -319,7 +308,7 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
     telemetry,
     extensions: options.extensions?.(),
     bootstrap: adminToken
-      ? { token: adminToken, email: accounts.admin ?? DEFAULT_ADMIN }
+      ? { token: adminToken, email: accounts.admin ?? "admin@localhost" }
       : undefined,
   });
 
@@ -365,17 +354,6 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
     });
   weighing();
 
-  // Why the dashboard of a server of your own does not open, said once it listens.
-  const closed = offers(accounts).noSignIn
-    ? await whyClosed(db, accounts).catch((err) => ({ code: "unknown", error: `it could not be told whether it may open (${reason(err)})` }))
-    : null;
-  // A dashboard opened before it closed is shut too: those sessions are an admin's.
-  if (closed && closed.code !== "unknown") {
-    await db
-      .query(`UPDATE tokens SET revoked_at = now() WHERE sign_in = 'open' AND revoked_at IS NULL`)
-      .catch(cannot("The dashboard's open sessions could not be ended."));
-  }
-
   const port = Number(process.env.PORT ?? 8080);
   const hostname = process.env.HOST ?? "127.0.0.1";
   const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
@@ -395,11 +373,9 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       const ways = offered.providers.map((name) => LABELS[name]).join(" and ");
       console.log(`Signing in with ${ways} is on${offered.signup ? ", and anyone may sign up" : ""}${offered.signup && offered.inviteCode ? " with the invitation code" : ""}.`);
     }
-    if (offered.noSignIn && closed) {
-      console.warn(`The dashboard does not open without signing in: ${closed.error}.`);
-    } else if (offered.noSignIn) {
+    if (offered.noSignIn) {
       console.log(
-        `The dashboard opens without signing in, as ${accounts.admin ?? DEFAULT_ADMIN}: anyone who can reach this server is its admin. Machines connect with a token from its Connect page.`,
+        `The dashboard opens without signing in, as ${accounts.admin ?? "admin@localhost"}: anyone who can reach this server is its admin. Machines connect with a token from its Connect page.`,
       );
     }
   });
