@@ -22,6 +22,9 @@ services:
       SESSIONLY_PUBLIC_URL: ${SESSIONLY_PUBLIC_URL:-}
       # Optional: an admin token that always works, for scripts and CI.
       SESSIONLY_ADMIN_TOKEN: ${SESSIONLY_ADMIN_TOKEN:-}
+      # With an admin token set, "true" for the dashboard to open without
+      # signing in all the same (docs-site/server.md#nobody-signs-in).
+      SESSIONLY_OPEN_DASHBOARD: ${SESSIONLY_OPEN_DASHBOARD:-}
       # The dashboard counts which of its pages are opened (docs-site/dashboard.md); "off" stops it.
       SESSIONLY_TELEMETRY: ${SESSIONLY_TELEMETRY:-}
       DO_NOT_TRACK: ${DO_NOT_TRACK:-}

@@ -77,10 +77,15 @@ whose name is made to point at this server from opening it.
 
 A server from before this does not open without signing in, and says why when it starts, while:
 
+- **`SESSIONLY_ADMIN_TOKEN` is set and it listens beyond this machine** (`HOST` other than
+  `127.0.0.1` or `localhost`, as in the Docker image). Until now that token was the only way
+  in, perhaps from anywhere. Set `SESSIONLY_OPEN_DASHBOARD=true` once whoever reaches it may
+  be its admin; the token keeps working either way.
 - **its Google or GitHub settings are still set.** It was signed in to, perhaps from the
   internet; take them out once whoever reaches it may be its admin.
 - **it has members or viewers** (who see only part of it): people added when it had signing
-  in, or anyone given a member's or viewer's token before. Each would otherwise become its
+  in, or anyone given a member's or viewer's token before (not the admin's own machines'
+  tokens, under `SESSIONLY_ADMIN_EMAIL` or an admin's address). Each would otherwise become its
   admin. Open the dashboard with an admin token (`SESSIONLY_ADMIN_TOKEN`), and on the Team
   page remove them or revoke their tokens. A member's token made since does not count: it was
   made knowing that whoever reaches the server is its admin.

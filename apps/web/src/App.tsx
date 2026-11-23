@@ -111,11 +111,16 @@ export function App() {
   const [unended, setUnended] = useState<string[]>([]);
   /** Why a server that opens without signing in did not: a token is the way in then. */
   const [unopened, setUnopened] = useState<string | null>(null);
+  /** Counts the tries at opening it, to try once more. */
+  const [attempt, setAttempt] = useState(0);
 
   const use = (value: string | null) => {
     saveToken(value);
     setMe(null);
     setToken(value);
+    // Why it did not open was of the session before: left without one, it is asked anew.
+    setUnopened(null);
+    if (value === null) setAttempt((n) => n + 1);
   };
   /** The server no longer accepts this session. If there is one in another organisation, that one is next. */
   const signOut = () => {
@@ -186,23 +191,25 @@ export function App() {
 
   // A server of your own opens without signing in: it hands this browser a
   // session as its admin, and another once that one runs out. What only
-  // happened to fail (no answer, too many at once) is tried again.
+  // happened to fail (no answer, too many at once) is tried again, behind
+  // the token's form, which stays as it is; anything else, once this
+  // browser is left without a session again.
   useEffect(() => {
-    if (token || !options?.noSignIn || unopened) return;
+    if (token || !options?.noSignIn) return;
     let current = true;
+    let again: ReturnType<typeof setTimeout> | undefined;
     open<SignedIn>("/auth/open", {})
       .then((opened) => current && (setProblem(null), use(opened.token)))
       .catch((err: Error) => {
         if (!current) return;
         setUnopened(err.message);
-        if (passing(err)) {
-          setTimeout(() => setUnopened((was) => (was === err.message ? null : was)), RETRY_MS);
-        }
+        if (passing(err)) again = setTimeout(() => setAttempt((n) => n + 1), RETRY_MS);
       });
     return () => {
       current = false;
+      clearTimeout(again);
     };
-  }, [token, options, unopened]);
+  }, [token, options, attempt]);
 
   /** Signed in: this browser keeps the session, and shows the organisation. */
   const signedIn = (signed: SignedIn) => {
@@ -295,7 +302,7 @@ export function App() {
       />
     );
   }
-  if (!token && (!options || (options.noSignIn && !unopened))) {
+  if (!token && (!options || (options.noSignIn && unopened === null))) {
     return (
       <main className="center">
         <Brand />

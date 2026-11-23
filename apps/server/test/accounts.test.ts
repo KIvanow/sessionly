@@ -216,7 +216,7 @@ test("what the server offers depends on how it is set up", async () => {
 });
 
 test("a server of your own opens its dashboard as its admin, and a hosted service does not", async () => {
-  const own = createApp(db, { accounts: { admin: "kris@example.com", providers: [provider("google")], publicUrl: "https://s.test" } });
+  const own = createApp(db, { accounts: { admin: "kris@example.com", providers: [provider("google")], publicUrl: "https://s.test", trustProxy: true } });
   assert.equal((await call(own, "GET", "/auth/options")).body.noSignIn, true);
   // Signing in with a provider is the hosted service's, whatever is set up.
   assert.equal((await own.request("/api/v1/auth/google")).status, 404);
@@ -231,7 +231,7 @@ test("a server of your own opens its dashboard as its admin, and a hosted servic
   const listed = await call(own, "GET", "/tokens", { token: opened.body.token });
   assert.ok(!listed.body.tokens.some((t: { email: string }) => t.email === "kris@example.com"));
   // Without the address, it is the admin's of the environment.
-  assert.equal((await call(createApp(db, {}), "POST", "/auth/open", { body: {} })).body.email, "admin@localhost");
+  assert.equal((await call(createApp(db, { accounts: { trustProxy: true } }), "POST", "/auth/open", { body: {} })).body.email, "admin@localhost");
   // The rest of the API still takes a token: an upload without one is refused.
   assert.equal((await call(own, "GET", "/sessions")).status, 401);
   // Asked by the dashboard only: another site cannot have one made.
@@ -251,7 +251,7 @@ test("a server of your own opens its dashboard as its admin, and a hosted servic
 });
 
 test("a server of your own opens its dashboard only at its own names", async () => {
-  const own = createApp(db, { accounts: { publicUrl: "https://s.test" } });
+  const own = createApp(db, { accounts: { publicUrl: "https://s.test", trustProxy: true } });
   const openAt = (site: string, as: "origin" | "url" = "origin") =>
     own.request(as === "url" ? `${site}/api/v1/auth/open` : "/api/v1/auth/open", {
       method: "POST",
@@ -282,7 +282,7 @@ test("a server of your own opens its dashboard only at its own names", async () 
 });
 
 test("a server that had signing in does not open while its members are in it", async () => {
-  const own = createApp(db, { accounts: {} });
+  const own = createApp(db, { accounts: { trustProxy: true } });
   const id = `u_open_${Date.now()}`;
   await db.asOrg("default", (tx) =>
     tx.query(`INSERT INTO users (id, org_id, email, role) VALUES ($1, 'default', 'member@example.com', 'member')`, [id]),
@@ -303,17 +303,41 @@ test("a server that had signing in does not open while its members are in it", a
   // One made since was made knowing whoever reaches the server is its admin.
   await tokenFor(db, { email: "since@example.com", role: "member" });
   assert.equal((await call(own, "POST", "/auth/open", { body: {} })).status, 200);
+
+  // The admin's own machines connect with a member's token: under the admin's address, or an admin's, it is no one limited.
+  const mine = createApp(db, { accounts: { admin: "Kris@Example.com", trustProxy: true } });
+  const { id: laptop } = await tokenWithId(db, { email: "kris@example.com", role: "member" });
+  const adminId = `u_admin_${Date.now()}`;
+  await db.asOrg("default", (tx) =>
+    tx.query(`INSERT INTO users (id, org_id, email, role) VALUES ($1, 'default', 'ann@example.com', 'admin')`, [adminId]),
+  );
+  const { id: annsLaptop } = await tokenWithId(db, { email: "ann@example.com", role: "member" });
+  await db.asOrg("default", (tx) => tx.query(`UPDATE tokens SET before_open = true WHERE id = ANY($1)`, [[laptop, annsLaptop]]));
+  assert.equal((await call(mine, "POST", "/auth/open", { body: {} })).status, 200);
+  // admin@localhost's laptop is the admin's only where no other address is set.
+  assert.equal((await call(own, "POST", "/auth/open", { body: {} })).status, 409);
+  await db.asOrg("default", (tx) => tx.query(`UPDATE tokens SET revoked_at = now() WHERE id = ANY($1)`, [[laptop, annsLaptop]]));
+});
+
+test("a server got into with its admin token from beyond this machine opens only when told to", async () => {
+  const token = { SESSIONLY_ADMIN_TOKEN: "sly_env", HOST: "0.0.0.0" };
+  const closed = await call(createApp(db, { accounts: { ...accountsFrom(token), trustProxy: true } }), "POST", "/auth/open", { body: {} });
+  assert.deepEqual([closed.status, closed.body.code], [409, "admin_token"]);
+  for (const env of [{ ...token, SESSIONLY_OPEN_DASHBOARD: "true" }, { ...token, HOST: "127.0.0.1" }, { ...token, HOST: undefined }, { HOST: "0.0.0.0" }]) {
+    assert.equal(accountsFrom(env).guarded, false, JSON.stringify(env));
+  }
+  assert.equal(accountsFrom({ ...token, SESSIONLY_HOSTED: "true", SESSIONLY_PUBLIC_URL: "https://app.test" }).guarded, false);
 });
 
 test("a server that keeps the settings of signing in does not open until they are taken out", async () => {
   const env = { SESSIONLY_GOOGLE_CLIENT_ID: "id", SESSIONLY_GOOGLE_CLIENT_SECRET: "s", SESSIONLY_PUBLIC_URL: "https://s.test" };
-  const own = createApp(db, { accounts: accountsFrom(env) });
+  const own = createApp(db, { accounts: { ...accountsFrom(env), trustProxy: true } });
   const closed = await call(own, "POST", "/auth/open", { body: {} });
   assert.deepEqual([closed.status, closed.body.code], [409, "sign_in_settings"]);
   assert.match(closed.body.error, /^SESSIONLY_GOOGLE_CLIENT_ID and SESSIONLY_GOOGLE_CLIENT_SECRET are set/);
   // A hosted service takes them, and has nothing to open.
   assert.deepEqual(accountsFrom({ ...env, SESSIONLY_HOSTED: "true" }).signInLeft, []);
-  assert.equal((await call(createApp(db, { accounts: accountsFrom({}) }), "POST", "/auth/open", { body: {} })).status, 200);
+  assert.equal((await call(createApp(db, { accounts: { ...accountsFrom({}), trustProxy: true } }), "POST", "/auth/open", { body: {} })).status, 200);
 });
 
 test("a server is a hosted service only when SESSIONLY_HOSTED says so plainly", () => {

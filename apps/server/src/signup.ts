@@ -68,6 +68,13 @@ export interface Accounts {
    * open without signing in until they are taken out.
    */
   signInLeft?: string[];
+  /**
+   * A server of your own with SESSIONLY_ADMIN_TOKEN set that listens beyond
+   * this machine, and not told SESSIONLY_OPEN_DASHBOARD=true: it was got
+   * into with that token only, perhaps from anywhere, and does not open
+   * without signing in until it is told to.
+   */
+  guarded?: boolean;
   /** Where the dashboard is reached, which is also where a provider sends people back: `https://app.example.com`. */
   publicUrl?: string;
   /** A service many organisations share: signing up creates one. */
@@ -184,6 +191,9 @@ export function opensAt(site: string, publicUrl: string | undefined): boolean {
   return new URL(publicUrl).hostname.toLowerCase() === name;
 }
 
+/** Whose the dashboard of a server of your own is when SESSIONLY_ADMIN_EMAIL is not set. */
+export const DEFAULT_ADMIN = "admin@localhost";
+
 /**
  * People of the default organisation who see only their own sessions, or see
  * and change nothing, from before its dashboard opened without signing in:
@@ -191,18 +201,25 @@ export function opensAt(site: string, publicUrl: string | undefined): boolean {
  * token then. A dashboard opened without signing in would make each of them
  * its admin, so it does not open while there are any.
  */
-export async function limitedPeople(db: Queryable): Promise<number> {
+export async function limitedPeople(db: Queryable, admin: string = DEFAULT_ADMIN): Promise<number> {
+  // A member's token is also what an admin connects their own machine with
+  // (the Connect page, `sessionly token create`): one under the admin's
+  // address, or an admin's, is no one limited.
   const [row] = await db.query<{ n: string | number }>(
     `SELECT count(*) AS n FROM (
        SELECT email FROM users WHERE org_id = $1 AND role IN ('member', 'viewer') AND removed_at IS NULL
        UNION
-       SELECT email FROM tokens WHERE org_id = $1 AND before_open AND revoked_at IS NULL
-         AND (expires_at IS NULL OR expires_at > now())
+       SELECT t.email FROM tokens t WHERE t.org_id = $1 AND t.before_open AND t.revoked_at IS NULL
+         AND (t.expires_at IS NULL OR t.expires_at > now())
+         AND t.email <> $2
+         AND NOT EXISTS (SELECT 1 FROM users u WHERE u.org_id = $1 AND u.email = t.email
+           AND u.role IN ('owner', 'admin') AND u.removed_at IS NULL)
      ) AS limited`,
-    [DEFAULT_ORG],
+    [DEFAULT_ORG, admin.trim().toLowerCase()],
   );
   return Number(row?.n ?? 0);
 }
+
 
 /**
  * Why a server of your own does not open its dashboard without signing in,
@@ -217,7 +234,13 @@ export async function whyClosed(db: Queryable, accounts: Accounts): Promise<{ co
       error: `${left.join(" and ")} ${left.length === 1 ? "is" : "are"} set: this server was signed in to, and signing in is the hosted service's now. Take ${left.length === 1 ? "it" : "them"} out for the dashboard to open without signing in to whoever reaches it, or open it with an admin token`,
     };
   }
-  const limited = await limitedPeople(db);
+  if (accounts.guarded) {
+    return {
+      code: "admin_token",
+      error: "SESSIONLY_ADMIN_TOKEN is set and this server listens beyond this machine: until now it was got into with that token only. Set SESSIONLY_OPEN_DASHBOARD=true for the dashboard to open without signing in to whoever reaches it, or open it with the admin token",
+    };
+  }
+  const limited = await limitedPeople(db, accounts.admin);
   if (limited > 0) {
     return {
       code: "people",
@@ -666,7 +689,7 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
     const closed = await whyClosed(db, accounts);
     if (closed) return c.json(closed, 409);
     const expiresAt = new Date(Date.now() + SIGN_IN_DAYS * 86_400_000);
-    const email = accounts.admin ?? "admin@localhost";
+    const email = accounts.admin ?? DEFAULT_ADMIN;
     const [org] = await db.query<{ name: string }>(`SELECT name FROM orgs WHERE id = $1`, [DEFAULT_ORG]);
     const { token } = await issueToken(db, DEFAULT_ORG, { email, role: "admin", signIn: "open", expiresAt });
     const opened: SignedIn = {
