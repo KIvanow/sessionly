@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use crate::cursor_hooks::{self, FileEdit, Tool, Turn};
 use crate::import::{edit_result, patch_lines, slim_input, Builder};
 use crate::paths::CURSOR;
-use crate::transcript::Facts;
+use crate::transcript::{Facts, ReviewSaid};
 
 fn subagent_files(transcript: &Path) -> Vec<PathBuf> {
     let dir = transcript.parent().map(|d| d.join("subagents"));
@@ -196,13 +196,15 @@ fn unseen_by_hooks(name: &str) -> bool {
 }
 
 /// Read one transcript file into events, taking times and outcomes from the
-/// turns the hooks saw (`hooked`; none for a subagent's file). Returns how
-/// many tool calls and prompts it had.
+/// turns the hooks saw (`hooked`; none for a subagent's file), and into
+/// `said` what the reply to a typed review says it found. Returns how many
+/// tool calls and prompts it had.
 fn read_file(
     path: &Path,
     agent_id: Option<&str>,
     hooked: &mut [Turn],
     out: &mut Builder,
+    said: &mut Vec<ReviewSaid>,
 ) -> Result<(u64, u64)> {
     let mut prompts = 0u64;
     let mut calls = 0u64;
@@ -211,6 +213,10 @@ fn read_file(
     let mut current: Option<usize> = None;
     let mut next_tool = 0usize;
     let mut open: Option<usize> = None;
+    // The prompt being read and the last thing said in answer to it: a
+    // review's reply says how many findings it has.
+    let mut asked: Option<(String, String)> = None;
+    let mut reply: Option<String> = None;
     let stem = path
         .file_stem()
         .unwrap_or_default()
@@ -232,7 +238,13 @@ fn read_file(
                     if let Some(i) = open.take() {
                         end_turn(out, &hooked[i], format!("p{prompts}"));
                     }
+                    if let (Some((id, asked)), Some(reply)) = (asked.take(), reply.take()) {
+                        if crate::reviews::is_typed_review(&asked) {
+                            said.extend(crate::reviews::review_said(&id, &reply));
+                        }
+                    }
                     prompts += 1;
+                    asked = Some((format!("p{prompts}"), prompt.clone()));
                     let minute = prompt_time(&text);
                     current = find_turn(hooked, &prompt, minute);
                     next_tool = 0;
@@ -252,6 +264,15 @@ fn read_file(
                 }
             }
             (Some("assistant"), _) => {
+                if agent_id.is_none() {
+                    let texts = blocks.into_iter().flatten();
+                    let said = texts
+                        .filter_map(|b| b["text"].as_str().filter(|_| b["type"] == "text"))
+                        .rfind(|t| !t.trim().is_empty());
+                    if let Some(said) = said {
+                        reply = Some(said.to_string());
+                    }
+                }
                 for block in blocks
                     .into_iter()
                     .flatten()
@@ -330,6 +351,11 @@ fn read_file(
     if let Some(i) = open {
         end_turn(out, &hooked[i], format!("p{prompts}"));
     }
+    if let (Some((id, asked)), Some(reply)) = (asked, reply) {
+        if crate::reviews::is_typed_review(&asked) {
+            said.extend(crate::reviews::review_said(&id, &reply));
+        }
+    }
     Ok((calls, prompts))
 }
 
@@ -378,7 +404,9 @@ pub fn session(transcript: &Path, capture: Option<&Path>) -> Result<(Vec<Value>,
         .into_owned();
     let mut hooked = capture.map(cursor_hooks::read).unwrap_or_default();
     let mut out = Builder::new(CURSOR, &session_id);
-    let (calls, prompts) = read_file(transcript, None, &mut hooked.turns, &mut out)?;
+    // What the reply to each typed review says it found.
+    let mut said = Vec::new();
+    let (calls, prompts) = read_file(transcript, None, &mut hooked.turns, &mut out, &mut said)?;
     let mut total = calls;
     for file in subagent_files(transcript) {
         let agent = file
@@ -388,7 +416,7 @@ pub fn session(transcript: &Path, capture: Option<&Path>) -> Result<(Vec<Value>,
             .into_owned();
         let identity = json!({ "agent_id": agent, "agent_type": "" });
         out.push("", "SubagentStart", identity.clone());
-        total += read_file(&file, Some(&agent), &mut [], &mut out)?.0;
+        total += read_file(&file, Some(&agent), &mut [], &mut out, &mut said)?.0;
         out.push("", "SubagentStop", identity);
     }
     let events = out.in_order();
@@ -418,6 +446,7 @@ pub fn session(transcript: &Path, capture: Option<&Path>) -> Result<(Vec<Value>,
         version: hooked.cursor_version,
         cost,
         usage,
+        review_replies: said,
         ..Default::default()
     };
     Ok((all, Some(facts)))
@@ -829,6 +858,44 @@ mod tests {
         let s = crate::normalize::from_events(&events, facts.as_ref(), CURSOR).unwrap();
         assert!(s.cost.is_none() && s.models.is_empty() && s.active_ms == 0);
         assert!(s.tool_calls.iter().all(|c| c.status == ToolStatus::Ok));
+    }
+
+    #[test]
+    fn the_reply_that_ends_a_typed_review_says_what_it_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("projects/no-such-place/agent-transcripts/k7/k7.jsonl");
+        let asked = |text: &str| user(&format!("<user_query>\n{text}\n</user_query>"));
+        let says = |text: &str| {
+            json!({ "role": "assistant",
+                    "message": { "content": [{ "type": "text", "text": text }] } })
+        };
+        write_rows(
+            &path,
+            &[
+                asked("/code-review #41"),
+                says("Reading the diff."),
+                says("I found 2 issues in #41."),
+                // not a review: what is said to it is not read
+                asked("fix the first one"),
+                says("I found 5 problems on the way."),
+                // one whose reply names no number
+                asked("/code-review #41"),
+                says("Do not merge this yet."),
+            ],
+        );
+        let (events, facts) = session(&path, None).unwrap();
+        let facts = facts.unwrap();
+        let said: Vec<_> = facts
+            .review_replies
+            .iter()
+            .map(|r| (r.prompt_id.as_str(), r.findings))
+            .collect();
+        assert_eq!(said, [("p1", 2)]);
+        let s = crate::normalize::from_events(&events, Some(&facts), CURSOR).unwrap();
+        let found: Vec<_> = s.reviews.iter().map(|r| r.findings).collect();
+        assert_eq!(found, [Some(2), None]);
     }
 
     #[test]

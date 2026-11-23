@@ -1,9 +1,9 @@
-import type { PullAfterMerge, PullDetail, PullHistory, PullHistoryNamedSession, PullSession } from "@sessionly/schema";
+import type { LocalReviewRun, PullAfterMerge, PullDetail, PullHistory, PullHistoryNamedSession, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { afterMergeLine, afterMergeName, afterMergeTile, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, matchedLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
-import { cost, count, dateTime, modelName, percent, repoName, share, shareOf, toolName } from "./format.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewTarget, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
+import { cost, count, dateTime, duration, modelName, usd, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
 import { sessionHref } from "./Sessions.tsx";
@@ -115,6 +115,25 @@ export function PullView({
         />
         <Tile label="Agent cost" value={pullCost(p.cost)} note={pullCostNote(p.cost)} />
         {afterMerge && <Tile label="Kept @30d after merge" value={afterMerge.value} part={afterMerge.part} note={afterMerge.note} />}
+      </section>
+
+      <section className="card" aria-label="Reviews">
+        <h2>Reviews</h2>
+        <dl className="facts">
+          <dt>In its sessions</dt>
+          <dd>{localReviewsLine(p.local_reviews)}</dd>
+          <dt>On GitHub</dt>
+          <dd>
+            {count(p.reviews)} {p.reviews === 1 ? "review" : "reviews"} ({count(p.changes_requested)} asking for changes), {count(p.review_rounds)}{" "}
+            {p.review_rounds === 1 ? "round" : "rounds"}, {count(p.review_comments)} comments by people and {count(p.bot_review_comments)} by bots.
+          </dd>
+        </dl>
+        {(p.local_reviews?.each ?? []).length > 0 && <ReviewRuns each={p.local_reviews!.each!} />}
+        <p className="muted hint">
+          A review command run in a session (/code-review and the like) and a review on GitHub are different things, and are not
+          added up. Reviews started with a prompt in words, without a command, are not counted. What a run's subagents cost is part
+          of the sessions' cost, not on top of it, and leaves out the main thread's own tokens; a review in the cloud is billed apart.
+        </p>
       </section>
 
       <History history={p.history} counts={p.after_merge} />
@@ -498,5 +517,55 @@ function Earlier({ what, dependsOnAction }: { what: string; dependsOnAction: boo
       {what} were not kept when this pull request was last reported. They appear with its next report from
       the current version of the Action: push to it, or run the Action's workflow for it by hand.
     </p>
+  );
+}
+
+/** Each review run of the pull request's sessions, in the order they ran: its iterations. */
+function ReviewRuns({ each }: { each: LocalReviewRun[] }) {
+  const gaps = reviewGaps(each);
+  return (
+    <div className="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col" className="num">Run</th>
+            <th scope="col">When</th>
+            <th scope="col" className="num" title="How long after the run before it">After the last</th>
+            <th scope="col">Command</th>
+            <th scope="col">Effort</th>
+            <th scope="col">Where</th>
+            <th scope="col" className="num" title="What its subagents cost: a floor, and part of the session's cost">Cost</th>
+            <th scope="col" className="num">Findings</th>
+            <th scope="col">Session</th>
+          </tr>
+        </thead>
+        <tbody>
+          {each.map((r, i) => (
+            <tr key={`${r.session_id}-${r.at}-${i}`}>
+              <td className="num">
+                {count(i + 1)} of {count(each.length)}
+              </td>
+              <td className="nowrap">{dateTime(r.at)}</td>
+              <td className="num nowrap">{gaps[i] != null ? duration(gaps[i]!) : "–"}</td>
+              <th scope="row">
+                /{r.command}
+                <span className="muted">
+                  {r.via === "skill" ? ", by the agent" : r.via === "slash_command" ? ", typed" : ""}
+                  {r.target ? `, of ${reviewTarget(r.target)}` : r.names_pull ? "" : ", names no pull request"}
+                  {r.status === "failed" ? ", failed" : r.status === "interrupted" ? ", interrupted" : r.status === "no_result" ? ", did not finish" : ""}
+                </span>
+              </th>
+              <td>{r.effort ?? "–"}</td>
+              <td>{r.ran === "cloud" ? "the cloud" : "here"}</td>
+              <td className="num">{r.cost_usd != null ? usd(r.cost_usd) : r.ran === "cloud" ? "not known" : "–"}</td>
+              <td className="num">{r.findings != null ? count(r.findings) : "–"}</td>
+              <td>
+                <a href={sessionHref(r)}>{r.session_id.slice(0, 8)}</a>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

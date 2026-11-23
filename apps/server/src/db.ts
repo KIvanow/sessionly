@@ -883,6 +883,19 @@ const MIGRATIONS: string[] = [
   // they are there to match by still, and stay the session's only while the
   // match gives it them. Null from before, and with `gone`.
   `ALTER TABLE pull_sessions ADD COLUMN gone_opened jsonb`,
+  // Review runs (`/code-review` and the like). Null for a session from a
+  // collector that did not count them: not known, which is not none.
+  `ALTER TABLE sessions ADD COLUMN review_runs integer`,
+  // The pull request numbers its review runs name, as a list: a pull request
+  // finds the sessions that reviewed it without reading every session's record.
+  `ALTER TABLE sessions ADD COLUMN review_pulls jsonb`,
+  // The runs themselves, beside the session: a list of pull requests reads
+  // them for each one without taking every session's whole record out. Null
+  // where there is none. And the sessions that have any, by repository, which
+  // is how a pull request looks for them.
+  `ALTER TABLE sessions ADD COLUMN reviews jsonb`,
+  `UPDATE sessions SET reviews = payload->'session'->'reviews' WHERE review_runs > 0`,
+  `CREATE INDEX sessions_reviewed ON sessions (org_id, repo) WHERE review_runs > 0`,
   // A server of your own opens its dashboard without signing in: what the
   // dashboard is handed then is a session of its own kind ('open'), which
   // runs out as the others do and is no one's sign-in.

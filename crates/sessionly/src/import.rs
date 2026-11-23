@@ -75,7 +75,8 @@ fn is_prompt(row: &Value) -> bool {
 /// A tool result reduced to what normalizing reads, plus its original size.
 fn slim_result(result: &Value) -> Value {
     let mut slim = json!({ "_bytes": result.to_string().len() });
-    for key in ["type", "structuredPatch", "interrupted"] {
+    // `agentId`: the subagent an Agent call, or a skill that forks, started.
+    for key in ["type", "structuredPatch", "interrupted", "agentId"] {
         if let Some(value) = result.get(key) {
             slim[key] = value.clone();
         }
@@ -260,6 +261,12 @@ fn read_file(
                 out.push(at, "UserPromptSubmit", payload);
             }
             Some("user") => {
+                if let Some(mut command) =
+                    crate::reviews::command_row(&row).filter(|_| agent.is_none())
+                {
+                    command["prompt_id"] = row["promptId"].clone();
+                    out.push(at, "UserPromptExpansion", command);
+                }
                 let blocks = row["message"]["content"].as_array();
                 for block in blocks
                     .into_iter()
@@ -341,6 +348,12 @@ fn read_file(
                 }
             }
             Some("system") if agent.is_none() => match row["subtype"].as_str() {
+                Some("local_command") => {
+                    if let Some(mut command) = crate::reviews::command_row(&row) {
+                        command["prompt_id"] = row["promptId"].clone();
+                        out.push(at, "UserPromptExpansion", command);
+                    }
+                }
                 Some("turn_duration") => {
                     open_turn = None;
                     out.push(at, "Stop", json!({ "prompt_id": prompt_id }));
@@ -470,7 +483,7 @@ impl AgentHomes {
 
 /// Raised when an importer reads more, or differently, from the same files,
 /// so that sessions imported by an older binary are imported again.
-const IMPORT_VERSION: u64 = 6;
+const IMPORT_VERSION: u64 = 10;
 
 /// The source file, its size, the importer's version and the stamp of the
 /// session's name recorded in an import file's first record.
@@ -1246,6 +1259,217 @@ mod tests {
             &[json!({ "hook": "Stop", "payload": { "session_id": MAIN } })],
         );
         assert_eq!(refresh(&homes, &data).imported, 1);
+    }
+
+    #[test]
+    fn review_runs_come_through_the_import_as_through_the_hooks() {
+        use crate::session::{ReviewRan, ReviewVia};
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("proj/sess-r.jsonl");
+        let review = |second: u32| {
+            tool_use(
+                second,
+                "t1",
+                "Skill",
+                json!({ "skill": "code-review", "args": "xhigh #621 see /home/ann/notes" }),
+            )
+        };
+        let system = |second: u32, content: &str| {
+            json!({ "type": "system", "subtype": "local_command", "timestamp": ts(second),
+                    "content": content, "uuid": format!("u{second}") })
+        };
+        write_rows(
+            &main,
+            &[
+                user(1, "p1", json!("review it"), json!({ "turnOrigin": "human" })),
+                // the call's row is written more than once
+                review(2),
+                review(2),
+                result(
+                    3,
+                    "t1",
+                    json!({}),
+                    json!({ "toolUseResult": { "success": true, "commandName": "code-review",
+                                               "status": "forked", "agentId": "fork1" } }),
+                ),
+                json!({ "type": "system", "subtype": "turn_duration", "timestamp": ts(4) }),
+                system(
+                    10,
+                    "<command-name>/ultrareview</command-name>\n<command-message>ultrareview</command-message>\n<command-args>#2</command-args>",
+                ),
+                system(
+                    11,
+                    "<command-name>/model</command-name>\n<command-args></command-args>",
+                ),
+                user(
+                    12,
+                    "p2",
+                    json!("<command-name>/security-review</command-name>\n<command-args>high</command-args>"),
+                    json!({}),
+                ),
+                // a summary of what went before quotes a command's row: no run
+                user(
+                    40,
+                    "p3",
+                    json!("This session is being continued.\n<command-name>/code-review</command-name>\n<command-args>#9</command-args>"),
+                    json!({ "isCompactSummary": true }),
+                ),
+                user(
+                    41,
+                    "p3",
+                    json!("<command-name>/code-review</command-name>\n<command-args>#9</command-args>"),
+                    json!({ "isMeta": true }),
+                ),
+                system(
+                    42,
+                    "The earlier run was <command-name>/code-review</command-name> on #9",
+                ),
+            ],
+        );
+        write_rows(
+            &dir.path().join("proj/sess-r/subagents/agent-fork1.jsonl"),
+            &[tool_use(
+                5,
+                "s1",
+                "Bash",
+                json!({ "command": "gh pr diff 621" }),
+            )],
+        );
+        let events = events_from_transcript(&main).unwrap();
+        let saved = serde_json::to_string(&events).unwrap();
+        assert!(!saved.contains("/model"), "other commands are not kept");
+        let s = crate::normalize::from_events(&events, None, "claude-code").unwrap();
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| {
+                (
+                    r.command.as_str(),
+                    r.via,
+                    r.ran,
+                    r.effort.as_deref(),
+                    r.pull_number,
+                    r.subagents,
+                )
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (
+                    "code-review",
+                    ReviewVia::Skill,
+                    ReviewRan::Local,
+                    Some("xhigh"),
+                    Some(621),
+                    1
+                ),
+                (
+                    "ultrareview",
+                    ReviewVia::SlashCommand,
+                    ReviewRan::Cloud,
+                    None,
+                    Some(2),
+                    0
+                ),
+                (
+                    "security-review",
+                    ReviewVia::SlashCommand,
+                    ReviewRan::Local,
+                    Some("high"),
+                    None,
+                    0
+                ),
+            ]
+        );
+        assert_eq!(s.reviews[0].id, "t1");
+        assert_eq!(s.prompts.len(), 1, "a command is not a prompt");
+        let record = serde_json::to_string(&s.reviews).unwrap();
+        assert!(!record.contains("notes") && !record.contains("/home"));
+
+        // The hooks of the same session: the call with its full result, the
+        // subagent, and Claude Code's own command as an expansion.
+        let hook = |at: &str, hook: &str, mut payload: Value| {
+            payload["session_id"] = json!("sess-r");
+            json!({ "v": 1, "source": "claude-code", "hook": hook, "session_id": "sess-r",
+                    "received_at": at, "payload": payload })
+        };
+        let call = json!({ "prompt_id": "p1", "tool_use_id": "t1", "tool_name": "Skill",
+                           "tool_input": { "skill": "code-review", "args": "xhigh #621 see /home/ann/notes" } });
+        let mut done = call.clone();
+        done["tool_response"] = json!({ "success": true, "commandName": "code-review",
+                                        "status": "forked", "agentId": "fork1",
+                                        "result": "Running in the background as @code-review" });
+        done["duration_ms"] = json!(1000);
+        let fork = json!({ "agent_id": "fork1", "agent_type": "" });
+        let hooks = vec![
+            hook(
+                &ts(1),
+                "UserPromptSubmit",
+                json!({ "prompt_id": "p1", "prompt": "review it" }),
+            ),
+            hook(&ts(2), "PreToolUse", call),
+            hook(&ts(3), "PostToolUse", done),
+            hook(&ts(4), "Stop", json!({ "prompt_id": "p1" })),
+            hook(&ts(5), "SubagentStart", fork.clone()),
+            hook(&ts(5), "SubagentStop", fork),
+            hook(
+                &ts(10),
+                "UserPromptExpansion",
+                json!({ "expansion_type": "slash_command", "command_name": "ultrareview",
+                         "command_args": "#2" }),
+            ),
+            hook(
+                &ts(12),
+                "UserPromptExpansion",
+                json!({ "prompt_id": "p2", "expansion_type": "slash_command",
+                         "command_name": "security-review", "command_args": "high" }),
+            ),
+        ];
+        let live = crate::normalize::from_events(&hooks, None, "claude-code").unwrap();
+        assert_eq!(live.reviews, s.reviews);
+    }
+
+    #[test]
+    fn a_typed_review_owns_the_subagent_it_forked() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("proj/sess-t.jsonl");
+        let launch = |second: u32, agent: &str, typed: &str| {
+            let launch =
+                json!({ "agentId": agent, "skillName": "code-review", "description": typed });
+            json!({ "type": "system", "subtype": "local_command", "timestamp": ts(second),
+                    "content": format!("<local-command-stdout>Running in the background as @code-review</local-command-stdout>\n<forked-skill-launch>{launch}</forked-skill-launch>") })
+        };
+        write_rows(
+            &main,
+            &[
+                user(1, "p1", json!("/code-review xhigh #1"), json!({})),
+                launch(1, "f1", "/code-review xhigh #1"),
+                // typed a moment later, while the first was starting: not forked
+                user(2, "p2", json!("/code-review xhigh #2"), json!({})),
+            ],
+        );
+        for (agent, second) in [("f1", 3), ("other", 4)] {
+            write_rows(
+                &dir.path()
+                    .join(format!("proj/sess-t/subagents/agent-{agent}.jsonl")),
+                &[tool_use(
+                    second,
+                    &format!("s{second}"),
+                    "Bash",
+                    json!({ "command": "ls" }),
+                )],
+            );
+        }
+        let events = events_from_transcript(&main).unwrap();
+        let s = crate::normalize::from_events(&events, None, "claude-code").unwrap();
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.id.as_str(), r.pull_number, r.subagents))
+            .collect();
+        // the fork is the first one's; the second has what started in its turn
+        assert_eq!(runs, [("p1", Some(1), 1), ("p2", Some(2), 1)]);
     }
 
     #[test]

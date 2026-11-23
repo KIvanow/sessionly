@@ -189,6 +189,16 @@
               name, status, duration and the size of its output, subagents, permission requests;
             </li>
             <li>
+              the names of the skills the agent ran (such as <code>code-review</code>, or a team's
+              own), and for each review command that ran (such as <code>/code-review</code>): its
+              name, the effort and pull request number given to it or the kind of change it was
+              pointed at (such as uncommitted changes), whether it ran in the cloud,
+              when, how long it took, how many subagents it used and what they cost, and how many
+              findings it reported. Not the text of its arguments, and not the findings themselves:
+              the number is read on your machine from the review's reply, and the reply is not
+              sent;
+            </li>
+            <li>
               the files the agent read or changed, as paths relative to the repository or to the
               home directory, with lines added and removed;
             </li>
@@ -556,7 +566,7 @@
           <h2>Other Sites and Services</h2>
           <p>
             Sessionly reads sessions recorded by coding agents made by third parties (Claude Code,
-            Cursor, Grok) and its Action runs on GitHub. The website links to GitHub, where the
+            Codex, Cursor, Grok) and its Action runs on GitHub. The website links to GitHub, where the
             code is published. These links and integrations are not an endorsement of, or a
             representation that I am affiliated with, any third party. I do not control those
             services and am not responsible for their actions. Please read their privacy policies.

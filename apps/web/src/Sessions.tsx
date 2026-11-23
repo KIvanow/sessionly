@@ -29,6 +29,8 @@ export function Sessions({ token, scope, onSignOut }: { token: string; scope: Sc
     onSignOut,
   );
   const total = list.data?.total ?? 0;
+  // Shown where a session on the page has one.
+  const reviews = (list.data?.sessions ?? []).some((s) => (s.review_runs ?? 0) > 0);
 
   return (
     <section className="card" aria-label="Sessions">
@@ -63,9 +65,14 @@ export function Sessions({ token, scope, onSignOut }: { token: string; scope: Sc
                   <th scope="col" className="num">Files</th>
                   <th scope="col" className="num">Lines</th>
                   <th scope="col" className="num">Rewritten</th>
+                  {reviews && (
+                    <th scope="col" className="num" title="Review runs: /code-review and the like">
+                      Reviews
+                    </th>
+                  )}
                 </tr>
               </thead>
-              <tbody>{list.data.sessions.map((s) => <Row key={sessionHref(s)} s={s} />)}</tbody>
+              <tbody>{list.data.sessions.map((s) => <Row key={sessionHref(s)} s={s} reviews={reviews} />)}</tbody>
             </table>
           </div>
           <div className="pager">
@@ -86,7 +93,7 @@ export function Sessions({ token, scope, onSignOut }: { token: string; scope: Sc
   );
 }
 
-function Row({ s }: { s: SessionRow }) {
+function Row({ s, reviews }: { s: SessionRow; reviews: boolean }) {
   const name = s.title || s.first_prompt || `${s.session_id.slice(0, 8)}…`;
   return (
     <tr>
@@ -114,6 +121,11 @@ function Row({ s }: { s: SessionRow }) {
           ? `${count(s.rewrite.files_rewritten)}/${count(s.rewrite.files_measured)}`
           : "–"}
       </td>
+      {reviews && (
+        <td className="num" title={s.review_runs == null ? "Not known: captured by an older Sessionly, which did not count reviews, or a Codex session whose own record of them was not there to read" : undefined}>
+          {s.review_runs == null ? "?" : s.review_runs > 0 ? count(s.review_runs) : "–"}
+        </td>
+      )}
     </tr>
   );
 }

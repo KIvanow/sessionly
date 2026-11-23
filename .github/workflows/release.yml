@@ -136,6 +136,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Only the release notes, beside the binaries and not among them.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: release-notes
+          path: repo
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           # Only the binaries: the image job leaves a record of its build
@@ -151,9 +156,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # What changed is written by hand in release-notes/<tag>.md. A release
+          # without that file gets GitHub's list of what was merged since the
+          # one before. Either way, how to install follows.
+          if [ -f "repo/release-notes/$GITHUB_REF_NAME.md" ]; then
+            cat "repo/release-notes/$GITHUB_REF_NAME.md" > notes.md
+          else
+            echo "::warning title=No release notes::release-notes/$GITHUB_REF_NAME.md does not exist, so this release uses GitHub's generated notes. Add release-notes/$GITHUB_REF_NAME.md to write them by hand."
+            gh api "repos/$GH_REPO/releases/generate-notes" -f tag_name="$GITHUB_REF_NAME" --jq .body > notes.md
+          fi
+          printf '\n' >> notes.md
+          cat repo/release-notes/install.md >> notes.md
           gh release create "$GITHUB_REF_NAME" ${{ needs.version.outputs.stable == 'true' && ' ' || '--prerelease' }} \
             --title "Sessionly ${GITHUB_REF_NAME#v}" \
-            --notes "Binaries for Linux (statically linked) and macOS, each as \`sessionly-<target>.tar.gz\`, with their SHA-256 checksums in \`SHA256SUMS\`. See the README for how to install." \
+            --notes-file notes.md \
             sessionly-*.tar.gz SHA256SUMS
 
   # The crate, for `cargo install sessionly`. After the GitHub release, so

@@ -13,7 +13,7 @@ import { accountsFrom, hostedProblems, notHostedProblems, unheeded } from "../sr
 import { emailFrom, INVITATIONS_SHOWN, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
 import { forgetAccount } from "../src/users.ts";
 import { storeUpload } from "../src/sessions.ts";
-import { newOrg, testDb, testDbUrl, tokenFor } from "./helpers.ts";
+import { clearOfTheClock, newOrg, testDb, testDbUrl, tokenFor } from "./helpers.ts";
 
 let db: Db;
 let app: Hono<Env>;
@@ -523,6 +523,7 @@ test("an organisation is signed in to with the account that signed in to it firs
 });
 
 test("one person owns only so many organisations, by address and by account", async () => {
+  await clearOfTheClock(db);
   // Nineteen already, made over time: as many as the hourly counts would let through in a day.
   const seed = async (email: string, account: string, n: number, tag: string) => {
     for (let i = 0; i < n; i++) {
@@ -625,6 +626,7 @@ test("signing up creates an organisation once it is named, and not before", asyn
 });
 
 test("two uses of one code at the same moment: one works", async () => {
+  await clearOfTheClock(db);
   const code = await arrive(["twice@race.example"], { create: true });
   const both = await Promise.all([post("/auth/verify", { code, org_name: "Race" }), post("/auth/verify", { code, org_name: "Race" })]);
   assert.deepEqual(both.map((r) => r.status).sort(), [200, 400]);
@@ -1126,6 +1128,7 @@ test("a count is given back to the hour it was taken in", async () => {
 
 
 test("too many requests are refused, and too many organisations are not created", async () => {
+  await clearOfTheClock(db);
   // Twenty goings a minute from one address; past that the browser is sent
   // back to be told so, and not on to the provider.
   const from = "203.0.113.9";
@@ -1232,6 +1235,7 @@ test("too many requests are refused, and too many organisations are not created"
 });
 
 test("adding people is limited, since anyone can add anyone", async () => {
+  await clearOfTheClock(db);
   // One organisation: thirty people an hour, whoever they are.
   const fresh = await signUp("kim@many.example", "Many");
   const many = [];
@@ -1284,6 +1288,7 @@ test("requests can do nothing with what is kept outside organisations", async ()
 });
 
 test("signing up can be closed, or need an invitation code", async () => {
+  await clearOfTheClock(db);
   const closed = createApp(db, { accounts: { ...hosted, signup: "off" } });
   assert.equal((await call(closed, "GET", "/auth/options")).body.signup, false);
   // Someone who signed in while it was open creates nothing once it is closed.

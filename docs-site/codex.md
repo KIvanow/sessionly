@@ -36,6 +36,10 @@ is read from its output and a patch's files from the patch text.
   JavaScript (a call to `exec`). In the newer layout that makes no difference, since what ran
   is recorded either way. In the older layout only patches are recorded besides the script, so
   such a session has its edits but not its commands.
+- **`/review`** is a [review run](session-record.md#review-runs): when it ran, what kind of
+  change it was pointed at, how long it took, how many findings came back, and what the
+  reviewer's thread cost. The reviewer is a subagent of the session, of type `review`. The
+  findings themselves are not kept.
 - **A subagent** is a thread with a rollout file of its own. It is folded into the session
   that started it, with its tool calls and tokens, as Claude Code's subagents are. A thread
   is a subagent when Codex itself says so in the file's first record, not because it carries

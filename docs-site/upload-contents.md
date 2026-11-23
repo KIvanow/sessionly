@@ -32,7 +32,7 @@ Before a record leaves the machine:
 
 | Level | What is sent |
 |---|---|
-| `metadata` (default) | Counts, sizes, timings, tool names, statuses, relative file paths, models, tokens, cost (for Claude Code also by branch), rewrite figures, git user, remote and branch, the working directory and repository folder (as `~/…` under the home directory), the agent's version and how it was started, its permission modes, and the paths of the instruction files it loaded (`CLAUDE.md`, rules). **No text** from prompts, commands, search patterns, URLs, errors or titles, and no content hashes. |
+| `metadata` (default) | Counts, sizes, timings, tool names and skill names, statuses, review runs (command, effort, pull request number, where it ran, subagents, cost, findings count), relative file paths, models, tokens, cost (for Claude Code also by branch), rewrite figures, git user, remote and branch, the working directory and repository folder (as `~/…` under the home directory), the agent's version and how it was started, its permission modes, and the paths of the instruction files it loaded (`CLAUDE.md`, rules). **No text** from prompts, commands, search patterns, URLs, errors or titles, and no content hashes. |
 | `previews` | The above, plus the 200-character previews and the hashes. A preview can contain anything you typed or ran, including secrets. |
 
 **Line hashes are a separate switch, off by default.** `sessionly settings --line-hashes on`
@@ -60,9 +60,17 @@ know to `unknown`, and ignores fields it doesn't know.
 | `content` | `metadata`, `previews`; `local` is the record on your machine, which a server refuses |
 | `captured_by` | `hooks`, `transcript` |
 | `runtime.kind` | `cloud`, `unknown` |
+| a review run's `via` | `skill`, `slash_command`, `codex_review`, `unknown` |
+| a review run's `ran` | `local`, `cloud`, `unknown` |
+| a review run's `target` | For Codex: `base_branch`, `uncommitted_changes`, `commit`, `custom`. `other_repository` for a run that named a pull request of another repository (which one is not kept) |
 
 The agent (`source`) and a tool's name are plain text: `claude-code`, `cursor`, `grok` or
-`codex`, and whatever the tool is called.
+`codex`, and whatever the tool is called. So is a skill's name (`code-review`, or a plugin's
+`plugin:name`), which leaves the machine in every content mode, as an MCP tool's name does: a
+team's own skills are named by it. A review run's arguments do not: only the effort and a pull
+request number parsed from them are sent, never their text, and never the findings themselves,
+nor the reply their number is read from
+(see [Review runs](session-record.md#review-runs)).
 
 A background run also asks GitHub, at most once a day, for the address of the newest
 release (or asks `SESSIONLY_RELEASE_LATEST`, if that is set). The request carries the binary's

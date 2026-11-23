@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { afterMergeLine, afterMergeName, afterMergeTile, timeline, byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, matchAll, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web, survivingOnce } from "../src/pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, timeline, byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, localReviewsLine, matchAll, reviewGaps, reviewTarget, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web, survivingOnce } from "../src/pull.ts";
 
 test("a moved agent figure says what it was, and why", () => {
   const history = [
@@ -286,4 +286,31 @@ test("reports and the counts made after merging are one list by time, and stay t
   );
   assert.deepEqual(timeline(history, undefined).map((row) => row.report?.event), ["match", "closed"]);
   assert.deepEqual(timeline([], []), []);
+});
+
+test("what Codex's review was pointed at is said in words", () => {
+  assert.equal(reviewTarget("base_branch"), "the changes against a branch");
+  assert.equal(reviewTarget("uncommitted_changes"), "the uncommitted changes");
+  assert.equal(reviewTarget("something_new"), "something new");
+  assert.equal(reviewTarget(null), "");
+});
+
+test("each review run says how long after the one before it started", () => {
+  const at = (time: string | null) => ({ at: time && `2026-11-10T${time}:00Z` });
+  assert.deepEqual(reviewGaps([at("09:10"), at("09:40"), at(null), at("11:00"), at("11:00")]), [null, 30 * 60_000, null, null, 0]);
+  assert.deepEqual(reviewGaps([]), []);
+});
+
+test("a pull request's local review runs in a sentence, and what is not known said", () => {
+  const none = { runs: 0, cloud: 0, by_effort: {}, findings: null, cost_usd: null, sessions_unknown: 0, shared_with: 0 };
+  assert.equal(localReviewsLine(null), "No session of it is known.");
+  assert.equal(localReviewsLine(none), "No review command ran in its sessions.");
+  assert.equal(
+    localReviewsLine({ ...none, runs: 4, cloud: 1, by_effort: { high: 1, xhigh: 2 }, cost_usd: 12.4 }),
+    "Reviewed 4 times before and during review (2 xhigh, 1 high), 1 of them in the cloud. Review subagents: $12.40.",
+  );
+  assert.equal(
+    localReviewsLine({ ...none, runs: 1, findings: 3, shared_with: 2, sessions_unknown: 1 }),
+    "Reviewed once before and during review. 3 findings reported. Some of those ran in sessions it shares with 2 other pull requests, and name none: they may be counted on those too. Not known for 1 of its sessions: deleted since, captured by an older Sessionly, which did not count reviews, or a Codex session whose own record of them was not there to read.",
+  );
 });

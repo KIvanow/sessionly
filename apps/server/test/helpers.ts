@@ -25,3 +25,17 @@ export function tokenWithId(
 ): Promise<{ id: string; token: string }> {
   return db.asOrg(org, (scoped) => createToken(scoped, owner));
 }
+
+/**
+ * Wait, if a minute of the database's clock is about to end, until the next
+ * has begun. Rate limits are counted in windows that start on the clock (a
+ * minute, an hour), so a test that counts up to a limit would see the count
+ * start again were a window to end partway through it. Call this first in
+ * such a test: what follows then has at least `seconds` in one window.
+ */
+export async function clearOfTheClock(db: Db, seconds = 10): Promise<void> {
+  const [{ left }] = await db.query<{ left: number }>(
+    `SELECT 60 - (extract(epoch FROM clock_timestamp())::numeric % 60)::float8 AS left`,
+  );
+  if (Number(left) < seconds) await new Promise((done) => setTimeout(done, Number(left) * 1000 + 50));
+}
