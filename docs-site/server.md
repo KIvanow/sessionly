@@ -18,21 +18,26 @@ From a checkout, with Node 22.18 or later and pnpm:
 ```sh
 pnpm install
 pnpm build      # builds the dashboard; the server then serves it
-SESSIONLY_ADMIN_TOKEN=choose-a-long-secret SESSIONLY_ADMIN_EMAIL=you@example.com pnpm server
+SESSIONLY_ADMIN_EMAIL=you@example.com pnpm run server
 ```
 
+(`pnpm run server`, not `pnpm server`: that is a command of pnpm's own, which starts nothing
+here.)
+
 That starts it on `http://127.0.0.1:8080` with an embedded database in
-`apps/server/data/pglite`, which is enough to try it or for a small team. Open that address and
-sign in with the token. Set `DATABASE_URL=postgres://…` to use a Postgres server (16 or later).
+`apps/server/data/pglite`, which is enough to try it or for a small team. Open that address:
+the dashboard opens as its admin, `SESSIONLY_ADMIN_EMAIL`, with no signing in (see
+[below](#nobody-signs-in)). Set `DATABASE_URL=postgres://…` to use a Postgres server (16 or
+later).
 
 Settings can also be kept in a file named `.env` at the top of the repository, one
-`NAME=value` a line; `pnpm server` reads it, and git ignores it. All of them are in
+`NAME=value` a line; `pnpm run server` reads it, and git ignores it. All of them are in
 [Configuration](server-configuration.md).
 
-Then, on a developer's machine:
+Then make a token for each machine on the dashboard's Connect page, and on that machine:
 
 ```sh
-sessionly connect http://127.0.0.1:8080   # paste the token, or pass it with --token
+sessionly connect http://127.0.0.1:8080 --token sly_…
 sessionly upload
 ```
 
@@ -41,12 +46,12 @@ sessionly upload
 The server and Postgres together:
 
 ```sh
-SESSIONLY_ADMIN_TOKEN=choose-a-long-secret docker compose up -d
+docker compose up -d
 ```
 
 It listens on port 8080 of the machine; `SESSIONLY_PORT` names another. The compose file hands
-the container the admin token and address, the public address, the Google and GitHub settings,
-the two page-count settings and the four `SESSIONLY_DEMO_*` settings (see
+the container the admin's address and token, the two page-count settings and the four
+`SESSIONLY_DEMO_*` settings (see
 [Server configuration](server-configuration.md#showing-a-repository-in-another-organisation)),
 from the environment or from a `.env` file beside it. Other
 settings (`SESSIONLY_DB_POOL`, `SESSIONLY_RATE_PER_MINUTE` and so on) have to be added to the
@@ -55,12 +60,23 @@ file's `environment:` list to reach the server.
 Each release also has an image, `ghcr.io/kivanow/sessionly-server:v<version>`. It is the
 [ee server](editions.md), which without a license behaves exactly like the core one.
 
+## Nobody signs in
+
+A server of your own has no sign-in: whoever opens the dashboard is its admin, as
+`SESSIONLY_ADMIN_EMAIL` (`admin@localhost` unless set). **Anyone who can reach the server can
+therefore see every session and make tokens**, so keep it where only your team can reach it: on
+this machine, a private network or a VPN, or behind a proxy that asks who is there.
+
+What is sent to it still takes a token: each machine connects with one made on the Connect or
+Team page (see [People, tokens and sign-in](people-and-tokens.md)), and its sessions are filed
+under that token's person. Signing in with Google or GitHub, and a dashboard where each person
+sees only their own sessions, are the [hosted service's](https://app.sessionly.dev).
+
 ## Before anyone else uses it
 
 - **Put it behind HTTPS.** The `sessionly` binary refuses plain `http://` for anything but
   this machine (`localhost`, `127.0.0.1`, `[::1]`).
-- **Decide how people get in**: a token an admin makes for each, or signing in with Google or
-  GitHub. See [People, tokens and sign-in](people-and-tokens.md).
+- **Decide who can reach it**: anyone who can is its admin (see [above](#nobody-signs-in)).
 - **Know what the dashboard sends**: it counts which of its pages are opened, and
   `SESSIONLY_TELEMETRY=off` stops that. See [Dashboard](dashboard.md#page-counts).
 

@@ -158,10 +158,15 @@ The server receives uploads and serves the team dashboard. Use the hosted one at
 [app.sessionly.dev](https://app.sessionly.dev) (free during early access), or run your own:
 
 ```sh
-SESSIONLY_ADMIN_TOKEN=choose-a-long-secret docker compose up -d
-sessionly connect http://127.0.0.1:8080
+docker compose up -d
+# open http://127.0.0.1:8080, make a token on the Connect page, then:
+sessionly connect http://127.0.0.1:8080 --token sly_…
 sessionly upload
 ```
+
+A server of your own has no sign-in: whoever can reach it is its admin, so keep it on a network
+you trust. Signing in with Google or GitHub, with people who see only their own sessions, is the
+hosted service's.
 
 Owners can export everything as JSONL or delete the organisation at any time. More:
 [Server](docs-site/server.md), [Uploading](docs-site/uploading.md),

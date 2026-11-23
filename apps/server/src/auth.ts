@@ -62,8 +62,11 @@ export interface NewToken {
   role: Role;
   /** The person it is tied to. Left out, a person of that address in the organisation is looked for. */
   userId?: string | null;
-  /** Set for a token someone got by signing in, which also expires. */
-  signIn?: ProviderName;
+  /**
+   * Set for a token someone got by signing in, which also expires; "open"
+   * for one the dashboard of a server of your own got without signing in.
+   */
+  signIn?: ProviderName | "open";
   expiresAt?: Date;
 }
 
@@ -184,18 +187,22 @@ export async function authenticate(
     [digest],
   );
   const row = rows[0];
-  return row
-    ? {
-        orgId: row.org_id,
-        email: row.email,
-        name: row.name,
-        role: row.role,
-        tokenId: row.id,
-        userId: row.user_id,
-        signedIn: row.sign_in !== null,
-        // Signed in as the owner. A token for their laptop says the same
-        // person and is not: it must not be able to delete the organisation.
-        owner: row.sign_in !== null && row.user_role === "owner",
-      }
-    : null;
+  // The dashboard of a server of your own, opened without signing in. A
+  // hosted service never hands one out, and takes none.
+  const opened = row?.sign_in === "open";
+  if (!row || (opened && options?.hosted === true)) return null;
+  return {
+    orgId: row.org_id,
+    email: row.email,
+    name: row.name,
+    role: row.role,
+    tokenId: row.id,
+    userId: row.user_id,
+    // Nobody vouched for the address of an opened dashboard.
+    signedIn: row.sign_in !== null && !opened,
+    // Signed in as the owner. A token for their laptop says the same
+    // person and is not: it must not be able to delete the organisation.
+    // An opened dashboard is the owner as the admin token is: for export.
+    owner: opened || (row.sign_in !== null && row.user_role === "owner"),
+  };
 }

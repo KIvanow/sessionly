@@ -4,11 +4,12 @@
 //   DATABASE_URL           postgres://… ; default: an embedded database in apps/server/data
 //   SESSIONLY_DB_POOL      Postgres only: connections kept at most (default 10)
 //   SESSIONLY_DB_QUERY_SECONDS  Postgres only: how long a statement may take (default 30, a day at most)
-//   SESSIONLY_ADMIN_TOKEN  an admin token that always works (for first use)
-//   SESSIONLY_ADMIN_EMAIL  whose sessions uploads with that token belong to
+//   SESSIONLY_ADMIN_TOKEN  an admin token that always works (optional: for scripts and CI)
+//   SESSIONLY_ADMIN_EMAIL  whose the dashboard is, which opens without signing in, and
+//                          whose sessions uploads with that token belong to
 //   SESSIONLY_HOSTED       "true" for a service that many organisations share
-// Signing in with Google or GitHub (and, hosted, signing up) needs the public
-// address and the id and secret of at least one of the two:
+// Hosted only, signing in and signing up with Google or GitHub needs the
+// public address and the id and secret of at least one of the two:
 //   SESSIONLY_PUBLIC_URL   where people reach the dashboard, e.g. https://app.example.com
 //   SESSIONLY_GOOGLE_CLIENT_ID, SESSIONLY_GOOGLE_CLIENT_SECRET
 //                          of an OAuth client (a "Web application") in Google Cloud, whose redirect
@@ -158,10 +159,14 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
   }
   return {
     hosted,
-    providers: PROVIDER_NAMES.flatMap((name) => {
-      const client = clientOf(env, name);
-      return client ? [MAKERS[name](client)] : [];
-    }),
+    // Signing in is the hosted service's: a server of your own opens its dashboard without it.
+    providers: hosted
+      ? PROVIDER_NAMES.flatMap((name) => {
+          const client = clientOf(env, name);
+          return client ? [MAKERS[name](client)] : [];
+        })
+      : [],
+    admin: env.SESSIONLY_ADMIN_EMAIL?.trim() || undefined,
     publicUrl,
     signup: env.SESSIONLY_SIGNUP === "off" ? "off" : "open",
     signupCode: env.SESSIONLY_SIGNUP_CODE?.trim() || undefined,
@@ -179,16 +184,24 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
  */
 export function unheeded(env: NodeJS.ProcessEnv): string[] {
   const notes = misset(env, COUNTS);
+  const hosted = env.SESSIONLY_HOSTED === "true";
   for (const name of PROVIDER_NAMES) {
     const [id, secret] = settingsOf(name);
-    if (Boolean(env[id]?.trim()) !== Boolean(env[secret]?.trim())) {
+    if (!hosted) {
+      const set = [id, secret].filter((setting) => env[setting]?.trim());
+      if (set.length) {
+        notes.push(
+          `${set.join(" and ")} ${set.length === 1 ? "is" : "are"} set, but signing in with ${LABELS[name]} is for the hosted service: this server's dashboard opens without signing in, and ${set.length === 1 ? "it is" : "they are"} not used.`,
+        );
+      }
+    } else if (Boolean(env[id]?.trim()) !== Boolean(env[secret]?.trim())) {
       notes.push(`Only one of ${id} and ${secret} is set: signing in with ${LABELS[name]} needs both, and is off.`);
     } else if (clientOf(env, name) && !env.SESSIONLY_PUBLIC_URL?.trim()) {
       notes.push(`${id} is set, but SESSIONLY_PUBLIC_URL is not: signing in with ${LABELS[name]} is off, since it has nowhere to send people back to.`);
     }
   }
   const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim() ?? "";
-  if (publicUrl.startsWith("http://") && !ON_THIS_MACHINE.test(publicUrl) && PROVIDER_NAMES.some((name) => clientOf(env, name))) {
+  if (hosted && publicUrl.startsWith("http://") && !ON_THIS_MACHINE.test(publicUrl) && PROVIDER_NAMES.some((name) => clientOf(env, name))) {
     notes.push(
       "SESSIONLY_PUBLIC_URL is plain HTTP on a host that is not this machine: sign-ins and tokens cross the network in clear. Put it behind HTTPS.",
     );
@@ -267,7 +280,7 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
     telemetry,
     extensions: options.extensions?.(),
     bootstrap: adminToken
-      ? { token: adminToken, email: process.env.SESSIONLY_ADMIN_EMAIL ?? "admin@localhost" }
+      ? { token: adminToken, email: accounts.admin ?? "admin@localhost" }
       : undefined,
   });
 
@@ -332,9 +345,9 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       const ways = offered.providers.map((name) => LABELS[name]).join(" and ");
       console.log(`Signing in with ${ways} is on${offered.signup ? ", and anyone may sign up" : ""}${offered.signup && offered.inviteCode ? " with the invitation code" : ""}.`);
     }
-    if (!adminToken && !hosted) {
+    if (offered.noSignIn) {
       console.log(
-        "No SESSIONLY_ADMIN_TOKEN set: create tokens with `pnpm token create --email you@example.com --role admin`",
+        `The dashboard opens without signing in, as ${accounts.admin ?? "admin@localhost"}: anyone who can reach this server is its admin. Machines connect with a token from its Connect page.`,
       );
     }
   });

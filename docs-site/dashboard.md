@@ -6,8 +6,9 @@ parent: Server
 
 # Dashboard
 
-Sign in with a token, or with Google or GitHub where the server is set up for them. An admin
-sees the whole team; a member sees their own sessions. The dashboard has the website's look,
+On a server of your own it opens without signing in, as its admin (see
+[Server](server.md#nobody-signs-in)). On the hosted service you sign in with Google or GitHub,
+or with a token. An admin sees the whole team; a member sees their own sessions. The dashboard has the website's look,
 light or dark as the system is, and serves the same two typefaces itself, from
 `apps/web/public/fonts/`.
 
@@ -70,8 +71,9 @@ of each prompt (see [What an upload contains](upload-contents.md)).
 ## What the browser keeps
 
 Being signed in is kept in the browser's local storage: the token you signed in with, or the
-one the server gave when you signed in with Google or GitHub, for each organisation. Signing
-out removes it. Nothing else is kept, and counting pages (below) keeps nothing at all.
+one the server gave when you signed in with Google or GitHub, for each organisation, or when
+the dashboard of a server of your own opened (it lasts a week, and the dashboard then gets
+another). Signing out removes it. Nothing else is kept, and counting pages (below) keeps nothing at all.
 
 ## Page counts
 

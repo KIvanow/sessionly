@@ -36,6 +36,11 @@ export type SignInProvider = "google" | "github";
 export interface AuthOptions {
   /** A service many organisations share. */
   hosted: boolean;
+  /**
+   * A server of your own: the dashboard opens as its admin, with nobody
+   * signing in (`POST /auth/open`). Not there from a server from before.
+   */
+  noSignIn?: boolean;
   /** What people can sign in with. Empty: by token only. */
   providers: SignInProvider[];
   /** Anyone can create an organisation. */

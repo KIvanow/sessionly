@@ -48,7 +48,7 @@ What to know about the command line:
 - It makes `admin` and `member` tokens only. A `ci` or `env` token is made on the Team page or
   through the API.
 - With the embedded database, stop the server first: one process at a time can open it.
-- **It does not read the `.env` file.** `pnpm server` does; these commands take `DATABASE_URL`
+- **It does not read the `.env` file.** `pnpm run server` does; these commands take `DATABASE_URL`
   from the environment only, and without it they open the embedded database. For a server on
   Postgres whose address is in `.env`, give it on the command line:
   `DATABASE_URL=postgres://… pnpm token list`.
@@ -56,9 +56,11 @@ What to know about the command line:
 
 ## Signing in with Google or GitHub
 
-With the [settings](server-configuration.md) for either (with Docker
-Compose, put them in a `.env` file beside `docker-compose.yml`, which passes them on), an
-admin adds
+On a server of your own nobody signs in: the dashboard opens as its admin,
+`SESSIONLY_ADMIN_EMAIL`, for whoever can reach it (see [Server](server.md#nobody-signs-in)),
+and people get in with tokens, as above. Signing in is the hosted service's.
+
+There, with the [settings](server-configuration.md) for either, an admin adds
 people by their email address on the Team page (`POST /api/v1/users`), and each signs in with
 an account that has that address: a Google account's address, or any address GitHub has
 verified for a GitHub account. Nothing is sent to anyone, and no password is kept: what is
@@ -71,8 +73,8 @@ the only one that gets in as them there, whoever else comes to have the address.
 account is gone, another admin lets them in with a new one from the Team page.
 
 People then make the tokens for their own machines on the Connect page
-(`POST /api/v1/me/tokens`). Without those settings there are only tokens, as above, and the
-Team page has no list of people.
+(`POST /api/v1/me/tokens`). Without those settings, or on a server of your own, there are only
+tokens, as above, and the Team page has no list of people.
 
 **Removing a person** ends their sign-in and revokes their `admin` and `member` tokens. A `ci`
 token made under their address keeps reporting pull requests. An `env` token keeps working, and
@@ -85,7 +87,8 @@ sessions and the repositories they stopped. Ticking it forgets those repositorie
 the person again does not stop them.
 
 **The owner** is who signed an organisation up on a hosted service; a server of your own has
-none, and there the admin token from the environment is the owner for a download. An owner
+none, and there the dashboard and the admin token from the environment are the owner for a
+download. An owner
 cannot be removed, and only an admin who has signed in (not one with a token) can let an
 owner in with a new account. For an owner with no other admin,
 `pnpm person forget-account --email owner@example.com` does (with the embedded database,

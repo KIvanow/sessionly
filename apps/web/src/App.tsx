@@ -103,6 +103,8 @@ export function App() {
   const [leaving, setLeaving] = useState(false);
   /** Sessions the server could not be told to end, kept (not stored) to try again. */
   const [unended, setUnended] = useState<string[]>([]);
+  /** Why a server that opens without signing in did not: a token is the way in then. */
+  const [unopened, setUnopened] = useState<string | null>(null);
 
   const use = (value: string | null) => {
     saveToken(value);
@@ -162,6 +164,19 @@ export function App() {
       // An older server, or none: a token is the way in.
       .catch(() => setOptions({ hosted: false, providers: [], signup: false, inviteCode: false }));
   }, []);
+
+  // A server of your own opens without signing in: it hands this browser a
+  // session as its admin, and another once that one runs out.
+  useEffect(() => {
+    if (token || !options?.noSignIn || unopened) return;
+    let current = true;
+    open<SignedIn>("/auth/open", {})
+      .then((opened) => current && (setProblem(null), use(opened.token)))
+      .catch((err: Error) => current && setUnopened(err.message));
+    return () => {
+      current = false;
+    };
+  }, [token, options, unopened]);
 
   /** Signed in: this browser keeps the session, and shows the organisation. */
   const signedIn = (signed: SignedIn) => {
@@ -254,11 +269,19 @@ export function App() {
       />
     );
   }
+  if (!token && (!options || (options.noSignIn && !unopened))) {
+    return (
+      <main className="center">
+        <Brand />
+        <p>Loading…</p>
+      </main>
+    );
+  }
   if (!token) {
     return (
       <Login
         options={options}
-        problem={problem}
+        problem={unopened ? `The dashboard could not be opened: ${unopened}` : problem}
         onRetry={unended.length ? endAgain : undefined}
         onToken={(value) => {
           setProblem(null);
@@ -304,7 +327,7 @@ const HEADINGS: Record<string, { title: string; about: string }> = {
   "": { title: "Overview", about: "What the agents did, what it cost, and how much of what they wrote is still there." },
   sessions: { title: "Sessions", about: "Every session that was uploaded, newest first." },
   pulls: { title: "Pull requests", about: "How much of each pull request agents wrote, and how those lines fared in review." },
-  team: { title: "Team", about: "Who can sign in, and the tokens for what cannot." },
+  team: { title: "Team", about: "Who can get in, and the tokens machines and services connect with." },
   connect: { title: "Connect", about: "A token for each of your machines, and how to capture sessions elsewhere." },
 };
 
@@ -459,7 +482,7 @@ function Shell({
             <span>
               {me.email} · {me.role}
             </span>
-            <button onClick={onLeave}>Sign out</button>
+            {!auth?.noSignIn && <button onClick={onLeave}>Sign out</button>}
           </span>
         </div>
       </header>

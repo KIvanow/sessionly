@@ -181,21 +181,23 @@ async function quietly<T>(fn: () => Promise<T>): Promise<{ out: T; errors: strin
 test("what the server offers depends on how it is set up", async () => {
   assert.deepEqual((await call(app, "GET", "/auth/options")).body, {
     hosted: true,
+    noSignIn: false,
     providers: ["google", "github"],
     signup: true,
     inviteCode: false,
     publicUrl: "https://app.test",
   });
-  // A self-hosted install with one provider: people sign in, nobody signs up.
+  // A self-hosted install, even with a provider: nobody signs in, or up; the dashboard opens.
   assert.deepEqual(offers({ providers: [provider("github")], publicUrl: "https://s.test/" }), {
     hosted: false,
-    providers: ["github"],
+    noSignIn: true,
+    providers: [],
     signup: false,
     inviteCode: false,
-    publicUrl: "https://s.test",
+    publicUrl: null,
   });
   // Without a provider, or without an address for one to send people back to, there are only tokens.
-  assert.deepEqual(offers({ hosted: true }), { hosted: true, providers: [], signup: false, inviteCode: false, publicUrl: null });
+  assert.deepEqual(offers({ hosted: true }), { hosted: true, noSignIn: false, providers: [], signup: false, inviteCode: false, publicUrl: null });
   assert.equal(offers({ hosted: true, publicUrl: "https://app.test" }).publicUrl, null);
   assert.deepEqual(offers({ hosted: true, providers: hosted.providers }).providers, []);
   assert.equal(offers({ ...hosted, signup: "off" }).signup, false);
@@ -211,6 +213,41 @@ test("what the server offers depends on how it is set up", async () => {
   assert.equal((await leave({ server: one, provider: "github" })).to.host, "github.test");
   // Any other name is no route of these: it is the API's to refuse, as anything without a token.
   assert.equal((await app.request("/api/v1/auth/gitlab")).status, 401);
+});
+
+test("a server of your own opens its dashboard as its admin, and a hosted service does not", async () => {
+  const own = createApp(db, { accounts: { admin: "kris@example.com", providers: [provider("google")], publicUrl: "https://s.test" } });
+  assert.equal((await call(own, "GET", "/auth/options")).body.noSignIn, true);
+  // Signing in with a provider is the hosted service's, whatever is set up.
+  assert.equal((await own.request("/api/v1/auth/google")).status, 404);
+  const opened = await call(own, "POST", "/auth/open", { body: {} });
+  assert.equal(opened.status, 200, JSON.stringify(opened.body));
+  assert.deepEqual([opened.body.org.id, opened.body.email, opened.body.role, opened.body.created], ["default", "kris@example.com", "admin", false]);
+  assert.ok(Date.parse(opened.body.expires_at) > Date.now() + 6 * 86_400_000);
+  // As the admin, and the owner, as the admin token is: nobody vouched for the address.
+  const me = await call(own, "GET", "/me", { token: opened.body.token });
+  assert.deepEqual([me.body.role, me.body.owner, me.body.signed_in], ["admin", true, false]);
+  // It is no token of the Team page's, and it ends as a sign-in does.
+  const listed = await call(own, "GET", "/tokens", { token: opened.body.token });
+  assert.ok(!listed.body.tokens.some((t: { email: string }) => t.email === "kris@example.com"));
+  // Without the address, it is the admin's of the environment.
+  assert.equal((await call(createApp(db, {}), "POST", "/auth/open", { body: {} })).body.email, "admin@localhost");
+  // The rest of the API still takes a token: an upload without one is refused.
+  assert.equal((await call(own, "GET", "/sessions")).status, 401);
+  // Asked by the dashboard only: another site cannot have one made.
+  const elsewhere = await own.request("/api/v1/auth/open", {
+    method: "POST",
+    headers: { "content-type": "application/json", "sec-fetch-site": "cross-site" },
+    body: "{}",
+  });
+  assert.equal(elsewhere.status, 403);
+  // A hosted service opens nothing, and takes no such session.
+  const refused = await call(app, "POST", "/auth/open", { body: {} });
+  assert.deepEqual([refused.status, refused.body.code], [404, "sign_in"]);
+  assert.equal((await call(app, "GET", "/me", { token: opened.body.token })).status, 401);
+  const out = await call(own, "DELETE", "/auth/session", { token: opened.body.token });
+  assert.equal(out.status, 200);
+  assert.equal((await call(own, "GET", "/me", { token: opened.body.token })).status, 401);
 });
 
 test("the browser that comes back from a provider must be the one that left", async () => {
@@ -1322,7 +1359,7 @@ test("the environment sets how people get in", () => {
   const both = { ...env, SESSIONLY_GOOGLE_CLIENT_ID: "test.apps.googleusercontent.com", SESSIONLY_GOOGLE_CLIENT_SECRET: "secret-of-google" };
   assert.deepEqual(hostedProblems(env), []);
   const accounts = accountsFrom(env);
-  assert.deepEqual(offers(accounts), { hosted: true, providers: ["github"], signup: true, inviteCode: false, publicUrl: "https://app.example.com" });
+  assert.deepEqual(offers(accounts), { hosted: true, noSignIn: false, providers: ["github"], signup: true, inviteCode: false, publicUrl: "https://app.example.com" });
   assert.deepEqual(offers(accountsFrom(both)).providers, ["google", "github"]);
   // Each sends the browser to its own, with this server's id and never its secret.
   const [google, github] = accountsFrom(both).providers ?? [];
@@ -1370,17 +1407,14 @@ test("the environment sets how people get in", () => {
     assert.deepEqual(hostedProblems({ ...env, SESSIONLY_PUBLIC_URL: here }), [], here);
   }
   assert.deepEqual(offers(accountsFrom({ ...env, SESSIONLY_GITHUB_CLIENT_SECRET: " " })).providers, []);
-  // A single install: no limits, no signing up, and signing in only if it is set up.
+  // A single install: no limits, no signing up, and no signing in, even with a provider set up.
   const single = accountsFrom({});
-  assert.deepEqual(offers(single), { hosted: false, providers: [], signup: false, inviteCode: false, publicUrl: null });
+  assert.deepEqual(offers(single), { hosted: false, noSignIn: true, providers: [], signup: false, inviteCode: false, publicUrl: null });
   assert.equal(single.ratePerMinute, undefined);
-  assert.deepEqual(offers(accountsFrom({ ...both, SESSIONLY_HOSTED: undefined })), {
-    hosted: false,
-    providers: ["google", "github"],
-    signup: false,
-    inviteCode: false,
-    publicUrl: "https://app.example.com",
-  });
+  const own = accountsFrom({ ...both, SESSIONLY_HOSTED: undefined, SESSIONLY_ADMIN_EMAIL: " kris@example.com " });
+  assert.deepEqual(own.providers, []);
+  assert.equal(own.admin, "kris@example.com");
+  assert.deepEqual(offers(own), { hosted: false, noSignIn: true, providers: [], signup: false, inviteCode: false, publicUrl: null });
   assert.throws(() => accountsFrom({ SESSIONLY_PUBLIC_URL: "app.example.com/x" }), /SESSIONLY_PUBLIC_URL/);
 });
 
@@ -1441,22 +1475,23 @@ test("people from before the account was kept are asked as someone new, and then
 
 test("a setting that does nothing as it is set is said at the start", () => {
   assert.deepEqual(unheeded({}), []);
-  // Half of what a provider needs, or all of it and nowhere to send people back to.
-  const half = unheeded({ SESSIONLY_GOOGLE_CLIENT_ID: "id", SESSIONLY_PUBLIC_URL: "https://app.example.com" });
+  // Hosted: half of what a provider needs, or all of it and nowhere to send people back to.
+  const hosting = { SESSIONLY_HOSTED: "true" };
+  const half = unheeded({ ...hosting, SESSIONLY_GOOGLE_CLIENT_ID: "id", SESSIONLY_PUBLIC_URL: "https://app.example.com" });
   assert.deepEqual(half, [
     "Only one of SESSIONLY_GOOGLE_CLIENT_ID and SESSIONLY_GOOGLE_CLIENT_SECRET is set: signing in with Google needs both, and is off.",
   ]);
   assert.match(
-    unheeded({ SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "s" }).join(),
+    unheeded({ ...hosting, SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "s" }).join(),
     /^SESSIONLY_GITHUB_CLIENT_ID is set, but SESSIONLY_PUBLIC_URL is not: signing in with GitHub is off/,
   );
   assert.deepEqual(
-    unheeded({ SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "s", SESSIONLY_PUBLIC_URL: "https://app.example.com" }),
+    unheeded({ ...hosting, SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "s", SESSIONLY_PUBLIC_URL: "https://app.example.com" }),
     [],
   );
-  // A team's own server may be tried over plain HTTP on its own machine,
-  // and is told if it is set up that way anywhere else.
-  const github = { SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "s" };
+  // A hosted service may be tried over plain HTTP on its own machine, and
+  // is told if it is set up that way anywhere else.
+  const github = { ...hosting, SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "s" };
   for (const here of ["http://localhost:8080", "http://127.0.0.1:8080/", "http://[::1]:8080", "http://localhost"]) {
     assert.deepEqual(unheeded({ ...github, SESSIONLY_PUBLIC_URL: here }), [], here);
   }
@@ -1464,6 +1499,14 @@ test("a setting that does nothing as it is set is said at the start", () => {
     assert.match(unheeded({ ...github, SESSIONLY_PUBLIC_URL: there }).join(), /^SESSIONLY_PUBLIC_URL is plain HTTP on a host that is not this machine/, there);
   }
   assert.deepEqual(unheeded({ SESSIONLY_PUBLIC_URL: "http://sessionly.corp.example" }), []);
+  // A server of your own opens without signing in: either half of a provider is said once, as not used.
+  assert.deepEqual(
+    unheeded({ SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "s", SESSIONLY_GOOGLE_CLIENT_SECRET: "s", SESSIONLY_PUBLIC_URL: "http://10.0.0.5:8080" }),
+    [
+      "SESSIONLY_GOOGLE_CLIENT_SECRET is set, but signing in with Google is for the hosted service: this server's dashboard opens without signing in, and it is not used.",
+      "SESSIONLY_GITHUB_CLIENT_ID and SESSIONLY_GITHUB_CLIENT_SECRET are set, but signing in with GitHub is for the hosted service: this server's dashboard opens without signing in, and they are not used.",
+    ],
+  );
   // What sent the links that people signed in with before.
   assert.deepEqual(unheeded({ RESEND_API_KEY: "re_test", SESSIONLY_EMAIL_FROM: "a@b.example" }), [
     "RESEND_API_KEY and SESSIONLY_EMAIL_FROM are set, but no email is sent any more: people sign in with Google or GitHub.",
