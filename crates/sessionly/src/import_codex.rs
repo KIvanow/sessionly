@@ -1594,6 +1594,7 @@ pub fn session(
     // Each review with the thread it ran in: the reviewer that began while
     // the review was on, each one once.
     reviewers.sort_by(|a, b| a.1.cmp(&b.1));
+    const SAME_START: i64 = crate::reviews::SAME_START_SECONDS;
     for (i, review) in main.reviews.iter().enumerate() {
         // One left without an end was on until the next one began.
         let next = main.reviews.get(i + 1).and_then(|r| parse_time(&r.at));
@@ -1602,10 +1603,10 @@ pub fn session(
                 return false;
             };
             let end = review.ended.as_deref().and_then(parse_time);
-            (start - began).num_seconds() <= 5
+            (start - began).num_seconds() <= SAME_START
                 && match end {
                     Some(end) => began <= end,
-                    None => next.is_none_or(|next| (next - began).num_seconds() > 5),
+                    None => next.is_none_or(|next| (next - began).num_seconds() > SAME_START),
                 }
         };
         let ran_in = reviewers.iter().position(|(_, began)| within(began));

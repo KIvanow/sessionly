@@ -738,26 +738,17 @@ fn scan(
     Ok((usage, last_reply.map(|(_, all)| all.join("\n"))))
 }
 
-/// A review command that forked, from the row that says where:
-/// `<forked-skill-launch>{"agentId":…,"skillName":…,"description":"/code-review high"}`.
+/// A review command that forked, from the row that says where (see
+/// `reviews::forked_launch`).
 fn review_launch(said: &str) -> Option<ReviewLaunch> {
-    const OPEN: &str = "<forked-skill-launch>";
-    let start = said.find(OPEN)? + OPEN.len();
-    let end = said[start..].find("</forked-skill-launch>")? + start;
-    let launch: Value = serde_json::from_str(said[start..end].trim()).ok()?;
-    let command = launch["skillName"].as_str()?;
-    if !crate::reviews::is_review(command) {
-        return None;
-    }
-    let typed = launch["description"].as_str().unwrap_or_default();
-    let args = crate::reviews::slash_command(typed).map_or("", |(_, args)| args);
-    let (effort, pull_number) = crate::reviews::parse_args(args);
+    let launch = crate::reviews::forked_launch(said)?;
+    let (effort, pull_number) = crate::reviews::parse_args(&launch.args);
     Some(ReviewLaunch {
         at: None,
-        command: command.to_string(),
+        command: launch.command,
         effort,
         pull_number,
-        agent_id: launch["agentId"].as_str()?.to_string(),
+        agent_id: launch.agent_id?,
     })
 }
 

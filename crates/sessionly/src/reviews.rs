@@ -40,8 +40,9 @@ const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 /// How far into a reply its number of findings is looked for: its first lines.
 const FINDINGS_WITHIN: usize = 400;
 
-/// A typed command and the prompt it is in, taken as one start within this.
-const SAME_START_SECONDS: i64 = 5;
+/// A typed command and the prompt it is in, taken as one start within this;
+/// so are a review and the thread its reviewer began in.
+pub const SAME_START_SECONDS: i64 = 5;
 
 /// True for an agent whose review commands are read. A session of another
 /// has no count: not known, which is not none.
@@ -118,6 +119,36 @@ fn pull_number(word: &str) -> Option<u64> {
     } else {
         None
     }
+}
+
+/// A review command that forked a subagent to run in, as the transcript's row
+/// for it says:
+/// `<forked-skill-launch>{"agentId":…,"skillName":…,"description":"/code-review high"}`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForkedLaunch {
+    pub command: String,
+    /// The arguments as typed.
+    pub args: String,
+    pub agent_id: Option<String>,
+}
+
+/// The forked review command in `said`, if it has one: read here only.
+pub fn forked_launch(said: &str) -> Option<ForkedLaunch> {
+    const OPEN: &str = "<forked-skill-launch>";
+    let start = said.find(OPEN)? + OPEN.len();
+    let end = said[start..].find("</forked-skill-launch>")? + start;
+    let launch: Value = serde_json::from_str(said[start..end].trim()).ok()?;
+    let command = launch["skillName"]
+        .as_str()
+        .filter(|name| is_review(name))?;
+    let typed = launch["description"].as_str().unwrap_or_default();
+    Some(ForkedLaunch {
+        command: command.to_string(),
+        args: slash_command(typed)
+            .map_or("", |(_, args)| args)
+            .to_string(),
+        agent_id: launch["agentId"].as_str().map(String::from),
+    })
 }
 
 /// A review target as the record names it: `baseBranch` → `base_branch`.
@@ -1126,6 +1157,26 @@ mod tests {
         e["source"] = json!("codex");
         let s = from_events(&[e], None, "codex").unwrap();
         assert!(s.reviews.is_empty());
+    }
+
+    #[test]
+    fn a_forked_launch_names_the_command_its_arguments_and_the_subagent() {
+        let row = |skill: &str| {
+            format!(
+                "<forked-skill-launch>{{\"agentId\":\"a1\",\"skillName\":\"{skill}\",\
+                 \"description\":\"/{skill} high #7\"}}</forked-skill-launch>"
+            )
+        };
+        assert_eq!(
+            forked_launch(&row("code-review")),
+            Some(ForkedLaunch {
+                command: "code-review".into(),
+                args: "high #7".into(),
+                agent_id: Some("a1".into()),
+            })
+        );
+        assert_eq!(forked_launch(&row("deploy")), None);
+        assert_eq!(forked_launch("<forked-skill-launch>not json"), None);
     }
 
     #[test]

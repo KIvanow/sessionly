@@ -87,19 +87,13 @@ fn review_command(row: &Value) -> Option<Value> {
         Some(text[start..end].trim().to_string())
     };
     // A typed command that forks says so in a row of its own.
-    if let Some(launch) = between("<forked-skill-launch>", "</forked-skill-launch>") {
-        let launch: Value = serde_json::from_str(&launch).ok()?;
-        let name = launch["skillName"].as_str()?;
-        if !crate::reviews::is_review(name) {
-            return None;
-        }
-        let typed = launch["description"].as_str().unwrap_or_default();
-        let args = crate::reviews::slash_command(typed).map_or("", |(_, args)| args);
+    if text.contains("<forked-skill-launch>") {
+        let launch = crate::reviews::forked_launch(&text)?;
         return Some(json!({
             "expansion_type": "slash_command",
-            "command_name": name,
-            "command_args": args,
-            "forked_agent_id": launch["agentId"],
+            "command_name": launch.command,
+            "command_args": launch.args,
+            "forked_agent_id": launch.agent_id,
         }));
     }
     let name = between("<command-name>", "</command-name>")?;

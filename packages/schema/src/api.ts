@@ -1,6 +1,6 @@
 // Shapes of the server's answers to the dashboard. Shared by the server,
 // which produces them, and the web app, which reads them.
-import type { Upload } from "./upload.ts";
+import type { ReviewRun, Upload } from "./upload.ts";
 
 /**
  * `ci` is for the GitHub Action: it can report pull requests and nothing
@@ -636,10 +636,10 @@ export interface LocalReviewRun {
   /** What was run: "code-review", "ultrareview". */
   command: string;
   effort: string | null;
-  /** "local" or "cloud". */
-  ran: string;
-  /** "skill" (the agent ran it) or "slash_command" (a person typed it). */
-  via: string;
+  /** Where the review itself ran. */
+  ran: NonNullable<ReviewRun["ran"]>;
+  /** "skill" (the agent ran it), "slash_command" (a person typed it) or "codex_review" (Codex's `/review`). */
+  via: NonNullable<ReviewRun["via"]>;
   /** What Codex's `/review` was pointed at: "base_branch", "uncommitted_changes", "commit", "custom". Null for the others. */
   target: string | null;
   /** False for a run that names no pull request, counted here because its session is matched to this one or is on its branch. */
