@@ -187,11 +187,16 @@ The **Pull requests** page (admins) then shows, for the period, repository and s
   by bots (CodeRabbit and the like);
 - on a pull request's own page (its name in the list leads there): the sessions that wrote its
   lines, each a link to the session; its files, with how much of each an agent wrote; and its
-  reviews and comments, counted apart for people, bots and the author, each with who, when,
-  which line, and a link to it on GitHub. What reviews and comments say is not sent to the
-  server and not stored;
+  reviews and comments, a row for each reviewer under people, bots and the author (reviews,
+  those asking for changes, comments on the diff, replies, comments in the conversation), and
+  each one with who, when, which line, and a link to it on GitHub. What reviews and comments
+  say is not sent to the server and not stored;
 - **by model**: the same summed, so you can see whose lines get through review as written and
-  whose take several rounds.
+  whose take several rounds;
+- **review bots**: each bot that reviewed these pull requests, and all people together: how
+  many pull requests, comments on the diff, and the rounds that followed its feedback alone
+  or with someone else's (see [Rounds by who asked](#rounds-by-who-asked)). Shown once a bot
+  has reviewed one of them.
 
 **The list starts on merged pull requests.** Open and closed ones are there once you change the
 state filter. The period goes by when a pull request was merged or closed, or for an open one
@@ -260,6 +265,70 @@ is billed apart and has none. The list has a Local column, and **by model** the 
 pull request. A matched session that was deleted since, that came from a Sessionly that
 did not count review runs, or that is a Codex session whose rollout was not there to read, is
 said to be not known.
+
+## Rounds by who asked
+
+The rounds of a pull request are one number. Beside it the page says whose feedback they
+followed: **after bots only**, **after people only**, or **after both**. The list has it as
+the title of the rounds figure, and the **Review bots** table sums it for each bot.
+
+- **A round** is what it is for the rounds figure: review feedback (a review that comments or
+  asks for changes, or a comment on the diff, a reply too, from anyone but the author) followed
+  by a new commit. An approval and a comment in the conversation are not feedback.
+- **Its kind** is that of the feedback before that commit, since the round before: all of it
+  by bots, all of it by people, or some of each. The three always add up to the rounds figure.
+- **For one bot**, a round is its own alone when nobody else gave feedback before it, no other
+  bot either, and shared otherwise. For people, who are one row together, a round is theirs
+  alone when only people did.
+- **To review** is to submit a review or comment on the diff. A bot that only posts in the
+  conversation (a preview's address, a coverage report) is not in the Review bots table.
+- **Comments on the diff** in the table of reviewers and in the Review bots table are those
+  that start a thread. Replies are counted apart: a bot that answers each of the author's
+  replies has not found more.
+
+**Version 0.4.0 of the Action says whose feedback each round followed**, from the commits'
+own times, as it counts the rounds. That is exact, and known for every pull request it
+reports, whenever it was first reported.
+
+**A pull request last reported by an older Action** has only what the server can tell from
+what it already has: the reviews and comments, and the times its reports arrived. It counts a
+push with feedback since the push before as a round, and keeps the result only where all of
+this holds; otherwise the page says the split is not known, and why, and gives no number:
+
+- the server saw the pull request being opened (its first report came within an hour of
+  that, and no report of more commits in the same seconds; one first reported later, or
+  brought in with `backfill`, was not);
+- its earliest reports are still kept (the latest 50 are);
+- all of its reviews and comments are kept (it has no more than 2,000);
+- every push was reported at its own time: where the commits of a push first show in a report
+  that something else prompted (a review, the merge), the report of the push never came, and
+  when it was pushed is not known;
+- the pushes seen come to as many rounds as the Action counted. A push that left no report
+  (an amended commit pushed over the last one, with as many lines), a report that arrived
+  late, and a comment made while a report was on its way mostly give another number.
+
+Where the numbers agree, a round may still be put down to the wrong kind when feedback
+arrived in the minutes between a push and its report. The page and the list say of such a
+split that it was told from when the reports arrived. Running the workflow again with the
+newer Action settles it.
+
+A pull request with no rounds has none of any kind, whichever Action reported it.
+
+The Review bots table says for how many of a bot's pull requests the rounds are known, and
+counts rounds over those only; and for how many of those they were told from when the reports
+arrived. Its other figures are over all of them.
+
+A pull request stored by a server from before this was worked out gets it when the server
+starts after the upgrade, and at **Match again** where its lines can be matched again: neither
+asks GitHub.
+
+**Limits.**
+
+- A bot that posts through a person's account (with a user's token) counts as a person.
+- A rebase that rewrites the commits' dates moves them after the feedback they came before:
+  the rounds figure and its split both count such a rebase as a round.
+- More comments or more rounds do not mean worse code: a careful team has more. Read them
+  beside how many of the agent's lines survived review.
 
 ## How to read it
 
@@ -496,6 +565,9 @@ line without the whitespace at its ends, as the `sessionly` binary makes them).
 For each review and comment: who made it (their GitHub login, and whether that is a bot), when,
 the file and line it is on, a review's outcome, and its link on GitHub, which is what the
 pull request's page in the dashboard leads to. What a review or comment says is never sent.
+For each round of review: the logins of those whose feedback it followed, and whether each is a
+bot. They are the logins of reviews and comments as above (of all of them, also where a pull
+request has more than the 2,000 that are sent); nothing else is said of a round.
 
 For a count [after merge](#after-merge): the repository, the pull request's number, and for
 each file the server asked about, its path and a hash of each of its lines as it is on the

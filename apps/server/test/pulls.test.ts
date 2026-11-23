@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { countHashedLines, migrationAt, openDb, type Db } from "../src/db.ts";
 import { DEFAULT_ORG } from "../src/auth.ts";
 import { newOrg, testDb, testDbUrl, tokenFor } from "./helpers.ts";
-import { attribute, breakdown, charge, chargeAgain, CURRENT_ACTION, type Claim, historyChange, holdPullSessions, MATCH_AT_ONCE, olderAction, UNKNOWN_REPORTER, weigh, weighKept, weighKeptSome, writers, type SessionAt } from "../src/pulls.ts";
+import { attribute, breakdown, charge, chargeAgain, CURRENT_ACTION, type Claim, historyChange, holdPullSessions, MATCH_AT_ONCE, olderAction, type PullAt, splitReviews, unsplitPulls, UNKNOWN_REPORTER, weigh, weighKept, weighKeptSome, writers, type SessionAt } from "../src/pulls.ts";
 import { unionLines } from "../src/contributed.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
@@ -2663,4 +2663,158 @@ test("a pull request's local review runs: its sessions', and those of a session 
   await db.query(`DELETE FROM sessions WHERE session_id = 'rv-a'`);
   const gone = (await call(tokens.admin, "GET", "/prs?limit=500")).body.pulls.find((p: any) => p.repo === "github.com/acme/web" && p.number === 43);
   assert.deepEqual([gone.local_reviews.runs, gone.local_reviews.sessions_unknown], [0, 1]);
+});
+
+test("a report stores who reviewed and whose feedback each round followed; an old row gets it when matched again; the summary sums by bot", async () => {
+  const repo = "github.com/acme/split";
+  const BOT = "coderabbitai[bot]";
+  const OTHER = "sonarcloud[bot]";
+  const when = (minutes: number) => new Date(Date.parse("2026-11-10T12:00:00Z") + minutes * 60_000).toISOString();
+  const inline = (author: string, at: string, reply = false) => ({ kind: "inline", author, bot: author.endsWith("[bot]"), at, path: "src/a.ts", line: 1, reply });
+  const who = (...logins: string[]) => logins.map((author) => ({ author, bot: author.endsWith("[bot]") }));
+  const send = (number: number, more: Record<string, unknown>) =>
+    call(tokens.ci, "PUT", "/prs", report({ repo, number, url: `https://github.com/acme/split/pull/${number}`, files: [file("src/a.ts", 1)], ...more }));
+  const at = async (number: number) => (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(repo)}&number=${number}`)).body;
+  const merged = { event: "closed", state: "merged", merged_at: "2026-11-11T12:00:00Z" };
+
+  // The Action says whose feedback each round followed: a bot's, then a person's and the bot's; a last comment nothing followed.
+  const feedback = [
+    inline(BOT, when(1)), inline(BOT, when(2)),
+    { kind: "review", author: "bob", bot: false, at: when(11), state: "changes_requested" }, inline(BOT, when(12), true),
+    { kind: "conversation", author: "bob", bot: false, at: when(21) }, inline(OTHER, when(22)),
+  ];
+  assert.equal((await send(1, { feedback: [], review_round_authors: [] })).status, 200);
+  assert.deepEqual((await at(1)).review_split, { reviewers: [], rounds: { bots: 0, people: 0, both: 0 }, round_authors: [], counted_by: "commits", unknown: null });
+  await send(1, { event: "synchronize", commits: 2, review_rounds: 1, feedback: feedback.slice(0, 2), review_round_authors: [who(BOT)] });
+  assert.deepEqual((await at(1)).review_split.rounds, { bots: 1, people: 0, both: 0 });
+  await send(1, { ...merged, commits: 3, review_rounds: 2, feedback, review_round_authors: [who(BOT), who(BOT, "bob")] });
+  const one = (await at(1)).review_split;
+  assert.deepEqual(
+    [one.rounds, one.round_authors, one.counted_by, one.unknown],
+    [{ bots: 1, people: 0, both: 1 }, [who(BOT), who("bob", BOT)], "commits", null],
+  );
+  assert.deepEqual(
+    one.reviewers.map((r: any) => [r.author, r.bot, r.reviews, r.changes_requested, r.inline, r.replies, r.conversation]),
+    [[BOT, true, 0, 0, 2, 1, 0], [OTHER, true, 0, 0, 1, 0, 0], ["bob", false, 1, 1, 0, 0, 1]],
+  );
+  assert.deepEqual([one.reviewers[0].first_at, one.reviewers[0].last_at], [when(1), when(12)]);
+  // the list has the rounds by kind, and leaves who reviewed and who each round followed to the page
+  const listed = (await call(tokens.admin, "GET", `/prs?repo=${encodeURIComponent(repo)}&state=merged`)).body.pulls;
+  assert.deepEqual(listed.map((p: any) => p.review_split), [{ rounds: one.rounds, counted_by: "commits", unknown: null }]);
+
+  // What it says is taken only whole: not as many rounds as it counted, or not of the shape, and it is as if it had not said.
+  for (const bad of [[who(BOT)], [who(BOT), []], [who(BOT), [{ author: "" }]], "two", [who(BOT), who(BOT), who(BOT)]]) {
+    assert.equal((await send(1, { ...merged, commits: 3, review_rounds: 2, feedback, review_round_authors: bad })).status, 200);
+    assert.deepEqual([(await at(1)).review_split.rounds, (await at(1)).review_split.counted_by], [null, null]);
+  }
+  await send(1, { ...merged, commits: 3, review_rounds: 2, feedback, review_round_authors: [who(BOT), who(BOT, "bob")] });
+  assert.deepEqual((await at(1)).review_split, one);
+
+  // An older Action does not say. The server tells the rounds from when its reports arrived, for a pull request it
+  // saw being opened, and keeps them when they are as many as the Action counted.
+  // Reports are timed by the database's clock as they are stored, so these reviews and comments are timed by it too, between them.
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 15));
+  const now = async () => {
+    await tick();
+    const [clock] = await db.query<{ at: unknown }>(`SELECT clock_timestamp() AS at`);
+    await tick();
+    return new Date(clock!.at as string).toISOString();
+  };
+  const created_at = await now();
+  await send(2, { created_at, feedback: [] });
+  // (opened a minute ago, and reported then: a push reported in the same seconds as the opening is taken for the Action's backfill)
+  await db.query(`UPDATE pull_request_reports SET at = at - interval '1 minute' WHERE repo = $1 AND number = 2`, [repo]);
+  const alone = [inline(BOT, await now())];
+  await send(2, { created_at, event: "synchronize", commits: 2, review_rounds: 1, feedback: alone });
+  // a review reported moves no figure and is no push
+  const later = [...alone, inline("cy", await now())];
+  await send(2, { created_at, event: "review", commits: 2, review_rounds: 1, feedback: later });
+  await send(2, { created_at, ...merged, commits: 2, review_rounds: 1, feedback: later });
+  const two = (await at(2)).review_split;
+  assert.deepEqual([two.rounds, two.round_authors, two.counted_by, two.unknown], [{ bots: 1, people: 0, both: 0 }, [who(BOT)], "pushes", null]);
+  // the Action counted another number than the pushes seen come to: nothing is said
+  await send(2, { created_at, ...merged, commits: 2, review_rounds: 2, feedback: later });
+  assert.deepEqual([(await at(2)).review_split.rounds, (await at(2)).review_split.unknown], [null, "pushes_not_seen"]);
+  // only the latest reviews and comments kept
+  await send(2, { created_at, ...merged, commits: 2, review_rounds: 1, feedback: later, feedback_total: 2500 });
+  assert.deepEqual([(await at(2)).review_split.unknown, (await at(2)).review_split.reviewers.length], ["feedback_not_kept", 2]);
+  await send(2, { created_at, ...merged, commits: 2, review_rounds: 1, feedback: later });
+  assert.deepEqual((await at(2)).review_split, two);
+  // first seen at a push, or opened long before its first report (the Action's backfill): not seen from the start
+  await send(3, { created_at, ...merged, commits: 3, review_rounds: 1, feedback: [inline(BOT, when(1)), inline("dee", when(2))] });
+  await send(5, { review_rounds: 1, feedback: [] });
+  await send(5, { ...merged, commits: 4, review_rounds: 1, feedback: [inline(BOT, when(1))] });
+  const three = (await at(3)).review_split;
+  assert.deepEqual([three.rounds, three.unknown, three.reviewers.map((r: any) => r.author)], [null, "not_from_open", [BOT, "dee"]]);
+  assert.deepEqual([(await at(5)).review_split.rounds, (await at(5)).review_split.unknown], [null, "not_from_open"]);
+  // an Action from before reviews and comments were sent: no reviewers to name; no rounds are none, and some are not known
+  const none = { reviewers: [], rounds: { bots: 0, people: 0, both: 0 }, round_authors: [], counted_by: "commits", unknown: null };
+  await send(4, { ...merged });
+  assert.deepEqual((await at(4)).review_split, none);
+  await send(4, { ...merged, review_rounds: 2 });
+  assert.deepEqual((await at(4)).review_split, { reviewers: [], rounds: null, round_authors: null, counted_by: null, unknown: "feedback_not_kept" });
+  await send(4, { ...merged });
+
+  const summary = (await call(tokens.admin, "GET", `/prs/summary?repo=${encodeURIComponent(repo)}&state=merged`)).body;
+  assert.deepEqual(summary.by_reviewer, [
+    // alone in the first round of the first and in the second's; with bob in the first's second
+    { author: BOT, pulls: 4, reviews: 0, changes_requested: 0, inline: 5, replies: 1, conversation: 0, rounds_alone: 2, rounds_shared: 1, pulls_with_rounds_known: 2, pulls_with_rounds_by_pushes: 1 },
+    { author: OTHER, pulls: 1, reviews: 0, changes_requested: 0, inline: 1, replies: 0, conversation: 0, rounds_alone: 0, rounds_shared: 0, pulls_with_rounds_known: 1, pulls_with_rounds_by_pushes: 0 },
+    { author: null, pulls: 3, reviews: 1, changes_requested: 1, inline: 2, replies: 0, conversation: 1, rounds_alone: 0, rounds_shared: 1, pulls_with_rounds_known: 2, pulls_with_rounds_by_pushes: 1 },
+  ]);
+  // the sums are those of the pages
+  const pages = await Promise.all([1, 2, 3, 5].map(async (n) => (await at(n)).review_split));
+  const ofBot = pages.flatMap((split: any) => split.reviewers).filter((r: any) => r.author === BOT);
+  assert.equal(ofBot.reduce((sum: number, r: any) => sum + r.inline, 0), summary.by_reviewer[0].inline);
+
+  // a row from before this was worked out: matching again fills it, with no report from GitHub
+  const stored = async (number: number) => (await db.query(`SELECT review_split, review_split_at, updated_at FROM pull_requests WHERE repo = $1 AND number = $2`, [repo, number]))[0]!;
+  const before = await stored(1);
+  await db.query(`UPDATE pull_requests SET review_split = NULL, review_split_rule = NULL, review_split_at = NULL WHERE repo = $1`, [repo]);
+  assert.equal((await at(1)).review_split, null);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 1 })).status, 200);
+  assert.deepEqual((await at(1)).review_split, one);
+  assert.deepEqual((await stored(1)).updated_at, before.updated_at);
+  // and the server goes through the rest once it is up, some at a time, each on its own
+  const unsplit = async (atOnce?: number) => {
+    const found: PullAt[] = [];
+    let after: PullAt | null = null;
+    for (;;) {
+      const some: PullAt[] = await db.asOrg(DEFAULT_ORG, (tx) => unsplitPulls(tx, after, atOnce));
+      if (some.length === 0) return found;
+      found.push(...some);
+      after = some[some.length - 1]!;
+    }
+  };
+  const mine = async (atOnce?: number) => (await unsplit(atOnce)).filter((pull) => pull.repo === repo).map((pull) => pull.number);
+  assert.deepEqual(await mine(1), [2, 3, 4, 5]);
+  for (const number of await mine()) await db.asOrg(DEFAULT_ORG, (tx) => splitReviews(tx, repo, number));
+  assert.deepEqual([(await at(2)).review_split, (await at(3)).review_split, (await at(4)).review_split], [two, three, none]);
+  assert.deepEqual(await mine(), []);
+  // one worked out by a later rule than this server's is that server's, and left
+  await db.query(`UPDATE pull_requests SET review_split_rule = 99 WHERE repo = $1 AND number = 3`, [repo]);
+  assert.deepEqual(await mine(), []);
+  // nor read by this one, which does not know what shape it has: not on its page, nor in the list, nor summed
+  assert.equal((await at(3)).review_split, null);
+  const without = (await call(tokens.admin, "GET", `/prs/summary?repo=${encodeURIComponent(repo)}&state=merged`)).body.by_reviewer;
+  assert.deepEqual(without.map((r: any) => [r.author, r.pulls]), [[BOT, 3], [OTHER, 1], [null, 2]]);
+  // one whose last report was stored by a server from before this, beside this one: its split is from the report before, and is gone through again
+  await db.query(`UPDATE pull_requests SET updated_at = clock_timestamp(), review_rounds = 2 WHERE repo = $1 AND number = 2`, [repo]);
+  assert.deepEqual(await mine(), [2]);
+  // and until then is not given out as that report's
+  assert.equal((await at(2)).review_split, null);
+  assert.deepEqual((await call(tokens.admin, "GET", `/prs?repo=${encodeURIComponent(repo)}&state=merged`)).body.pulls.find((p: any) => p.number === 2).review_split, null);
+  await db.asOrg(DEFAULT_ORG, (tx) => splitReviews(tx, repo, 2));
+  assert.deepEqual([(await at(2)).review_split.unknown, await mine()], ["pushes_not_seen", []]);
+  // and what the Action said of the rounds of the report before is not that report's: the first had two rounds, a bot's and one of both
+  await db.query(`UPDATE pull_requests SET updated_at = clock_timestamp() WHERE repo = $1 AND number = 1`, [repo]);
+  await db.asOrg(DEFAULT_ORG, (tx) => splitReviews(tx, repo, 1));
+  assert.deepEqual([(await at(1)).review_split.rounds, (await at(1)).review_split.counted_by, (await at(1)).review_split.unknown], [null, null, "not_from_open"]);
+  // its next report says again
+  await send(1, { ...merged, commits: 3, review_rounds: 2, feedback, review_round_authors: [who(BOT), who(BOT, "bob")] });
+  assert.deepEqual((await at(1)).review_split, one);
+  // matching again leaves one that is not from before as it is
+  await db.query(`UPDATE pull_requests SET review_split = jsonb_set(review_split, '{unknown}', '"kept"') WHERE repo = $1 AND number = 2`, [repo]);
+  assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 2 })).status, 200);
+  assert.equal((await at(2)).review_split.unknown, "kept");
 });

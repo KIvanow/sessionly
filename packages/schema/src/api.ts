@@ -422,6 +422,14 @@ export interface PullReport {
   bot_review_comments: number;
   /** Times review feedback was followed by a new commit. */
   review_rounds: number;
+  /**
+   * For each of those rounds, oldest first, whose feedback it followed: at
+   * most 1,000 rounds of at most 200 logins each. Left out by an Action
+   * before 0.4.0, and on a pull request with more: the server then works
+   * out what it can from the times its reports arrived. One that does not
+   * fit, or is not as many rounds as `review_rounds`, is taken as left out.
+   */
+  review_round_authors?: RoundAuthor[][];
   /** The lines the pull request adds, per file, as it is now. */
   files: FileHashes[];
   /** Changed files GitHub gave no diff for (too large, or binary). */
@@ -671,6 +679,131 @@ export interface LocalReviewRun {
   session_id: string;
 }
 
+/**
+ * What one reviewer of a pull request did on GitHub: anyone in its reviews
+ * and comments but its author. Counted from the reviews and comments that
+ * are kept (`feedback`), so on a pull request with more than are kept, from
+ * the latest.
+ */
+export interface PullReviewer {
+  /** Login on GitHub. */
+  author: string;
+  /** As the Action reported it. */
+  bot: boolean;
+  /** Reviews submitted. */
+  reviews: number;
+  /** Of those, asking for changes. */
+  changes_requested: number;
+  /**
+   * Comments on the diff that start a thread. Those that answer another are
+   * `replies`: a bot that answers each of the author's replies has found no
+   * more for it.
+   */
+  inline: number;
+  /** Comments on the diff that answer another. */
+  replies: number;
+  /** Comments in the conversation. */
+  conversation: number;
+  /** The first and the last of any of these. */
+  first_at: string;
+  last_at: string;
+}
+
+/** Someone whose feedback a round of review followed. A login is a bot when anything of its is. */
+export interface RoundAuthor {
+  /** Login on GitHub. */
+  author: string;
+  bot: boolean;
+}
+
+/**
+ * Who reviewed a pull request, and whose feedback its rounds of review
+ * followed. Worked out on the server when a report is stored, from its
+ * reviews and comments and from what the report says of its rounds.
+ *
+ * A round is review feedback followed by a new commit, as `review_rounds`
+ * counts them: a review that comments or asks for changes, or a comment on
+ * the diff, from anyone but the author. When the split is known its three
+ * numbers add up to `review_rounds`.
+ */
+export interface ReviewSplit extends ReviewRounds {
+  /** Bots first, then people; in each, most reviews and comments first, then by login. */
+  reviewers: PullReviewer[];
+  /** For each round, oldest first, whose feedback it followed, by login. Null when `rounds` is. */
+  round_authors: RoundAuthor[][] | null;
+}
+
+/** The rounds of a pull request by whose feedback they followed: what a list has of its `ReviewSplit`. */
+export interface ReviewRounds {
+  /**
+   * Rounds by whose feedback came before the commit: only bots', only
+   * people's, or some of each. Null when it is not known (`unknown` says why).
+   */
+  rounds: { bots: number; people: number; both: number } | null;
+  /**
+   * Where the rounds are from. `commits`: the Action said whose feedback
+   * each followed, from the commits' own times, or counted no round at
+   * all. `pushes`: an older Action did not, and the server worked it out
+   * from the times its reports arrived, which it keeps only when it comes
+   * to as many rounds as `review_rounds`; a round may then be put down to
+   * the wrong kind. Null when `rounds` is.
+   */
+  counted_by: "commits" | "pushes" | null;
+  /**
+   * Why the rounds are not known. Always one of these when the report did
+   * not say whose feedback each round followed (an Action before 0.4.0):
+   * - `not_from_open`: the pull request was not reported from the moment it
+   *   was opened (first reported later, or brought in with `backfill`), so
+   *   not every push was seen;
+   * - `reports_not_kept`: its earliest reports are no longer kept;
+   * - `feedback_not_kept`: not all of its reviews and comments are kept
+   *   (only the latest, or none: an Action from before they were sent);
+   * - `pushes_not_seen`: the pushes the server saw do not come to as many
+   *   rounds as `review_rounds`: some push left no report, or one arrived
+   *   late.
+   * Null when `rounds` is known.
+   */
+  unknown: "not_from_open" | "reports_not_kept" | "feedback_not_kept" | "pushes_not_seen" | null;
+}
+
+/**
+ * What one review bot did over the pull requests of a filter, or what all
+ * the people who reviewed them did together. To review is to submit a
+ * review or to comment on the diff: one who only commented in the
+ * conversation of a pull request has no part in it here.
+ */
+export interface ReviewerSummary {
+  /** The bot's login. Null for the one row of all people. */
+  author: string | null;
+  /** Pull requests it reviewed, or has a round in. */
+  pulls: number;
+  /** Sums of what `PullReviewer` counts in each of those it reviewed. */
+  reviews: number;
+  changes_requested: number;
+  inline: number;
+  replies: number;
+  conversation: number;
+  /**
+   * Rounds that followed its feedback and no one else's. For the people's
+   * row: rounds that followed only people's.
+   */
+  rounds_alone: number;
+  /**
+   * Rounds that followed its feedback and someone else's, another bot's or
+   * a person's. For the people's row: rounds that followed people's and a
+   * bot's.
+   */
+  rounds_shared: number;
+  /** Of `pulls`, those whose rounds are known (`ReviewSplit.rounds`): the two figures above are over these. */
+  pulls_with_rounds_known: number;
+  /**
+   * Of those, the ones whose rounds the server told from when the reports
+   * arrived (`counted_by` is `pushes`), as an older Action did not say: a
+   * round of theirs may be put down to the wrong kind.
+   */
+  pulls_with_rounds_by_pushes: number;
+}
+
 export interface PullRow {
   repo: string;
   number: number;
@@ -688,6 +821,12 @@ export interface PullRow {
   review_comments: number;
   bot_review_comments: number;
   review_rounds: number;
+  /**
+   * Whose feedback its rounds followed. Null only on a pull request stored
+   * before this was worked out that has not been gone through yet. Its
+   * page (`PullDetail`) has who reviewed it and who each round followed too.
+   */
+  review_split: ReviewRounds | null;
   files_without_diff: number;
   attribution: PullAttribution;
   /** Null on a pull request last reported before its sessions were kept. */
@@ -925,6 +1064,8 @@ export interface PullDetail extends PullRow {
   sessions: PullSession[] | null;
   /** Oldest first. */
   feedback: PullFeedback[] | null;
+  /** With its reviewers, and who each round followed. */
+  review_split: ReviewSplit | null;
   /** How many there are on GitHub: more than `feedback` has when only the latest were kept. */
   feedback_total: number | null;
   /**
@@ -983,6 +1124,13 @@ export interface PullsByModel extends LinesBy {
 export interface PullSummary {
   /** Most lines first. */
   by_model: PullsByModel[];
+  /**
+   * Who reviewed these pull requests on GitHub: one row for each bot, most
+   * comments on the diff first, and after them one row for all people
+   * together. Only those that reviewed at least one (a review, or a comment
+   * on the diff), or that a round of one followed.
+   */
+  by_reviewer: ReviewerSummary[];
   /**
    * Repositories that have a pull request in the filter and report with an
    * older Action: the most recent report from the Action, or that named no

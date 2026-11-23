@@ -9,24 +9,37 @@ import { addedHashes } from "./lines.mjs";
  */
 const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
+/** Whose a review or comment is. An account deleted since has no user, and is "unknown" wherever it is named. */
+const loginOf = (user) => user?.login ?? "unknown";
+
 const isBot = (user) => user?.type === "Bot" || /\[bot\]$/.test(user?.login ?? "");
 
+/** The server takes no more rounds than this for one pull request, and no more names for one round. */
+const MAX_ROUNDS = 1000;
+const MAX_ROUND_AUTHORS = 200;
+
 /**
- * Times review feedback was followed by a new commit: a round of review.
- * Feedback is a review that comments or asks for changes, or a comment on
- * the diff, from anyone but the author.
+ * The rounds of review, oldest first: for each time review feedback was
+ * followed by a new commit (how many there are is `review_rounds`), who
+ * gave the feedback it followed, as
+ * `{ author, bot }`, by login. Feedback is a review that comments or asks
+ * for changes, or a comment on the diff, from anyone but the author.
  */
-export function reviewRounds(author, reviews, comments, commits) {
+export function roundAuthors(author, reviews, comments, commits) {
   const events = [];
   for (const review of reviews) {
     const feedback = review.state === "CHANGES_REQUESTED" || review.state === "COMMENTED";
-    if (feedback && review.user?.login !== author && review.submitted_at) {
-      events.push([Date.parse(review.submitted_at), "feedback"]);
+    if (feedback && loginOf(review.user) !== author && review.submitted_at) {
+      events.push([Date.parse(review.submitted_at), "feedback", review.user]);
     }
   }
+  // A comment written in a review is nobody's to act on until the review is submitted, though it
+  // is dated when it was drafted: it is feedback from then.
+  const submitted = new Map(reviews.filter((r) => r.id != null && r.submitted_at).map((r) => [r.id, Date.parse(r.submitted_at)]));
   for (const comment of comments) {
-    if (comment.user?.login !== author && comment.created_at) {
-      events.push([Date.parse(comment.created_at), "feedback"]);
+    if (loginOf(comment.user) !== author && comment.created_at) {
+      const seen = Math.max(Date.parse(comment.created_at), submitted.get(comment.pull_request_review_id) ?? -Infinity);
+      events.push([seen, "feedback", comment.user]);
     }
   }
   for (const commit of commits) {
@@ -34,13 +47,16 @@ export function reviewRounds(author, reviews, comments, commits) {
     if (at) events.push([Date.parse(at), "commit"]);
   }
   events.sort((a, b) => a[0] - b[0]);
-  let rounds = 0;
-  let waiting = false;
-  for (const [, kind] of events) {
-    if (kind === "feedback") waiting = true;
-    else if (waiting) {
-      rounds += 1;
-      waiting = false;
+  const rounds = [];
+  let waiting = new Map();
+  for (const [, kind, user] of events) {
+    if (kind === "feedback") {
+      // An account that was deleted since has no user: its feedback is feedback all the same.
+      const login = loginOf(user);
+      waiting.set(login, { author: login, bot: waiting.get(login)?.bot === true || isBot(user) });
+    } else if (waiting.size > 0) {
+      rounds.push([...waiting.values()].sort((a, b) => (a.author < b.author ? -1 : a.author > b.author ? 1 : 0)));
+      waiting = new Map();
     }
   }
   return rounds;
@@ -58,7 +74,7 @@ const MAX_FEEDBACK = 2000;
  * sent. The Action's own comment is left out.
  */
 export function feedbackOf(reviews, comments, conversation) {
-  const who = (item) => ({ url: item.html_url ?? null, author: item.user?.login ?? "unknown", bot: isBot(item.user) });
+  const who = (item) => ({ url: item.html_url ?? null, author: loginOf(item.user), bot: isBot(item.user) });
   const all = [];
   for (const review of reviews) {
     if (review.state === "PENDING" || !review.submitted_at) continue;
@@ -88,9 +104,9 @@ export function feedbackOf(reviews, comments, conversation) {
  * server (`github.com`); `ignored` says which paths to leave out.
  */
 export function buildReport({ pull, files, reviews, comments, conversation = [], commits, event, host, ignored }) {
-  const author = pull.user?.login ?? "unknown";
-  const submitted = reviews.filter((r) => r.user?.login !== author && r.state !== "PENDING");
-  const others = comments.filter((c) => c.user?.login !== author);
+  const author = loginOf(pull.user);
+  const submitted = reviews.filter((r) => loginOf(r.user) !== author && r.state !== "PENDING");
+  const others = comments.filter((c) => loginOf(c.user) !== author);
   const reported = [];
   let withoutDiff = 0;
   for (const file of files) {
@@ -114,6 +130,7 @@ export function buildReport({ pull, files, reviews, comments, conversation = [],
   const repo = pull.base?.repo?.full_name;
   const headRepo = pull.head?.repo?.full_name;
   const feedback = feedbackOf(reviews, comments, conversation);
+  const rounds = roundAuthors(author, reviews, comments, commits);
   return {
     repo: `${host}/${repo}`,
     head_repo: headRepo && headRepo !== repo ? `${host}/${headRepo}` : null,
@@ -135,7 +152,10 @@ export function buildReport({ pull, files, reviews, comments, conversation = [],
     changes_requested: submitted.filter((r) => r.state === "CHANGES_REQUESTED").length,
     review_comments: others.filter((c) => !isBot(c.user)).length,
     bot_review_comments: others.filter((c) => isBot(c.user)).length,
-    review_rounds: reviewRounds(author, reviews, comments, commits),
+    review_rounds: rounds.length,
+    // Whose feedback each round followed. Left out where there is more of it
+    // than the server takes: it then works out what it can from what it has.
+    ...(rounds.length <= MAX_ROUNDS && rounds.every((round) => round.length <= MAX_ROUND_AUTHORS) ? { review_round_authors: rounds } : {}),
     files: reported,
     files_without_diff: withoutDiff,
     // On a pull request with more than the server takes, the latest are sent,

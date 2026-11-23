@@ -40,7 +40,7 @@ import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type
 import { demoFrom, reportsShownIn } from "./demo.ts";
 import { tidy } from "./limits.ts";
 import { purgeDeletedOrgs } from "./orgs.ts";
-import { type SessionAt, UNWEIGHED, weighKeptSome } from "./pulls.ts";
+import { type PullAt, type SessionAt, splitReviews, UNSPLIT, unsplitPulls, UNWEIGHED, weighKeptSome } from "./pulls.ts";
 import {
   github,
   google,
@@ -354,6 +354,50 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       setTimeout(weighing, 10 * 60_000).unref();
     });
   weighing();
+
+  // Pull requests whose reviewers and rounds by who asked are to be worked
+  // out (stored before they were, or by an earlier rule): gone through now,
+  // beside the requests, from what is already here, each in a transaction of
+  // its own. What failed is passed over, and tried again later. And looked
+  // for twice more, ten minutes and an hour on: a server from before this,
+  // still running beside this one while it is replaced, stores reports
+  // without working them out. Not for good: it reads through every pull
+  // request to find, once that server is gone, none.
+  const again = [10, 60];
+  // One that fails every time is not tried for good either.
+  let retries = 6;
+  const splitting = () =>
+    void (async () => {
+      const orgs = await db.query<{ org_id: string }>(`SELECT DISTINCT org_id FROM pull_requests WHERE ${UNSPLIT}`);
+      let failed = false;
+      for (const { org_id } of orgs) {
+        try {
+          let after: PullAt | null = null;
+          for (;;) {
+            const some: PullAt[] = await db.asOrg(org_id, (tx) => unsplitPulls(tx, after));
+            if (some.length === 0) break;
+            for (const pull of some) {
+              try {
+                await db.asOrg(org_id, (tx) => splitReviews(tx, pull.repo, pull.number));
+              } catch (err) {
+                failed = true;
+                console.error(`working out the reviewers of ${pull.repo}#${pull.number} of ${org_id} failed:`, err);
+              }
+            }
+            after = some[some.length - 1]!;
+          }
+        } catch (err) {
+          failed = true;
+          console.error(`working out the pull requests' reviewers of ${org_id} failed:`, err);
+        }
+      }
+      const next = failed && retries-- > 0 ? 10 : again.shift();
+      if (next !== undefined) setTimeout(splitting, next * 60_000).unref();
+    })().catch((err) => {
+      console.error("working out pull requests' reviewers failed:", err);
+      if (retries-- > 0) setTimeout(splitting, 10 * 60_000).unref();
+    });
+  splitting();
 
   const port = Number(process.env.PORT ?? 8080);
   const hostname = process.env.HOST ?? "127.0.0.1";

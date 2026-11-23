@@ -1,4 +1,4 @@
-import type { LinesBy, PullList, PullMatches, PullRow, PullSummary } from "@sessionly/schema";
+import type { LinesBy, PullList, PullMatches, PullRow, PullSummary, ReviewerSummary } from "@sessionly/schema";
 import { useEffect, useState } from "react";
 import { api, ApiError, query, samePullFilters } from "./api.ts";
 import { scopeParams, type Scope } from "./App.tsx";
@@ -6,7 +6,7 @@ import { average, count, dateTime, modelName, percent, repoName, share, shareOf,
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { costIsFloor, costText, matchAll, nameSome, pullCost, pullHref, pullsCostNote, survivingOnce, web } from "./pull.ts";
+import { costIsFloor, costText, matchAll, nameSome, pullCost, pullHref, pullsCostNote, roundsTitle, survivingOnce, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -136,6 +136,8 @@ export function Pulls({ token, scope, setScope, repos, readOnly = false, onSignO
             />
           </section>
           <ByModel summary={summary.data!} />
+          {/* A server from before this sends none. */}
+          <ReviewBots rows={summary.data!.by_reviewer ?? []} />
         </>
       )}
       {/* Apart from the list: one that could not be read again does not take this with it. */}
@@ -297,6 +299,79 @@ function ByModel({ summary }: { summary: PullSummary }) {
   );
 }
 
+/**
+ * Review bots over these pull requests: what each commented, and how many
+ * rounds followed its feedback; and all people together as one row beside
+ * them. Not shown where no bot reviewed.
+ */
+export function ReviewBots({ rows }: { rows: ReviewerSummary[] }) {
+  if (!rows.some((r) => r.author != null)) return null;
+  const unknown = rows.filter((r) => r.pulls_with_rounds_known < r.pulls);
+  const pulls = (n: number) => (n === 1 ? "pull request" : "pull requests");
+  // Rounds the server told from when reports arrived, as an older Action did not say whose feedback each followed.
+  const told = rows.filter((r) => (r.pulls_with_rounds_by_pushes ?? 0) > 0);
+  return (
+    <section className="card" aria-label="Review bots">
+      <div className="card-head">
+        <h2>Review bots: what each commented, and the rounds that followed</h2>
+      </div>
+      <p className="muted hint">
+        Each bot that reviewed these pull requests on GitHub (a review, or a comment on the diff), and all people
+        together. Comments on the diff are those that start a thread; replies are left out. A round is review
+        feedback followed by a new commit: alone when nobody else gave feedback before it (for people: only
+        people did), shared when someone else did too. More comments or rounds do not mean worse code: read them
+        beside what survived review.
+      </p>
+      <div className="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Reviewer</th>
+              <th scope="col" className="num" title="Pull requests it reviewed">Pull requests</th>
+              <th scope="col" className="num" title="Comments on the diff that start a thread">Comments on the diff</th>
+              <th scope="col" className="num" title="Comments on the diff per pull request it reviewed">Per pull request</th>
+              <th scope="col" className="num" title="Rounds that followed its feedback and no one else's">Rounds alone</th>
+              <th scope="col" className="num" title="Rounds that followed its feedback and someone else's">Rounds shared</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const known = r.pulls_with_rounds_known;
+              const partly = known < r.pulls ? `Known for ${count(known)} of its ${count(r.pulls)} ${pulls(r.pulls)}` : undefined;
+              return (
+                <tr key={r.author ?? ""}>
+                  <th scope="row" className="name">{r.author ?? "People (all together)"}</th>
+                  <td className="num">{count(r.pulls)}</td>
+                  <td className="num">{count(r.inline)}</td>
+                  <td className="num">{average(r.inline, r.pulls)}</td>
+                  <td className="num" title={partly}>{known > 0 ? count(r.rounds_alone) : "–"}</td>
+                  <td className="num" title={partly}>{known > 0 ? count(r.rounds_shared) : "–"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {unknown.length > 0 && (
+        <p className="muted hint">
+          Rounds are counted only where it is known whose feedback each followed: for{" "}
+          {unknown.map((r) => `${count(r.pulls_with_rounds_known)} of ${count(r.pulls)} ${pulls(r.pulls)} of ${r.author ?? "people"}`).join(", ")}.
+          A report from version 0.4.0 of the Action or later says it; for one from before, the server can tell only
+          where it saw every push.
+        </p>
+      )}
+      {told.length > 0 && (
+        <p className="muted hint">
+          Told from when its reports arrived, as its Action did not say whose feedback each round followed, and so
+          less sure of a round's kind: the rounds of{" "}
+          {told.map((r) => `${count(r.pulls_with_rounds_by_pushes)} of ${count(r.pulls_with_rounds_known)} ${pulls(r.pulls_with_rounds_known)} of ${r.author ?? "people"}`).join(", ")}.
+          A report from version 0.4.0 of the Action or later makes them exact.
+        </p>
+      )}
+    </section>
+  );
+}
+
 /** Repositories in this filter that report with an older Action, and what to change. */
 function OlderActions({ repos }: { repos: string[] }) {
   if (repos.length === 0) return null;
@@ -350,7 +425,7 @@ function Row({ p }: { p: PullRow }) {
           ? `${shareOf(surviving, a.first.agent_lines)} of ${count(a.first.agent_lines)}`
           : "–"}
       </td>
-      <td className="num">{count(p.review_rounds)}</td>
+      <td className="num" title={roundsTitle(p)}>{count(p.review_rounds)}</td>
       <td
         className="num"
         title={p.local_reviews && p.local_reviews.sessions_unknown > 0 ? "Not all known: some of its sessions were deleted since, captured by an older Sessionly, which did not count reviews, or a Codex session whose own record of them was not there to read" : undefined}

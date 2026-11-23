@@ -2,7 +2,7 @@ import type { LocalReviewRun, PullAfterMerge, PullDetail, PullHistory, PullHisto
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { afterMergeLine, afterMergeName, afterMergeTile, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewTarget, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewNote, reviewTarget, roundsLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
 import { cost, count, dateTime, duration, modelName, usd, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -111,7 +111,7 @@ export function PullView({
         <Tile
           label="Review comments"
           value={count(p.review_comments + p.bot_review_comments)}
-          note={`${count(p.review_comments)} by people, ${count(p.bot_review_comments)} by bots, in ${count(p.review_rounds)} ${p.review_rounds === 1 ? "round" : "rounds"} of review`}
+          note={reviewNote(p)}
         />
         <Tile label="Agent cost" value={pullCost(p.cost)} note={pullCostNote(p.cost)} />
         {afterMerge && <Tile label="Kept @30d after merge" value={afterMerge.value} part={afterMerge.part} note={afterMerge.note} />}
@@ -127,6 +127,10 @@ export function PullView({
             {count(p.reviews)} {p.reviews === 1 ? "review" : "reviews"} ({count(p.changes_requested)} asking for changes), {count(p.review_rounds)}{" "}
             {p.review_rounds === 1 ? "round" : "rounds"}, {count(p.review_comments)} comments by people and {count(p.bot_review_comments)} by bots.
           </dd>
+          <dt title="A round is review feedback followed by a new commit: a review that comments or asks for changes, or a comment on the diff, from anyone but the author">
+            Rounds by who asked
+          </dt>
+          <dd>{roundsLine(p)}</dd>
         </dl>
         {(p.local_reviews?.each ?? []).length > 0 && <ReviewRuns each={p.local_reviews!.each!} />}
         <p className="muted hint">
@@ -282,21 +286,33 @@ export function PullView({
                   <th scope="col">Who</th>
                   <th scope="col" className="num">Reviews</th>
                   <th scope="col" className="num">Asking for changes</th>
-                  <th scope="col" className="num">Comments on the diff</th>
+                  <th scope="col" className="num" title="Comments on the diff that start a thread">Comments on the diff</th>
+                  <th scope="col" className="num" title="Comments on the diff that answer another">Replies</th>
                   <th scope="col" className="num">Comments in the conversation</th>
                 </tr>
               </thead>
               <tbody>
-                {countFeedback(p.feedback, p.author).map((row) => (
-                  <tr key={row.by}>
-                    <th scope="row" className="name">{BY[row.by]}</th>
-                    <td className="who">{row.names.join(", ") || "–"}</td>
-                    <td className="num">{count(row.reviews)}</td>
-                    <td className="num">{count(row.changes_requested)}</td>
-                    <td className="num">{count(row.inline)}</td>
-                    <td className="num">{count(row.conversation)}</td>
-                  </tr>
-                ))}
+                {countFeedback(p.feedback, p.author, p.review_split?.reviewers ?? null).flatMap((group) =>
+                  group.rows.length === 0 ? (
+                    <tr key={group.by}>
+                      <th scope="row" className="name">{BY[group.by]}</th>
+                      <td className="who">–</td>
+                      {[0, 1, 2, 3, 4].map((i) => <td key={i} className="num">{count(0)}</td>)}
+                    </tr>
+                  ) : (
+                    group.rows.map((row, i) => (
+                      <tr key={`${group.by} ${row.author}`}>
+                        {i === 0 && <th scope="row" rowSpan={group.rows.length} className="name">{BY[group.by]}</th>}
+                        <td className="who">{row.author}</td>
+                        <td className="num">{count(row.reviews)}</td>
+                        <td className="num">{count(row.changes_requested)}</td>
+                        <td className="num">{count(row.inline)}</td>
+                        <td className="num">{count(row.replies)}</td>
+                        <td className="num">{count(row.conversation)}</td>
+                      </tr>
+                    ))
+                  ),
+                )}
               </tbody>
             </table>
           </div>
@@ -326,7 +342,7 @@ export function PullView({
                     <td className="nowrap">{dateTime(f.at)}</td>
                     <td className="nowrap">
                       {f.author}
-                      {f.bot ? <span className="chip">bot</span> : f.author === p.author && <span className="chip">author</span>}
+                      {f.author === p.author ? <span className="chip">author</span> : f.bot && <span className="chip">bot</span>}
                     </td>
                     <td className="title">{feedbackLabel(f)}</td>
                     <td className="nowrap">

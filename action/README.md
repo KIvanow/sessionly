@@ -158,6 +158,9 @@ hash of each added line that has a letter or digit.
 For each review and comment: who made it (their GitHub login, and whether that is a bot), when,
 the file and line it is on, a review's outcome, and its link on GitHub, which is what the
 pull request's page in the dashboard leads to. What a review or comment says is never sent.
+For each round of review: the logins of those whose feedback it followed, and whether each is a
+bot. They are the logins of reviews and comments as above (of all of them, also where a pull
+request has more than the 2,000 that are sent); nothing else is said of a round.
 
 For a count after merge: the repository, the pull request's number, and for each file the
 server asked about, its path and a hash of each of its lines as it is on the branch now.
