@@ -14,6 +14,12 @@
 //! entered and left, what it was pointed at, how many findings came back, and
 //! the reviewer's thread, whose tokens give its cost.
 //!
+//! A run is decided here and nowhere else. What it is decided from are the
+//! session's own events (`Seen`) and what its files say beside them
+//! (`Facts`): where a typed command forked, the effort it reused, what the
+//! reply that ended it found, and for Codex the review modes and the threads
+//! reviewers ran in. Those who read the files only write down what is there.
+//!
 //! Reviews started by a prompt in words ("review this branch") leave no
 //! command and are not counted: they can't be told from any other subagent
 //! without reading text.
@@ -27,7 +33,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::session::{Outcome, ReviewRan, ReviewRun, ReviewVia, Session, ToolStatus};
-use crate::transcript::Facts;
+use crate::transcript::{Facts, ReviewMode, ReviewSaid, ReviewerThread};
 
 /// The commands that are reviews. A plugin's skill matches on its last part
 /// (`anything:code-review`). A team's own review skill under another name is
@@ -313,15 +319,78 @@ pub fn findings_in(reply: &str) -> Option<u64> {
     one(&kept).or_else(|| one(&counts).filter(|_| kept.is_empty()))
 }
 
-/// What an import writes for a turn that a review command started, where
-/// its last reply says how many findings it has: read by `Seen::event`.
-pub fn reply_event(prompt_id: &str, prompt: &str, reply: &str) -> Option<Value> {
-    let (command, _) = slash_command(prompt)?;
-    if !is_review(command) {
+/// True for a prompt that is a review command typed as one (`/code-review #41`).
+pub fn is_typed_review(prompt: &str) -> bool {
+    slash_command(prompt).is_some_and(|(command, _)| is_review(command))
+}
+
+/// What the reply that ends a typed review's turn says it found, for the
+/// prompt the command was. Every agent's reply is read here, and only the
+/// number is kept.
+pub fn review_said(prompt_id: &str, reply: &str) -> Option<ReviewSaid> {
+    Some(ReviewSaid {
+        prompt_id: prompt_id.to_string(),
+        findings: findings_in(reply)?,
+    })
+}
+
+/// A review command in a row Claude Code wrote for a command it ran itself
+/// (`/ultrareview`) or an older transcript wrote for a typed one: its name and
+/// arguments, as the hooks' `UserPromptExpansion` has them. Other commands
+/// (`/model`, `/clear`) are not kept.
+pub fn command_row(row: &Value) -> Option<Value> {
+    // A summary of what went before quotes the rows of the commands in it.
+    if row["isMeta"].as_bool() == Some(true) || row["isCompactSummary"].as_bool() == Some(true) {
         return None;
     }
-    let findings = findings_in(reply)?;
-    Some(serde_json::json!({ "prompt_id": prompt_id, "findings": findings }))
+    let text = match row["type"].as_str() {
+        Some("system") => row["content"].as_str()?.to_string(),
+        _ => match &row["message"]["content"] {
+            Value::String(text) => text.clone(),
+            Value::Array(blocks) => {
+                let texts: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
+                texts.join("\n")
+            }
+            _ => return None,
+        },
+    };
+    // The row is the command's own: it opens with it, and does not only
+    // have it somewhere in what was pasted or quoted.
+    const OPENS: &[&str] = &[
+        "<command-name>",
+        "<command-message>",
+        "<local-command-stdout>",
+        "<forked-skill-launch>",
+    ];
+    let opening = text.trim_start();
+    if !OPENS.iter().any(|tag| opening.starts_with(tag)) {
+        return None;
+    }
+    let between = |open: &str, close: &str| {
+        let start = text.find(open)? + open.len();
+        let end = text[start..].find(close)? + start;
+        Some(text[start..end].trim().to_string())
+    };
+    // A typed command that forks says so in a row of its own.
+    if text.contains("<forked-skill-launch>") {
+        let launch = forked_launch(&text)?;
+        return Some(serde_json::json!({
+            "expansion_type": "slash_command",
+            "command_name": launch.command,
+            "command_args": launch.args,
+            "forked_agent_id": launch.agent_id,
+        }));
+    }
+    let name = between("<command-name>", "</command-name>")?;
+    let name = name.trim_start_matches('/');
+    if !is_review(name) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "expansion_type": "slash_command",
+        "command_name": name,
+        "command_args": between("<command-args>", "</command-args>").unwrap_or_default(),
+    }))
 }
 
 /// The effort Claude Code says it reused for a command typed without one:
@@ -360,25 +429,7 @@ pub struct Seen {
     started_by: HashMap<String, String>,
     /// `ReportFindings` calls: tool-use id → how many findings.
     findings: HashMap<String, u64>,
-    /// What the last reply of a review's turn says it found, by prompt id:
-    /// written by the imports of the agents whose reviews run in the
-    /// session's own thread.
-    said: HashMap<String, u64>,
     typed: Vec<Typed>,
-    /// Codex's `/review` runs, as its rollout has them.
-    codex: Vec<CodexReview>,
-}
-
-/// One run of Codex's `/review`: review mode entered and left.
-#[derive(Debug, Clone)]
-struct CodexReview {
-    id: String,
-    at: Option<DateTime<Utc>>,
-    target: Option<String>,
-    ended: Option<DateTime<Utc>>,
-    findings: Option<u64>,
-    /// The thread the reviewer ran in.
-    agent: Option<String>,
 }
 
 impl Seen {
@@ -410,32 +461,10 @@ impl Seen {
                         .or_insert_with(|| id.into());
                 }
             }
-            // Codex's `/review` is no prompt: the import writes this from the
-            // rollout's review mode.
-            ("CodexReview", _) if source == crate::paths::CODEX => {
-                let Some(id) = p["review_id"].as_str() else {
-                    return;
-                };
-                if self.codex.iter().any(|r| r.id == id) {
-                    return;
-                }
-                let time = |v: &Value| v.as_str().and_then(|t| t.parse::<DateTime<Utc>>().ok());
-                self.codex.push(CodexReview {
-                    id: id.to_string(),
-                    at,
-                    target: p["target"].as_str().map(target_name),
-                    ended: time(&p["ended_at"]),
-                    findings: p["findings"].as_u64(),
-                    agent: p["agent_id"].as_str().map(String::from),
-                });
-            }
-            ("ReviewReply", _) => {
-                if let (Some(prompt), Some(n)) = (p["prompt_id"].as_str(), p["findings"].as_u64()) {
-                    self.said.insert(prompt.to_string(), n);
-                }
-            }
+            // Codex's `/review` is no prompt: it is in the rollout's review
+            // mode, which the transcript's facts have.
             // Codex's own command is not in what it writes down; a prompt
-            // that names it would count the review above a second time.
+            // that names it would count that review a second time.
             _ if source == crate::paths::CODEX => {}
             // Typed in Claude Code, Cursor or Grok: the prompt is the command.
             // Cursor's files wrap it in `<user_query>`, which the import has
@@ -617,16 +646,17 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             effort: typed.effort.clone(),
             pull_number: number,
             status: typed_status(s, typed),
-            findings: typed
-                .prompt_id
-                .as_ref()
-                .and_then(|p| seen.said.get(p))
-                .copied(),
             ..Default::default()
         });
     }
-    for review in &seen.codex {
-        if let Some(agent) = &review.agent {
+    let modes = facts.filter(|_| s.source == crate::paths::CODEX);
+    let modes = modes.map_or(&[][..], |facts| &facts.review_modes);
+    let reviewers = facts.map(|facts| reviewers_of(modes, facts));
+    for (i, review) in modes.iter().enumerate() {
+        if modes[..i].iter().any(|before| before.id == review.id) {
+            continue;
+        }
+        if let Some(agent) = reviewers.as_ref().and_then(|of| of[i]) {
             forks.insert(review.id.clone(), agent);
         }
         runs.push(ReviewRun {
@@ -635,15 +665,15 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             command: "review".into(),
             via: ReviewVia::CodexReview,
             ran: ReviewRan::Local,
-            target: review.target.clone(),
+            target: review.target.as_deref().map(target_name),
             // Left without an end: the session stopped while it ran.
-            status: match review.ended {
+            status: match review.ended_at {
                 Some(_) => ToolStatus::Ok,
                 None => ToolStatus::NoResult,
             },
             duration_ms: review
                 .at
-                .zip(review.ended)
+                .zip(review.ended_at)
                 .map(|(start, end)| (end - start).num_milliseconds().max(0) as u64),
             findings: review.findings,
             ..Default::default()
@@ -652,6 +682,33 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
     runs.sort_by(|a, b| a.at.cmp(&b.at).then(a.id.cmp(&b.id)));
     measure(&mut runs, s, seen, &forks, facts);
     runs
+}
+
+/// The thread each of Codex's reviews ran in: the reviewer that began while
+/// the review was on, or a moment before it, each one once.
+fn reviewers_of<'a>(modes: &[ReviewMode], facts: &'a Facts) -> Vec<Option<&'a str>> {
+    let mut free: Vec<&ReviewerThread> = facts.reviewer_threads.iter().collect();
+    free.sort_by_key(|thread| thread.began);
+    let mut of = Vec::with_capacity(modes.len());
+    for (i, review) in modes.iter().enumerate() {
+        // One left without an end was on until the next one began.
+        let next = modes.get(i + 1).and_then(|r| r.at);
+        let within = |began: Option<DateTime<Utc>>| {
+            let (Some(began), Some(start)) = (began, review.at) else {
+                return false;
+            };
+            (start - began).num_seconds() <= SAME_START_SECONDS
+                && match review.ended_at {
+                    Some(end) => began <= end,
+                    None => {
+                        next.is_none_or(|next| (next - began).num_seconds() > SAME_START_SECONDS)
+                    }
+                }
+        };
+        let ran_in = free.iter().position(|thread| within(thread.began));
+        of.push(ran_in.map(|i| free.remove(i).agent_id.as_str()));
+    }
+    of
 }
 
 /// How a typed command went: as its turn did, where the session has it. A
@@ -1851,29 +1908,32 @@ mod tests {
 
     #[test]
     fn what_a_review_turns_last_reply_found_is_the_runs_findings() {
+        assert!(is_typed_review("/code-review #41"));
+        assert!(!is_typed_review("fix it"));
+        assert!(!is_typed_review("/model"));
         assert_eq!(
-            reply_event("p1", "/code-review #41", "I found 2 issues in #41."),
-            Some(json!({ "prompt_id": "p1", "findings": 2 }))
+            review_said("p1", "I found 2 issues in #41."),
+            Some(ReviewSaid {
+                prompt_id: "p1".into(),
+                findings: 2
+            })
         );
-        assert_eq!(reply_event("p1", "fix it", "I found 2 issues."), None);
-        assert_eq!(
-            reply_event("p1", "/code-review", "Do not merge this yet."),
-            None
-        );
+        assert_eq!(review_said("p1", "Do not merge this yet."), None);
         let of = |mut e: Value| {
             e["source"] = json!("grok");
             e
         };
         let events = [
             of(prompt(0, "p1", "/code-review #41")),
-            of(event(
-                9,
-                "ReviewReply",
-                json!({ "prompt_id": "p1", "findings": 2 }),
-            )),
             of(prompt(30, "p2", "/code-review #41")),
         ];
-        let s = from_events(&events, None, "grok").unwrap();
+        let facts = Facts {
+            review_replies: review_said("p1", "I found 2 issues in #41.")
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let s = from_events(&events, Some(&facts), "grok").unwrap();
         let found: Vec<_> = s.reviews.iter().map(|r| r.findings).collect();
         assert_eq!(found, [Some(2), None]);
     }

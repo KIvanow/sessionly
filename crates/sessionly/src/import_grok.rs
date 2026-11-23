@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 use crate::import::{edit_result, slim_input, Builder};
 use crate::paths::GROK;
 use crate::session::{Cost, CostSource, ModelUsage};
-use crate::transcript::Facts;
+use crate::transcript::{Facts, ReviewSaid};
 
 /// Grok counts money in ticks: ten billion to the dollar.
 const TICKS_PER_USD: f64 = 1e10;
@@ -117,7 +117,6 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
     // the last tool call: a review's reply says how many findings it has.
     let mut asked: Option<(String, String)> = None;
     let mut reply = String::new();
-    let mut replied = 0;
 
     // A prompt arrives in chunks: it is pushed once the next thing happens,
     // and handed back as the one now being answered.
@@ -138,17 +137,15 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
         Some((id.clone().unwrap_or_default(), std::mem::take(text)))
     }
     // What the answer to a review command says it found, once it is over.
-    // At the time it was said: an event with no time would be put first,
-    // ahead of the session's start.
+    let mut said: Vec<ReviewSaid> = Vec::new();
     fn flush_reply(
-        out: &mut Builder,
+        said: &mut Vec<ReviewSaid>,
         asked: &mut Option<(String, String)>,
         reply: &mut String,
-        at: i64,
     ) {
         if let Some((id, prompt)) = asked.take() {
-            if let Some(said) = crate::reviews::reply_event(&id, &prompt, reply) {
-                out.push(&time_of(at), "ReviewReply", said);
+            if crate::reviews::is_typed_review(&prompt) {
+                said.extend(crate::reviews::review_said(&id, reply));
             }
         }
         reply.clear();
@@ -165,13 +162,12 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
         if kind != "user_message_chunk" {
             if let Some(now) = flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started)
             {
-                flush_reply(&mut out, &mut asked, &mut reply, replied);
+                flush_reply(&mut said, &mut asked, &mut reply);
                 asked = Some(now);
             }
         }
         match kind {
             "agent_message_chunk" => {
-                replied = at;
                 reply.push_str(update["content"]["text"].as_str().unwrap_or_default());
             }
             "user_message_chunk" => {
@@ -181,7 +177,7 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
                     if let Some(now) =
                         flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started)
                     {
-                        flush_reply(&mut out, &mut asked, &mut reply, replied);
+                        flush_reply(&mut said, &mut asked, &mut reply);
                         asked = Some(now);
                     }
                     prompt_id = id;
@@ -276,10 +272,10 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
         }
     })?;
     if let Some(now) = flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started) {
-        flush_reply(&mut out, &mut asked, &mut reply, replied);
+        flush_reply(&mut said, &mut asked, &mut reply);
         asked = Some(now);
     }
-    flush_reply(&mut out, &mut asked, &mut reply, replied);
+    flush_reply(&mut said, &mut asked, &mut reply);
     // Calls that never reported an outcome.
     let mut open: Vec<(String, Call)> = calls.into_iter().collect();
     open.sort_by_key(|(_, call)| call.started);
@@ -313,15 +309,14 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
     let created = parse_time(&summary["created_at"]).or(DateTime::from_timestamp(first, 0));
     let updated =
         parse_time(&summary["updated_at"]).or(last.and_then(|l| DateTime::from_timestamp(l, 0)));
-    Ok((
-        out.finish(),
-        Some(facts(
-            &read_json(&dir.join("usage.json")),
-            &summary,
-            created,
-            updated,
-        )),
-    ))
+    let mut facts = facts(
+        &read_json(&dir.join("usage.json")),
+        &summary,
+        created,
+        updated,
+    );
+    facts.review_replies = said;
+    Ok((out.finish(), Some(facts)))
 }
 
 /// Tokens and cost as Grok recorded them.
@@ -569,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reviews_reply_is_an_event_at_its_time_and_the_start_stays_first() {
+    fn a_reviews_reply_says_what_it_found_and_the_start_stays_first() {
         let dir = tempfile::tempdir().unwrap();
         let updates = sample(dir.path());
         let t0 = 1_794_212_700;
@@ -592,8 +587,8 @@ mod tests {
         let (events, facts) = session(&updates).unwrap();
         // The first line of an import says what it was read from.
         assert_eq!(events[0]["hook"], "SessionStart");
-        let reply = events.iter().find(|e| e["hook"] == "ReviewReply").unwrap();
-        assert!(reply["received_at"].is_string());
+        // What the reply says is a fact of the session, and no event of it.
+        assert!(events.iter().all(|e| e["received_at"].is_string()));
         let s = crate::normalize::from_events(&events, facts.as_ref(), GROK).unwrap();
         let runs: Vec<_> = s
             .reviews

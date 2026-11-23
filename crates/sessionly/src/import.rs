@@ -72,58 +72,6 @@ fn is_prompt(row: &Value) -> bool {
     }
 }
 
-/// A review command in a row Claude Code wrote for a command it ran itself
-/// (`/ultrareview`) or an older transcript wrote for a typed one: its name and
-/// arguments, as the hooks' `UserPromptExpansion` has them. Other commands
-/// (`/model`, `/clear`) are not kept.
-pub(crate) fn review_command(row: &Value) -> Option<Value> {
-    // A summary of what went before quotes the rows of the commands in it.
-    if row["isMeta"].as_bool() == Some(true) || row["isCompactSummary"].as_bool() == Some(true) {
-        return None;
-    }
-    let text = match row["type"].as_str() {
-        Some("system") => row["content"].as_str()?.to_string(),
-        _ => text_of(&row["message"]["content"]),
-    };
-    // The row is the command's own: it opens with it, and does not only
-    // have it somewhere in what was pasted or quoted.
-    const OPENS: &[&str] = &[
-        "<command-name>",
-        "<command-message>",
-        "<local-command-stdout>",
-        "<forked-skill-launch>",
-    ];
-    let opening = text.trim_start();
-    if !OPENS.iter().any(|tag| opening.starts_with(tag)) {
-        return None;
-    }
-    let between = |open: &str, close: &str| {
-        let start = text.find(open)? + open.len();
-        let end = text[start..].find(close)? + start;
-        Some(text[start..end].trim().to_string())
-    };
-    // A typed command that forks says so in a row of its own.
-    if text.contains("<forked-skill-launch>") {
-        let launch = crate::reviews::forked_launch(&text)?;
-        return Some(json!({
-            "expansion_type": "slash_command",
-            "command_name": launch.command,
-            "command_args": launch.args,
-            "forked_agent_id": launch.agent_id,
-        }));
-    }
-    let name = between("<command-name>", "</command-name>")?;
-    let name = name.trim_start_matches('/');
-    if !crate::reviews::is_review(name) {
-        return None;
-    }
-    Some(json!({
-        "expansion_type": "slash_command",
-        "command_name": name,
-        "command_args": between("<command-args>", "</command-args>").unwrap_or_default(),
-    }))
-}
-
 /// A tool result reduced to what normalizing reads, plus its original size.
 fn slim_result(result: &Value) -> Value {
     let mut slim = json!({ "_bytes": result.to_string().len() });
@@ -313,7 +261,9 @@ fn read_file(
                 out.push(at, "UserPromptSubmit", payload);
             }
             Some("user") => {
-                if let Some(mut command) = review_command(&row).filter(|_| agent.is_none()) {
+                if let Some(mut command) =
+                    crate::reviews::command_row(&row).filter(|_| agent.is_none())
+                {
                     command["prompt_id"] = row["promptId"].clone();
                     out.push(at, "UserPromptExpansion", command);
                 }
@@ -399,7 +349,7 @@ fn read_file(
             }
             Some("system") if agent.is_none() => match row["subtype"].as_str() {
                 Some("local_command") => {
-                    if let Some(mut command) = review_command(&row) {
+                    if let Some(mut command) = crate::reviews::command_row(&row) {
                         command["prompt_id"] = row["promptId"].clone();
                         out.push(at, "UserPromptExpansion", command);
                     }

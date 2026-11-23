@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use crate::cursor_hooks::{self, FileEdit, Tool, Turn};
 use crate::import::{edit_result, patch_lines, slim_input, Builder};
 use crate::paths::CURSOR;
-use crate::transcript::Facts;
+use crate::transcript::{Facts, ReviewSaid};
 
 fn subagent_files(transcript: &Path) -> Vec<PathBuf> {
     let dir = transcript.parent().map(|d| d.join("subagents"));
@@ -196,13 +196,15 @@ fn unseen_by_hooks(name: &str) -> bool {
 }
 
 /// Read one transcript file into events, taking times and outcomes from the
-/// turns the hooks saw (`hooked`; none for a subagent's file). Returns how
-/// many tool calls and prompts it had.
+/// turns the hooks saw (`hooked`; none for a subagent's file), and into
+/// `said` what the reply to a typed review says it found. Returns how many
+/// tool calls and prompts it had.
 fn read_file(
     path: &Path,
     agent_id: Option<&str>,
     hooked: &mut [Turn],
     out: &mut Builder,
+    said: &mut Vec<ReviewSaid>,
 ) -> Result<(u64, u64)> {
     let mut prompts = 0u64;
     let mut calls = 0u64;
@@ -237,8 +239,8 @@ fn read_file(
                         end_turn(out, &hooked[i], format!("p{prompts}"));
                     }
                     if let (Some((id, asked)), Some(reply)) = (asked.take(), reply.take()) {
-                        if let Some(said) = crate::reviews::reply_event(&id, &asked, &reply) {
-                            out.push("", "ReviewReply", said);
+                        if crate::reviews::is_typed_review(&asked) {
+                            said.extend(crate::reviews::review_said(&id, &reply));
                         }
                     }
                     prompts += 1;
@@ -350,8 +352,8 @@ fn read_file(
         end_turn(out, &hooked[i], format!("p{prompts}"));
     }
     if let (Some((id, asked)), Some(reply)) = (asked, reply) {
-        if let Some(said) = crate::reviews::reply_event(&id, &asked, &reply) {
-            out.push("", "ReviewReply", said);
+        if crate::reviews::is_typed_review(&asked) {
+            said.extend(crate::reviews::review_said(&id, &reply));
         }
     }
     Ok((calls, prompts))
@@ -402,7 +404,9 @@ pub fn session(transcript: &Path, capture: Option<&Path>) -> Result<(Vec<Value>,
         .into_owned();
     let mut hooked = capture.map(cursor_hooks::read).unwrap_or_default();
     let mut out = Builder::new(CURSOR, &session_id);
-    let (calls, prompts) = read_file(transcript, None, &mut hooked.turns, &mut out)?;
+    // What the reply to each typed review says it found.
+    let mut said = Vec::new();
+    let (calls, prompts) = read_file(transcript, None, &mut hooked.turns, &mut out, &mut said)?;
     let mut total = calls;
     for file in subagent_files(transcript) {
         let agent = file
@@ -412,7 +416,7 @@ pub fn session(transcript: &Path, capture: Option<&Path>) -> Result<(Vec<Value>,
             .into_owned();
         let identity = json!({ "agent_id": agent, "agent_type": "" });
         out.push("", "SubagentStart", identity.clone());
-        total += read_file(&file, Some(&agent), &mut [], &mut out)?.0;
+        total += read_file(&file, Some(&agent), &mut [], &mut out, &mut said)?.0;
         out.push("", "SubagentStop", identity);
     }
     let events = out.in_order();
@@ -442,6 +446,7 @@ pub fn session(transcript: &Path, capture: Option<&Path>) -> Result<(Vec<Value>,
         version: hooked.cursor_version,
         cost,
         usage,
+        review_replies: said,
         ..Default::default()
     };
     Ok((all, Some(facts)))

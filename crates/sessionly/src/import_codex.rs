@@ -57,7 +57,7 @@ use serde_json::{json, Value};
 use crate::import::{edit_result, slim_input, Builder};
 use crate::paths::CODEX;
 use crate::session::{Cost, ModelUsage};
-use crate::transcript::{Facts, SubagentFacts};
+use crate::transcript::{Facts, ReviewMode, ReviewerThread, SubagentFacts};
 
 /// What is between `rollout-` and `.jsonl` (or `.jsonl.zst`) in a rollout's
 /// file name.
@@ -1593,33 +1593,26 @@ pub fn session(
         subagent_facts.push(facts);
     }
 
-    // Each review with the thread it ran in: the reviewer that began while
-    // the review was on, each one once.
-    reviewers.sort_by(|a, b| a.1.cmp(&b.1));
-    const SAME_START: i64 = crate::reviews::SAME_START_SECONDS;
-    for (i, review) in main.reviews.iter().enumerate() {
-        // One left without an end was on until the next one began.
-        let next = main.reviews.get(i + 1).and_then(|r| parse_time(&r.at));
-        let within = |began: &str| {
-            let (Some(began), Some(start)) = (parse_time(began), parse_time(&review.at)) else {
-                return false;
-            };
-            let end = review.ended.as_deref().and_then(parse_time);
-            (start - began).num_seconds() <= SAME_START
-                && match end {
-                    Some(end) => began <= end,
-                    None => next.is_none_or(|next| (next - began).num_seconds() > SAME_START),
-                }
-        };
-        let ran_in = reviewers.iter().position(|(_, began)| within(began));
-        let agent = ran_in.map(|i| reviewers.remove(i).0);
-        out.push(
-            &review.at,
-            "CodexReview",
-            json!({ "review_id": review.id, "target": review.target, "ended_at": review.ended,
-                    "findings": review.findings, "agent_id": agent }),
-        );
-    }
+    // Each `/review` as the rollout has it, and the threads reviewers ran in:
+    // which review each is of is told where the runs are built.
+    let review_modes = main
+        .reviews
+        .iter()
+        .map(|review| ReviewMode {
+            id: review.id.clone(),
+            at: parse_time(&review.at),
+            target: review.target.clone(),
+            ended_at: review.ended.as_deref().and_then(parse_time),
+            findings: review.findings,
+        })
+        .collect();
+    let reviewer_threads = reviewers
+        .into_iter()
+        .map(|(agent_id, began)| ReviewerThread {
+            agent_id,
+            began: parse_time(&began),
+        })
+        .collect();
 
     let mut start = json!({ "source": "startup" });
     if let Some(cwd) = main.meta["cwd"].as_str() {
@@ -1650,6 +1643,8 @@ pub fn session(
         usage,
         subagents: subagent_facts,
         tool_models,
+        review_modes,
+        reviewer_threads,
         ..Default::default()
     };
     Ok((out.finish(), Some(facts)))

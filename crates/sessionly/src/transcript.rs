@@ -391,6 +391,8 @@ impl TranscriptSummary {
             review_launches: self.review_launches.clone(),
             reused_efforts: self.reused_efforts.clone(),
             review_replies: self.review_replies.clone(),
+            review_modes: Vec::new(),
+            reviewer_threads: Vec::new(),
         }
     }
 
@@ -471,6 +473,14 @@ pub struct Facts {
     /// names, for a review that ran there and not in a subagent.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub review_replies: Vec<ReviewSaid>,
+    /// Codex's `/review` runs, as its rollout has them: review mode entered
+    /// and left.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review_modes: Vec<ReviewMode>,
+    /// The threads Codex's reviewers ran in, and when each began: which
+    /// review each is of is told from the times (`reviews::runs`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reviewer_threads: Vec<ReviewerThread>,
 }
 
 /// A typed review command that forked: the row Claude Code writes as it
@@ -484,6 +494,30 @@ pub struct ReviewLaunch {
     pub pull_number: Option<u64>,
     /// The subagent the review runs in.
     pub agent_id: String,
+}
+
+/// One run of Codex's `/review`: an `EnteredReviewMode` item, and the
+/// `ExitedReviewMode` that ends it with what the reviewer found.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewMode {
+    pub id: String,
+    pub at: Option<DateTime<Utc>>,
+    /// What was reviewed, as Codex writes it: `baseBranch`,
+    /// `uncommittedChanges`, `commit`, `custom`.
+    pub target: Option<String>,
+    /// None when the session stopped while it ran.
+    pub ended_at: Option<DateTime<Utc>>,
+    /// How many findings the reviewer returned.
+    pub findings: Option<u64>,
+}
+
+/// A thread a reviewer of Codex's `/review` ran in.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewerThread {
+    pub agent_id: String,
+    pub began: Option<DateTime<Utc>>,
 }
 
 /// The number of findings the reply to a typed review names (see
@@ -630,11 +664,9 @@ fn scan(
             .review_replies
             .iter()
             .any(|r| r.prompt_id == prompt_id);
-        if let (Some(findings), false) = (crate::reviews::findings_in(&all.join("\n")), known) {
-            summary.review_replies.push(ReviewSaid {
-                prompt_id,
-                findings,
-            });
+        if !known {
+            let said = crate::reviews::review_said(&prompt_id, &all.join("\n"));
+            summary.review_replies.extend(said);
         }
     }
 
@@ -675,7 +707,7 @@ fn scan(
                 let result = blocks.is_some_and(|b| b.iter().any(|b| b["type"] == "tool_result"));
                 if !result {
                     said(summary, &mut reviewing, &mut last_reply);
-                    if crate::import::review_command(&row).is_some() {
+                    if crate::reviews::command_row(&row).is_some() {
                         reviewing = text("promptId");
                     }
                 }
