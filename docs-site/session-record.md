@@ -99,8 +99,8 @@ Each run has:
   reply is a JSON list of findings or its first lines say how many it found, kept or has
   ("15 findings, most severe first", "I reviewed PR #50 and found 4 issues", "no
   findings"). The reply is read on your machine and only the number is kept. It is the reply
-  of the subagent a Claude Code review ran in, and in Cursor and Grok the last thing said in
-  the turn. A reply that words its result another way, names two different numbers, or says
+  of the subagent a Claude Code review ran in (for a typed one that forked none, the last
+  thing said in its turn), and in Cursor and Grok the last thing said in the turn. A reply that words its result another way, names two different numbers, or says
   there are none of one kind only ("no blocking bugs"), has none (`null`), which is not
   zero.
 

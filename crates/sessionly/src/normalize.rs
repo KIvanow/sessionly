@@ -68,7 +68,7 @@ pub fn build_with(
         }
         None => Facts::load(&saved),
     };
-    let Some(mut session) = from_events(&events, facts.as_ref(), source) else {
+    let Some((mut session, reviews)) = assemble(&events, facts.as_ref(), source) else {
         return Ok(None);
     };
     // Nothing was asked and no tool ran: an agent that was opened and closed
@@ -79,6 +79,8 @@ pub fn build_with(
     }
     let runtime = crate::runtime::Seen::of(&events);
     add_local_context(&mut session, facts.as_ref(), runtime.as_ref());
+    // After the repository is known: a review's runs are read against it.
+    add_reviews(&mut session, &reviews, facts.as_ref());
     // A call whose model is not known is put down to the session's main one.
     let main = session.models.first();
     let models: HashMap<&str, &str> = session
@@ -162,8 +164,27 @@ pub fn apply_runtime(session: &mut Session, runtime: &crate::runtime::Seen) {
     }
 }
 
-/// Normalize raw capture records (the envelopes written by `sessionly capture`).
+/// Normalize raw capture records (the envelopes written by `sessionly capture`),
+/// where the session ran in no repository that is known.
+#[cfg(test)]
 pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Option<Session> {
+    let (mut s, reviews) = assemble(events, facts, source)?;
+    add_reviews(&mut s, &reviews, facts);
+    Some(s)
+}
+
+/// The session's review runs and their count, from what its events showed.
+pub(crate) fn add_reviews(s: &mut Session, seen: &crate::reviews::Seen, facts: Option<&Facts>) {
+    s.reviews = crate::reviews::runs(s, seen, facts);
+    s.counts.reviews = crate::reviews::counted(&s.source).then_some(s.reviews.len() as u64);
+}
+
+/// The session without its review runs, and what its events showed of them.
+pub(crate) fn assemble(
+    events: &[Value],
+    facts: Option<&Facts>,
+    source: &str,
+) -> Option<(Session, crate::reviews::Seen)> {
     let mut s = Session {
         schema_version: SCHEMA_VERSION,
         source: source.into(),
@@ -384,7 +405,6 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
     if s.models.is_empty() {
         s.models.extend(start_model);
     }
-    s.reviews = crate::reviews::runs(&s, &reviews, facts);
     s.started_at = first;
     s.ended_at = last;
     s.duration_ms = first.zip(last).map(|(f, l)| (l - f).num_milliseconds());
@@ -397,12 +417,11 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
         .filter(|c| c.status == ToolStatus::Failed)
         .count() as u64;
     s.counts.subagents = s.subagents.len() as u64;
-    s.counts.reviews = crate::reviews::counted(source).then_some(s.reviews.len() as u64);
     s.counts.files_read = s.files.iter().filter(|f| f.reads > 0).count() as u64;
     s.counts.files_changed = s.files.iter().filter(|f| f.writes > 0).count() as u64;
     s.counts.lines_added = s.files.iter().map(|f| f.lines_added).sum();
     s.counts.lines_removed = s.files.iter().map(|f| f.lines_removed).sum();
-    Some(s)
+    Some((s, reviews))
 }
 
 /// The turn a hook event belongs to. Claude Code names it `prompt_id`;

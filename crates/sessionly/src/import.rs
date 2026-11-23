@@ -76,7 +76,7 @@ fn is_prompt(row: &Value) -> bool {
 /// (`/ultrareview`) or an older transcript wrote for a typed one: its name and
 /// arguments, as the hooks' `UserPromptExpansion` has them. Other commands
 /// (`/model`, `/clear`) are not kept.
-fn review_command(row: &Value) -> Option<Value> {
+pub(crate) fn review_command(row: &Value) -> Option<Value> {
     // A summary of what went before quotes the rows of the commands in it.
     if row["isMeta"].as_bool() == Some(true) || row["isCompactSummary"].as_bool() == Some(true) {
         return None;

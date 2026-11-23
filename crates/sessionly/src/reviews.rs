@@ -119,16 +119,6 @@ fn parse_args_of(args: &str) -> Args {
     (effort, number, repo)
 }
 
-/// The origin of the repository the session ran in, as the record has it or,
-/// before it has, as git says for where the session ran.
-fn remote_of(s: &Session) -> Option<String> {
-    if let Some(repo) = &s.repo {
-        return repo.remote.clone();
-    }
-    let root = crate::git::repo_root(std::path::Path::new(s.cwd.as_deref()?))?;
-    crate::git::origin_remote(&root)
-}
-
 /// The number, unless a URL named it in a repository other than the
 /// session's (`remote`). Where either is not known it is kept.
 fn in_repo(number: Option<u64>, named: &Option<String>, remote: Option<&str>) -> Option<u64> {
@@ -537,14 +527,8 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
     }
     // A URL of a pull request in another repository names none of this
     // one's: by name, since a fork has its own owner.
-    // The session's repository is asked for only where a URL named one: it
-    // is not on the record yet while its runs are built.
-    let named = |repo: &Option<String>| repo.is_some();
-    let asked = seen.skill_calls.values().any(|(_, _, repo)| named(repo))
-        || seen.typed.iter().any(|t| named(&t.repo));
-    let here = asked.then(|| remote_of(s)).flatten();
-    let of_here =
-        |number: Option<u64>, repo: &Option<String>| in_repo(number, repo, here.as_deref());
+    let here = s.repo.as_ref().and_then(|r| r.remote.as_deref());
+    let of_here = |number: Option<u64>, repo: &Option<String>| in_repo(number, repo, here);
     for call in &s.tool_calls {
         let Some((effort, number, repo)) = seen.skill_calls.get(&call.tool_use_id) else {
             continue;
@@ -905,10 +889,22 @@ fn measure(
         }
         // Reported as a list, or else what the last reply of the subagent
         // the review ran in says.
+        // Where it forked none, what the main thread's reply to it says.
         run.findings = run.findings.or(findings[i]).or_else(|| {
-            let fork = forks.get(run.id.as_str())?;
-            let said = facts?.subagents.iter().find(|sub| sub.agent_id == *fork)?;
-            said.findings
+            let facts = facts?;
+            match forks.get(run.id.as_str()) {
+                Some(fork) => {
+                    let said = facts.subagents.iter().find(|sub| sub.agent_id == *fork)?;
+                    said.findings
+                }
+                None => {
+                    let said = facts
+                        .review_replies
+                        .iter()
+                        .find(|r| r.prompt_id == run.id)?;
+                    Some(said.findings)
+                }
+            }
         });
     }
 }
@@ -1445,22 +1441,8 @@ mod tests {
     }
 
     #[test]
-    fn a_url_of_another_repository_is_checked_against_where_the_session_ran() {
-        let dir = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let done = std::process::Command::new("git")
-                .args(args)
-                .current_dir(dir.path())
-                .output()
-                .unwrap();
-            assert!(done.status.success());
-        };
-        git(&["init", "-q"]);
-        git(&["remote", "add", "origin", "https://github.com/acme/web.git"]);
-        let here = |mut e: Value| {
-            e["payload"]["cwd"] = json!(dir.path());
-            e
-        };
+    fn a_url_of_another_repository_is_checked_against_the_sessions_own() {
+        use crate::session::Repo;
         let [other, _] = skill(
             1,
             "t1",
@@ -1475,16 +1457,38 @@ mod tests {
             "https://github.com/acme/web/pull/42",
             None,
         );
-        let s = session(
-            vec![vec![
-                here(prompt(0, "p1", "review them")),
-                here(other),
-                here(own),
-            ]],
-            None,
-        );
+        let events = [prompt(0, "p1", "review them"), other, own];
+        // As a session is built: its repository is known before its runs are.
+        let (mut s, seen) = crate::normalize::assemble(&events, None, "claude-code").unwrap();
+        s.repo = Some(Repo {
+            remote: Some("github.com/acme/web".into()),
+            ..Default::default()
+        });
+        crate::normalize::add_reviews(&mut s, &seen, None);
         let numbers: Vec<_> = s.reviews.iter().map(|r| r.pull_number).collect();
         assert_eq!(numbers, [None, Some(42)]);
+        assert_eq!(s.counts.reviews, Some(2));
+    }
+
+    #[test]
+    fn a_typed_review_that_forked_none_has_what_the_main_threads_reply_found() {
+        use crate::transcript::ReviewSaid;
+        let facts = Facts {
+            review_replies: vec![ReviewSaid {
+                prompt_id: "p1".into(),
+                findings: 3,
+            }],
+            ..Default::default()
+        };
+        let s = session(
+            vec![vec![
+                prompt(0, "p1", "/security-review"),
+                prompt(60, "p2", "/security-review"),
+            ]],
+            Some(&facts),
+        );
+        let found: Vec<_> = s.reviews.iter().map(|r| r.findings).collect();
+        assert_eq!(found, [Some(3), None]);
     }
 
     #[test]

@@ -235,9 +235,11 @@ cloud, the findings they reported, and what their subagents cost. They are of:
 3. sessions of its repository on its branch, for runs that name no pull request: a review
    there is work on this pull request. Codex's `/review` never names one. A run made after
    the pull request was merged or closed is left out, since a branch's name can be used
-   again, and so is one made before the pull request before it on that branch was merged
-   or closed: a branch such as `develop` has one after another, and a run is of the one
-   open at the time. A branch that is the one the pull request merges into is left out,
+   again. A branch such as `develop` has one pull request after another: a run there is
+   left out of a pull request when it was made before the earlier ones on that branch
+   (those with a lower number) were merged or closed, so it is of the one it was made for
+   and not of those opened later. Two that are open on one branch at once, into different
+   branches, each have it. A branch that is the one the pull request merges into is left out,
    and a fork's branch is the fork's, not a branch of that name in your repository. The
    branch is the one the session started on.
 

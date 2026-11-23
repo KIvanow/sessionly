@@ -228,6 +228,8 @@ pub struct TranscriptSummary {
     pub review_launches: Vec<ReviewLaunch>,
     /// Efforts Claude Code said it reused for a review typed without one.
     pub reused_efforts: Vec<ReusedEffort>,
+    /// What the main thread's last reply to a typed review says it found.
+    pub review_replies: Vec<ReviewSaid>,
     messages: Vec<Message>,
 }
 
@@ -388,6 +390,7 @@ impl TranscriptSummary {
             tool_models: self.tool_models.clone(),
             review_launches: self.review_launches.clone(),
             reused_efforts: self.reused_efforts.clone(),
+            review_replies: self.review_replies.clone(),
         }
     }
 
@@ -464,6 +467,10 @@ pub struct Facts {
     /// Efforts Claude Code said it reused for a review typed without one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reused_efforts: Vec<ReusedEffort>,
+    /// How many findings the main thread's last reply to a typed review
+    /// names, for a review that ran there and not in a subagent.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review_replies: Vec<ReviewSaid>,
 }
 
 /// A typed review command that forked: the row Claude Code writes as it
@@ -477,6 +484,16 @@ pub struct ReviewLaunch {
     pub pull_number: Option<u64>,
     /// The subagent the review runs in.
     pub agent_id: String,
+}
+
+/// The number of findings the reply to a typed review names (see
+/// `reviews::findings_in`), by the prompt the command was: the reply itself
+/// is not kept.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewSaid {
+    pub prompt_id: String,
+    pub findings: u64,
 }
 
 /// "Reusing high effort, the level you typed last time."
@@ -597,6 +614,29 @@ fn scan(
     let mut by_id: HashMap<String, usize> = HashMap::new();
     let mut latest: Option<DateTime<Utc>> = None;
     let mut last_reply: Option<(Option<String>, Vec<String>)> = None;
+    // In the main thread, the typed review being answered: its prompt.
+    let mut reviewing: Option<String> = None;
+    // What a reply to a typed review says it found, once the turn is over.
+    fn said(
+        summary: &mut TranscriptSummary,
+        reviewing: &mut Option<String>,
+        reply: &mut Option<(Option<String>, Vec<String>)>,
+    ) {
+        let (prompt, reply) = (reviewing.take(), reply.take());
+        let (Some(prompt_id), Some((_, all))) = (prompt, reply) else {
+            return;
+        };
+        let known = summary
+            .review_replies
+            .iter()
+            .any(|r| r.prompt_id == prompt_id);
+        if let (Some(findings), false) = (crate::reviews::findings_in(&all.join("\n")), known) {
+            summary.review_replies.push(ReviewSaid {
+                prompt_id,
+                findings,
+            });
+        }
+    }
 
     let skipped = crate::jsonl::for_each(path, |row| {
         let text = |k: &str| {
@@ -628,9 +668,21 @@ fn scan(
             latest = Some(latest.map_or(ts, |l| l.max(ts)));
         }
         match row.get("type").and_then(Value::as_str) {
+            // Something asked, and not a tool's result: the turn before it is
+            // over. A review command typed here is the one answered next.
+            Some("user") if is_main => {
+                let blocks = row["message"]["content"].as_array();
+                let result = blocks.is_some_and(|b| b.iter().any(|b| b["type"] == "tool_result"));
+                if !result {
+                    said(summary, &mut reviewing, &mut last_reply);
+                    if crate::import::review_command(&row).is_some() {
+                        reviewing = text("promptId");
+                    }
+                }
+            }
             Some("assistant") => {
                 let message = &row["message"];
-                if !is_main {
+                if !is_main || reviewing.is_some() {
                     let texts = message["content"].as_array().into_iter().flatten();
                     // All it said in its last message, in order: the number
                     // of findings may be in a block before the last, and a
@@ -734,6 +786,9 @@ fn scan(
             cost,
             branch: response.branch,
         });
+    }
+    if is_main {
+        said(summary, &mut reviewing, &mut last_reply);
     }
     Ok((usage, last_reply.map(|(_, all)| all.join("\n"))))
 }
@@ -1158,6 +1213,50 @@ mod tests {
             &json!({ "output_tokens": 1000, "speed": "fast" }),
         );
         assert!((fast.cost_usd - 2.0 * normal.cost_usd).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_main_threads_reply_to_a_typed_review_says_what_it_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s1.jsonl");
+        let user = |id: &str, content: Value| {
+            json!({ "type": "user", "promptId": id, "sessionId": "s1",
+                    "message": { "role": "user", "content": content } })
+        };
+        let says = |id: &str, text: &str| {
+            json!({ "type": "assistant", "sessionId": "s1",
+                    "message": { "id": id, "model": "claude-opus-5-5", "usage": {},
+                                 "content": [{ "type": "text", "text": text }] } })
+        };
+        let typed = "<command-name>/security-review</command-name>\n<command-args></command-args>";
+        write_jsonl(
+            &path,
+            &[
+                user("p1", json!(typed)),
+                says("m1", "Looking at the diff."),
+                // a tool's result is not the next thing asked
+                user(
+                    "p1",
+                    json!([{ "type": "tool_result", "tool_use_id": "t1", "content": "ok" }]),
+                ),
+                says("m2", "I found 3 issues."),
+                says("m2", "The first is in auth.rs."),
+                // not a review: what is said to it is not read
+                user("p2", json!("thanks, fix them")),
+                says("m3", "I found 9 problems on the way."),
+                // one whose reply names no number
+                user("p3", json!(typed)),
+                says("m4", "Nothing stands out."),
+            ],
+        );
+        let facts = parse(&path).unwrap().facts();
+        assert_eq!(
+            facts.review_replies,
+            [ReviewSaid {
+                prompt_id: "p1".into(),
+                findings: 3
+            }]
+        );
     }
 
     #[test]

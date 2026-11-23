@@ -26,6 +26,7 @@ import type {
 } from "@sessionly/schema";
 import { createHash, createHmac } from "node:crypto";
 import type { OrgDb } from "./db.ts";
+import { EFFORTS, belongs } from "./review-runs.ts";
 import { type Lines, contributedAfter, copiesAt, countLines, lineKey, unionLines } from "./contributed.ts";
 
 export class BadReport extends Error {}
@@ -2184,11 +2185,9 @@ async function costed(
  * `pullKey`: of the sessions matched to each (as `sharesIn` has them), of
  * the sessions of its repository with a run that names its number, and of
  * the sessions of its repository on its branch, for runs that name none. One
- * with neither is not in the map.
+ * with neither is not in the map. The query finds the sessions; which of
+ * their runs are the pull request's is `belongs` (review-runs.ts).
  */
-/** The efforts a review command takes. */
-const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
-
 async function localReviewsIn(
   db: OrgDb,
   chosen: { sql: string; params: unknown[] },
@@ -2262,22 +2261,18 @@ async function localReviewsIn(
       if (row.matched === true) into.sessions_unknown += 1;
       continue;
     }
-    const number = num(row.number);
     const instantOf = (at: unknown) => (at == null ? null : new Date(at as string | Date).getTime());
-    const [ended, after] = [instantOf(row.ended_at), instantOf(row.after_at)];
+    // What was found of the two. Which of the session's runs are the pull request's is `belongs`.
+    const reviewed = {
+      number: num(row.number),
+      ended: instantOf(row.ended_at),
+      after: instantOf(row.after_at),
+      matched: row.matched === true,
+      onBranch: row.on_branch === true,
+    };
     for (const run of row.runs == null ? [] : json<ReviewRun[]>(row.runs)) {
-      // Refused before it began: no review ran.
-      if (run.status === "denied" || run.status === "rejected") continue;
+      if (!belongs(reviewed, run)) continue;
       const named = run.pull_number ?? null;
-      const at = run.at == null ? null : Date.parse(run.at);
-      // One that names none is this pull request's only while it was not yet merged or closed: a session may
-      // go on to other work, and a branch's name may be used again.
-      const late = at !== null && ended !== null && at > ended;
-      // On its branch, and after the pull request before it on that branch was done with.
-      const onBranch = row.on_branch === true && !late && (after === null || (at !== null && at > after));
-      const matched = row.matched === true && !late;
-      // A run that names another pull request is that one's.
-      if (named !== number && !(named === null && (matched || onBranch))) continue;
       into.runs += 1;
       if (run.ran === "cloud") into.cloud += 1;
       // Of the efforts there are: what was sent is a string, and one that is no effort is not a key to count by.
