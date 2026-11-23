@@ -1405,6 +1405,19 @@ mod tests {
             ),
             found
         );
+        // Nor is what is said after that command the review's.
+        assert_eq!(
+            replies(
+                "after",
+                &[
+                    user("p1", "/security-review"),
+                    says("m1", "I found 3 issues."),
+                    command("<command-name>/doctor</command-name>"),
+                    says("m2", "I found 5 problems elsewhere."),
+                ]
+            ),
+            found
+        );
     }
 
     #[test]

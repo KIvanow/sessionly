@@ -195,7 +195,8 @@ export interface Totals {
   output_tokens: number;
   /**
    * Review runs (`/code-review` and the like) in the sessions that count
-   * them; `sessions_reviews_unknown` are from a collector that did not.
+   * them; `sessions_reviews_unknown` are from a collector that did not, or
+   * are Codex sessions whose rollout was not there to read.
    */
   review_runs: number;
   sessions_reviews_unknown: number;
@@ -249,7 +250,7 @@ export interface SessionRow {
   files_changed: number;
   lines_added: number;
   lines_removed: number;
-  /** Review runs (`/code-review` and the like). Null when the collector that sent it did not count them. */
+  /** Review runs (`/code-review` and the like). Null when the collector that sent it did not count them, or for a Codex session whose rollout was not there to read. */
   review_runs: number | null;
   content: string;
   captured_by: string | null;
@@ -619,7 +620,11 @@ export interface LocalReviews {
    * none has a cost; a cloud run's is not known.
    */
   cost_usd: number | null;
-  /** Matched sessions that are deleted, or from a collector that did not count review runs: theirs are not known. */
+  /**
+   * Matched sessions that are deleted, from a collector that did not count
+   * review runs, or Codex sessions whose rollout was not there to read:
+   * theirs are not known.
+   */
   sessions_unknown: number;
   /**
    * The most other pull requests a matched session that has a run naming

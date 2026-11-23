@@ -54,7 +54,7 @@ export function localReviewsLine(r: LocalReviews | null): string {
   if (!r) return "No session of it is known.";
   const unknown =
     r.sessions_unknown > 0
-      ? ` Not known for ${count(r.sessions_unknown)} of its sessions: deleted since, or captured by an older Sessionly, which did not count reviews.`
+      ? ` Not known for ${count(r.sessions_unknown)} of its sessions: deleted since, captured by an older Sessionly, which did not count reviews, or a Codex session whose own record of them was not there to read.`
       : "";
   if (r.runs === 0) return `No review command ran in its sessions.${unknown}`;
   const efforts = Object.entries(r.by_effort)

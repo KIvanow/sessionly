@@ -246,8 +246,8 @@ fn ran(command: &str, effort: Option<&str>) -> ReviewRan {
 /// None when the reply words it another way, and when it is not clear which
 /// number is meant: "the two earlier findings are fixed" counts nothing, two
 /// different numbers are none unless one is what was kept, and none of one
-/// kind ("no blocking bugs", "no bugs that crash anything") is not none at
-/// all.
+/// kind ("no blocking bugs", "no bugs that crash anything", "no bugs found,
+/// but 3 style issues") is not none at all.
 pub fn findings_in(reply: &str) -> Option<u64> {
     let reply = reply.trim();
     if let Some(block) = reply.strip_prefix("```json") {
@@ -273,10 +273,12 @@ pub fn findings_in(reply: &str) -> Option<u64> {
         "reports",
         "reporting",
     ];
-    // After "no bugs": what makes it none of some, not none at all.
-    const NARROWS: &[&str] = &[
-        "that", "which", "but", "except", "beyond", "other", "apart", "aside", "though",
-        "although", "however", "worth", "of",
+    // Straight after "no bugs": what makes it none of some, not none at all.
+    const NARROWS: &[&str] = &["that", "which", "worth", "of"];
+    // The same anywhere in the rest of the sentence ("no bugs found, but 3
+    // style issues").
+    const NARROWS_LATER: &[&str] = &[
+        "but", "except", "beyond", "other", "apart", "aside", "though", "although", "however",
     ];
     const NOT_A_KIND: &[&str] = &["of", "the", "in", "and", "or", "to", "for", "on", "from"];
     const WORDS: &[&str] = &[
@@ -333,11 +335,25 @@ pub fn findings_in(reply: &str) -> Option<u64> {
             continue;
         };
         // None of a kind says nothing of the other kinds, and nor does
-        // none that is then narrowed ("no bugs that block it", "no bugs,
-        // but several smaller problems").
-        let narrowed = raw
-            .get(i + 1)
-            .is_some_and(|next| NARROWS.contains(&clean(next).as_str()));
+        // none that is then narrowed ("no bugs that block it", "no bugs
+        // found, but several smaller problems").
+        let ends = |word: &&str| {
+            word.trim_end_matches(['"', '\'', ')', '*'])
+                .ends_with(['.', '!', '?'])
+        };
+        let rest = match ends(word) {
+            true => &raw[i..i],
+            false => {
+                let end = raw[i + 1..].iter().position(ends);
+                &raw[i + 1..end.map_or(raw.len(), |end| i + 2 + end)]
+            }
+        };
+        let narrowed = rest
+            .first()
+            .is_some_and(|next| NARROWS.contains(&clean(next).as_str()))
+            || rest
+                .iter()
+                .any(|later| NARROWS_LATER.contains(&clean(later).as_str()));
         if count == 0 && (at != i - 1 || narrowed) {
             continue;
         }
@@ -2138,6 +2154,12 @@ mod tests {
             "I found no bugs, but the diff has several minor issues.",
             "There are no issues of substance.",
             "I found no blocking bugs, but the diff has several minor issues.",
+            // narrowed further on in the sentence
+            "No bugs found, but 3 style issues.",
+            "No issues found other than two style nits.",
+            "I found no problems in the diff, except for a typo in the README.",
+            "There are no bugs here, though the tests are thin.",
+            "No issues found (apart from the naming)!",
             "",
         ] {
             assert_eq!(findings_in(other), None, "{other}");

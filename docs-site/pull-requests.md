@@ -257,8 +257,9 @@ not on top of it, and is a floor: their subagents only. It is not a part of the 
 request's cost that the two can be set against: that one is each matched session's share
 by its lines, and a session that only reviewed is not in it at all. A review in the cloud
 is billed apart and has none. The list has a Local column, and **by model** the runs per
-pull request. A matched session that was deleted since, or that came from a Sessionly that
-did not count review runs, is said to be not known.
+pull request. A matched session that was deleted since, that came from a Sessionly that
+did not count review runs, or that is a Codex session whose rollout was not there to read, is
+said to be not known.
 
 ## How to read it
 

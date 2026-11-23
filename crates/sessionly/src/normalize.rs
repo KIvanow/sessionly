@@ -105,12 +105,15 @@ pub fn build_with(
     }))
 }
 
-/// True for what a skill is called (`code-review`, `plugin:name`), which is
-/// kept: the model writes the field, and anything else in it is text that is
-/// not.
-fn is_skill_name(written: &str) -> bool {
+/// What a skill is called (`code-review`, `plugin:name`), which is kept
+/// without the slash it may be written with: the model writes the field, and
+/// anything else in it is text that is not kept.
+fn skill_name(written: &str) -> Option<&str> {
+    let name = written.trim();
+    let name = name.strip_prefix('/').unwrap_or(name);
     let shaped = |c: char| c.is_alphanumeric() || "_-:.".contains(c);
-    !written.is_empty() && written.chars().count() <= 100 && written.chars().all(shaped)
+    let named = !name.is_empty() && name.chars().count() <= 100 && name.chars().all(shaped);
+    named.then_some(name)
 }
 
 /// Repository and user details read from the local machine, and for a
@@ -473,7 +476,7 @@ fn tool_call<'a>(
                 input_sha256: sha256_hex(input.to_string().as_bytes()),
                 input_summary: input_summary(&tool, input),
                 skill: (tool == "Skill")
-                    .then(|| input["skill"].as_str().filter(|v| is_skill_name(v)))
+                    .then(|| input["skill"].as_str().and_then(skill_name))
                     .flatten()
                     .map(String::from),
                 tool,
@@ -835,11 +838,18 @@ mod tests {
 
     #[test]
     fn a_skill_is_kept_by_its_name_and_not_by_text_in_its_place() {
-        assert!(is_skill_name("code-review"));
-        assert!(is_skill_name("acme_tools:security-review.v2"));
-        assert!(!is_skill_name(""));
-        assert!(!is_skill_name("code-review 62 see ~/clients/acme/notes"));
-        assert!(!is_skill_name(&"a".repeat(101)));
+        assert_eq!(skill_name("code-review"), Some("code-review"));
+        assert_eq!(
+            skill_name("acme_tools:security-review.v2"),
+            Some("acme_tools:security-review.v2")
+        );
+        // written with its slash
+        assert_eq!(skill_name("/code-review"), Some("code-review"));
+        assert_eq!(skill_name(""), None);
+        assert_eq!(skill_name("/"), None);
+        assert_eq!(skill_name("code-review 62 see ~/clients/acme/notes"), None);
+        assert_eq!(skill_name("/home/ann/notes.md"), None);
+        assert_eq!(skill_name(&"a".repeat(101)), None);
     }
 
     #[test]

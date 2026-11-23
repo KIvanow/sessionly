@@ -40,7 +40,7 @@ imported transcript from the rows Claude Code writes for a command it runs itsel
 three things the hooks do not have: the subagent a typed command forked, the effort Claude
 Code reused for a command typed without one, and the number of findings the review's last
 reply names: its subagent's, or for a review that ran where it was typed, what the command
-printed.
+printed or the last thing said in its turn.
 
 ## Hook overhead
 
