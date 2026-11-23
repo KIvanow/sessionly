@@ -66,7 +66,7 @@ export function localReviewsLine(r: LocalReviews | null): string {
   if (r.findings != null) line += ` ${count(r.findings)} findings reported.`;
   if (r.cost_usd != null) line += ` Review subagents: ${usdOf(r.cost_usd)}.`;
   if (r.shared_with > 0)
-    line += ` Some of those ran in sessions it shares with ${count(r.shared_with)} other pull ${r.shared_with === 1 ? "request" : "requests"}, and name none: they are counted on each.`;
+    line += ` Some of those ran in sessions it shares with ${count(r.shared_with)} other pull ${r.shared_with === 1 ? "request" : "requests"}, and name none: they may be counted on those too.`;
   return line + unknown;
 }
 

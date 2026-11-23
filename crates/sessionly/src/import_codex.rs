@@ -1978,6 +1978,61 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn review_events_of_another_thread_or_beside_the_items_are_not_more_reviews() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str| {
+            dir.path().join(format!(
+                "sessions/2026/11/16/rollout-2026-11-16T12-00-0{name}-{MAIN}.jsonl"
+            ))
+        };
+        let entered = |second: u32, more: Value| event(second, "entered_review_mode", more);
+        let count = |path: &Path| {
+            let (events, facts) = session(path, &[], None).unwrap();
+            let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+            s.counts.reviews
+        };
+        // The paginated layout has an item for each review: an event beside
+        // it is the same review.
+        let item = json!({ "type": "EnteredReviewMode", "id": "r1" });
+        let paginated = file("1");
+        write(
+            &paginated,
+            &[
+                meta(MAIN, json!({ "history_mode": "paginated" })),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                entered(1, json!({})),
+                event(
+                    1,
+                    "item_completed",
+                    json!({ "turn_id": "t1", "item": item }),
+                ),
+            ],
+        );
+        assert_eq!(count(&paginated), Some(1));
+        // The older layout: an event of another thread is that thread's review.
+        let older = file("2");
+        write(
+            &older,
+            &[
+                meta(MAIN, json!({})),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                entered(1, json!({})),
+                entered(5, json!({ "thread_id": CHILD })),
+                event(
+                    6,
+                    "exited_review_mode",
+                    json!({ "thread_id": CHILD, "review_output": null }),
+                ),
+            ],
+        );
+        let (events, facts) = session(&older, &[], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        assert_eq!(s.counts.reviews, Some(1));
+        // Still running: the other thread's leaving did not end it.
+        assert_eq!(s.reviews[0].duration_ms, None);
+    }
+
+    #[test]
     fn two_reviews_whose_items_have_no_id_are_two_runs() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join(format!(

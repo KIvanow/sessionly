@@ -328,8 +328,8 @@ export interface ToolCall {
   agent_id?: string | null;
   tool?: string;
   /**
-   * For a `Skill` call, the skill's name as written (`code-review`,
-   * `plugin:name`). A name, like the tool's, so it is kept in every
+   * For a `Skill` call, the skill's name (`code-review`, `plugin:name`),
+   * without the slash it may be written with. A name, like the tool's, so it is kept in every
    * content mode; its arguments are not.
    */
   skill?: string | null;

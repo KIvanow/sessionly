@@ -628,7 +628,8 @@ export interface LocalReviews {
   sessions_unknown: number;
   /**
    * The most other pull requests a matched session that has a run naming
-   * none is matched to: such a run is shown on each of them. 0 when none.
+   * none is matched to: such a run is counted on each of them that was
+   * not yet merged or closed when it ran. 0 when none.
    */
   shared_with: number;
   /** Each run, oldest first: the order the pull request was reviewed in. On a pull request's own page only. */

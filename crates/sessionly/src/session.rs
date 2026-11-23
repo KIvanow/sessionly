@@ -274,8 +274,8 @@ pub struct ToolCall {
     /// Set when a subagent made the call.
     pub agent_id: Option<String>,
     pub tool: String,
-    /// For a `Skill` call, the skill's name as written (`code-review`,
-    /// `plugin:name`). A name, like the tool's, so it is kept in every
+    /// For a `Skill` call, the skill's name (`code-review`, `plugin:name`),
+    /// without the slash it may be written with. A name, like the tool's, so it is kept in every
     /// content mode; its arguments are not.
     pub skill: Option<String>,
     /// Model that made the call. Null where the agent does not say: Grok, and

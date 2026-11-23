@@ -57,6 +57,11 @@ In Claude Code the commands are `/code-review`, `/review`, `/security-review` an
 - you type it (`via: slash_command`), or
 - Claude Code runs its own command, `/ultrareview`.
 
+A plugin's command whose name has a dot in it (`my.plugin:code-review`) is counted where Claude
+Code names it: the `Skill` call, the hooks' record of a typed command, and the notice of a
+fork. Where only the typed text is there to read, as in a transcript imported without hooks,
+it is not: a file's name ends that way.
+
 In Cursor and Grok a run is the command typed as a prompt (`/code-review #41`, `via:
 slash_command`), on a machine or in Cursor's cloud. A prompt that opens with a path which
 ends in a command's name (`/home/ann/notes.md:review`) is no command; nor, there, is a

@@ -747,7 +747,7 @@
           "default": ""
         },
         "skill": {
-          "description": "For a `Skill` call, the skill's name as written (`code-review`,\n`plugin:name`). A name, like the tool's, so it is kept in every\ncontent mode; its arguments are not.",
+          "description": "For a `Skill` call, the skill's name (`code-review`, `plugin:name`),\nwithout the slash it may be written with. A name, like the tool's, so it is kept in every\ncontent mode; its arguments are not.",
           "type": [
             "string",
             "null"

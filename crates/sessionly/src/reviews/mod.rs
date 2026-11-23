@@ -35,6 +35,9 @@ use serde_json::Value;
 use crate::session::{Outcome, ReviewRan, ReviewRun, ReviewVia, Session, ToolStatus};
 use crate::transcript::{Facts, ReviewMode, ReviewSaid, ReviewerThread};
 
+mod findings;
+pub use findings::findings_in;
+
 /// The commands that are reviews. A plugin's skill matches on its last part
 /// (`anything:code-review`). A team's own review skill under another name is
 /// not counted.
@@ -42,9 +45,6 @@ pub const COMMANDS: &[&str] = &["code-review", "review", "security-review", "ult
 
 /// The efforts a review command takes as its first argument.
 const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
-
-/// How far into a reply its number of findings is looked for: its first lines.
-const FINDINGS_WITHIN: usize = 400;
 
 /// A typed command and the prompt it is in, taken as one start within this;
 /// so are a review and the thread its reviewer began in.
@@ -234,140 +234,6 @@ fn ran(command: &str, effort: Option<&str>) -> ReviewRan {
     } else {
         ReviewRan::Local
     }
-}
-
-/// How many findings a review's reply says it has, where its first lines say
-/// so in a way that can be relied on: a JSON list of them, or a number of
-/// findings, issues, problems or bugs that the reply opens a sentence with or
-/// says it found, kept or has ("15 findings, most severe first", "I reviewed
-/// PR #50 and found 4 issues", "there are no findings"). Read here on the
-/// machine; only the number is kept.
-///
-/// None when the reply words it another way, and when it is not clear which
-/// number is meant: "the two earlier findings are fixed" counts nothing, two
-/// different numbers are none unless one is what was kept, and none of one
-/// kind ("no blocking bugs", "no bugs that crash anything", "no bugs found,
-/// but 3 style issues") is not none at all.
-pub fn findings_in(reply: &str) -> Option<u64> {
-    let reply = reply.trim();
-    if let Some(block) = reply.strip_prefix("```json") {
-        let list = block.rsplit_once("```").map_or(block, |(list, _)| list);
-        return match serde_json::from_str::<Value>(list.trim()).ok()? {
-            Value::Array(found) => Some(found.len() as u64),
-            _ => None,
-        };
-    }
-    const THINGS: &[&str] = &[
-        "finding", "findings", "issue", "issues", "problem", "problems", "bug", "bugs",
-    ];
-    // What says that the number after it is this review's.
-    const FRAMES: &[&str] = &[
-        "found",
-        "kept",
-        "keeping",
-        "are",
-        "is",
-        "has",
-        "have",
-        "with",
-        "reports",
-        "reporting",
-    ];
-    // Straight after "no bugs": what makes it none of some, not none at all.
-    const NARROWS: &[&str] = &["that", "which", "worth", "of"];
-    // The same anywhere in the rest of the sentence ("no bugs found, but 3
-    // style issues").
-    const NARROWS_LATER: &[&str] = &[
-        "but", "except", "beyond", "other", "apart", "aside", "though", "although", "however",
-    ];
-    const NOT_A_KIND: &[&str] = &["of", "the", "in", "and", "or", "to", "for", "on", "from"];
-    const WORDS: &[&str] = &[
-        "no",
-        "one",
-        "two",
-        "three",
-        "four",
-        "five",
-        "six",
-        "seven",
-        "eight",
-        "nine",
-        "ten",
-        "eleven",
-        "twelve",
-        "thirteen",
-        "fourteen",
-        "fifteen",
-        "sixteen",
-        "seventeen",
-        "eighteen",
-        "nineteen",
-        "twenty",
-    ];
-    let head: String = reply.chars().take(FINDINGS_WITHIN).collect();
-    let raw: Vec<&str> = head.split_whitespace().collect();
-    let clean = |word: &str| {
-        word.trim_matches(|c: char| !c.is_alphanumeric())
-            .to_ascii_lowercase()
-    };
-    let number = |word: &str| -> Option<u64> {
-        if word.starts_with('#') {
-            return None;
-        }
-        let word = clean(word);
-        match WORDS.iter().position(|w| *w == word) {
-            Some(n) => Some(n as u64),
-            None => word.parse().ok().filter(|_| word.len() <= 4),
-        }
-    };
-    let (mut kept, mut counts): (Vec<u64>, Vec<u64>) = (Vec::new(), Vec::new());
-    for (i, word) in raw.iter().enumerate() {
-        if !THINGS.contains(&clean(word).as_str()) || i == 0 {
-            continue;
-        }
-        // "4 issues", or with what kind between: "4 blocking issues".
-        let at = match number(raw[i - 1]) {
-            Some(_) => i - 1,
-            None if i >= 2 && !NOT_A_KIND.contains(&clean(raw[i - 1]).as_str()) => i - 2,
-            None => continue,
-        };
-        let Some(count) = number(raw[at]) else {
-            continue;
-        };
-        // None of a kind says nothing of the other kinds, and nor does
-        // none that is then narrowed ("no bugs that block it", "no bugs
-        // found, but several smaller problems").
-        let ends = |word: &&str| {
-            word.trim_end_matches(['"', '\'', ')', '*'])
-                .ends_with(['.', '!', '?'])
-        };
-        let rest = match ends(word) {
-            true => &raw[i..i],
-            false => {
-                let end = raw[i + 1..].iter().position(ends);
-                &raw[i + 1..end.map_or(raw.len(), |end| i + 2 + end)]
-            }
-        };
-        let narrowed = rest
-            .first()
-            .is_some_and(|next| NARROWS.contains(&clean(next).as_str()))
-            || rest
-                .iter()
-                .any(|later| NARROWS_LATER.contains(&clean(later).as_str()));
-        if count == 0 && (at != i - 1 || narrowed) {
-            continue;
-        }
-        let before = at.checked_sub(1).map(|b| raw[b]);
-        let frame = before.map(clean).unwrap_or_default();
-        let opens = before.is_none_or(|b| b.ends_with(['.', ':', '!', '?']));
-        if frame == "kept" || frame == "keeping" {
-            kept.push(count);
-        } else if opens || FRAMES.contains(&frame.as_str()) {
-            counts.push(count);
-        }
-    }
-    let one = |of: &[u64]| of.first().copied().filter(|n| of.iter().all(|m| m == n));
-    one(&kept).or_else(|| one(&counts).filter(|_| kept.is_empty()))
 }
 
 /// True for a prompt that is a review command typed as one (`/code-review #41`).
@@ -595,6 +461,9 @@ impl Seen {
         if !named_review(name, named) {
             return false;
         }
+        // The name alone, as it is checked.
+        let name = name.trim();
+        let name = name.strip_prefix('/').unwrap_or(name);
         let prompt_id = p["prompt_id"]
             .as_str()
             .filter(|id| !id.is_empty())
@@ -743,6 +612,11 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
                 .target
                 .take()
                 .or(elsewhere(typed.pull_number, &typed.repo));
+            // One of the two named a pull request here: it is that one's,
+            // whatever the other named elsewhere.
+            if run.pull_number.is_some() && run.target.as_deref() == Some(OTHER_REPOSITORY) {
+                run.target = None;
+            }
             continue;
         }
         let id = match &typed.prompt_id {
@@ -1666,6 +1540,71 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_command_for_another_repositorys_pull_request_is_none_of_this_ones() {
+        use crate::session::Repo;
+        const API: &str = "https://github.com/acme/api/pull/41";
+        let runs = |events: Vec<Vec<Value>>| {
+            let events: Vec<Value> = events.into_iter().flatten().collect();
+            let (mut s, seen) = crate::normalize::assemble(&events, None, "claude-code").unwrap();
+            s.repo = Some(Repo {
+                remote: Some("github.com/acme/web".into()),
+                ..Default::default()
+            });
+            crate::normalize::add_reviews(&mut s, &seen, None);
+            let runs = s.reviews.iter();
+            runs.map(|r| (r.via, r.pull_number, r.target.clone()))
+                .collect::<Vec<_>>()
+        };
+        let typed = ReviewVia::SlashCommand;
+        let elsewhere = Some(OTHER_REPOSITORY.to_string());
+        // typed, and nothing more
+        assert_eq!(
+            runs(vec![vec![prompt(0, "p1", &format!("/code-review {API}"))]]),
+            [(typed, None, elsewhere.clone())]
+        );
+        // typed, and the call it led to names none
+        assert_eq!(
+            runs(vec![
+                vec![prompt(0, "p1", &format!("/code-review {API}"))],
+                skill(1, "t1", "code-review", "", None).into(),
+            ]),
+            [(typed, None, elsewhere)]
+        );
+        // One of the two names a pull request here: the run is that one's.
+        assert_eq!(
+            runs(vec![
+                vec![prompt(0, "p1", "/code-review #42")],
+                skill(1, "t1", "code-review", API, None).into(),
+            ]),
+            [(typed, Some(42), None)]
+        );
+        assert_eq!(
+            runs(vec![
+                vec![prompt(0, "p1", &format!("/code-review {API}"))],
+                skill(1, "t1", "code-review", "#42", None).into(),
+            ]),
+            [(typed, Some(42), None)]
+        );
+    }
+
+    #[test]
+    fn a_command_named_with_spaces_or_its_slash_is_kept_by_its_name() {
+        let named = |name: &str| {
+            let s = session(
+                vec![vec![event(
+                    0,
+                    "UserPromptExpansion",
+                    json!({ "prompt_id": "p1", "command_name": name, "command_args": "" }),
+                )]],
+                None,
+            );
+            s.reviews[0].command.clone()
+        };
+        assert_eq!(named(" code-review "), "code-review");
+        assert_eq!(named("/my.plugin:code-review"), "my.plugin:code-review");
+    }
+
+    #[test]
     fn a_typed_review_that_led_to_a_call_has_what_was_said_of_its_prompt() {
         use crate::transcript::ReviewSaid;
         let facts = Facts {
@@ -2099,71 +2038,6 @@ mod tests {
         );
         let efforts: Vec<_> = s.reviews.iter().map(|r| r.effort.as_deref()).collect();
         assert_eq!(efforts, [Some("high"), Some("xhigh")]);
-    }
-
-    #[test]
-    fn a_reply_says_how_many_findings_in_a_few_known_ways() {
-        assert_eq!(
-            findings_in("```json\n[{\"file\":\"a.rs\"},{\"file\":\"b.rs\"}]\n```"),
-            Some(2)
-        );
-        assert_eq!(findings_in("```json\n[]\n```"), Some(0));
-        assert_eq!(findings_in("```json\n{\"ok\":true}\n```"), None);
-        assert_eq!(findings_in("I found 3 issues in PR #50."), Some(3));
-        assert_eq!(findings_in("I found no problems in the diff."), Some(0));
-        assert_eq!(
-            findings_in("15 findings, most severe first:\n\n1. ..."),
-            Some(15)
-        );
-        assert_eq!(findings_in("No findings."), Some(0));
-        // further into the first lines, said as found, kept or had
-        for (reply, n) in [
-            ("I reviewed PR #50 at high effort and found 4 issues.", 4),
-            (
-                "I reviewed PR 12 (`feat/x`, 9 files). There are 7 findings.",
-                7,
-            ),
-            (
-                "Review of PR #3 is done. Ten findings, most severe first.",
-                10,
-            ),
-            ("I reviewed 14 files and found 3 confirmed problems.", 3),
-            ("PR #77 has no issues.", 0),
-            ("Of 20 candidates I verified each and kept 5 findings.", 5),
-            (
-                "I found 9 issues and, after checking each, kept 6 findings.",
-                6,
-            ),
-        ] {
-            assert_eq!(findings_in(reply), Some(n), "{reply}");
-        }
-        for other in [
-            "I reviewed PR #50 at high effort and 3 things stand out.",
-            "I found the 2 callers.",
-            "2026 was a long year",
-            // another review's findings
-            "The two earlier findings are fixed.",
-            "Both of the 3 issues from the last round are gone.",
-            // two numbers, and nothing says which
-            "I found 3 issues in the server. The CLI has 2 problems.",
-            // a pull request's number is no count
-            "This closes #12 issues aside.",
-            // none of one kind is not none at all
-            "PR #77 has no blocking bugs.",
-            "I reviewed PR 740 and found no bugs that would block it. There are four smaller ones.",
-            "I found no bugs, but the diff has several minor issues.",
-            "There are no issues of substance.",
-            "I found no blocking bugs, but the diff has several minor issues.",
-            // narrowed further on in the sentence
-            "No bugs found, but 3 style issues.",
-            "No issues found other than two style nits.",
-            "I found no problems in the diff, except for a typo in the README.",
-            "There are no bugs here, though the tests are thin.",
-            "No issues found (apart from the naming)!",
-            "",
-        ] {
-            assert_eq!(findings_in(other), None, "{other}");
-        }
     }
 
     #[test]
