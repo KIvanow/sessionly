@@ -73,14 +73,22 @@ pub fn build_with(
     };
     // Nothing was asked and no tool ran: an agent that was opened and closed
     // again, or the blank chat Cursor announces before anyone types.
+    // One in which only a review ran is a session: a command Claude Code
+    // runs itself (`/ultrareview`) is no prompt, and may be all there was.
     let spent = session.cost.as_ref().is_some_and(|c| c.total_usd > 0.0);
-    if session.prompts.is_empty() && session.tool_calls.is_empty() && !spent {
+    let blank = session.prompts.is_empty() && session.tool_calls.is_empty() && !spent;
+    let reviewed =
+        !reviews.is_empty() || facts.as_ref().is_some_and(|f| !f.review_modes.is_empty());
+    if blank && !reviewed {
         return Ok(None);
     }
     let runtime = crate::runtime::Seen::of(&events);
     add_local_context(&mut session, facts.as_ref(), runtime.as_ref());
     // After the repository is known: a review's runs are read against it.
     add_reviews(&mut session, &reviews, facts.as_ref());
+    if blank && session.reviews.is_empty() {
+        return Ok(None);
+    }
     // A call whose model is not known is put down to the session's main one.
     let main = session.models.first();
     let models: HashMap<&str, &str> = session
@@ -792,6 +800,37 @@ mod tests {
             ),
             event(22, "SessionEnd", json!({ "reason": "other" })),
         ]
+    }
+
+    #[test]
+    fn a_session_in_which_only_a_review_ran_is_kept_and_a_blank_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let build = |name: &str, events: &[Value]| {
+            let raw = dir.path().join(format!("raw/{name}.jsonl"));
+            std::fs::create_dir_all(raw.parent().unwrap()).unwrap();
+            let lines: Vec<String> = events.iter().map(Value::to_string).collect();
+            std::fs::write(&raw, lines.join("\n") + "\n").unwrap();
+            build_from_raw(&raw, &dir.path().join("facts"), "claude-code").unwrap()
+        };
+        let start = event(0, "SessionStart", json!({ "source": "startup" }));
+        // A command Claude Code runs itself is no prompt, and here all there was.
+        let review = event(
+            1,
+            "UserPromptExpansion",
+            json!({ "expansion_type": "slash_command", "command_name": "ultrareview",
+                    "command_args": "#7" }),
+        );
+        let built = build("reviewed", &[start.clone(), review]).unwrap();
+        assert_eq!(built.session.reviews.len(), 1);
+        assert_eq!(built.session.counts.reviews, Some(1));
+        // Another command is not one, and leaves the session blank.
+        let model = event(
+            1,
+            "UserPromptExpansion",
+            json!({ "expansion_type": "slash_command", "command_name": "model" }),
+        );
+        assert!(build("blank", &[start.clone(), model]).is_none());
+        assert!(build("empty", &[start]).is_none());
     }
 
     #[test]

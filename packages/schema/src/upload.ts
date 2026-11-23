@@ -431,8 +431,10 @@ export interface ReviewRun {
   pull_number?: number | null;
   /**
    * What Codex's `/review` was pointed at: `base_branch` (the changes
-   * against a branch), `uncommitted_changes`, `commit` or `custom`. None
-   * for the other agents, whose commands take a pull request.
+   * against a branch), `uncommitted_changes`, `commit` or `custom`. For
+   * the other agents, whose commands take a pull request:
+   * `other_repository` where a URL named one of another repository than
+   * the session's (which is not kept), else none.
    */
   target?: string | null;
   /**

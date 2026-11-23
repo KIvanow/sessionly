@@ -1034,7 +1034,7 @@
           "default": null
         },
         "target": {
-          "description": "What Codex's `/review` was pointed at: `base_branch` (the changes\nagainst a branch), `uncommitted_changes`, `commit` or `custom`. None\nfor the other agents, whose commands take a pull request.",
+          "description": "What Codex's `/review` was pointed at: `base_branch` (the changes\nagainst a branch), `uncommitted_changes`, `commit` or `custom`. For\nthe other agents, whose commands take a pull request:\n`other_repository` where a URL named one of another repository than\nthe session's (which is not kept), else none.",
           "type": [
             "string",
             "null"

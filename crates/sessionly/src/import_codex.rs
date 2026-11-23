@@ -536,6 +536,18 @@ struct Review {
     target: Option<String>,
     ended: Option<String>,
     findings: Option<u64>,
+    /// Left with nothing returned, as Codex leaves one that was interrupted.
+    interrupted: bool,
+}
+
+impl Review {
+    /// Review mode was left at `at`, with what `output` says was found.
+    fn left(&mut self, at: &str, output: &Value) {
+        self.ended = Some(at.to_string());
+        self.interrupted = output.is_null();
+        let found = output["findings"].as_array();
+        self.findings = found.map(|list| list.len() as u64);
+    }
 }
 
 fn text_of(output: &Value) -> String {
@@ -843,6 +855,24 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
                 }
             }
             "event_msg" => match p["type"].as_str().unwrap_or_default() {
+                // The older layout has review mode as events of its own, and
+                // no item for it; the paginated one has the items below.
+                "entered_review_mode" if !paginated && !other_thread(&p["thread_id"]) => {
+                    let nth = t.reviews.len();
+                    t.reviews.push(Review {
+                        id: format!("{thread}-review-{nth}"),
+                        at: at.to_string(),
+                        target: p["target"]["type"].as_str().map(String::from),
+                        ended: None,
+                        findings: None,
+                        interrupted: false,
+                    });
+                }
+                "exited_review_mode" if !paginated && !other_thread(&p["thread_id"]) => {
+                    if let Some(review) = t.reviews.iter_mut().rfind(|r| r.ended.is_none()) {
+                        review.left(at, &p["review_output"]);
+                    }
+                }
                 "task_started" | "turn_started" => {
                     turn = p["turn_id"].as_str().map(String::from);
                     // A prompt written down before its turn began.
@@ -908,13 +938,12 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
                             target: item["target"]["type"].as_str().map(String::from),
                             ended: None,
                             findings: None,
+                            interrupted: false,
                         }),
                         "ExitedReviewMode" => {
                             if let Some(review) = t.reviews.iter_mut().rfind(|r| r.ended.is_none())
                             {
-                                review.ended = Some(at.to_string());
-                                let found = item["review_output"]["findings"].as_array();
-                                review.findings = found.map(|list| list.len() as u64);
+                                review.left(at, &item["review_output"]);
                             }
                         }
                         _ => {
@@ -1604,6 +1633,7 @@ pub fn session(
             target: review.target.clone(),
             ended_at: review.ended.as_deref().and_then(parse_time),
             findings: review.findings,
+            interrupted: review.interrupted,
         })
         .collect();
     let reviewer_threads = reviewers
@@ -1894,6 +1924,57 @@ pub(crate) mod tests {
             .map(|r| (r.subagents, r.duration_ms))
             .collect();
         assert_eq!(runs, [(0, None), (1, Some(9000))]);
+    }
+
+    #[test]
+    fn the_older_layout_has_review_mode_as_events_and_one_left_with_nothing_was_interrupted() {
+        use crate::session::ToolStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join(format!(
+            "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{MAIN}.jsonl"
+        ));
+        let found = json!({ "findings": [{ "title": "x" }, { "title": "y" }] });
+        write(
+            &main,
+            &[
+                // no `history_mode`: the older layout
+                meta(MAIN, json!({})),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                event(
+                    1,
+                    "entered_review_mode",
+                    json!({ "target": { "type": "uncommittedChanges" } }),
+                ),
+                event(9, "exited_review_mode", json!({ "review_output": found })),
+                event(
+                    20,
+                    "entered_review_mode",
+                    json!({ "target": { "type": "custom" } }),
+                ),
+                // interrupted: left with nothing returned
+                event(25, "exited_review_mode", json!({ "review_output": null })),
+            ],
+        );
+        let (events, facts) = session(&main, &[], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.target.as_deref(), r.status, r.findings, r.duration_ms))
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (
+                    Some("uncommitted_changes"),
+                    ToolStatus::Ok,
+                    Some(2),
+                    Some(8000)
+                ),
+                (Some("custom"), ToolStatus::Interrupted, None, Some(5000)),
+            ]
+        );
+        assert_eq!(s.counts.reviews, Some(2));
     }
 
     #[test]

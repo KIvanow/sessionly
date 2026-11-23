@@ -51,8 +51,7 @@ A record without `counts.reviews` is from a Sessionly that did not count them, o
 session whose rollout was not there to read: not known, which is not none.
 
 In Claude Code the commands are `/code-review`, `/review`, `/security-review` and
-`/ultrareview` (a plugin's `anything:code-review` too; where it is typed, a plugin's name
-with a dot in it is not taken for one, since a file's name ends that way). A run starts in one of three ways:
+`/ultrareview` (a plugin's `anything:code-review` too). A run starts in one of three ways:
 
 - the agent calls the `Skill` tool with one of them (`via: skill`),
 - you type it (`via: slash_command`), or
@@ -60,7 +59,8 @@ with a dot in it is not taken for one, since a file's name ends that way). A run
 
 In Cursor and Grok a run is the command typed as a prompt (`/code-review #41`, `via:
 slash_command`), on a machine or in Cursor's cloud. A prompt that opens with a path which
-ends in a command's name (`/home/ann/notes.md:review`) is no command. The review there runs in the session's
+ends in a command's name (`/home/ann/notes.md:review`) is no command; nor, there, is a
+plugin's command whose name has a dot in it, since a file's name ends that way. The review there runs in the session's
 own thread: such a run has when it ran and a pull request number, its findings where the
 reply says how many (seldom, in practice), and no cost or subagents of its own. The agent choosing to review without the command being typed is not
 seen.
@@ -81,15 +81,19 @@ Each run has:
   anywhere in them, a bare `621` only as the first or second argument. A number further on
   is a number in a sentence ("the last 3 commits") and is not taken for one, nor is one in
   a path (`/work/pull/42/diff.rs`). A URL of a pull request in a repository of another
-  name than the session's gives none: that number is not one of this repository's.
-- `ran`: `cloud` for `/ultrareview` and `/code-review ultra`, else `local`.
+  name than the session's gives none: that number is not one of this repository's. The
+  run then has `target: other_repository`, so it is not taken for one that named no pull
+  request. This holds where the session's own repository is known; where it is not (no
+  clone, or one with no origin), the number is kept.
+- `ran`: `cloud` for `/ultrareview` and for any review command given the effort `ultra`
+  (`/code-review ultra`, `/security-review ultra`), else `local`.
 - `agent_id`, when a subagent ran it.
 - `status` and `duration_ms`: from the start to the end of the last of its subagents. A
   typed command went as its turn did: `failed` where the turn failed, and in Cursor and
   Grok `no_result` where it has no end (still running, or interrupted). In Claude Code a
   typed command forks and its own turn does not end, so only a failure is told. A Codex
-  review that was never left has no duration, nor has a review whose fork has no end on
-  record. A typed command and a `Skill` call it led to are one run where the call is the
+  review that was never left has no duration, and one left with nothing returned was
+  `interrupted`. Nor has a review whose fork has no end on record a duration. A typed command and a `Skill` call it led to are one run where the call is the
   first thing done in the turn; a call made after other work is the agent reviewing again.
 - `subagents` and `estimated_cost_usd`: the subagents that did the review. That is the one a
   review skill forks to run in, or, where none is known, those started from the same thread

@@ -351,8 +351,10 @@ pub struct ReviewRun {
     /// request's URL. Else none.
     pub pull_number: Option<u64>,
     /// What Codex's `/review` was pointed at: `base_branch` (the changes
-    /// against a branch), `uncommitted_changes`, `commit` or `custom`. None
-    /// for the other agents, whose commands take a pull request.
+    /// against a branch), `uncommitted_changes`, `commit` or `custom`. For
+    /// the other agents, whose commands take a pull request:
+    /// `other_repository` where a URL named one of another repository than
+    /// the session's (which is not kept), else none.
     pub target: Option<String>,
     /// Set when a subagent ran it.
     pub agent_id: Option<String>,

@@ -642,7 +642,7 @@ export interface LocalReviewRun {
   via: NonNullable<ReviewRun["via"]>;
   /** How it went. One that was refused before it began ("denied", "rejected") is not counted and not here. */
   status: NonNullable<ReviewRun["status"]>;
-  /** What Codex's `/review` was pointed at: "base_branch", "uncommitted_changes", "commit", "custom". Null for the others. */
+  /** What Codex's `/review` was pointed at: "base_branch", "uncommitted_changes", "commit", "custom". "other_repository" for a run that named a pull request of another repository. Null for the others. */
   target: string | null;
   /** False for a run that names no pull request, counted here because its session is matched to this one or is on its branch. */
   names_pull: boolean;

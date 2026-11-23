@@ -50,6 +50,10 @@ const FINDINGS_WITHIN: usize = 400;
 /// so are a review and the thread its reviewer began in.
 pub const SAME_START_SECONDS: i64 = 5;
 
+/// The `target` of a run that named a pull request of another repository
+/// than the session's.
+pub const OTHER_REPOSITORY: &str = "other_repository";
+
 /// How long before its command a typed review's subagent may be written
 /// down as started.
 const STARTED_EARLY_MS: i64 = 1000;
@@ -495,6 +499,11 @@ pub struct Seen {
 }
 
 impl Seen {
+    /// True when the events showed no review command at all.
+    pub fn is_empty(&self) -> bool {
+        self.skill_calls.is_empty() && self.typed.is_empty()
+    }
+
     /// Take in one event of a session from `source`.
     pub fn event(&mut self, source: &str, hook: &str, p: &Value, at: Option<DateTime<Utc>>) {
         let id = p["tool_use_id"].as_str().filter(|id| !id.is_empty());
@@ -533,17 +542,20 @@ impl Seen {
             // taken off, and its hooks have it bare.
             ("UserPromptSubmit", _) => {
                 if let Some((name, args)) = p["prompt"].as_str().and_then(slash_command) {
-                    self.typed(p, at, name, args);
+                    self.typed(p, at, name, args, false);
                 }
             }
             ("UserPromptExpansion", _) if source == crate::paths::CLAUDE_CODE => {
                 let kind = p["expansion_type"].as_str().unwrap_or("slash_command");
                 if let (Some(name), "slash_command") = (p["command_name"].as_str(), kind) {
                     let args = p["command_args"].as_str().unwrap_or_default();
-                    self.typed(p, at, name.trim_start_matches('/'), args);
-                    // Written by the import, from the row that says where it forked.
-                    if let (Some(fork), Some(typed)) =
-                        (p["forked_agent_id"].as_str(), self.typed.last_mut())
+                    // Claude Code names the command here: it is a name, as a
+                    // skill's is, and not what someone typed.
+                    let known = self.typed(p, at, name.trim_start_matches('/'), args, true);
+                    // Written by the import, from the row that says where it
+                    // forked: of the command this one is, and no other.
+                    if let (Some(fork), Some(typed), true) =
+                        (p["forked_agent_id"].as_str(), self.typed.last_mut(), known)
                     {
                         typed.fork.get_or_insert_with(|| fork.to_string());
                     }
@@ -553,9 +565,19 @@ impl Seen {
         }
     }
 
-    fn typed(&mut self, p: &Value, at: Option<DateTime<Utc>>, name: &str, args: &str) {
-        if !is_review(name) {
-            return;
+    /// Take in a typed command, if it is a review: true when it is, and the
+    /// record of it is then the last. `named` for a command Claude Code
+    /// names, which may be a plugin's with a dot in it; what is typed may not.
+    fn typed(
+        &mut self,
+        p: &Value,
+        at: Option<DateTime<Utc>>,
+        name: &str,
+        args: &str,
+        named: bool,
+    ) -> bool {
+        if !named_review(name, named) {
+            return false;
         }
         let prompt_id = p["prompt_id"]
             .as_str()
@@ -572,7 +594,8 @@ impl Seen {
                     _ => match (t.at, at) {
                         (Some(a), Some(b)) => {
                             (a - b).num_seconds().abs() <= SAME_START_SECONDS
-                                && (&t.effort, t.pull_number) == (&effort, pull_number)
+                                && (&t.effort, t.pull_number, &t.repo)
+                                    == (&effort, pull_number, &repo)
                         }
                         _ => false,
                     },
@@ -588,7 +611,7 @@ impl Seen {
             // after it, and is not taken for the next one.
             typed.at = typed.at.max(at);
             self.typed.push(typed);
-            return;
+            return true;
         }
         self.typed.push(Typed {
             prompt_id,
@@ -599,6 +622,7 @@ impl Seen {
             repo,
             fork: None,
         });
+        true
     }
 }
 
@@ -620,6 +644,12 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
     // one's: by name, since a fork has its own owner.
     let here = s.repo.as_ref().and_then(|r| r.remote.as_deref());
     let of_here = |number: Option<u64>, repo: &Option<String>| in_repo(number, repo, here);
+    // One that named a pull request of another repository names none of this
+    // one's, and is not one that named none either: it says what it was of.
+    let elsewhere = |number: Option<u64>, repo: &Option<String>| {
+        let dropped = number.is_some() && of_here(number, repo).is_none();
+        dropped.then(|| OTHER_REPOSITORY.to_string())
+    };
     for call in &s.tool_calls {
         let Some((effort, number, repo)) = seen.skill_calls.get(&call.tool_use_id) else {
             continue;
@@ -634,6 +664,7 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             via: ReviewVia::Skill,
             effort: effort.clone(),
             pull_number: *pull_number,
+            target: elsewhere(*number, repo),
             agent_id: call.agent_id.clone(),
             status: call.status,
             duration_ms: call.duration_ms,
@@ -692,6 +723,10 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             run.command = typed.command.clone();
             run.effort = run.effort.take().or(typed.effort.clone());
             run.pull_number = run.pull_number.or(number);
+            run.target = run
+                .target
+                .take()
+                .or(elsewhere(typed.pull_number, &typed.repo));
             continue;
         }
         let id = match &typed.prompt_id {
@@ -713,6 +748,7 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             ran: ran_at,
             effort: typed.effort.clone(),
             pull_number: number,
+            target: elsewhere(typed.pull_number, &typed.repo),
             status: typed_status(s, typed),
             ..Default::default()
         });
@@ -734,9 +770,11 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             via: ReviewVia::CodexReview,
             ran: ReviewRan::Local,
             target: review.target.as_deref().map(target_name),
-            // Left without an end: the session stopped while it ran.
+            // Left without an end: the session stopped while it ran. Left
+            // with nothing returned: it was interrupted.
             status: match review.ended_at {
-                Some(_) => ToolStatus::Ok,
+                Some(_) if !review.interrupted => ToolStatus::Ok,
+                Some(_) => ToolStatus::Interrupted,
                 None => ToolStatus::NoResult,
             },
             duration_ms: review
@@ -759,6 +797,11 @@ fn reviewers_of<'a>(modes: &[ReviewMode], facts: &'a Facts) -> Vec<Option<&'a st
     free.sort_by_key(|thread| thread.began);
     let mut of = Vec::with_capacity(modes.len());
     for (i, review) in modes.iter().enumerate() {
+        // Written down twice: the first has its reviewer, and this takes none.
+        if modes[..i].iter().any(|before| before.id == review.id) {
+            of.push(None);
+            continue;
+        }
         // One left without an end was on until the next one began.
         let next = modes.get(i + 1).and_then(|r| r.at);
         let within = |began: Option<DateTime<Utc>>| {
@@ -901,7 +944,11 @@ fn measure(
         let early = chrono::Duration::milliseconds(if by_time { STARTED_EARLY_MS } else { 0 });
         let i = runs.iter().rposition(|r| {
             r.agent_id.as_deref() == thread
-                && r.at.is_some_and(|t| t <= at + early)
+                && r.at.is_some_and(|t| {
+                    // Only a typed command's own row is written late.
+                    let typed = r.via == ReviewVia::SlashCommand;
+                    t <= at || (typed && t <= at + early)
+                })
                 && !(local && r.ran == ReviewRan::Cloud)
         })?;
         let start = runs[i].at?;
@@ -1592,8 +1639,13 @@ mod tests {
             ..Default::default()
         });
         crate::normalize::add_reviews(&mut s, &seen, None);
-        let numbers: Vec<_> = s.reviews.iter().map(|r| r.pull_number).collect();
-        assert_eq!(numbers, [None, Some(42)]);
+        let numbers: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.pull_number, r.target.as_deref()))
+            .collect();
+        // It names none of this repository's, and is not one that named none.
+        assert_eq!(numbers, [(None, Some(OTHER_REPOSITORY)), (Some(42), None)]);
         assert_eq!(s.counts.reviews, Some(2));
     }
 
@@ -1641,6 +1693,95 @@ mod tests {
         );
         let found: Vec<_> = s.reviews.iter().map(|r| r.findings).collect();
         assert_eq!(found, [Some(3), None]);
+    }
+
+    #[test]
+    fn the_same_number_in_another_repository_is_another_command() {
+        let expansion = |args: &str| {
+            event(
+                0,
+                "UserPromptExpansion",
+                json!({ "command_name": "code-review", "command_args": args }),
+            )
+        };
+        let s = session(
+            vec![vec![
+                expansion("https://github.com/acme/api/pull/41"),
+                expansion("#41"),
+            ]],
+            None,
+        );
+        assert_eq!(s.reviews.len(), 2);
+    }
+
+    #[test]
+    fn a_plugins_fork_is_its_own_and_not_the_command_before_its() {
+        let launch = |second: u32, name: &str, fork: &str| {
+            event(
+                second,
+                "UserPromptExpansion",
+                json!({ "command_name": name, "command_args": "", "forked_agent_id": fork }),
+            )
+        };
+        let s = session(
+            vec![
+                vec![
+                    prompt(0, "p1", "/review"),
+                    launch(60, "my.plugin:code-review", "f2"),
+                ],
+                subagent(61, 90, "f2").into(),
+            ],
+            Some(&costs(&[("f2", 2.0)])),
+        );
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.command.as_str(), r.estimated_cost_usd))
+            .collect();
+        assert_eq!(
+            runs,
+            [("review", None), ("my.plugin:code-review", Some(2.0))]
+        );
+        // one that is no review at all leaves the one before it as it was
+        let s = session(
+            vec![
+                vec![
+                    prompt(0, "p1", "/review"),
+                    prompt(50, "p2", "now deploy it"),
+                    launch(60, "deploy", "f2"),
+                ],
+                subagent(61, 90, "f2").into(),
+            ],
+            Some(&costs(&[("f2", 2.0)])),
+        );
+        assert_eq!(s.reviews.len(), 1);
+        assert_eq!(s.reviews[0].subagents, 0);
+    }
+
+    #[test]
+    fn a_subagent_started_a_moment_before_a_skill_review_is_not_that_reviews() {
+        let at = |ms: u32| format!("2026-11-20T10:00:{:02}.{:03}000Z", ms / 1000, ms % 1000);
+        let stamped = |ms: u32, mut e: Value| {
+            e["received_at"] = json!(at(ms));
+            e
+        };
+        let who = json!({ "agent_id": "x", "agent_type": "general-purpose" });
+        let [pre, post] = skill(3, "t2", "code-review", "", None);
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "review it twice")],
+                skill(1, "t1", "code-review", "", None).into(),
+                vec![
+                    stamped(3000, event(3, "SubagentStart", who.clone())),
+                    stamped(3500, pre),
+                    stamped(3500, post),
+                    event(50, "SubagentStop", who),
+                ],
+            ],
+            Some(&costs(&[("x", 2.0)])),
+        );
+        let subagents: Vec<_> = s.reviews.iter().map(|r| r.subagents).collect();
+        assert_eq!(subagents, [1, 0]);
     }
 
     #[test]
@@ -1704,26 +1845,55 @@ mod tests {
             target: Some("uncommittedChanges".into()),
             ended_at: at(9),
             findings: Some(3),
+            interrupted: false,
+        };
+        // Left with nothing returned, and its reviewer began as the first ended.
+        let next = ReviewMode {
+            id: "r2".into(),
+            at: at(9),
+            ended_at: at(20),
+            interrupted: true,
+            ..Default::default()
         };
         let facts = Facts {
-            review_modes: vec![review.clone(), review],
+            review_modes: vec![review.clone(), review, next],
             review_modes_read: true,
-            reviewer_threads: vec![ReviewerThread {
-                agent_id: "rev".into(),
-                began: at(2),
-            }],
+            reviewer_threads: vec![
+                ReviewerThread {
+                    agent_id: "rev".into(),
+                    began: at(2),
+                },
+                ReviewerThread {
+                    agent_id: "rev2".into(),
+                    began: at(9),
+                },
+            ],
             ..Default::default()
         };
         let mut e = prompt(0, "p1", "look at this");
         e["source"] = json!("codex");
-        let s = from_events(std::slice::from_ref(&e), Some(&facts), "codex").unwrap();
+        let mut events = vec![e.clone()];
+        for agent in ["rev", "rev2"] {
+            let mut started = event(2, "SubagentStart", json!({ "agent_id": agent }));
+            started["source"] = json!("codex");
+            events.push(started);
+        }
+        let s = from_events(&events, Some(&facts), "codex").unwrap();
         let runs: Vec<_> = s
             .reviews
             .iter()
-            .map(|r| (r.id.as_str(), r.target.as_deref(), r.findings))
+            .map(|r| (r.id.as_str(), r.status, r.findings, r.subagents))
             .collect();
-        assert_eq!(runs, [("r1", Some("uncommitted_changes"), Some(3))]);
-        assert_eq!(s.counts.reviews, Some(1));
+        // The copy takes no reviewer: the next review has its own.
+        assert_eq!(
+            runs,
+            [
+                ("r1", ToolStatus::Ok, Some(3), 1),
+                ("r2", ToolStatus::Interrupted, None, 1)
+            ]
+        );
+        assert_eq!(s.reviews[0].target.as_deref(), Some("uncommitted_changes"));
+        assert_eq!(s.counts.reviews, Some(2));
         // The reviews are in the rollout only: without it, or with facts
         // saved before it was read for them, not known.
         let unread = Facts::default();

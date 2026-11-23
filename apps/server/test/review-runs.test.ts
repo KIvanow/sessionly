@@ -13,6 +13,14 @@ test("a run that names a pull request is that one's, and no other's", () => {
   assert.equal(belongs(pull({ ended: at("12:00") }), run({ pull_number: 41, at: "2026-11-10T15:00:00Z" })), true);
 });
 
+test("a run that named another repository's pull request is not one that named none", () => {
+  const elsewhere = run({ target: "other_repository" });
+  assert.equal(belongs(pull({ matched: true }), elsewhere), false);
+  assert.equal(belongs(pull({ onBranch: true }), elsewhere), false);
+  // Codex's target is the kind of change, and such a run names none
+  assert.equal(belongs(pull({ onBranch: true }), run({ target: "base_branch" })), true);
+});
+
 test("a run refused before it began is no review", () => {
   for (const status of ["denied", "rejected"]) assert.equal(belongs(pull({ matched: true }), run({ pull_number: 41, status })), false);
   for (const status of ["failed", "interrupted", "no_result"]) assert.equal(belongs(pull(), run({ pull_number: 41, status })), true);

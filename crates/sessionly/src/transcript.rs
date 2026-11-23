@@ -515,6 +515,10 @@ pub struct ReviewMode {
     pub ended_at: Option<DateTime<Utc>>,
     /// How many findings the reviewer returned.
     pub findings: Option<u64>,
+    /// It was left with nothing returned: Codex does that when a review is
+    /// interrupted.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 
 /// A thread a reviewer of Codex's `/review` ran in.

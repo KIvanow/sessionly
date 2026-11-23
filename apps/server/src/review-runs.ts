@@ -6,6 +6,12 @@ import type { ReviewRun } from "@sessionly/schema";
 /** The efforts a review command takes. What was sent as one is a string: any other is not counted by. */
 export const EFFORTS: ReadonlySet<string> = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
 
+/**
+ * The `target` of a run that named a pull request of another repository than
+ * its session's: it names none of this one's, and is not one that named none.
+ */
+export const OTHER_REPOSITORY = "other_repository";
+
 /** A pull request and a session that may have reviewed it, as they were found. */
 export interface Reviewed {
   /** The pull request's number. */
@@ -32,7 +38,8 @@ export interface Reviewed {
  * True for a run that is this pull request's:
  *
  * - Not one refused before it began (denied, or declined): no review ran.
- * - One that names a pull request is that one's, whenever it ran.
+ * - One that names a pull request is that one's, whenever it ran. One that
+ *   named a pull request of another repository is none of this one's.
  * - One that names none is of the pull requests its session is matched to,
  *   and of the one whose branch its session is on, only while that pull
  *   request was not yet merged or closed: a session may go on to other work,
@@ -44,6 +51,7 @@ export interface Reviewed {
 export function belongs(to: Reviewed, run: ReviewRun): boolean {
   if (run.status === "denied" || run.status === "rejected") return false;
   if (run.pull_number != null) return run.pull_number === to.number;
+  if (run.target === OTHER_REPOSITORY) return false;
   const at = run.at == null ? null : Date.parse(run.at);
   if (at !== null && to.ended !== null && at > to.ended) return false;
   return to.matched || (to.onBranch && (to.after === null || (at !== null && at > to.after)));

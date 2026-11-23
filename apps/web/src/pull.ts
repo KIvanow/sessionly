@@ -19,7 +19,7 @@ export function costText(cost: number | null, estimated: boolean, floor: boolean
   return `${unsure(floor, estimated, word)}${usdOf(cost)}`;
 }
 
-/** What Codex's `/review` was pointed at, in words; "" for a run of another agent. */
+/** What a run was pointed at, in words, where the record says: Codex's `/review`, or a pull request of another repository. "" otherwise. */
 export function reviewTarget(target: string | null | undefined): string {
   if (!target) return "";
   const known: Record<string, string> = {
@@ -27,6 +27,7 @@ export function reviewTarget(target: string | null | undefined): string {
     uncommitted_changes: "the uncommitted changes",
     commit: "a commit",
     custom: "what it was told to",
+    other_repository: "a pull request in another repository",
   };
   return known[target] ?? target.replaceAll("_", " ");
 }
