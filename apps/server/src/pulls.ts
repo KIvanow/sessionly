@@ -2198,34 +2198,42 @@ async function localReviewsIn(
 ): Promise<Map<string, LocalReviews>> {
   const rows = await db.query(
     `WITH pulls AS (
-       SELECT r.repo, r.number, r.head_repo, r.aliases, r.head_ref, r.base_ref, coalesce(r.merged_at, r.closed_at) AS ended_at
+       SELECT r.repo, r.number, r.head_repo, r.aliases, r.head_ref, r.base_ref, coalesce(r.merged_at, r.closed_at) AS ended_at,
+              -- When the pull request before it on the same branch was merged or closed: a branch such as
+              -- develop has one after another, and a run is of the one that was open or yet to be opened.
+              (SELECT max(coalesce(o.merged_at, o.closed_at)) FROM pull_requests o
+                WHERE o.org_id = $1 AND o.repo = r.repo AND o.number < r.number AND o.head_ref = r.head_ref
+                  AND lower(coalesce(o.head_repo, o.repo)) = lower(coalesce(r.head_repo, r.repo))) AS after_at
        FROM (${chosen.sql}) c
        JOIN pull_requests r ON r.org_id = $1 AND r.repo = c.repo AND r.number = c.number),
      theirs AS (
-       SELECT pulls.repo, pulls.number, p.machine_id, p.source, p.session_id, true AS matched, false AS on_branch
+       SELECT pulls.repo, pulls.number, pulls.ended_at, pulls.after_at, p.machine_id, p.source, p.session_id, true AS matched, false AS on_branch
        FROM pulls JOIN pull_sessions p ON p.org_id = $1 AND p.repo = pulls.repo AND p.number = pulls.number
        WHERE p.lines > 0 OR p.opened_lines > 0 OR p.contributed_lines > 0
        UNION ALL
        -- A session names a repository by its clone's origin: the pull request's, its fork's, or an old name of it.
-       SELECT pulls.repo, pulls.number, s.machine_id, s.source, s.session_id, false, false
+       SELECT pulls.repo, pulls.number, pulls.ended_at, pulls.after_at, s.machine_id, s.source, s.session_id, false, false
        FROM pulls JOIN sessions s ON s.org_id = $1 AND s.review_runs > 0
          AND ${OF_ITS_REPO}
          AND s.review_pulls @> to_jsonb(pulls.number)
        UNION ALL
        -- A session on the pull request's own branch: a review there is of this pull request, whether
        -- or not it names it (Codex's /review names a branch or the uncommitted changes, never a number).
-       -- Not where the branch is the one it merges into, as a fork's main is.
-       SELECT pulls.repo, pulls.number, s.machine_id, s.source, s.session_id, false, true
+       -- Not where the branch is the one it merges into, as a fork's main is. A fork's branch is the
+       -- fork's: a branch of the same name in the repository it merges into is another.
+       SELECT pulls.repo, pulls.number, pulls.ended_at, pulls.after_at, s.machine_id, s.source, s.session_id, false, true
        FROM pulls JOIN sessions s ON s.org_id = $1 AND s.review_runs > 0
-         AND ${OF_ITS_REPO}
+         AND (CASE WHEN pulls.head_repo IS NOT NULL AND lower(pulls.head_repo) <> lower(pulls.repo)
+                   THEN lower(s.repo) = lower(pulls.head_repo) ELSE ${OF_ITS_REPO} END)
          AND s.branch = pulls.head_ref AND pulls.head_ref IS DISTINCT FROM pulls.base_ref),
      one AS (
-       SELECT repo, number, machine_id, source, session_id, bool_or(matched) AS matched, bool_or(on_branch) AS on_branch
+       SELECT repo, number, machine_id, source, session_id, bool_or(matched) AS matched, bool_or(on_branch) AS on_branch,
+              max(ended_at) AS ended_at, max(after_at) AS after_at
        FROM theirs GROUP BY repo, number, machine_id, source, session_id)
      SELECT one.repo, one.number, one.matched, one.on_branch, one.machine_id, one.source, one.session_id,
-            (SELECT ended_at FROM pulls WHERE pulls.repo = one.repo AND pulls.number = one.number) AS ended_at,
+            one.ended_at, one.after_at,
             s.session_id IS NOT NULL AS held, s.review_runs,
-            CASE WHEN s.review_runs > 0 THEN s.payload->'session'->'reviews' END AS runs,
+            CASE WHEN s.review_runs > 0 THEN s.reviews END AS runs,
             (SELECT count(*) FROM pull_sessions o
               WHERE o.org_id = $1 AND o.machine_id = one.machine_id AND o.source = one.source
                 AND o.session_id = one.session_id AND (o.lines > 0 OR o.opened_lines > 0 OR o.contributed_lines > 0)) AS pulls
@@ -2248,13 +2256,21 @@ async function localReviewsIn(
       continue;
     }
     const number = num(row.number);
-    const ended = row.ended_at == null ? null : new Date(row.ended_at as string | Date).getTime();
+    const instantOf = (at: unknown) => (at == null ? null : new Date(at as string | Date).getTime());
+    const [ended, after] = [instantOf(row.ended_at), instantOf(row.after_at)];
     for (const run of row.runs == null ? [] : json<ReviewRun[]>(row.runs)) {
+      // Refused before it began: no review ran.
+      if (run.status === "denied" || run.status === "rejected") continue;
       const named = run.pull_number ?? null;
-      // On its branch, and not after it was merged or closed: the branch's name may be used again.
-      const onBranch = row.on_branch === true && !(run.at != null && ended !== null && Date.parse(run.at) > ended);
+      const at = run.at == null ? null : Date.parse(run.at);
+      // One that names none is this pull request's only while it was not yet merged or closed: a session may
+      // go on to other work, and a branch's name may be used again.
+      const late = at !== null && ended !== null && at > ended;
+      // On its branch, and after the pull request before it on that branch was done with.
+      const onBranch = row.on_branch === true && !late && (after === null || (at !== null && at > after));
+      const matched = row.matched === true && !late;
       // A run that names another pull request is that one's.
-      if (named !== number && !(named === null && (row.matched === true || onBranch))) continue;
+      if (named !== number && !(named === null && (matched || onBranch))) continue;
       into.runs += 1;
       if (run.ran === "cloud") into.cloud += 1;
       if (run.effort) into.by_effort[run.effort] = (into.by_effort[run.effort] ?? 0) + 1;
@@ -2268,6 +2284,7 @@ async function localReviewsIn(
           effort: run.effort ?? null,
           ran: run.ran ?? "local",
           via: run.via ?? "skill",
+          status: run.status ?? "ok",
           target: run.target ?? null,
           names_pull: named !== null,
           subagents: run.subagents ?? 0,

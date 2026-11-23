@@ -204,6 +204,7 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     // one that does not read that agent's review commands sends none.
     review_runs: counts.reviews ?? null,
     review_pulls: JSON.stringify([...new Set((s.reviews ?? []).flatMap((run) => (run.pull_number != null ? [run.pull_number] : [])))].sort((a, b) => a - b)),
+    reviews: (s.reviews ?? []).length > 0 ? JSON.stringify(s.reviews) : null,
     files_changed: counts.files_changed ?? 0,
     lines_added: counts.lines_added ?? 0,
     lines_removed: counts.lines_removed ?? 0,
@@ -222,7 +223,7 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     copied: copy,
   };
   const names = Object.keys(columns);
-  const casts: Record<string, string> = { models: "::jsonb", payload: "::jsonb", checkpoints: "::jsonb", review_pulls: "::jsonb" };
+  const casts: Record<string, string> = { models: "::jsonb", payload: "::jsonb", checkpoints: "::jsonb", review_pulls: "::jsonb", reviews: "::jsonb" };
   const placeholders = names.map((name, i) => `$${i + 1}${casts[name] ?? ""}`);
   const updates = names
     .filter((name) => !["org_id", "machine_id", "source", "session_id"].includes(name))

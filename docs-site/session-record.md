@@ -77,7 +77,8 @@ Each run has:
 - `pull_number`: a pull request number among the arguments: `#528` or a pull request's URL
   anywhere in them, a bare `621` only as the first or second argument. A number further on
   is a number in a sentence ("the last 3 commits") and is not taken for one, nor is one in
-  a path (`/work/pull/42/diff.rs`).
+  a path (`/work/pull/42/diff.rs`). A URL of a pull request in a repository of another
+  name than the session's gives none: that number is not one of this repository's.
 - `ran`: `cloud` for `/ultrareview` and `/code-review ultra`, else `local`.
 - `agent_id`, when a subagent ran it.
 - `status` and `duration_ms`: from the start to the end of the last of its subagents. A

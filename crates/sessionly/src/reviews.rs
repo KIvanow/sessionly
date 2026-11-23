@@ -72,7 +72,18 @@ pub fn slash_command(text: &str) -> Option<(&str, &str)> {
 /// 3 commits"). `#528` and a pull request's URL are one wherever they are;
 /// a path with `/pull/` in it (`/work/pull/42/diff.rs`) is not a URL.
 pub fn parse_args(args: &str) -> (Option<String>, Option<u64>) {
-    let (mut effort, mut number) = (None, None);
+    let (effort, number, _) = parse_args_of(args);
+    (effort, number)
+}
+
+/// A review command's effort, its pull request number, and the name of the
+/// repository a URL gave the number in.
+type Args = (Option<String>, Option<u64>, Option<String>);
+
+/// As `parse_args`, with the name of the repository the number was given
+/// for, where a URL gave it (`web` for `https://github.com/acme/web/pull/7`).
+fn parse_args_of(args: &str) -> Args {
+    let (mut effort, mut number, mut repo) = (None, None, None);
     let mut position = 0;
     let mut words = args.split_whitespace();
     while let Some(word) = words.next() {
@@ -95,9 +106,28 @@ pub fn parse_args(args: &str) -> (Option<String>, Option<u64>) {
         let named = bare.starts_with('#') || is_pull_url(bare);
         if number.is_none() && (named || position <= 2) {
             number = pull_number(bare);
+            if number.is_some() && is_pull_url(bare) {
+                let before = bare.split_once("/pull/").map_or("", |(before, _)| before);
+                repo = before.rsplit('/').next().map(repo_name);
+            }
         }
     }
-    (effort, number)
+    (effort, number, repo)
+}
+
+/// The number, unless a URL named it in a repository other than the
+/// session's (`remote`). Where either is not known it is kept.
+fn in_repo(number: Option<u64>, named: &Option<String>, remote: Option<&str>) -> Option<u64> {
+    match (named, remote.map(repo_name)) {
+        (Some(named), Some(here)) if *named != here => None,
+        _ => number,
+    }
+}
+
+/// A repository's name as two of them are compared: `Web.git` → `web`.
+fn repo_name(written: &str) -> String {
+    let name = written.rsplit('/').next().unwrap_or(written);
+    name.trim_end_matches(".git").to_ascii_lowercase()
 }
 
 /// True for a pull request's URL, as against a path that has `/pull/` in it.
@@ -309,6 +339,8 @@ struct Typed {
     command: String,
     effort: Option<String>,
     pull_number: Option<u64>,
+    /// The repository a URL named the number in, where one did.
+    repo: Option<String>,
     /// The subagent the command forked to run in, where that is known.
     fork: Option<String>,
 }
@@ -316,8 +348,9 @@ struct Typed {
 /// What the events show about review runs, gathered while they are read.
 #[derive(Debug, Default)]
 pub struct Seen {
-    /// Skill calls of a review command: tool-use id → effort and number.
-    skill_calls: HashMap<String, (Option<String>, Option<u64>)>,
+    /// Skill calls of a review command: tool-use id → effort, number, and
+    /// the repository a URL named the number in.
+    skill_calls: HashMap<String, Args>,
     /// Subagents a call started (an `Agent` call, or a skill that forked):
     /// the subagent's id → the call's tool-use id.
     started_by: HashMap<String, String>,
@@ -355,7 +388,7 @@ impl Seen {
                     Some("Skill") => {
                         if input["skill"].as_str().is_some_and(is_review) {
                             let args = input["args"].as_str().unwrap_or_default();
-                            self.skill_calls.insert(id.into(), parse_args(args));
+                            self.skill_calls.insert(id.into(), parse_args_of(args));
                         }
                     }
                     Some("ReportFindings") => {
@@ -366,7 +399,11 @@ impl Seen {
                     _ => {}
                 }
                 if let Some(agent) = p["tool_response"]["agentId"].as_str() {
-                    self.started_by.insert(agent.into(), id.into());
+                    // The first to name it started it: a later call may
+                    // only be talking to it.
+                    self.started_by
+                        .entry(agent.into())
+                        .or_insert_with(|| id.into());
                 }
             }
             // Codex's `/review` is no prompt: the import writes this from the
@@ -429,7 +466,7 @@ impl Seen {
             .as_str()
             .filter(|id| !id.is_empty())
             .map(String::from);
-        let (effort, pull_number) = parse_args(args);
+        let (effort, pull_number, repo) = parse_args_of(args);
         // The hooks see a typed command twice: as the prompt and as its
         // expansion. The same command with other arguments, typed a moment
         // later, is another run.
@@ -452,6 +489,9 @@ impl Seen {
             // The id of whichever of the two had one: a later prompt with
             // another id is then another run.
             typed.prompt_id = typed.prompt_id.or(prompt_id);
+            // The later of the two times: the turn's own prompt is then not
+            // after it, and is not taken for the next one.
+            typed.at = typed.at.max(at);
             self.typed.push(typed);
             return;
         }
@@ -461,6 +501,7 @@ impl Seen {
             command: name.to_string(),
             effort,
             pull_number,
+            repo,
             fork: None,
         });
     }
@@ -480,10 +521,15 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             forks.insert(call.clone(), agent);
         }
     }
+    // A URL of a pull request in another repository names none of this
+    // one's: by name, since a fork has its own owner.
+    let here = s.repo.as_ref().and_then(|r| r.remote.as_deref());
+    let of_here = |number: Option<u64>, repo: &Option<String>| in_repo(number, repo, here);
     for call in &s.tool_calls {
-        let Some((effort, pull_number)) = seen.skill_calls.get(&call.tool_use_id) else {
+        let Some((effort, number, repo)) = seen.skill_calls.get(&call.tool_use_id) else {
             continue;
         };
+        let pull_number = &of_here(*number, repo);
         let command = call.skill.clone().unwrap_or_default();
         runs.push(ReviewRun {
             id: call.tool_use_id.clone(),
@@ -514,6 +560,7 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
         // `/ultrareview` leads to a skill call in the same turn: one start.
         // A command that forked ran where it forked, and led to no call.
         let end = next_prompt(typed.at);
+        let number = of_here(typed.pull_number, &typed.repo);
         let same_start = runs.iter_mut().find(|r| {
             typed.fork.is_none()
                 && r.via == ReviewVia::Skill
@@ -522,7 +569,7 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
                 && (r.ran == ReviewRan::Cloud || r.command == typed.command)
                 // One for another pull request is another review.
                 && r.pull_number
-                    .zip(typed.pull_number)
+                    .zip(number)
                     .is_none_or(|(call, start)| call == start)
                 && match (r.at, typed.at) {
                     (Some(call), Some(start)) => call >= start && end.is_none_or(|e| call < e),
@@ -534,7 +581,7 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             run.at = typed.at;
             run.command = typed.command.clone();
             run.effort = run.effort.take().or(typed.effort.clone());
-            run.pull_number = run.pull_number.or(typed.pull_number);
+            run.pull_number = run.pull_number.or(number);
             continue;
         }
         let id = match &typed.prompt_id {
@@ -555,7 +602,7 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             via: ReviewVia::SlashCommand,
             ran: ran_at,
             effort: typed.effort.clone(),
-            pull_number: typed.pull_number,
+            pull_number: number,
             status: typed_status(s, typed),
             findings: typed
                 .prompt_id
@@ -1177,6 +1224,70 @@ mod tests {
         );
         assert_eq!(forked_launch(&row("deploy")), None);
         assert_eq!(forked_launch("<forked-skill-launch>not json"), None);
+    }
+
+    #[test]
+    fn a_url_of_another_repositorys_pull_request_names_none_of_this_one() {
+        let (_, number, repo) = parse_args_of("high https://github.com/acme/api/pull/41");
+        assert_eq!((number, repo.as_deref()), (Some(41), Some("api")));
+        let web = Some("github.com/acme/web");
+        assert_eq!(in_repo(number, &repo, web), None);
+        assert_eq!(
+            in_repo(number, &repo, Some("github.com/acme/API.git")),
+            Some(41)
+        );
+        // a fork has its own owner and the same name
+        assert_eq!(in_repo(number, &repo, Some("github.com/ann/api")), Some(41));
+        // not known where the session is: kept
+        assert_eq!(in_repo(number, &repo, None), Some(41));
+        // a bare number is this repository's
+        let (_, number, repo) = parse_args_of("#41");
+        assert_eq!(in_repo(number, &repo, web), Some(41));
+    }
+
+    #[test]
+    fn a_command_seen_a_moment_before_its_prompt_keeps_its_turn() {
+        let s = session(
+            vec![
+                vec![
+                    event(
+                        0,
+                        "UserPromptExpansion",
+                        json!({ "prompt_id": "p1", "command_name": "code-review",
+                                "command_args": "" }),
+                    ),
+                    prompt(1, "p1", "/code-review"),
+                ],
+                subagent(2, 30, "fork").into(),
+            ],
+            Some(&costs(&[("fork", 3.0)])),
+        );
+        assert_eq!(s.reviews.len(), 1);
+        assert_eq!(
+            (s.reviews[0].subagents, s.reviews[0].estimated_cost_usd),
+            (1, Some(3.0))
+        );
+    }
+
+    #[test]
+    fn a_subagent_is_the_run_that_started_it_whoever_talks_to_it_later() {
+        let facts = costs(&[("x", 2.0)]);
+        let mut again = agent_call(60, "a2", None, "x");
+        again[0]["payload"]["tool_name"] = json!("SendMessage");
+        again[1]["payload"]["tool_name"] = json!("SendMessage");
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "review it twice")],
+                skill(1, "t1", "code-review", "", None).into(),
+                agent_call(2, "a1", None, "x").into(),
+                subagent(3, 40, "x").into(),
+                skill(50, "t2", "code-review", "", None).into(),
+                again.into(),
+            ],
+            Some(&facts),
+        );
+        let costs: Vec<_> = s.reviews.iter().map(|r| r.estimated_cost_usd).collect();
+        assert_eq!(costs, [Some(2.0), None]);
     }
 
     #[test]

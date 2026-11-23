@@ -228,19 +228,26 @@ sessions before and during review (`/code-review` and the like; see
 [Review runs](session-record.md#review-runs)): how many, at which effort, how many in the
 cloud, the findings they reported, and what their subagents cost. They are of:
 
-1. the sessions matched to it, and
+1. the sessions matched to it: their runs that name no pull request, made before it was
+   merged or closed (a session may go on to other work), and
 2. sessions of its repository (or its fork, or an old name of it) with a run that names its
    number, a review-only session with no line in it too, and
 3. sessions of its repository on its branch, for runs that name no pull request: a review
    there is work on this pull request. Codex's `/review` never names one. A run made after
    the pull request was merged or closed is left out, since a branch's name can be used
-   again, and so is a branch that is the one the pull request merges into.
+   again, and so is one made before the pull request before it on that branch was merged
+   or closed: a branch such as `develop` has one after another, and a run is of the one
+   open at the time. A branch that is the one the pull request merges into is left out,
+   and a fork's branch is the fork's, not a branch of that name in your repository. The
+   branch is the one the session started on.
 
 The page lists each run in the order they ran, as the pull request's iterations: run 2 of
 5, how long after the one before it, its effort, cost and findings, and the session it ran
 in.
 
-A run that names another pull request is that one's, and each run counts once. A matched
+A run that names another pull request is that one's, and each run counts once. A run that
+was refused before it began (denied, or declined by you) is no review and is not counted;
+one that failed or did not finish is, and the page says so. A matched
 session with a run that names none, matched to other pull requests too, gives that run to
 each of them, and the page says so. The two sides are not added up: a run in a session and a
 bot's comments are different things. The cost of the runs is part of their sessions' cost,

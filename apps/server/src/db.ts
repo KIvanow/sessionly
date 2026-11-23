@@ -889,6 +889,13 @@ const MIGRATIONS: string[] = [
   // The pull request numbers its review runs name, as a list: a pull request
   // finds the sessions that reviewed it without reading every session's record.
   `ALTER TABLE sessions ADD COLUMN review_pulls jsonb`,
+  // The runs themselves, beside the session: a list of pull requests reads
+  // them for each one without taking every session's whole record out. Null
+  // where there is none. And the sessions that have any, by repository, which
+  // is how a pull request looks for them.
+  `ALTER TABLE sessions ADD COLUMN reviews jsonb`,
+  `UPDATE sessions SET reviews = payload->'session'->'reviews' WHERE review_runs > 0`,
+  `CREATE INDEX sessions_reviewed ON sessions (org_id, lower(repo)) WHERE review_runs > 0`,
 ];
 
 /**

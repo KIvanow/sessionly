@@ -117,6 +117,7 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
     // the last tool call: a review's reply says how many findings it has.
     let mut asked: Option<(String, String)> = None;
     let mut reply = String::new();
+    let mut replied = 0;
 
     // A prompt arrives in chunks: it is pushed once the next thing happens,
     // and handed back as the one now being answered.
@@ -137,10 +138,17 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
         Some((id.clone().unwrap_or_default(), std::mem::take(text)))
     }
     // What the answer to a review command says it found, once it is over.
-    fn flush_reply(out: &mut Builder, asked: &mut Option<(String, String)>, reply: &mut String) {
+    // At the time it was said: an event with no time would be put first,
+    // ahead of the session's start.
+    fn flush_reply(
+        out: &mut Builder,
+        asked: &mut Option<(String, String)>,
+        reply: &mut String,
+        at: i64,
+    ) {
         if let Some((id, prompt)) = asked.take() {
             if let Some(said) = crate::reviews::reply_event(&id, &prompt, reply) {
-                out.push("", "ReviewReply", said);
+                out.push(&time_of(at), "ReviewReply", said);
             }
         }
         reply.clear();
@@ -157,12 +165,13 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
         if kind != "user_message_chunk" {
             if let Some(now) = flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started)
             {
-                flush_reply(&mut out, &mut asked, &mut reply);
+                flush_reply(&mut out, &mut asked, &mut reply, replied);
                 asked = Some(now);
             }
         }
         match kind {
             "agent_message_chunk" => {
+                replied = at;
                 reply.push_str(update["content"]["text"].as_str().unwrap_or_default());
             }
             "user_message_chunk" => {
@@ -172,7 +181,7 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
                     if let Some(now) =
                         flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started)
                     {
-                        flush_reply(&mut out, &mut asked, &mut reply);
+                        flush_reply(&mut out, &mut asked, &mut reply, replied);
                         asked = Some(now);
                     }
                     prompt_id = id;
@@ -267,10 +276,10 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
         }
     })?;
     if let Some(now) = flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started) {
-        flush_reply(&mut out, &mut asked, &mut reply);
+        flush_reply(&mut out, &mut asked, &mut reply, replied);
         asked = Some(now);
     }
-    flush_reply(&mut out, &mut asked, &mut reply);
+    flush_reply(&mut out, &mut asked, &mut reply, replied);
     // Calls that never reported an outcome.
     let mut open: Vec<(String, Call)> = calls.into_iter().collect();
     open.sort_by_key(|(_, call)| call.started);
@@ -557,6 +566,41 @@ mod tests {
             s.ended_at.unwrap().to_rfc3339(),
             "2026-11-09T09:00:00+00:00"
         );
+    }
+
+    #[test]
+    fn a_reviews_reply_is_an_event_at_its_time_and_the_start_stays_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let updates = sample(dir.path());
+        let t0 = 1_794_212_700;
+        let mut f = fs::OpenOptions::new().append(true).open(&updates).unwrap();
+        for row in [
+            update(
+                t0 + 50,
+                json!({ "sessionUpdate": "user_message_chunk", "_meta": { "promptIndex": 2 },
+                        "content": { "type": "text", "text": "/code-review #41" } }),
+            ),
+            update(
+                t0 + 55,
+                json!({ "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": "I found 2 issues." } }),
+            ),
+            update(t0 + 56, json!({ "sessionUpdate": "turn_completed" })),
+        ] {
+            writeln!(f, "{row}").unwrap();
+        }
+        let (events, facts) = session(&updates).unwrap();
+        // The first line of an import says what it was read from.
+        assert_eq!(events[0]["hook"], "SessionStart");
+        let reply = events.iter().find(|e| e["hook"] == "ReviewReply").unwrap();
+        assert!(reply["received_at"].is_string());
+        let s = crate::normalize::from_events(&events, facts.as_ref(), GROK).unwrap();
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.pull_number, r.findings))
+            .collect();
+        assert_eq!(runs, [(Some(41), Some(2))]);
     }
 
     #[test]

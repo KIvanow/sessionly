@@ -77,10 +77,26 @@ fn is_prompt(row: &Value) -> bool {
 /// arguments, as the hooks' `UserPromptExpansion` has them. Other commands
 /// (`/model`, `/clear`) are not kept.
 fn review_command(row: &Value) -> Option<Value> {
+    // A summary of what went before quotes the rows of the commands in it.
+    if row["isMeta"].as_bool() == Some(true) || row["isCompactSummary"].as_bool() == Some(true) {
+        return None;
+    }
     let text = match row["type"].as_str() {
         Some("system") => row["content"].as_str()?.to_string(),
         _ => text_of(&row["message"]["content"]),
     };
+    // The row is the command's own: it opens with it, and does not only
+    // have it somewhere in what was pasted or quoted.
+    const OPENS: &[&str] = &[
+        "<command-name>",
+        "<command-message>",
+        "<local-command-stdout>",
+        "<forked-skill-launch>",
+    ];
+    let opening = text.trim_start();
+    if !OPENS.iter().any(|tag| opening.starts_with(tag)) {
+        return None;
+    }
     let between = |open: &str, close: &str| {
         let start = text.find(open)? + open.len();
         let end = text[start..].find(close)? + start;
@@ -1340,6 +1356,23 @@ mod tests {
                     "p2",
                     json!("<command-name>/security-review</command-name>\n<command-args>high</command-args>"),
                     json!({}),
+                ),
+                // a summary of what went before quotes a command's row: no run
+                user(
+                    40,
+                    "p3",
+                    json!("This session is being continued.\n<command-name>/code-review</command-name>\n<command-args>#9</command-args>"),
+                    json!({ "isCompactSummary": true }),
+                ),
+                user(
+                    41,
+                    "p3",
+                    json!("<command-name>/code-review</command-name>\n<command-args>#9</command-args>"),
+                    json!({ "isMeta": true }),
+                ),
+                system(
+                    42,
+                    "The earlier run was <command-name>/code-review</command-name> on #9",
                 ),
             ],
         );

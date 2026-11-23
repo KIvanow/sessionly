@@ -876,7 +876,9 @@ fn read(path: &Path, thread: &str) -> Result<Thread> {
                     // told apart by it.
                     let mut item = p["item"].clone();
                     if item["id"].as_str().is_none_or(str::is_empty) {
-                        item["id"] = json!(format!("{thread}-item-{}", t.parts.len()));
+                        // Reviews are counted too: one adds no part.
+                        let nth = t.parts.len() + t.reviews.len();
+                        item["id"] = json!(format!("{thread}-item-{nth}"));
                     }
                     let item = &item;
                     let id = item["id"].as_str().unwrap_or_default().to_string();
@@ -1896,6 +1898,35 @@ pub(crate) mod tests {
             .map(|r| (r.subagents, r.duration_ms))
             .collect();
         assert_eq!(runs, [(0, None), (1, Some(9000))]);
+    }
+
+    #[test]
+    fn two_reviews_whose_items_have_no_id_are_two_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join(format!(
+            "sessions/2026/11/16/rollout-2026-11-16T12-00-00-{MAIN}.jsonl"
+        ));
+        let mode = |second: u32, kind: &str| {
+            event(
+                second,
+                "item_completed",
+                json!({ "turn_id": "t1", "item": { "type": kind } }),
+            )
+        };
+        write(
+            &main,
+            &[
+                meta(MAIN, json!({ "history_mode": "paginated" })),
+                event(1, "task_started", json!({ "turn_id": "t1" })),
+                mode(1, "EnteredReviewMode"),
+                mode(9, "ExitedReviewMode"),
+                mode(20, "EnteredReviewMode"),
+                mode(29, "ExitedReviewMode"),
+            ],
+        );
+        let (events, facts) = session(&main, &[], None).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), CODEX).unwrap();
+        assert_eq!(s.counts.reviews, Some(2));
     }
 
     #[test]

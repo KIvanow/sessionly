@@ -89,7 +89,7 @@ A report that names no reporter still is: an Action from before this was sent. A
 before a report said who sent it is marked with an empty name, which a client cannot send,
 and is not judged.
 `GET /prs/detail` gives `local_reviews.each` too: each review run of the pull request's
-sessions, oldest first, with its time, command, effort, where it ran, cost, findings and the
+sessions, oldest first, with its time, command, effort, where it ran, how it went, cost, findings and the
 session it ran in.
 
 `GET /prs` and `GET /prs/detail` give `reporter_version` (null when none was kept) and

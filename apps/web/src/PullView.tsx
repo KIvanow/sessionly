@@ -552,6 +552,7 @@ function ReviewRuns({ each }: { each: LocalReviewRun[] }) {
                 <span className="muted">
                   {r.via === "skill" ? ", by the agent" : r.via === "slash_command" ? ", typed" : ""}
                   {r.target ? `, of ${reviewTarget(r.target)}` : r.names_pull ? "" : ", names no pull request"}
+                  {r.status === "failed" ? ", failed" : r.status === "interrupted" ? ", interrupted" : r.status === "no_result" ? ", did not finish" : ""}
                 </span>
               </th>
               <td>{r.effort ?? "–"}</td>
