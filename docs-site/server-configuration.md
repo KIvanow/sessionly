@@ -6,7 +6,7 @@ parent: Server
 
 # Server configuration
 
-Everything is set through the environment, or through the `.env` file `pnpm server` reads.
+Everything is set through the environment, or through the `.env` file `pnpm run server` reads.
 
 ## Settings
 
@@ -16,23 +16,23 @@ Everything is set through the environment, or through the `.env` file `pnpm serv
 | `DATABASE_URL` | `postgres://…` or `postgresql://…` (Postgres 16 or later), or unset for the embedded database (in `apps/server/data/pglite`; in the Docker image, `/data/pglite`). Anything else is taken as a folder to keep an embedded database in. |
 | `SESSIONLY_DB_POOL` | Postgres only: connections kept at most. Default 10. |
 | `SESSIONLY_DB_QUERY_SECONDS` | Postgres only: how long a statement may take. Default 30, and a day (86400) at most. |
-| `SESSIONLY_ADMIN_TOKEN` | An admin token that always works, for first use. |
-| `SESSIONLY_ADMIN_EMAIL` | Who uploads made with that token belong to. Default `admin@localhost`. |
-| `SESSIONLY_PUBLIC_URL` | Where people reach the dashboard, e.g. `https://sessionly.example.com`: a scheme and a host, with no path, or the server does not start. Needed for signing in with Google or GitHub, which send people back there; open the dashboard at exactly this address. (A server on your own machine sends a browser at `127.0.0.1` on to `localhost`, or the other way; behind a proxy it sends nobody anywhere, whatever `Host` the proxy passes on.) Google takes a plain `http://` address only for `localhost`, `127.0.0.1` and `[::1]`. |
-| `SESSIONLY_GOOGLE_CLIENT_ID`, `SESSIONLY_GOOGLE_CLIENT_SECRET` | Optional, both together: people then sign in with Google (see [People, tokens and sign-in](people-and-tokens.md)). From an OAuth client of type "Web application" in Google Cloud, whose redirect URI is the public address followed by `/api/v1/auth/google/callback`. |
-| `SESSIONLY_GITHUB_CLIENT_ID`, `SESSIONLY_GITHUB_CLIENT_SECRET` | Optional, both together: people then sign in with GitHub. From an OAuth app on GitHub, whose callback URL is the public address followed by `/api/v1/auth/github/callback`. |
+| `SESSIONLY_ADMIN_TOKEN` | Optional: an admin token that always works, for scripts and CI. The dashboard needs none: it [opens without signing in](server.md#nobody-signs-in). |
+| `SESSIONLY_ADMIN_EMAIL` | Who the dashboard opens as, and who uploads made with that token belong to. Default `admin@localhost`. |
+| `SESSIONLY_PUBLIC_URL` | Hosted only. Where people reach the dashboard, e.g. `https://sessionly.example.com`: a scheme and a host, with no path, or the server does not start. Needed for signing in with Google or GitHub, which send people back there; open the dashboard at exactly this address. (A server on your own machine sends a browser at `127.0.0.1` on to `localhost`, or the other way; behind a proxy it sends nobody anywhere, whatever `Host` the proxy passes on.) Google takes a plain `http://` address only for `localhost`, `127.0.0.1` and `[::1]`. |
+| `SESSIONLY_GOOGLE_CLIENT_ID`, `SESSIONLY_GOOGLE_CLIENT_SECRET` | Hosted only, both together: people then sign in with Google (see [People, tokens and sign-in](people-and-tokens.md)). From an OAuth client of type "Web application" in Google Cloud, whose redirect URI is the public address followed by `/api/v1/auth/google/callback`. |
+| `SESSIONLY_GITHUB_CLIENT_ID`, `SESSIONLY_GITHUB_CLIENT_SECRET` | Hosted only, both together: people then sign in with GitHub. From an OAuth app on GitHub, whose callback URL is the public address followed by `/api/v1/auth/github/callback`. |
 | `SESSIONLY_RATE_PER_MINUTE` | Requests a token may make in a minute; past that the answer is 429. Unset, a server of your own has no limit. |
 | `SESSIONLY_TRUST_PROXY` | `true` when the server is behind a proxy of yours that sets `X-Forwarded-For`: the caller's address is then taken from it. Used only for the limits on signing in, which are per address. |
 | `SESSIONLY_TELEMETRY`, `DO_NOT_TRACK` | `SESSIONLY_TELEMETRY=off` stops the dashboard counting its pages, and so does `DO_NOT_TRACK=1`. See [Dashboard](dashboard.md#page-counts). |
 | `SESSIONLY_HASH_KEY` | 32 characters or more of random text (`openssl rand -hex 32`). The server keeps a hash of each email address on a pull request's commits, to [match its lines again](pull-requests.md#the-pull-requests-page) later; with this set, the hash is keyed, and the database alone does not confirm a guessed address. Without it the hash is a plain one. Keep it the same: after a change, pull requests have to be reported once more before they can be matched again. |
 | `SESSIONLY_DEMO_FROM`, `SESSIONLY_DEMO_REPO`, `SESSIONLY_DEMO_ORG` | Shows one repository's sessions in a second organisation, for a demo of real work, as `node src/cli.ts demo import` copies them: see [below](#showing-a-repository-in-another-organisation). All three or none. |
 | `SESSIONLY_DEMO_HIDE` | What of that repository not to show, separated by commas: file names, paths, folders and patterns with `*`, as the Action's `ignore` takes them. See [below](#what-is-not-shown). |
-| `SESSIONLY_HOSTED` | `true` for a service many organisations sign up to. It has settings of its own (`SESSIONLY_SIGNUP`, `SESSIONLY_SIGNUP_CODE` and the sign-up limits): see [`infra/`](https://github.com/KIvanow/sessionly/blob/main/infra/README.md). |
+| `SESSIONLY_HOSTED` | `true` for a service many organisations sign up to; `false` or unset for a server of your own. Anything else, or the hosted service's own settings (`SESSIONLY_SIGNUP`, `SESSIONLY_SIGNUP_CODE` and the sign-up limits) without `true`, and the server does not start: see [`infra/`](https://github.com/KIvanow/sessionly/blob/main/infra/README.md). |
 | `SESSIONLY_ORG` | The ee server only: this install's org id. See [Editions and license](editions.md). |
 
 What the server says at its start is worth reading once: it names a setting it could not use
-(half of a Google or GitHub pair, a sign-in provider without a public address, a number that
-is not one), and stops rather than start with a public address it cannot make sense of.
+(a Google or GitHub setting on a server that is not hosted, half of such a pair, a sign-in
+provider without a public address, a number that is not one), and stops rather than start with a public address it cannot make sense of.
 
 With Docker Compose only some of these reach the container: see [Server](server.md#with-docker).
 
@@ -147,7 +147,8 @@ with Google or GitHub is offered it, and can join it as a `viewer`: they see eve
 admin sees (every session, the pull requests, the costs and the addresses of the people who
 worked on the repository) and change nothing. It is offered only while it holds nothing but
 the server's copies: a session uploaded to it directly closes it, as the settings may then
-name the organisation the work is in.
+name the organisation the work is in. Joining it is by signing in, which only a hosted service
+has: on a server of your own it is reached with a token made in it.
 
 ### What is not shown
 

@@ -910,7 +910,7 @@ SESSIONLY_LINE_HASHES=on</pre>
               <ul>
                 <li>The same code as the self-hosted server</li>
                 <li>The same content levels: metadata by default, previews opt-in</li>
-                <li>Sign in with Google or GitHub; your org's data is kept apart from every other</li>
+                <li>Sign in with Google or GitHub, and each person sees their own sessions; your org's data is kept apart from every other</li>
                 <li>The owner can download the organisation's data, or delete it</li>
                 <li>Runs in Frankfurt, Germany</li>
               </ul>
@@ -921,8 +921,8 @@ SESSIONLY_LINE_HASHES=on</pre>
             Sessionly is early. A
             <a href="https://github.com/KIvanow/sessionly/releases">release</a> is a binary for
             Linux or macOS to unpack, or <code>cargo install sessionly</code>; there is no
-            installer yet. On a server of your own, sign-in to
-            the dashboard is by token unless you set up Google or GitHub. The
+            installer yet. A server of your own has no sign-in: whoever can reach its
+            dashboard is its admin, so keep it on a network you trust. The
             <a href="https://github.com/KIvanow/sessionly#readme">README</a> says what works today.
           </p>
         </div>
@@ -988,7 +988,9 @@ SESSIONLY_LINE_HASHES=on</pre>
                   anything but a server on the same machine.
                 </li>
                 <li>
-                  <b>One token per person.</b> An admin creates and revokes them on the Team page.
+                  <b>No sign-in.</b> The dashboard opens as its admin for whoever can reach it:
+                  keep it on your own network. Each machine connects with a token from the
+                  Connect page.
                 </li>
                 <li>
                   <b>Nothing of yours phones home.</b> A self-hosted install sends none of your
@@ -1003,11 +1005,10 @@ SESSIONLY_LINE_HASHES=on</pre>
             <div class="term wide" aria-label="Commands to run a Sessionly server and connect to it">
               <header>A team</header>
               <pre><span class="c"># on the server</span>
-<span class="c">$</span> SESSIONLY_ADMIN_TOKEN=choose-a-long-secret \
-    docker compose up -d
+<span class="c">$</span> docker compose up -d
 
 <span class="c"># on each developer's machine</span>
-<span class="c">$</span> sessionly connect https://sessionly.example.com
+<span class="c">$</span> sessionly connect https://sessionly.example.com --token sly_…
 <span class="c">$</span> sessionly upload --dry-run   <span class="c"># count what would be sent</span>
 <span class="c">$</span> sessionly upload
 

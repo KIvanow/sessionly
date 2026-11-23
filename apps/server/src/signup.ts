@@ -17,7 +17,7 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { getConnInfo } from "@hono/node-server/conninfo";
-import { hash, issueToken, sameSecret, type Role } from "./auth.ts";
+import { DEFAULT_ORG, hash, issueToken, sameSecret, type Role } from "./auth.ts";
 import type { Db, Queryable } from "./db.ts";
 import { allowed, giveBack, take, type Taken } from "./limits.ts";
 import {
@@ -54,8 +54,14 @@ const AWAY_MINUTES = 10;
 export const CODE_MINUTES = 10;
 
 export interface Accounts {
-  /** The ways of signing in that are set up. Without one, people get in by token only. */
+  /**
+   * The ways of signing in that are set up. Hosted only: a server of your
+   * own opens its dashboard without signing in. Without one, a hosted
+   * service is got into by token only.
+   */
   providers?: Provider[];
+  /** Whose the dashboard of a server of your own is, opened without signing in (SESSIONLY_ADMIN_EMAIL). */
+  admin?: string;
   /** Where the dashboard is reached, which is also where a provider sends people back: `https://app.example.com`. */
   publicUrl?: string;
   /** A service many organisations share: signing up creates one. */
@@ -138,10 +144,13 @@ export function orgNameFrom(typed: string): string | null {
 
 /** What the server offers someone who is not signed in. */
 export function offers(accounts: Accounts) {
+  const hosted = accounts.hosted === true;
   // A provider sends people back to the public address: without one there is nowhere to come back to.
-  const providers = accounts.publicUrl ? (accounts.providers ?? []).map((provider) => provider.name) : [];
+  const providers = hosted && accounts.publicUrl ? (accounts.providers ?? []).map((provider) => provider.name) : [];
   return {
-    hosted: accounts.hosted === true,
+    hosted,
+    // A server of your own: the dashboard opens as its admin, with nobody signing in.
+    noSignIn: !hosted,
     providers,
     signup: providers.length > 0 && accounts.hosted === true && accounts.signup !== "off",
     inviteCode: Boolean(accounts.signupCode),
@@ -424,7 +433,8 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
   // And one for whoever has come back, until they have said where to.
   const arrivedAs = `${prefix}sessionly-arrived`;
   const ours = { httpOnly: true, secure, sameSite: "Lax", path: "/" } as const;
-  const providerOf = (name: ProviderName) => (home ? accounts.providers?.find((provider) => provider.name === name) : undefined);
+  const providerOf = (name: ProviderName) =>
+    home && accounts.hosted === true ? accounts.providers?.find((provider) => provider.name === name) : undefined;
   const redirectUri = (provider: ProviderName) => `${home}/api/v1/auth/${provider}/callback`;
   const tooMany = (c: Context) => c.json({ error: "too many requests; try again in a minute", code: "rate_limited" }, 429);
   const perMinute = async (c: Context, what: string, max: number) =>
@@ -434,7 +444,8 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
   const notSetUp = (c: Context) => c.json({ error: "signing in that way is not set up here", code: "no_sign_in" }, 404);
   /** Back to the dashboard, which says what happened. */
   const back = (c: Context, problem: Problem) => c.redirect(`${home}/#problem=${problem}`);
-  const origin = home ? new URL(home).origin : undefined;
+  // The address people sign in at: a server of your own has none, and is opened at any of its names.
+  const origin = home && accounts.hosted === true ? new URL(home).origin : undefined;
   /**
    * What only the dashboard asks: JSON, and from this very site if the
    * browser says where from. A form on another site cannot send JSON, and a
@@ -564,7 +575,28 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
     open.get(`/${name}/callback`, comeBack(name));
   }
 
-  for (const path of ["/check", "/cancel", "/verify"]) open.use(path, fromTheDashboard);
+  for (const path of ["/check", "/cancel", "/verify", "/open"]) open.use(path, fromTheDashboard);
+
+  // A server of your own opens its dashboard without signing in: it is
+  // handed a session as the admin, which runs out as a sign-in does. Anyone
+  // who can reach the server can have one; a hosted service has none.
+  open.post("/open", async (c) => {
+    if (!offers(accounts).noSignIn) return c.json({ error: "this server is signed in to", code: "sign_in" }, 404);
+    if (!(await perMinute(c, "auth-open", 20))) return tooMany(c);
+    const expiresAt = new Date(Date.now() + SIGN_IN_DAYS * 86_400_000);
+    const email = accounts.admin ?? "admin@localhost";
+    const [org] = await db.query<{ name: string }>(`SELECT name FROM orgs WHERE id = $1`, [DEFAULT_ORG]);
+    const { token } = await issueToken(db, DEFAULT_ORG, { email, role: "admin", signIn: "open", expiresAt });
+    const opened: SignedIn = {
+      token,
+      org: { id: DEFAULT_ORG, name: org?.name ?? DEFAULT_ORG },
+      email,
+      role: "admin",
+      expires_at: expiresAt.toISOString(),
+      created: false,
+    };
+    return c.json(opened);
+  });
 
   const invalid = (c: Context) => {
     deleteCookie(c, arrivedAs, { path: "/", secure });

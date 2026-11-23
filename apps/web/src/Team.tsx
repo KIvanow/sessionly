@@ -109,11 +109,17 @@ function License({ token, onSignOut }: { token: string; onSignOut: () => void })
 /** The people who can sign in. Adding one sends them nothing: they sign in, and are shown the organisation. */
 function People({
   token,
+  adding,
   address,
   myEmail,
   onSignOut,
 }: {
   token: string;
+  /**
+   * People sign in here. Without that, those added when this server had
+   * signing in are still shown, to be removed: nobody is added any more.
+   */
+  adding: boolean;
   /** Where people sign in. */
   address: string;
   /** Who is looking: nobody does for themselves what lets someone in anew. */
@@ -196,30 +202,41 @@ function People({
   }
 
   const people = (list.data?.users ?? []).filter((u) => !u.removed_at);
+  // Nobody from before: nothing to show. A list that could not be loaded says so.
+  if (!adding && !people.length && !problem && !list.error) return null;
   return (
     <section className="card">
       <h2>People</h2>
-      <p className="muted">
-        People sign in with a Google or GitHub account that has the address they were added under, and connect
-        their own machines from the Connect page. The account someone first signs in with is from then on the
-        only one that gets in as them here. If that account is gone, let them in with another from the list below;
-        nobody can do that for themselves.
-        Members see their own sessions; admins see everyone's and manage this page.
-      </p>
-      <form className="inline" onSubmit={add}>
-        <label>
-          Email
-          <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
-        </label>
-        <label>
-          Role
-          <select value={role} onChange={(e) => setRole(e.target.value as "member" | "admin")}>
-            <option value="member">Member</option>
-            <option value="admin">Admin</option>
-          </select>
-        </label>
-        <button type="submit">Add</button>
-      </form>
+      {adding ? (
+        <p className="muted">
+          People sign in with a Google or GitHub account that has the address they were added under, and connect
+          their own machines from the Connect page. The account someone first signs in with is from then on the
+          only one that gets in as them here. If that account is gone, let them in with another from the list below;
+          nobody can do that for themselves.
+          Members see their own sessions; admins see everyone's and manage this page.
+        </p>
+      ) : (
+        <p className="muted">
+          Added when this server had signing in, which is now the hosted service's: nobody signs in here any more.
+          Removing someone stops the tokens of their machines too.
+        </p>
+      )}
+      {adding && (
+        <form className="inline" onSubmit={add}>
+          <label>
+            Email
+            <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+          </label>
+          <label>
+            Role
+            <select value={role} onChange={(e) => setRole(e.target.value as "member" | "admin")}>
+              <option value="member">Member</option>
+              <option value="admin">Admin</option>
+            </select>
+          </label>
+          <button type="submit">Add</button>
+        </form>
+      )}
       {problem && <p role="alert">{problem}</p>}
       {added && (
         <p role="status">
@@ -249,12 +266,12 @@ function People({
                   <td>{u.signed_in_with ? PROVIDERS[u.signed_in_with] : <span className="muted">has not signed in</span>}</td>
                   <td className="nowrap">{dateTime(u.created_at)}</td>
                   <td>
-                    {u.signed_in_with && u.email !== myEmail && (
+                    {adding && u.signed_in_with && u.email !== myEmail && (
                       <button className="quiet" onClick={() => forget(u)}>
                         Let in with another account
                       </button>
                     )}{" "}
-                    {u.role !== "owner" && (
+                    {u.role !== "owner" && u.email !== myEmail.toLowerCase() && (
                       <button className="quiet" onClick={() => askRemove(u)} disabled={counting}>
                         Remove
                       </button>
@@ -542,7 +559,7 @@ export function Team({
 
   return (
     <>
-      {people && <People token={token} address={address} myEmail={myEmail} onSignOut={onSignOut} />}
+      <People token={token} adding={people} address={address} myEmail={myEmail} onSignOut={onSignOut} />
       <section className="card">
         <h2>{people ? "Tokens for machines and services" : "Give someone access"}</h2>
         <p className="muted">
@@ -596,7 +613,7 @@ export function Team({
         {!list.data && !list.error && <Loader label="Loading tokens" />}
         {list.data && list.data.tokens.length === 0 && (
           <p className="muted">
-            No tokens yet.{!people && " You are signed in with the server's built-in admin token."}
+            No tokens yet. Make one above for each machine.
           </p>
         )}
         {list.data && list.data.tokens.length > 0 && (

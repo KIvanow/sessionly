@@ -27,6 +27,11 @@ export interface Me {
    * hosted. A token for a machine is not, even the owner's.
    */
   owner: boolean;
+  /**
+   * The dashboard of a server of your own, opened without signing in. There
+   * is no signing out of it: it is opened again. From `/me` only.
+   */
+  opened?: boolean;
 }
 
 /** A service people sign in with. */
@@ -36,6 +41,11 @@ export type SignInProvider = "google" | "github";
 export interface AuthOptions {
   /** A service many organisations share. */
   hosted: boolean;
+  /**
+   * A server of your own: the dashboard opens as its admin, with nobody
+   * signing in (`POST /auth/open`). Not there from a server from before.
+   */
+  noSignIn?: boolean;
   /** What people can sign in with. Empty: by token only. */
   providers: SignInProvider[];
   /** Anyone can create an organisation. */

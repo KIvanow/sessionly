@@ -27,6 +27,12 @@ import { Team } from "./Team.tsx";
 import { dayLabel, modelName, toolName } from "./format.ts";
 import { useApi } from "./useApi.ts";
 
+/** How long before asking a server that did not answer again. */
+const RETRY_MS = 5_000;
+
+/** What only happened to go wrong: no answer (status 0), too many at once, or the server's own trouble. */
+const passing = (err: Error) => !(err instanceof ApiError) || err.status === 0 || err.status === 429 || err.status >= 500;
+
 export interface Scope {
   /** "7", "30", "90" days back, or "all". */
   period: string;
@@ -103,11 +109,23 @@ export function App() {
   const [leaving, setLeaving] = useState(false);
   /** Sessions the server could not be told to end, kept (not stored) to try again. */
   const [unended, setUnended] = useState<string[]>([]);
+  /** Why a server that opens without signing in did not: a token is the way in then. */
+  const [unopened, setUnopened] = useState<string | null>(null);
+  /** Counts the tries at opening it, to try once more. */
+  const [attempt, setAttempt] = useState(0);
+  /** The session the server last opened the dashboard with. */
+  const [openedToken, setOpenedToken] = useState<string | null>(null);
+  /** Why the dashboard is not opened again until this page is loaded anew. */
+  const [refused, setRefused] = useState<string | null>(null);
 
   const use = (value: string | null) => {
     saveToken(value);
     setMe(null);
     setToken(value);
+    // Why it did not open was of the session before: left without one, it is asked anew.
+    setUnopened(null);
+    if (value !== null) setRefused(null);
+    if (value === null) setAttempt((n) => n + 1);
   };
   /** The server no longer accepts this session. If there is one in another organisation, that one is next. */
   const signOut = () => {
@@ -156,12 +174,47 @@ export function App() {
   };
 
   useEffect(() => {
-    open<AuthOptions>("/auth/options")
-      // A server from before signing in with Google or GitHub names no providers.
-      .then((offered) => setOptions({ ...offered, providers: offered.providers ?? [] }))
-      // An older server, or none: a token is the way in.
-      .catch(() => setOptions({ hosted: false, providers: [], signup: false, inviteCode: false }));
+    let current = true;
+    let again: ReturnType<typeof setTimeout> | undefined;
+    const ask = () =>
+      open<AuthOptions>("/auth/options")
+        // A server from before signing in with Google or GitHub names no providers.
+        .then((offered) => current && setOptions({ ...offered, providers: offered.providers ?? [] }))
+        .catch((err: Error) => {
+          if (!current) return;
+          // An older server, or none: a token is the way in. One that did not
+          // answer is asked again, as it may open without signing in.
+          setOptions((had) => had ?? { hosted: false, providers: [], signup: false, inviteCode: false });
+          if (passing(err)) again = setTimeout(ask, RETRY_MS);
+        });
+    void ask();
+    return () => {
+      current = false;
+      clearTimeout(again);
+    };
   }, []);
+
+  // A server of your own opens without signing in: it hands this browser a
+  // session as its admin, and another once that one runs out. What only
+  // happened to fail (no answer, too many at once) is tried again, behind
+  // the token's form, which stays as it is; anything else, once this
+  // browser is left without a session again.
+  useEffect(() => {
+    if (token || !options?.noSignIn || refused) return;
+    let current = true;
+    let again: ReturnType<typeof setTimeout> | undefined;
+    open<SignedIn>("/auth/open", {})
+      .then((opened) => current && (setProblem(null), setOpenedToken(opened.token), use(opened.token)))
+      .catch((err: Error) => {
+        if (!current) return;
+        setUnopened(err.message);
+        if (passing(err)) again = setTimeout(() => setAttempt((n) => n + 1), RETRY_MS);
+      });
+    return () => {
+      current = false;
+      clearTimeout(again);
+    };
+  }, [token, options, attempt, refused]);
 
   /** Signed in: this browser keeps the session, and shows the organisation. */
   const signedIn = (signed: SignedIn) => {
@@ -206,7 +259,13 @@ export function App() {
       .then((who) => current && (setMe(who), setProblem(null)))
       .catch((err: Error) => {
         if (!current) return;
-        if (err instanceof ApiError && err.status === 401) {
+        if (err instanceof ApiError && err.status === 401 && token === openedToken) {
+          // Refused as soon as it was handed out (a proxy that asks for something of its own):
+          // opening again would only be refused again, so it is not.
+          saveToken(null);
+          setToken(null);
+          setRefused("The server handed out a session and then refused it. A proxy in front of it may be refusing what the dashboard sends.");
+        } else if (err instanceof ApiError && err.status === 401) {
           signOut();
           setProblem("That token is not accepted.");
         } else {
@@ -254,11 +313,19 @@ export function App() {
       />
     );
   }
+  if (!token && (!options || (options.noSignIn && unopened === null && !refused))) {
+    return (
+      <main className="center">
+        <Brand />
+        <p>Loading…</p>
+      </main>
+    );
+  }
   if (!token) {
     return (
       <Login
         options={options}
-        problem={problem}
+        problem={refused ?? problem ?? (unopened ? `The dashboard could not be opened: ${unopened}` : null)}
         onRetry={unended.length ? endAgain : undefined}
         onToken={(value) => {
           setProblem(null);
@@ -304,7 +371,7 @@ const HEADINGS: Record<string, { title: string; about: string }> = {
   "": { title: "Overview", about: "What the agents did, what it cost, and how much of what they wrote is still there." },
   sessions: { title: "Sessions", about: "Every session that was uploaded, newest first." },
   pulls: { title: "Pull requests", about: "How much of each pull request agents wrote, and how those lines fared in review." },
-  team: { title: "Team", about: "Who can sign in, and the tokens for what cannot." },
+  team: { title: "Team", about: "Who can get in, and the tokens machines and services connect with." },
   connect: { title: "Connect", about: "A token for each of your machines, and how to capture sessions elsewhere." },
 };
 
@@ -459,7 +526,8 @@ function Shell({
             <span>
               {me.email} · {me.role}
             </span>
-            <button onClick={onLeave}>Sign out</button>
+            {/* An opened dashboard would only be opened again. Any other session signs out, a pasted token too. */}
+            {!me.opened && <button onClick={onLeave}>Sign out</button>}
           </span>
         </div>
       </header>

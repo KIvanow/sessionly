@@ -127,16 +127,16 @@ Action is a row of its own, and the row before it keeps the version that produce
 
 | | Who | |
 |---|---|---|
-| `GET /me` | person | Who the token is, and in which organisation. `owner` is true when they signed in as the organisation's owner. A token for a machine is not an owner, even the owner's own. On a server that is not hosted, the admin token from the environment is the owner and nobody else is. |
+| `GET /me` | person | Who the token is, and in which organisation. `owner` is true when they signed in as the organisation's owner. A token for a machine is not an owner, even the owner's own. On a server that is not hosted, the admin token from the environment and the dashboard (`POST /auth/open`) are the owner and nobody else is; `opened` is true for the dashboard's. |
 | `GET /me/tokens` | person | Their own tokens. |
 | `POST /me/tokens` | person | A new `member` token for a machine of theirs: `{"name": "…"}`, optional. The token is in the answer, once. |
 | `DELETE /me/tokens/{id}` | person | Revokes one of them. |
-| `DELETE /auth/session` | person | Signs out: ends a sign-in made with Google or GitHub. |
+| `DELETE /auth/session` | person | Signs out: ends a sign-in made with Google or GitHub, or the session the dashboard of a server of your own opened with. |
 | `GET /tokens` | `admin` | Every token of the organisation (never the tokens themselves). |
 | `POST /tokens` | `admin` | A new token: `{"email": "…", "role": "member", "name": "…"}`. The role is `admin`, `member` (the default), `ci` or `env`. |
 | `DELETE /tokens/{id}` | `admin` | Revokes one. |
 | `GET /users` | `admin` | The people who may sign in. |
-| `POST /users` | `admin` | Adds one: `{"email": "…", "role": "member"}`, the role `admin` or `member`. `409` where neither Google nor GitHub is set up, or for someone already there; 30 an hour at most. |
+| `POST /users` | `admin` | Adds one: `{"email": "…", "role": "member"}`, the role `admin` or `member`. `409` where neither Google nor GitHub is set up (always, on a server that is not hosted), or for someone already there; 30 an hour at most. |
 | `DELETE /users/{id}` | `admin` | Removes one. Their sessions stay. With `?data=true`, their sessions are deleted too, and so are the repositories they stopped; pull requests stay. A session filed under their address is not stored while they stay removed. |
 | `DELETE /org` | owner, hosted | Deletes the organisation. The body is `{"name": "<the organisation's name>"}`. The wrong name is `400`. The right name is `204`: every token of the organisation is then `401`, and it is no longer offered at sign-in. The rows are removed after 7 days. Not offered on a server that is not hosted (`403`). |
 | `POST /users/{id}/forget-account` | `admin` | Lets a person in with another Google or GitHub account than the one they have used. |
@@ -148,7 +148,8 @@ Action is a row of its own, and the row before it keeps the version that produce
 |---|---|
 | `GET /healthz` | `{"ok": true}` while the server runs. (Not under `/api/v1`.) |
 | `GET /readyz` | The same once the database has answered; `503` if it does not. (Not under `/api/v1`.) |
-| `GET /api/v1/auth/options` | How people can sign in here: the providers set up, and whether this is a hosted service. |
+| `GET /api/v1/auth/options` | How people can sign in here: the providers set up (on a hosted service only), whether this is a hosted service, and `noSignIn`, true where the dashboard opens without signing in. |
+| `POST /api/v1/auth/open` | On a server that is not hosted, a session for the dashboard as its admin (`SESSIONLY_ADMIN_EMAIL`), which lasts a week: what the dashboard opens with, as nobody signs in there. Asked by the dashboard only, as JSON. `404` on a hosted service. |
 | `GET /api/v1/telemetry` | What the dashboard needs to [count its pages](dashboard.md#page-counts), or `null` where that is off. |
 | `/api/v1/auth/…` | The round trip of signing in with Google or GitHub, which the dashboard makes. Not for other callers. |
 

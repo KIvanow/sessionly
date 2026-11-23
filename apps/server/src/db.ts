@@ -896,6 +896,11 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE sessions ADD COLUMN reviews jsonb`,
   `UPDATE sessions SET reviews = payload->'session'->'reviews' WHERE review_runs > 0`,
   `CREATE INDEX sessions_reviewed ON sessions (org_id, repo) WHERE review_runs > 0`,
+  // A server of your own opens its dashboard without signing in: what the
+  // dashboard is handed then is a session of its own kind ('open'), which
+  // runs out as the others do and is no one's sign-in.
+  `ALTER TABLE tokens DROP CONSTRAINT tokens_sign_in_check`,
+  `ALTER TABLE tokens ADD CONSTRAINT tokens_sign_in_check CHECK (sign_in IN ('email', 'google', 'github', 'open'))`,
 ];
 
 /**

@@ -4,11 +4,12 @@
 //   DATABASE_URL           postgres://… ; default: an embedded database in apps/server/data
 //   SESSIONLY_DB_POOL      Postgres only: connections kept at most (default 10)
 //   SESSIONLY_DB_QUERY_SECONDS  Postgres only: how long a statement may take (default 30, a day at most)
-//   SESSIONLY_ADMIN_TOKEN  an admin token that always works (for first use)
-//   SESSIONLY_ADMIN_EMAIL  whose sessions uploads with that token belong to
+//   SESSIONLY_ADMIN_TOKEN  an admin token that always works (optional: for scripts and CI)
+//   SESSIONLY_ADMIN_EMAIL  whose the dashboard is, which opens without signing in, and
+//                          whose sessions uploads with that token belong to
 //   SESSIONLY_HOSTED       "true" for a service that many organisations share
-// Signing in with Google or GitHub (and, hosted, signing up) needs the public
-// address and the id and secret of at least one of the two:
+// Hosted only, signing in and signing up with Google or GitHub needs the
+// public address and the id and secret of at least one of the two:
 //   SESSIONLY_PUBLIC_URL   where people reach the dashboard, e.g. https://app.example.com
 //   SESSIONLY_GOOGLE_CLIENT_ID, SESSIONLY_GOOGLE_CLIENT_SECRET
 //                          of an OAuth client (a "Web application") in Google Cloud, whose redirect
@@ -149,6 +150,29 @@ const COUNTS = [
   ...DB_COUNTS,
 ] as const;
 
+/** A hosted service's own settings, which nothing else takes. */
+const HOSTED_ONLY = ["SESSIONLY_SIGNUP", "SESSIONLY_SIGNUP_CODE", "SESSIONLY_SIGNUPS_PER_HOUR", "SESSIONLY_SIGNUPS_PER_NETWORK"];
+
+/**
+ * Why a server would wrongly start as one of your own, whose dashboard
+ * opens to anyone without signing in: SESSIONLY_HOSTED written some other
+ * way than "true", or left out where a hosted service's settings are.
+ */
+export function notHostedProblems(env: NodeJS.ProcessEnv): string[] {
+  // As it is read everywhere else: " true" is not "true".
+  const said = env.SESSIONLY_HOSTED ?? "";
+  if (said !== "" && said !== "true" && said !== "false") {
+    return [`SESSIONLY_HOSTED is "${said}": it is "true" for a hosted service, or "false" or unset for a server of your own.`];
+  }
+  if (said === "true") return [];
+  const set = HOSTED_ONLY.filter((name) => env[name]?.trim());
+  return set.length
+    ? [
+        `${set.join(" and ")} ${set.length === 1 ? "is" : "are"} set, which only a hosted service takes, but SESSIONLY_HOSTED is not "true": this server would open its dashboard to anyone without signing in. Set SESSIONLY_HOSTED=true, or take ${set.length === 1 ? "it" : "them"} out.`,
+      ]
+    : [];
+}
+
 /** How people get in, as the environment sets it. */
 export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
   const hosted = env.SESSIONLY_HOSTED === "true";
@@ -158,10 +182,14 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
   }
   return {
     hosted,
-    providers: PROVIDER_NAMES.flatMap((name) => {
-      const client = clientOf(env, name);
-      return client ? [MAKERS[name](client)] : [];
-    }),
+    // Signing in is the hosted service's: a server of your own opens its dashboard without it.
+    providers: hosted
+      ? PROVIDER_NAMES.flatMap((name) => {
+          const client = clientOf(env, name);
+          return client ? [MAKERS[name](client)] : [];
+        })
+      : [],
+    admin: env.SESSIONLY_ADMIN_EMAIL?.trim() || undefined,
     publicUrl,
     signup: env.SESSIONLY_SIGNUP === "off" ? "off" : "open",
     signupCode: env.SESSIONLY_SIGNUP_CODE?.trim() || undefined,
@@ -179,16 +207,24 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
  */
 export function unheeded(env: NodeJS.ProcessEnv): string[] {
   const notes = misset(env, COUNTS);
+  const hosted = env.SESSIONLY_HOSTED === "true";
   for (const name of PROVIDER_NAMES) {
     const [id, secret] = settingsOf(name);
-    if (Boolean(env[id]?.trim()) !== Boolean(env[secret]?.trim())) {
+    if (!hosted) {
+      const set = [id, secret].filter((setting) => env[setting]?.trim());
+      if (set.length) {
+        notes.push(
+          `${set.join(" and ")} ${set.length === 1 ? "is" : "are"} set, but signing in with ${LABELS[name]} is for the hosted service: this server's dashboard opens without signing in, and ${set.length === 1 ? "it is" : "they are"} not used.`,
+        );
+      }
+    } else if (Boolean(env[id]?.trim()) !== Boolean(env[secret]?.trim())) {
       notes.push(`Only one of ${id} and ${secret} is set: signing in with ${LABELS[name]} needs both, and is off.`);
     } else if (clientOf(env, name) && !env.SESSIONLY_PUBLIC_URL?.trim()) {
       notes.push(`${id} is set, but SESSIONLY_PUBLIC_URL is not: signing in with ${LABELS[name]} is off, since it has nowhere to send people back to.`);
     }
   }
   const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim() ?? "";
-  if (publicUrl.startsWith("http://") && !ON_THIS_MACHINE.test(publicUrl) && PROVIDER_NAMES.some((name) => clientOf(env, name))) {
+  if (hosted && publicUrl.startsWith("http://") && !ON_THIS_MACHINE.test(publicUrl) && PROVIDER_NAMES.some((name) => clientOf(env, name))) {
     notes.push(
       "SESSIONLY_PUBLIC_URL is plain HTTP on a host that is not this machine: sign-ins and tokens cross the network in clear. Put it behind HTTPS.",
     );
@@ -218,6 +254,11 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       for (const problem of problems) console.error(`SESSIONLY_HOSTED: ${problem}`);
       process.exit(1);
     }
+  }
+  const misread = notHostedProblems(process.env);
+  if (misread.length) {
+    for (const problem of misread) console.error(problem);
+    process.exit(1);
   }
   for (const note of unheeded(process.env)) console.warn(note);
   // The embedded database lives next to the server's code, wherever it is started from.
@@ -267,7 +308,8 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
     telemetry,
     extensions: options.extensions?.(),
     bootstrap: adminToken
-      ? { token: adminToken, email: process.env.SESSIONLY_ADMIN_EMAIL ?? "admin@localhost" }
+      ? // As written, as it always was: sessions it uploaded before are filed under it.
+        { token: adminToken, email: process.env.SESSIONLY_ADMIN_EMAIL ?? "admin@localhost" }
       : undefined,
   });
 
@@ -332,9 +374,9 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       const ways = offered.providers.map((name) => LABELS[name]).join(" and ");
       console.log(`Signing in with ${ways} is on${offered.signup ? ", and anyone may sign up" : ""}${offered.signup && offered.inviteCode ? " with the invitation code" : ""}.`);
     }
-    if (!adminToken && !hosted) {
+    if (offered.noSignIn) {
       console.log(
-        "No SESSIONLY_ADMIN_TOKEN set: create tokens with `pnpm token create --email you@example.com --role admin`",
+        `The dashboard opens without signing in, as ${accounts.admin ?? "admin@localhost"}: anyone who can reach this server is its admin. Machines connect with a token from its Connect page.`,
       );
     }
   });

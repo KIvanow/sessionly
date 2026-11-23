@@ -1,10 +1,12 @@
 # Self-hosting: the server with the dashboard, and Postgres.
-#   SESSIONLY_ADMIN_TOKEN=choose-a-long-secret docker compose up -d
-# then open http://localhost:8080 and sign in with that token.
+#   docker compose up -d
+# then open http://localhost:8080. The dashboard opens without signing in,
+# as SESSIONLY_ADMIN_EMAIL: anyone who can reach the port is its admin, so
+# keep it on a network you trust. Machines connect with a token made on its
+# Connect page.
 #
-# For people to sign in with Google or GitHub, also set SESSIONLY_PUBLIC_URL
-# (where they reach the dashboard) and the id and secret of either, here in
-# the environment or in a .env file beside this one. See docs-site/server.md.
+# Settings go here in the environment or in a .env file beside this one.
+# See docs-site/server.md.
 services:
   server:
     build: .
@@ -12,14 +14,9 @@ services:
       - "${SESSIONLY_PORT:-8080}:8080"
     environment:
       DATABASE_URL: postgres://sessionly:sessionly@db:5432/sessionly
-      SESSIONLY_ADMIN_TOKEN: ${SESSIONLY_ADMIN_TOKEN:?set SESSIONLY_ADMIN_TOKEN to a long secret}
       SESSIONLY_ADMIN_EMAIL: ${SESSIONLY_ADMIN_EMAIL:-admin@localhost}
-      # Optional: signing in with Google or GitHub. Empty, there are only tokens.
-      SESSIONLY_PUBLIC_URL: ${SESSIONLY_PUBLIC_URL:-}
-      SESSIONLY_GOOGLE_CLIENT_ID: ${SESSIONLY_GOOGLE_CLIENT_ID:-}
-      SESSIONLY_GOOGLE_CLIENT_SECRET: ${SESSIONLY_GOOGLE_CLIENT_SECRET:-}
-      SESSIONLY_GITHUB_CLIENT_ID: ${SESSIONLY_GITHUB_CLIENT_ID:-}
-      SESSIONLY_GITHUB_CLIENT_SECRET: ${SESSIONLY_GITHUB_CLIENT_SECRET:-}
+      # Optional: an admin token that always works, for scripts and CI.
+      SESSIONLY_ADMIN_TOKEN: ${SESSIONLY_ADMIN_TOKEN:-}
       # The dashboard counts which of its pages are opened (docs-site/dashboard.md); "off" stops it.
       SESSIONLY_TELEMETRY: ${SESSIONLY_TELEMETRY:-}
       DO_NOT_TRACK: ${DO_NOT_TRACK:-}

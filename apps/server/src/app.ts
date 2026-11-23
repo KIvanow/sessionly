@@ -599,6 +599,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       org_name: await orgName(c.get("db")),
       signed_in: p.userId !== null,
       owner: p.owner,
+      opened: p.opened === true,
     });
   });
 
