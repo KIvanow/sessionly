@@ -115,7 +115,10 @@ export async function removeUser(db: OrgDb, id: string, by: Principal, options?:
   if (user.role === "owner") {
     throw new UserProblem(409, "owner_stays", "the owner of an organisation cannot be removed");
   }
-  if (user.id === by.userId) throw new UserProblem(409, "not_yourself", "you cannot remove yourself");
+  // By address too: an opened dashboard, or the admin token, is the admin's address and no person's.
+  if (user.id === by.userId || user.email === by.email.trim().toLowerCase()) {
+    throw new UserProblem(409, "not_yourself", "you cannot remove yourself");
+  }
   await db.query(`UPDATE users SET removed_at = now() WHERE org_id = $1 AND id = $2`, [db.orgId, id]);
   // By person, and by address for tokens made before they were a user here.
   await db.query(

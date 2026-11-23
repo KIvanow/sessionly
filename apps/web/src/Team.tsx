@@ -270,7 +270,7 @@ function People({
                         Let in with another account
                       </button>
                     )}{" "}
-                    {u.role !== "owner" && (
+                    {u.role !== "owner" && u.email !== myEmail.toLowerCase() && (
                       <button className="quiet" onClick={() => askRemove(u)} disabled={counting}>
                         Remove
                       </button>

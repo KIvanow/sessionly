@@ -113,6 +113,10 @@ export function App() {
   const [unopened, setUnopened] = useState<string | null>(null);
   /** Counts the tries at opening it, to try once more. */
   const [attempt, setAttempt] = useState(0);
+  /** The session the server last opened the dashboard with. */
+  const [openedToken, setOpenedToken] = useState<string | null>(null);
+  /** Why the dashboard is not opened again until this page is loaded anew. */
+  const [refused, setRefused] = useState<string | null>(null);
 
   const use = (value: string | null) => {
     saveToken(value);
@@ -120,6 +124,7 @@ export function App() {
     setToken(value);
     // Why it did not open was of the session before: left without one, it is asked anew.
     setUnopened(null);
+    if (value !== null) setRefused(null);
     if (value === null) setAttempt((n) => n + 1);
   };
   /** The server no longer accepts this session. If there is one in another organisation, that one is next. */
@@ -195,11 +200,11 @@ export function App() {
   // the token's form, which stays as it is; anything else, once this
   // browser is left without a session again.
   useEffect(() => {
-    if (token || !options?.noSignIn) return;
+    if (token || !options?.noSignIn || refused) return;
     let current = true;
     let again: ReturnType<typeof setTimeout> | undefined;
     open<SignedIn>("/auth/open", {})
-      .then((opened) => current && (setProblem(null), use(opened.token)))
+      .then((opened) => current && (setProblem(null), setOpenedToken(opened.token), use(opened.token)))
       .catch((err: Error) => {
         if (!current) return;
         setUnopened(err.message);
@@ -209,7 +214,7 @@ export function App() {
       current = false;
       clearTimeout(again);
     };
-  }, [token, options, attempt]);
+  }, [token, options, attempt, refused]);
 
   /** Signed in: this browser keeps the session, and shows the organisation. */
   const signedIn = (signed: SignedIn) => {
@@ -254,7 +259,13 @@ export function App() {
       .then((who) => current && (setMe(who), setProblem(null)))
       .catch((err: Error) => {
         if (!current) return;
-        if (err instanceof ApiError && err.status === 401) {
+        if (err instanceof ApiError && err.status === 401 && token === openedToken) {
+          // Refused as soon as it was handed out (a proxy that asks for something of its own):
+          // opening again would only be refused again, so it is not.
+          saveToken(null);
+          setToken(null);
+          setRefused("The server handed out a session and then refused it. A proxy in front of it may be refusing what the dashboard sends.");
+        } else if (err instanceof ApiError && err.status === 401) {
           signOut();
           setProblem("That token is not accepted.");
         } else {
@@ -302,7 +313,7 @@ export function App() {
       />
     );
   }
-  if (!token && (!options || (options.noSignIn && unopened === null))) {
+  if (!token && (!options || (options.noSignIn && unopened === null && !refused))) {
     return (
       <main className="center">
         <Brand />
@@ -314,7 +325,7 @@ export function App() {
     return (
       <Login
         options={options}
-        problem={problem ?? (unopened ? `The dashboard could not be opened: ${unopened}` : null)}
+        problem={refused ?? problem ?? (unopened ? `The dashboard could not be opened: ${unopened}` : null)}
         onRetry={unended.length ? endAgain : undefined}
         onToken={(value) => {
           setProblem(null);

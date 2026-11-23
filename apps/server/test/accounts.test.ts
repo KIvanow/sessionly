@@ -245,6 +245,14 @@ test("a server of your own opens its dashboard as its admin, and a hosted servic
   const refused = await call(app, "POST", "/auth/open", { body: {} });
   assert.deepEqual([refused.status, refused.body.code], [404, "sign_in"]);
   assert.equal((await call(app, "GET", "/me", { token: opened.body.token })).status, 401);
+  // A person from before under the admin's own address is the dashboard itself: not removed by it.
+  const selfId = `u_self_${Date.now()}`;
+  await db.asOrg("default", (tx) =>
+    tx.query(`INSERT INTO users (id, org_id, email, role) VALUES ($1, 'default', 'kris@example.com', 'admin')`, [selfId]),
+  );
+  const removed = await call(own, "DELETE", `/users/${selfId}`, { token: opened.body.token });
+  assert.deepEqual([removed.status, removed.body.code], [409, "not_yourself"]);
+  await db.asOrg("default", (tx) => tx.query(`UPDATE users SET removed_at = now() WHERE id = $1`, [selfId]));
   const out = await call(own, "DELETE", "/auth/session", { token: opened.body.token });
   assert.equal(out.status, 200);
   assert.equal((await call(own, "GET", "/me", { token: opened.body.token })).status, 401);
