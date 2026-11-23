@@ -705,9 +705,11 @@ fn scan(
             Some("user") if is_main => {
                 let blocks = row["message"]["content"].as_array();
                 let result = blocks.is_some_and(|b| b.iter().any(|b| b["type"] == "tool_result"));
-                if !result {
+                // Nor is a row Claude Code put in beside what was asked.
+                let beside = row["isMeta"].as_bool() == Some(true);
+                if !result && !beside {
                     said(summary, &mut reviewing, &mut last_reply);
-                    if crate::reviews::command_row(&row).is_some() {
+                    if crate::reviews::typed_row(&row) {
                         reviewing = text("promptId");
                     }
                 }
@@ -788,6 +790,21 @@ fn scan(
             }
             Some("system") if is_main => {
                 let said = row["content"].as_str().unwrap_or_default();
+                // A typed review that ran where it was typed ends with what
+                // it printed; one that forked says where, and its subagent
+                // has the reply.
+                if row["subtype"] == "local_command" {
+                    if let Some(prompt_id) = reviewing.take() {
+                        last_reply = None;
+                        let printed = crate::reviews::command_output(said);
+                        let known = |r: &ReviewSaid| r.prompt_id == prompt_id;
+                        if !summary.review_replies.iter().any(known) {
+                            let found = printed
+                                .and_then(|out| crate::reviews::review_said(&prompt_id, out));
+                            summary.review_replies.extend(found);
+                        }
+                    }
+                }
                 if let Some(launch) = review_launch(said) {
                     let known = |l: &ReviewLaunch| l.agent_id == launch.agent_id;
                     if !summary.review_launches.iter().any(known) {
@@ -1248,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn the_main_threads_reply_to_a_typed_review_says_what_it_found() {
+    fn a_typed_review_that_ran_where_it_was_typed_says_what_it_found() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s1.jsonl");
         let user = |id: &str, content: Value| {
@@ -1260,13 +1277,21 @@ mod tests {
                     "message": { "id": id, "model": "claude-opus-5-5", "usage": {},
                                  "content": [{ "type": "text", "text": text }] } })
         };
-        let typed = "<command-name>/security-review</command-name>\n<command-args></command-args>";
+        let printed = |text: &str| {
+            json!({ "type": "system", "subtype": "local_command", "sessionId": "s1",
+                    "content": format!("<local-command-stdout>{text}</local-command-stdout>") })
+        };
+        let mut beside = user("p1", json!("Review the changes for security problems."));
+        beside["isMeta"] = json!(true);
         write_jsonl(
             &path,
             &[
-                user("p1", json!(typed)),
+                // typed, as Claude Code writes it, and answered in the main thread
+                user("p1", json!("/security-review")),
+                // what the command stands for, put in beside it: not the next thing asked
+                beside,
                 says("m1", "Looking at the diff."),
-                // a tool's result is not the next thing asked
+                // nor is a tool's result
                 user(
                     "p1",
                     json!([{ "type": "tool_result", "tool_use_id": "t1", "content": "ok" }]),
@@ -1276,19 +1301,29 @@ mod tests {
                 // not a review: what is said to it is not read
                 user("p2", json!("thanks, fix them")),
                 says("m3", "I found 9 problems on the way."),
-                // one whose reply names no number
-                user("p3", json!(typed)),
-                says("m4", "Nothing stands out."),
+                // ran to its end where it was typed: what it printed
+                user("p3", json!("/code-review high #15")),
+                printed("10 findings, most severe first:\n\n1. `a.rs`: ..."),
+                says("m4", "I found 2 issues of my own."),
+                // forked: its subagent has the reply, and the notice has none
+                user("p4", json!("/code-review high")),
+                printed("Running in the background as @code-review</local-command-stdout>\n<forked-skill-launch>{\"agentId\":\"f1\",\"skillName\":\"code-review\",\"description\":\"/code-review high\"}</forked-skill-launch>"),
+                // the row an older transcript has for a typed command
+                user(
+                    "p5",
+                    json!("<command-name>/security-review</command-name>\n<command-args></command-args>"),
+                ),
+                says("m5", "No findings."),
             ],
         );
         let facts = parse(&path).unwrap().facts();
-        assert_eq!(
-            facts.review_replies,
-            [ReviewSaid {
-                prompt_id: "p1".into(),
-                findings: 3
-            }]
-        );
+        let said: Vec<_> = facts
+            .review_replies
+            .iter()
+            .map(|r| (r.prompt_id.as_str(), r.findings))
+            .collect();
+        assert_eq!(said, [("p1", 3), ("p3", 10), ("p5", 0)]);
+        assert_eq!(facts.review_launches.len(), 1);
     }
 
     #[test]

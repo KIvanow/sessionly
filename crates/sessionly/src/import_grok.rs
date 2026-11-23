@@ -564,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reviews_reply_says_what_it_found_and_the_start_stays_first() {
+    fn a_reviews_reply_says_what_it_found() {
         let dir = tempfile::tempdir().unwrap();
         let updates = sample(dir.path());
         let t0 = 1_794_212_700;
@@ -585,10 +585,10 @@ mod tests {
             writeln!(f, "{row}").unwrap();
         }
         let (events, facts) = session(&updates).unwrap();
-        // The first line of an import says what it was read from.
-        assert_eq!(events[0]["hook"], "SessionStart");
         // What the reply says is a fact of the session, and no event of it.
-        assert!(events.iter().all(|e| e["received_at"].is_string()));
+        assert_eq!(events[0]["hook"], "SessionStart");
+        let said = &facts.as_ref().unwrap().review_replies;
+        assert_eq!((said.len(), said[0].findings), (1, 2));
         let s = crate::normalize::from_events(&events, facts.as_ref(), GROK).unwrap();
         let runs: Vec<_> = s
             .reviews

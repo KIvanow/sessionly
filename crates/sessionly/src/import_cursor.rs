@@ -861,6 +861,44 @@ mod tests {
     }
 
     #[test]
+    fn the_reply_that_ends_a_typed_review_says_what_it_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("projects/no-such-place/agent-transcripts/k7/k7.jsonl");
+        let asked = |text: &str| user(&format!("<user_query>\n{text}\n</user_query>"));
+        let says = |text: &str| {
+            json!({ "role": "assistant",
+                    "message": { "content": [{ "type": "text", "text": text }] } })
+        };
+        write_rows(
+            &path,
+            &[
+                asked("/code-review #41"),
+                says("Reading the diff."),
+                says("I found 2 issues in #41."),
+                // not a review: what is said to it is not read
+                asked("fix the first one"),
+                says("I found 5 problems on the way."),
+                // one whose reply names no number
+                asked("/code-review #41"),
+                says("Do not merge this yet."),
+            ],
+        );
+        let (events, facts) = session(&path, None).unwrap();
+        let facts = facts.unwrap();
+        let said: Vec<_> = facts
+            .review_replies
+            .iter()
+            .map(|r| (r.prompt_id.as_str(), r.findings))
+            .collect();
+        assert_eq!(said, [("p1", 2)]);
+        let s = crate::normalize::from_events(&events, Some(&facts), CURSOR).unwrap();
+        let found: Vec<_> = s.reviews.iter().map(|r| r.findings).collect();
+        assert_eq!(found, [Some(2), None]);
+    }
+
+    #[test]
     fn reads_the_time_beside_a_prompt() {
         let at = |text: &str| prompt_time(text).map(|t| t.to_rfc3339());
         assert_eq!(

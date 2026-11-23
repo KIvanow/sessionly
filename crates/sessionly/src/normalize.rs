@@ -176,7 +176,11 @@ pub fn from_events(events: &[Value], facts: Option<&Facts>, source: &str) -> Opt
 /// The session's review runs and their count, from what its events showed.
 pub(crate) fn add_reviews(s: &mut Session, seen: &crate::reviews::Seen, facts: Option<&Facts>) {
     s.reviews = crate::reviews::runs(s, seen, facts);
-    s.counts.reviews = crate::reviews::counted(&s.source).then_some(s.reviews.len() as u64);
+    // Codex's `/review` is in its rollout only: without what that says, how
+    // many there were is not known, which is not none.
+    let unseen = s.source == crate::paths::CODEX && facts.is_none();
+    let counted = crate::reviews::counted(&s.source) && !unseen;
+    s.counts.reviews = counted.then_some(s.reviews.len() as u64);
 }
 
 /// The session without its review runs, and what its events showed of them.

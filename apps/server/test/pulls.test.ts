@@ -2650,6 +2650,15 @@ test("a pull request's local review runs: its sessions', and those of a session 
   const again = (await call(tokens.admin, "GET", "/prs?limit=500")).body.pulls.filter((p: any) => p.repo === "github.com/acme/web" && [41, 43].includes(p.number));
   assert.deepEqual(again.map((p: any) => [p.number, p.local_reviews.runs, p.local_reviews.shared_with]), [[43, 1, 1], [41, 2, 1]]);
 
+  // What a session names as a pull request is any number at all: one that can be no pull request's is
+  // stored, counts for none, and the pages still answer.
+  const big = await put("rv-big", [], [run("b1", { pull_number: 3000000000 }), run("b2", { pull_number: 1e21 }), run("b3", { pull_number: 41 })]);
+  assert.equal(big.status, 200);
+  for (const path of ["/prs?limit=500", "/prs/summary", `/prs/detail?repo=${encodeURIComponent("github.com/acme/web")}&number=41`])
+    assert.equal((await call(tokens.admin, "GET", path)).status, 200, path);
+  const kept = await db.query<{ review_pulls: unknown }>(`SELECT review_pulls FROM sessions WHERE session_id = 'rv-big'`);
+  assert.deepEqual(typeof kept[0]!.review_pulls === "string" ? JSON.parse(kept[0]!.review_pulls) : kept[0]!.review_pulls, [41]);
+
   // A matched session that was deleted since: its runs are not known, which is not none.
   await db.query(`DELETE FROM sessions WHERE session_id = 'rv-a'`);
   const gone = (await call(tokens.admin, "GET", "/prs?limit=500")).body.pulls.find((p: any) => p.repo === "github.com/acme/web" && p.number === 43);

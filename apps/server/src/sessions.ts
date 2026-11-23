@@ -117,6 +117,9 @@ export type StoreResult = {
  * person has stopped the repository (then a copy of theirs is removed).
  * Someone who was removed refuses the upload.
  */
+/** True for what a pull request's number can be: a whole number that the database's integer holds. */
+const isPullNumber = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n > 0 && n <= 2_147_483_647;
+
 export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal, { copy = false }: { copy?: boolean } = {}): Promise<StoreResult> {
   const s: Session = upload.session ?? {};
   const owner = { email: ownerOf(upload, uploader) };
@@ -203,7 +206,8 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     // A collector that counts an agent's review runs sends the count, 0 too;
     // one that does not read that agent's review commands sends none.
     review_runs: counts.reviews ?? null,
-    review_pulls: JSON.stringify([...new Set((s.reviews ?? []).flatMap((run) => (run.pull_number != null ? [run.pull_number] : [])))].sort((a, b) => a - b)),
+    // Those that can be a pull request's number: what is sent as one is any number at all.
+    review_pulls: JSON.stringify([...new Set((s.reviews ?? []).flatMap((run) => (isPullNumber(run.pull_number) ? [run.pull_number] : [])))].sort((a, b) => a - b)),
     reviews: (s.reviews ?? []).length > 0 ? JSON.stringify(s.reviews) : null,
     files_changed: counts.files_changed ?? 0,
     lines_added: counts.lines_added ?? 0,

@@ -2222,9 +2222,11 @@ async function localReviewsIn(
        -- A session of its repository with a run that names its number.
        SELECT named.repo, named.number, named.ended_at, named.after_at, s.machine_id, s.source, s.session_id, false, false
        FROM named
-       JOIN (SELECT s.machine_id, s.source, s.session_id, s.repo, n.number::integer AS number
-             FROM sessions s, jsonb_array_elements_text(s.review_pulls) AS n(number)
-             WHERE s.org_id = $1 AND s.review_runs > 0) s ON s.repo = named.name AND s.number = named.number
+       -- Compared as they are kept, not cast: nothing a session names can make the query fail.
+       JOIN (SELECT s.machine_id, s.source, s.session_id, s.repo, n.number
+             FROM sessions s, jsonb_array_elements(s.review_pulls) AS n(number)
+             WHERE s.org_id = $1 AND s.review_runs > 0 AND jsonb_typeof(s.review_pulls) = 'array') s
+         ON s.repo = named.name AND s.number = to_jsonb(named.number)
        UNION ALL
        -- A session on the pull request's own branch: a review there is of this pull request, whether
        -- or not it names it (Codex's /review names a branch or the uncommitted changes, never a number).

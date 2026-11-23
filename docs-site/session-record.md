@@ -47,8 +47,8 @@ user name. The local record keeps them; what may leave the machine is decided se
 ## Review runs
 
 `reviews` lists each time a review command ran in a session, and `counts.reviews` how many.
-A record without `counts.reviews` is from a Sessionly that did not count them: not known,
-which is not none.
+A record without `counts.reviews` is from a Sessionly that did not count them, or is a Codex
+session whose rollout was not there to read: not known, which is not none.
 
 In Claude Code the commands are `/code-review`, `/review`, `/security-review` and
 `/ultrareview` (a plugin's `anything:code-review` too). A run starts in one of three ways:
@@ -58,7 +58,8 @@ In Claude Code the commands are `/code-review`, `/review`, `/security-review` an
 - Claude Code runs its own command, `/ultrareview`.
 
 In Cursor and Grok a run is the command typed as a prompt (`/code-review #41`, `via:
-slash_command`), on a machine or in Cursor's cloud. The review there runs in the session's
+slash_command`), on a machine or in Cursor's cloud. A prompt that opens with a path which
+ends in a command's name (`/home/ann/notes.md:review`) is no command. The review there runs in the session's
 own thread: such a run has when it ran and a pull request number, its findings where the
 reply says how many (seldom, in practice), and no cost or subagents of its own. The agent choosing to review without the command being typed is not
 seen.
@@ -99,10 +100,11 @@ Each run has:
   reply is a JSON list of findings or its first lines say how many it found, kept or has
   ("15 findings, most severe first", "I reviewed PR #50 and found 4 issues", "no
   findings"). The reply is read on your machine and only the number is kept. It is the reply
-  of the subagent a Claude Code review ran in (for a typed one that forked none, the last
-  thing said in its turn), and in Cursor and Grok the last thing said in the turn. A reply that words its result another way, names two different numbers, or says
-  there are none of one kind only ("no blocking bugs"), has none (`null`), which is not
-  zero.
+  of the subagent a Claude Code review ran in. For one typed there that forked none, it is
+  what the command printed when it ended, or else the last thing said in its turn. In
+  Cursor and Grok it is the last thing said in the turn. A reply that words its result
+  another way, names two different numbers, or says there are none of one kind only ("no
+  blocking bugs"), has none (`null`), which is not zero.
 
 Nothing else of the arguments is kept: no free text, no path. A run is the same record in
 every content mode.

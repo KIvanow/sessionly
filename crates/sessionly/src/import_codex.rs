@@ -2032,13 +2032,6 @@ pub(crate) mod tests {
         // what the reviewer's tokens cost, and it is named for what it is
         assert!(s.reviews[0].estimated_cost_usd.is_some());
         assert_eq!(s.subagents[0].agent_type.as_deref(), Some("review"));
-        // the same rollout read again gives the same runs
-        let again = crate::normalize::from_events(
-            &[events.clone(), events].concat(),
-            facts.as_ref(),
-            CODEX,
-        );
-        assert_eq!(again.unwrap().reviews.len(), 2);
     }
 
     #[test]

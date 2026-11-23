@@ -60,11 +60,19 @@ pub fn counted(source: &str) -> bool {
     crate::paths::SOURCES.contains(&source)
 }
 
-/// True for the name of a review command, with or without its slash.
+/// True for the name of a review command, with or without its slash. A
+/// name and nothing else: what is typed after a slash may be a path that
+/// ends in one (`/home/ann/notes.md:review`), which is no command and is not
+/// kept.
 pub fn is_review(name: &str) -> bool {
-    let name = name.trim().trim_start_matches('/');
+    let name = name.trim();
+    let name = name.strip_prefix('/').unwrap_or(name);
+    let part = |part: &str| {
+        let shaped = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+        !part.is_empty() && part.chars().all(shaped)
+    };
     let last = name.rsplit(':').next().unwrap_or(name);
-    COMMANDS.contains(&last)
+    name.len() <= 100 && name.split(':').all(part) && COMMANDS.contains(&last)
 }
 
 /// The command and its arguments, if `text` is a slash command.
@@ -334,6 +342,47 @@ pub fn review_said(prompt_id: &str, reply: &str) -> Option<ReviewSaid> {
     })
 }
 
+/// The text of a transcript's row: a system row's content, or what a
+/// message says.
+fn row_text(row: &Value) -> Option<String> {
+    match row["type"].as_str() {
+        Some("system") => row["content"].as_str().map(String::from),
+        _ => match &row["message"]["content"] {
+            Value::String(text) => Some(text.clone()),
+            Value::Array(blocks) => {
+                let texts: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
+                Some(texts.join("\n"))
+            }
+            _ => None,
+        },
+    }
+}
+
+/// True for the row of a review command the person typed: the command as
+/// typed (`/code-review high`), which is how Claude Code writes it, or the
+/// tagged row an older transcript has for it.
+pub fn typed_row(row: &Value) -> bool {
+    let plain = row["isMeta"].as_bool() != Some(true)
+        && row["isCompactSummary"].as_bool() != Some(true)
+        && row_text(row).is_some_and(|text| is_typed_review(&text));
+    plain || command_row(row).is_some()
+}
+
+/// What a typed review that ran where it was typed printed when it ended:
+/// the row Claude Code writes for a command's output, where it is that and
+/// not the notice of a fork.
+pub fn command_output(said: &str) -> Option<&str> {
+    const OPEN: &str = "<local-command-stdout>";
+    let said = said.trim_start().strip_prefix(OPEN)?;
+    if said.contains("<forked-skill-launch>") {
+        return None;
+    }
+    Some(
+        said.rsplit_once("</local-command-stdout>")
+            .map_or(said, |(out, _)| out),
+    )
+}
+
 /// A review command in a row Claude Code wrote for a command it ran itself
 /// (`/ultrareview`) or an older transcript wrote for a typed one: its name and
 /// arguments, as the hooks' `UserPromptExpansion` has them. Other commands
@@ -343,17 +392,7 @@ pub fn command_row(row: &Value) -> Option<Value> {
     if row["isMeta"].as_bool() == Some(true) || row["isCompactSummary"].as_bool() == Some(true) {
         return None;
     }
-    let text = match row["type"].as_str() {
-        Some("system") => row["content"].as_str()?.to_string(),
-        _ => match &row["message"]["content"] {
-            Value::String(text) => text.clone(),
-            Value::Array(blocks) => {
-                let texts: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
-                texts.join("\n")
-            }
-            _ => return None,
-        },
-    };
+    let text = row_text(row)?;
     // The row is the command's own: it opens with it, and does not only
     // have it somewhere in what was pasted or quoted.
     const OPENS: &[&str] = &[
@@ -1557,6 +1596,76 @@ mod tests {
         for name in ["model", "clear", "code-reviewer", "my-review", ""] {
             assert!(!is_review(name), "{name}");
         }
+        // a path that ends in one is no command, and none of it is kept
+        for path in [
+            "/home/ann/clients/acme-secret/notes.md:review",
+            "notes.md:review",
+            "a b:review",
+            ":review",
+        ] {
+            assert!(!is_review(path), "{path}");
+        }
+        assert!(!is_typed_review(
+            "/home/ann/clients/acme-secret/notes.md:review please look at this"
+        ));
+        let mut e = prompt(
+            0,
+            "p1",
+            "/home/ann/clients/acme-secret/notes.md:review please look",
+        );
+        e["source"] = json!("cursor");
+        let s = from_events(&[e], None, "cursor").unwrap();
+        assert_eq!((s.reviews.len(), s.counts.reviews), (0, Some(0)));
+    }
+
+    #[test]
+    fn a_commands_output_is_what_it_printed_and_not_the_notice_of_a_fork() {
+        assert_eq!(
+            command_output("<local-command-stdout>10 findings</local-command-stdout>"),
+            Some("10 findings")
+        );
+        assert_eq!(
+            command_output("<local-command-stdout>Running</local-command-stdout>\n<forked-skill-launch>{}</forked-skill-launch>"),
+            None
+        );
+        assert_eq!(command_output("Reusing high effort, the level"), None);
+    }
+
+    #[test]
+    fn a_codex_review_written_down_twice_is_one_run_and_one_without_its_rollout_is_not_known() {
+        let at = |second: u32| {
+            format!("2026-11-20T10:00:{second:02}Z")
+                .parse::<DateTime<Utc>>()
+                .ok()
+        };
+        let review = ReviewMode {
+            id: "r1".into(),
+            at: at(1),
+            target: Some("uncommittedChanges".into()),
+            ended_at: at(9),
+            findings: Some(3),
+        };
+        let facts = Facts {
+            review_modes: vec![review.clone(), review],
+            reviewer_threads: vec![ReviewerThread {
+                agent_id: "rev".into(),
+                began: at(2),
+            }],
+            ..Default::default()
+        };
+        let mut e = prompt(0, "p1", "look at this");
+        e["source"] = json!("codex");
+        let s = from_events(std::slice::from_ref(&e), Some(&facts), "codex").unwrap();
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.id.as_str(), r.target.as_deref(), r.findings))
+            .collect();
+        assert_eq!(runs, [("r1", Some("uncommitted_changes"), Some(3))]);
+        assert_eq!(s.counts.reviews, Some(1));
+        // The reviews are in the rollout only: without it, not known.
+        let s = from_events(&[e], None, "codex").unwrap();
+        assert_eq!(s.counts.reviews, None);
     }
 
     #[test]
