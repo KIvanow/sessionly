@@ -35,7 +35,8 @@ The record holds metadata and short previews, not full content:
   the start of its output (for a command of Codex's, the end of it).
 - **Files:** absolute path, read and write counts, lines added and removed.
 - **Skills:** a `Skill` call keeps the skill's name (`code-review`, `plugin:name`), not its
-  arguments.
+  arguments. The agent writes that field: what is in it is kept only when it has the shape
+  of a name (letters, digits, `_ - : .`, at most 100 characters).
 - **Review runs** (`reviews`): see [below](#review-runs).
 - Full prompts, file contents and successful command output stay in the raw capture.
 
@@ -82,16 +83,19 @@ Each run has:
 - `ran`: `cloud` for `/ultrareview` and `/code-review ultra`, else `local`.
 - `agent_id`, when a subagent ran it.
 - `status` and `duration_ms`: from the start to the end of the last of its subagents. A
-  typed command went as its turn did: `failed` where the turn failed, `no_result` where it
-  has no end (still running, or interrupted). A Codex review that was never left has no
-  duration.
+  typed command went as its turn did: `failed` where the turn failed, and in Cursor and
+  Grok `no_result` where it has no end (still running, or interrupted). In Claude Code a
+  typed command forks and its own turn does not end, so only a failure is told. A Codex
+  review that was never left has no duration, nor has a review whose fork has no end on
+  record. A typed command and a `Skill` call it led to are one run where the call is the
+  first thing done in the turn; a call made after other work is the agent reviewing again.
 - `subagents` and `estimated_cost_usd`: the subagents that did the review. That is the one a
   review skill forks to run in, or, where none is known, those started from the same thread
   before your next prompt, with the subagents they started in turn. A review that ran
   inside another review's subagent has its own subagents, cost and findings, which are not
   the outer one's too.
 - `findings`: how many it reported, where that can be told: from a list it reports
-  (`ReportFindings`, or Codex's own), or else from the reply that ends the review, when that
+  (`ReportFindings` calls that went through, or Codex's own), or else from the reply that ends the review, when that
   reply is a JSON list of findings or its first lines say how many it found, kept or has
   ("15 findings, most severe first", "I reviewed PR #50 and found 4 issues", "no
   findings"). The reply is read on your machine and only the number is kept. It is the reply

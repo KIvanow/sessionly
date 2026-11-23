@@ -95,6 +95,14 @@ pub fn build_with(
     }))
 }
 
+/// True for what a skill is called (`code-review`, `plugin:name`), which is
+/// kept: the model writes the field, and anything else in it is text that is
+/// not.
+fn is_skill_name(written: &str) -> bool {
+    let shaped = |c: char| c.is_alphanumeric() || "_-:.".contains(c);
+    !written.is_empty() && written.chars().count() <= 100 && written.chars().all(shaped)
+}
+
 /// Repository and user details read from the local machine, and for a
 /// session in the cloud (`runtime`) what the platform said instead.
 fn add_local_context(
@@ -434,7 +442,7 @@ fn tool_call<'a>(
                 input_sha256: sha256_hex(input.to_string().as_bytes()),
                 input_summary: input_summary(&tool, input),
                 skill: (tool == "Skill")
-                    .then(|| input["skill"].as_str().filter(|v| !v.is_empty()))
+                    .then(|| input["skill"].as_str().filter(|v| is_skill_name(v)))
                     .flatten()
                     .map(String::from),
                 tool,
@@ -761,6 +769,15 @@ mod tests {
             ),
             event(22, "SessionEnd", json!({ "reason": "other" })),
         ]
+    }
+
+    #[test]
+    fn a_skill_is_kept_by_its_name_and_not_by_text_in_its_place() {
+        assert!(is_skill_name("code-review"));
+        assert!(is_skill_name("acme_tools:security-review.v2"));
+        assert!(!is_skill_name(""));
+        assert!(!is_skill_name("code-review 62 see ~/clients/acme/notes"));
+        assert!(!is_skill_name(&"a".repeat(101)));
     }
 
     #[test]

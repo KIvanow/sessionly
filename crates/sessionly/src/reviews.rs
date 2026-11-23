@@ -44,6 +44,10 @@ const FINDINGS_WITHIN: usize = 400;
 /// so are a review and the thread its reviewer began in.
 pub const SAME_START_SECONDS: i64 = 5;
 
+/// How long before its command a typed review's subagent may be written
+/// down as started.
+const STARTED_EARLY_MS: i64 = 1000;
+
 /// True for an agent whose review commands are read. A session of another
 /// has no count: not known, which is not none.
 pub fn counted(source: &str) -> bool {
@@ -113,6 +117,16 @@ fn parse_args_of(args: &str) -> Args {
         }
     }
     (effort, number, repo)
+}
+
+/// The origin of the repository the session ran in, as the record has it or,
+/// before it has, as git says for where the session ran.
+fn remote_of(s: &Session) -> Option<String> {
+    if let Some(repo) = &s.repo {
+        return repo.remote.clone();
+    }
+    let root = crate::git::repo_root(std::path::Path::new(s.cwd.as_deref()?))?;
+    crate::git::origin_remote(&root)
 }
 
 /// The number, unless a URL named it in a repository other than the
@@ -523,8 +537,14 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
     }
     // A URL of a pull request in another repository names none of this
     // one's: by name, since a fork has its own owner.
-    let here = s.repo.as_ref().and_then(|r| r.remote.as_deref());
-    let of_here = |number: Option<u64>, repo: &Option<String>| in_repo(number, repo, here);
+    // The session's repository is asked for only where a URL named one: it
+    // is not on the record yet while its runs are built.
+    let named = |repo: &Option<String>| repo.is_some();
+    let asked = seen.skill_calls.values().any(|(_, _, repo)| named(repo))
+        || seen.typed.iter().any(|t| named(&t.repo));
+    let here = asked.then(|| remote_of(s)).flatten();
+    let of_here =
+        |number: Option<u64>, repo: &Option<String>| in_repo(number, repo, here.as_deref());
     for call in &s.tool_calls {
         let Some((effort, number, repo)) = seen.skill_calls.get(&call.tool_use_id) else {
             continue;
@@ -561,8 +581,17 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
         // A command that forked ran where it forked, and led to no call.
         let end = next_prompt(typed.at);
         let number = of_here(typed.pull_number, &typed.repo);
+        // The call is what the command led to only as the first thing the
+        // main thread did in its turn: one made after other work is a review
+        // the agent ran again.
+        let first_done = |id: &str, at: Option<DateTime<Utc>>| {
+            !s.tool_calls.iter().any(|c| {
+                c.agent_id.is_none() && c.tool_use_id != id && c.at >= typed.at && c.at < at
+            })
+        };
         let same_start = runs.iter_mut().find(|r| {
             typed.fork.is_none()
+                && first_done(&r.id, r.at)
                 && r.via == ReviewVia::Skill
                 && r.agent_id.is_none()
                 && r.ran == ran_at
@@ -645,7 +674,12 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
 /// turn that failed is a review that failed, and one with no end yet (still
 /// running, or interrupted) has no result. A command that is no prompt of
 /// the session's (one Claude Code ran itself) is taken to have run.
+///
+/// In Claude Code a turn with no end says nothing: a typed command forks, and
+/// the turn that ends is the one its subagent's notice starts, under another
+/// prompt's id. There only a failure is told.
 fn typed_status(s: &Session, typed: &Typed) -> ToolStatus {
+    let forks = s.source == crate::paths::CLAUDE_CODE;
     let id = typed.prompt_id.as_deref();
     let turn = s
         .prompts
@@ -653,7 +687,7 @@ fn typed_status(s: &Session, typed: &Typed) -> ToolStatus {
         .find(|p| id.is_some() && p.prompt_id.as_deref() == id);
     match turn.map(|p| p.outcome) {
         Some(Some(Outcome::ApiError)) => ToolStatus::Failed,
-        Some(None) => ToolStatus::NoResult,
+        Some(None) if !forks => ToolStatus::NoResult,
         _ => ToolStatus::Ok,
     }
 }
@@ -746,11 +780,18 @@ fn measure(
     // latest run of that thread started before it, and in the main thread
     // before the person's next prompt. A review in the cloud has no
     // subagents here but the one it forked (`local`).
-    let owner = |thread: Option<&str>, at: Option<DateTime<Utc>>, local: bool| -> Option<usize> {
+    // `by_time`: a subagent whose start is known only by its first row,
+    // which may be written a moment before the prompt that started it.
+    let owner = |thread: Option<&str>,
+                 at: Option<DateTime<Utc>>,
+                 local: bool,
+                 by_time: bool|
+     -> Option<usize> {
         let at = at?;
+        let early = chrono::Duration::milliseconds(if by_time { STARTED_EARLY_MS } else { 0 });
         let i = runs.iter().rposition(|r| {
             r.agent_id.as_deref() == thread
-                && r.at.is_some_and(|t| t <= at)
+                && r.at.is_some_and(|t| t <= at + early)
                 && !(local && r.ran == ReviewRan::Cloud)
         })?;
         let start = runs[i].at?;
@@ -771,8 +812,8 @@ fn measure(
         }
         // Not known who started it: by time, and only for the main thread.
         let i = match parent.get(id) {
-            Some((thread, at)) => owner(*thread, *at, true),
-            None => owner(None, sub.started_at, true),
+            Some((thread, at)) => owner(*thread, *at, true, false),
+            None => owner(None, sub.started_at, true, true),
         };
         if let Some(i) = i.filter(|i| !forks.contains_key(runs[*i].id.as_str())) {
             members[i].insert(id);
@@ -815,10 +856,14 @@ fn measure(
         let Some(call) = calls.get(call.as_str()) else {
             continue;
         };
+        // One that failed or was refused reported nothing: it is made again.
+        if call.status != ToolStatus::Ok {
+            continue;
+        }
         let thread = call.agent_id.as_deref();
         let i = thread
             .and_then(|t| members.iter().position(|m| m.contains(t)))
-            .or_else(|| owner(thread, call.at, false));
+            .or_else(|| owner(thread, call.at, false, false));
         if let Some(i) = i {
             *findings[i].get_or_insert(0) += n;
         }
@@ -845,6 +890,17 @@ fn measure(
         if let (Some(start), Some(end), false) = (run.at, last_end, timed) {
             if end > start {
                 run.duration_ms = Some((end - start).num_milliseconds() as u64);
+            }
+        }
+        // A review that forked took as long as its fork did. Where that
+        // one's end is not known, neither is how long the review took: the
+        // call's own time is only what it took to start it.
+        if let (Some(fork), false) = (forks.get(run.id.as_str()), timed) {
+            let ended = subs
+                .iter()
+                .any(|s| s.agent_id == *fork && s.ended_at.is_some());
+            if !ended {
+                run.duration_ms = None;
             }
         }
         // Reported as a list, or else what the last reply of the subagent
@@ -1178,19 +1234,32 @@ mod tests {
             if let Some(thread) = thread {
                 call["agent_id"] = json!(thread);
             }
-            event(second, "PreToolUse", call)
+            vec![
+                event(second, "PreToolUse", call.clone()),
+                event(second, "PostToolUse", call),
+            ]
         };
+        // one that failed reported nothing: it is made again
+        let failed = event(
+            7,
+            "PostToolUseFailure",
+            json!({ "tool_use_id": "r0", "tool_name": "ReportFindings", "agent_id": "fork",
+                    "tool_input": { "findings": [{}, {}, {}] }, "error": "invalid" }),
+        );
         let s = session(
             vec![
                 vec![prompt(0, "p1", "review both")],
                 skill(1, "t1", "code-review", "", Some("fork")).into(),
                 subagent(2, 9, "fork").into(),
-                vec![report(8, "r1", Some("fork"), 3)],
+                vec![failed],
+                report(8, "r1", Some("fork"), 3),
                 skill(10, "t2", "code-review", "", None).into(),
-                vec![report(12, "r2", None, 2), prompt(20, "p2", "ok")],
+                report(12, "r2", None, 2),
+                vec![prompt(20, "p2", "ok")],
                 skill(21, "t3", "code-review", "", None).into(),
                 // a later turn reports nothing for t3
-                vec![prompt(30, "p3", "and?"), report(31, "r3", None, 5)],
+                vec![prompt(30, "p3", "and?")],
+                report(31, "r3", None, 5),
             ],
             None,
         );
@@ -1291,6 +1360,134 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_command_in_claude_code_ran_though_its_own_turn_has_no_end() {
+        // It forked: the turn that ends is another prompt's.
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "/code-review high #46")],
+                subagent(1, 110, "fork").into(),
+            ],
+            None,
+        );
+        assert_eq!(s.reviews[0].status, ToolStatus::Ok);
+    }
+
+    #[test]
+    fn a_review_the_agent_runs_again_later_in_the_turn_is_another_run() {
+        let bash = |second: u32, id: &str| {
+            let call = json!({ "tool_use_id": id, "tool_name": "Bash",
+                               "tool_input": { "command": "cargo test" } });
+            [
+                event(second, "PreToolUse", call.clone()),
+                event(second, "PostToolUse", call),
+            ]
+        };
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "/code-review high")],
+                bash(100, "b1").into(),
+                skill(600, "t1", "code-review", "high", Some("again")).into(),
+                // straight after a typed command, the call is what it led to
+                vec![prompt(700, "p2", "/code-review high")],
+                skill(703, "t2", "code-review", "high", None).into(),
+            ],
+            None,
+        );
+        let runs: Vec<_> = s.reviews.iter().map(|r| (r.id.as_str(), r.via)).collect();
+        assert_eq!(
+            runs,
+            [
+                ("p1", ReviewVia::SlashCommand),
+                ("t1", ReviewVia::Skill),
+                ("t2", ReviewVia::SlashCommand),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_subagent_written_a_moment_before_its_command_is_that_commands() {
+        let at = |ms: u32| format!("2026-11-20T10:00:{:02}.{:03}000Z", ms / 1000, ms % 1000);
+        let stamped = |ms: u32, mut e: Value| {
+            e["received_at"] = json!(at(ms));
+            e
+        };
+        let who = json!({ "agent_id": "fork", "agent_type": "general-purpose" });
+        let s = session(
+            vec![vec![
+                prompt(0, "p1", "/code-review high #14"),
+                stamped(3043, event(3, "SubagentStart", who.clone())),
+                stamped(3050, prompt(3, "p2", "/code-review high #15")),
+                event(50, "SubagentStop", who),
+            ]],
+            Some(&costs(&[("fork", 2.0)])),
+        );
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.pull_number, r.subagents))
+            .collect();
+        assert_eq!(runs, [(Some(14), 0), (Some(15), 1)]);
+    }
+
+    #[test]
+    fn a_review_whose_fork_has_no_end_has_no_duration() {
+        let who = json!({ "agent_id": "fork", "agent_type": "general-purpose" });
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "review it")],
+                skill(1, "t1", "code-review", "", Some("fork")).into(),
+                vec![event(1, "SubagentStart", who)],
+            ],
+            Some(&costs(&[("fork", 0.31)])),
+        );
+        let run = &s.reviews[0];
+        assert_eq!((run.subagents, run.duration_ms), (1, None));
+    }
+
+    #[test]
+    fn a_url_of_another_repository_is_checked_against_where_the_session_ran() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let done = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(done.status.success());
+        };
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", "https://github.com/acme/web.git"]);
+        let here = |mut e: Value| {
+            e["payload"]["cwd"] = json!(dir.path());
+            e
+        };
+        let [other, _] = skill(
+            1,
+            "t1",
+            "code-review",
+            "https://github.com/acme/api/pull/41",
+            None,
+        );
+        let [own, _] = skill(
+            2,
+            "t2",
+            "code-review",
+            "https://github.com/acme/web/pull/42",
+            None,
+        );
+        let s = session(
+            vec![vec![
+                here(prompt(0, "p1", "review them")),
+                here(other),
+                here(own),
+            ]],
+            None,
+        );
+        let numbers: Vec<_> = s.reviews.iter().map(|r| r.pull_number).collect();
+        assert_eq!(numbers, [None, Some(42)]);
+    }
+
+    #[test]
     fn names_on_the_list_are_reviews() {
         for name in ["code-review", "/ultrareview", "review", "security-review"] {
             assert!(is_review(name), "{name}");
@@ -1357,7 +1554,7 @@ mod tests {
         let [pre, post] = skill(10, "t2", "security-review", "", Some("inner"));
         let report = event(
             20,
-            "PreToolUse",
+            "PostToolUse",
             json!({ "tool_use_id": "r1", "tool_name": "ReportFindings", "agent_id": "inner",
                     "tool_input": { "findings": [{}, {}] } }),
         );

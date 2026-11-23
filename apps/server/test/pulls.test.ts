@@ -2637,10 +2637,12 @@ test("a pull request's local review runs: its sessions', and those of a session 
   assert.deepEqual(await sessionsOf(50), ["cx-fork"]);
 
   // A matched session that went on after the merge: its later run that names none is not of this one.
-  await put("rv-m", [4701], [run("m1", { at: "2026-11-10T09:00:00Z" }), run("m2", { at: "2026-11-10T16:00:00Z" })]);
+  await put("rv-m", [4701], [run("m1", { at: "2026-11-10T09:00:00Z", effort: "constructor" }), run("m2", { at: "2026-11-10T16:00:00Z" })]);
   await call(tokens.ci, "PUT", "/prs", report({ number: 47, state: "merged", merged_at: "2026-11-10T14:00:00Z", event: "closed", files: [file("rv.ts", 4701)] }));
   const merged = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent("github.com/acme/web")}&number=47`)).body.local_reviews;
   assert.deepEqual(merged.each.map((r: any) => [r.at.slice(11, 16), r.status]), [["09:00", "ok"]]);
+  // What was sent as its effort is a string: one that is no effort is not counted by.
+  assert.deepEqual(merged.by_effort, {});
 
   // Matched to a second pull request too: its runs that name none are on each.
   await put("rv-a", [4101, 4301], [run("t1", { effort: "xhigh" })]);

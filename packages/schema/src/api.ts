@@ -609,7 +609,7 @@ export interface LocalReviews {
   runs: number;
   /** Of `runs`, those that ran in the cloud (`/ultrareview`, `/code-review ultra`). */
   cloud: number;
-  /** Runs by the effort they were given (`xhigh`, `high`); a run given none is in no entry. */
+  /** Runs by the effort they were given (`xhigh`, `high`); a run given none, or one that is no effort, is in no entry. */
   by_effort: Record<string, number>;
   /** Findings reported, of the runs whose number of them is known. Null when none is. */
   findings: number | null;

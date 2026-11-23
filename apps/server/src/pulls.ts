@@ -2186,10 +2186,8 @@ async function costed(
  * the sessions of its repository on its branch, for runs that name none. One
  * with neither is not in the map.
  */
-/** A session `s` is of the repository of `pulls`: it names one by its clone's origin, the pull request's, its fork's, or an old name of it. */
-const OF_ITS_REPO = `(lower(s.repo) = lower(pulls.repo) OR lower(s.repo) = lower(pulls.head_repo)
-              OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(coalesce(pulls.aliases, '[]'::jsonb)) AS a(name)
-                         WHERE lower(a.name) = lower(s.repo)))`;
+/** The efforts a review command takes. */
+const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
 
 async function localReviewsIn(
   db: OrgDb,
@@ -2203,29 +2201,38 @@ async function localReviewsIn(
               -- develop has one after another, and a run is of the one that was open or yet to be opened.
               (SELECT max(coalesce(o.merged_at, o.closed_at)) FROM pull_requests o
                 WHERE o.org_id = $1 AND o.repo = r.repo AND o.number < r.number AND o.head_ref = r.head_ref
-                  AND lower(coalesce(o.head_repo, o.repo)) = lower(coalesce(r.head_repo, r.repo))) AS after_at
+                  AND coalesce(o.head_repo, o.repo) = coalesce(r.head_repo, r.repo)) AS after_at
        FROM (${chosen.sql}) c
        JOIN pull_requests r ON r.org_id = $1 AND r.repo = c.repo AND r.number = c.number),
+     -- The names a session may know each one's repository by, as matching has them (\`repoNames\`): the
+     -- repository's, its fork's, or an old name of it. A row each, so that sessions are joined by the name.
+     named AS (
+       SELECT DISTINCT pulls.repo, pulls.number, pulls.ended_at, pulls.after_at, pulls.head_ref, pulls.base_ref, n.name,
+              -- A fork's branch is the fork's: a branch of the same name in the repository it merges into is another.
+              pulls.head_repo IS NULL OR pulls.head_repo = pulls.repo OR n.name = pulls.head_repo AS has_branch
+       FROM pulls, LATERAL (
+         SELECT pulls.repo AS name UNION ALL SELECT coalesce(pulls.head_repo, pulls.repo)
+         UNION ALL SELECT jsonb_array_elements_text(coalesce(pulls.aliases, '[]'::jsonb))) n),
+     reviewed AS (
+       SELECT s.machine_id, s.source, s.session_id, s.repo, s.branch FROM sessions s WHERE s.org_id = $1 AND s.review_runs > 0),
      theirs AS (
        SELECT pulls.repo, pulls.number, pulls.ended_at, pulls.after_at, p.machine_id, p.source, p.session_id, true AS matched, false AS on_branch
        FROM pulls JOIN pull_sessions p ON p.org_id = $1 AND p.repo = pulls.repo AND p.number = pulls.number
        WHERE p.lines > 0 OR p.opened_lines > 0 OR p.contributed_lines > 0
        UNION ALL
-       -- A session names a repository by its clone's origin: the pull request's, its fork's, or an old name of it.
-       SELECT pulls.repo, pulls.number, pulls.ended_at, pulls.after_at, s.machine_id, s.source, s.session_id, false, false
-       FROM pulls JOIN sessions s ON s.org_id = $1 AND s.review_runs > 0
-         AND ${OF_ITS_REPO}
-         AND s.review_pulls @> to_jsonb(pulls.number)
+       -- A session of its repository with a run that names its number.
+       SELECT named.repo, named.number, named.ended_at, named.after_at, s.machine_id, s.source, s.session_id, false, false
+       FROM named
+       JOIN (SELECT s.machine_id, s.source, s.session_id, s.repo, n.number::integer AS number
+             FROM sessions s, jsonb_array_elements_text(s.review_pulls) AS n(number)
+             WHERE s.org_id = $1 AND s.review_runs > 0) s ON s.repo = named.name AND s.number = named.number
        UNION ALL
        -- A session on the pull request's own branch: a review there is of this pull request, whether
        -- or not it names it (Codex's /review names a branch or the uncommitted changes, never a number).
-       -- Not where the branch is the one it merges into, as a fork's main is. A fork's branch is the
-       -- fork's: a branch of the same name in the repository it merges into is another.
-       SELECT pulls.repo, pulls.number, pulls.ended_at, pulls.after_at, s.machine_id, s.source, s.session_id, false, true
-       FROM pulls JOIN sessions s ON s.org_id = $1 AND s.review_runs > 0
-         AND (CASE WHEN pulls.head_repo IS NOT NULL AND lower(pulls.head_repo) <> lower(pulls.repo)
-                   THEN lower(s.repo) = lower(pulls.head_repo) ELSE ${OF_ITS_REPO} END)
-         AND s.branch = pulls.head_ref AND pulls.head_ref IS DISTINCT FROM pulls.base_ref),
+       -- Not where the branch is the one it merges into, as a fork's main is.
+       SELECT named.repo, named.number, named.ended_at, named.after_at, s.machine_id, s.source, s.session_id, false, true
+       FROM named JOIN reviewed s ON s.repo = named.name AND s.branch = named.head_ref
+       WHERE named.has_branch AND named.head_ref IS DISTINCT FROM named.base_ref),
      one AS (
        SELECT repo, number, machine_id, source, session_id, bool_or(matched) AS matched, bool_or(on_branch) AS on_branch,
               max(ended_at) AS ended_at, max(after_at) AS after_at
@@ -2273,7 +2280,8 @@ async function localReviewsIn(
       if (named !== number && !(named === null && (matched || onBranch))) continue;
       into.runs += 1;
       if (run.ran === "cloud") into.cloud += 1;
-      if (run.effort) into.by_effort[run.effort] = (into.by_effort[run.effort] ?? 0) + 1;
+      // Of the efforts there are: what was sent is a string, and one that is no effort is not a key to count by.
+      if (run.effort && EFFORTS.has(run.effort)) into.by_effort[run.effort] = (into.by_effort[run.effort] ?? 0) + 1;
       if (run.findings != null) into.findings = (into.findings ?? 0) + run.findings;
       if (run.estimated_cost_usd != null) into.cost_usd = money((into.cost_usd ?? 0) + run.estimated_cost_usd);
       if (named === null && row.matched === true) into.shared_with = Math.max(into.shared_with, num(row.pulls) - 1);
@@ -2368,7 +2376,7 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
   const [reporter, shares, history, reviews] = await Promise.all([
     repoReporters(db, [repo]).then((found) => found.get(repo)),
     detail
-      ? sharesIn(db, { sql: `SELECT $2::text AS repo, $3::integer AS number`, params: [db.orgId, repo, number] }, true).then(
+      ? sharesIn(db, chosen, true).then(
           (found) => found.get(pullKey(row)) ?? [],
         )
       : Promise.resolve(null),

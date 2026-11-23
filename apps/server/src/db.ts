@@ -895,7 +895,7 @@ const MIGRATIONS: string[] = [
   // is how a pull request looks for them.
   `ALTER TABLE sessions ADD COLUMN reviews jsonb`,
   `UPDATE sessions SET reviews = payload->'session'->'reviews' WHERE review_runs > 0`,
-  `CREATE INDEX sessions_reviewed ON sessions (org_id, lower(repo)) WHERE review_runs > 0`,
+  `CREATE INDEX sessions_reviewed ON sessions (org_id, repo) WHERE review_runs > 0`,
 ];
 
 /**
