@@ -223,9 +223,11 @@ pub struct Counts {
     /// Tool calls refused by auto mode.
     pub permission_denials: u64,
     pub subagents: u64,
-    /// Review runs: the length of `Session::reviews`. Left out for an agent
-    /// whose review commands are not read (none of the four today): not
-    /// known, which is not none.
+    /// Review runs: the length of `Session::reviews`. Left out where they
+    /// could not be read: for an agent whose review commands are not read
+    /// (none of the four today), and for a Codex session whose rollout,
+    /// which alone has them, was not there to read. Not known, which is not
+    /// none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reviews: Option<u64>,
     pub compactions: u64,

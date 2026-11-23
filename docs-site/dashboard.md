@@ -30,7 +30,8 @@ light or dark as the system is, and serves the same two typefaces itself, from
   are still there, and when it was last changed.
 - **Sessions:** a searchable, paged list, 50 to a page. A Reviews column appears when a
   session on the page has [review runs](session-record.md#review-runs); `?` is a session
-  whose review runs are not known: captured by an older Sessionly, which did not count them.
+  whose review runs are not known: captured by an older Sessionly, which did not count them,
+  or a Codex session whose rollout was not there to read.
 - **One session:** cost and tokens per model, prompts with how long each took and how it ended,
   how much of what the agent wrote in the whole session was still there 1, 7 and 30 days after
   it ended and is there now, files changed with how much of each survives as last measured,

@@ -1644,6 +1644,7 @@ pub fn session(
         subagents: subagent_facts,
         tool_models,
         review_modes,
+        review_modes_read: true,
         reviewer_threads,
         ..Default::default()
     };

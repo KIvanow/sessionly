@@ -392,6 +392,7 @@ impl TranscriptSummary {
             reused_efforts: self.reused_efforts.clone(),
             review_replies: self.review_replies.clone(),
             review_modes: Vec::new(),
+            review_modes_read: false,
             reviewer_threads: Vec::new(),
         }
     }
@@ -477,6 +478,10 @@ pub struct Facts {
     /// and left.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub review_modes: Vec<ReviewMode>,
+    /// The rollout was read for them. False in facts saved before they were:
+    /// how many there were is then not known.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub review_modes_read: bool,
     /// The threads Codex's reviewers ran in, and when each began: which
     /// review each is of is told from the times (`reviews::runs`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -650,8 +655,11 @@ fn scan(
     let mut last_reply: Option<(Option<String>, Vec<String>)> = None;
     // In the main thread, the typed review being answered: its prompt.
     let mut reviewing: Option<String> = None;
+    // Nothing has been said or asked since that command was typed: the
+    // command row that comes now is its own.
+    let mut just_typed = false;
     // What a reply to a typed review says it found, once the turn is over.
-    fn said(
+    fn turn_over(
         summary: &mut TranscriptSummary,
         reviewing: &mut Option<String>,
         reply: &mut Option<(Option<String>, Vec<String>)>,
@@ -705,17 +713,26 @@ fn scan(
             Some("user") if is_main => {
                 let blocks = row["message"]["content"].as_array();
                 let result = blocks.is_some_and(|b| b.iter().any(|b| b["type"] == "tool_result"));
-                // Nor is a row Claude Code put in beside what was asked.
-                let beside = row["isMeta"].as_bool() == Some(true);
+                // Nor is a row Claude Code put in beside the command, under
+                // its prompt: what the command stands for. Another such row
+                // (a message from elsewhere, a task that fired) is a turn of
+                // its own.
+                let beside = row["isMeta"].as_bool() == Some(true)
+                    && reviewing.is_some()
+                    && text("promptId") == reviewing;
                 if !result && !beside {
-                    said(summary, &mut reviewing, &mut last_reply);
+                    turn_over(summary, &mut reviewing, &mut last_reply);
                     if crate::reviews::typed_row(&row) {
                         reviewing = text("promptId");
                     }
+                    just_typed = reviewing.is_some();
                 }
             }
             Some("assistant") => {
                 let message = &row["message"];
+                if is_main {
+                    just_typed = false;
+                }
                 if !is_main || reviewing.is_some() {
                     let texts = message["content"].as_array().into_iter().flatten();
                     // All it said in its last message, in order: the number
@@ -794,7 +811,10 @@ fn scan(
                 // it printed; one that forked says where, and its subagent
                 // has the reply.
                 if row["subtype"] == "local_command" {
-                    if let Some(prompt_id) = reviewing.take() {
+                    if !std::mem::take(&mut just_typed) {
+                        // Another command's row: the turn before it is over.
+                        turn_over(summary, &mut reviewing, &mut last_reply);
+                    } else if let Some(prompt_id) = reviewing.take() {
                         last_reply = None;
                         let printed = crate::reviews::command_output(said);
                         let known = |r: &ReviewSaid| r.prompt_id == prompt_id;
@@ -837,7 +857,7 @@ fn scan(
         });
     }
     if is_main {
-        said(summary, &mut reviewing, &mut last_reply);
+        turn_over(summary, &mut reviewing, &mut last_reply);
     }
     Ok((usage, last_reply.map(|(_, all)| all.join("\n"))))
 }
@@ -1324,6 +1344,63 @@ mod tests {
             .collect();
         assert_eq!(said, [("p1", 3), ("p3", 10), ("p5", 0)]);
         assert_eq!(facts.review_launches.len(), 1);
+    }
+
+    #[test]
+    fn what_comes_after_a_typed_reviews_turn_is_not_its_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = |id: &str, content: &str| {
+            json!({ "type": "user", "promptId": id, "sessionId": "s1",
+                    "message": { "role": "user", "content": content } })
+        };
+        let says = |id: &str, text: &str| {
+            json!({ "type": "assistant", "sessionId": "s1",
+                    "message": { "id": id, "model": "claude-opus-5-5", "usage": {},
+                                 "content": [{ "type": "text", "text": text }] } })
+        };
+        let command = |content: &str| {
+            json!({ "type": "system", "subtype": "local_command", "sessionId": "s1",
+                    "content": content })
+        };
+        let replies = |name: &str, rows: &[Value]| {
+            let path = dir.path().join(format!("{name}.jsonl"));
+            write_jsonl(&path, rows);
+            let facts = parse(&path).unwrap().facts();
+            let said = facts.review_replies.iter();
+            said.map(|r| (r.prompt_id.clone(), r.findings))
+                .collect::<Vec<_>>()
+        };
+        let found = [("p1".to_string(), 3)];
+        // A message from another session, or a task that fired, is put in as
+        // Claude Code's own row under a prompt of its own: a new turn.
+        let mut peer = user("p2", "A message from another session.");
+        peer["isMeta"] = json!(true);
+        assert_eq!(
+            replies(
+                "peer",
+                &[
+                    user("p1", "/security-review"),
+                    says("m1", "I found 3 issues."),
+                    peer,
+                    says("m2", "I found 5 problems elsewhere."),
+                ]
+            ),
+            found
+        );
+        // Another command typed after it: its rows are not the review's
+        // output, and do not take the review's reply away.
+        assert_eq!(
+            replies(
+                "command",
+                &[
+                    user("p1", "/security-review"),
+                    says("m1", "I found 3 issues."),
+                    command("<command-name>/doctor</command-name>"),
+                    command("<local-command-stdout>Found 2 issues with your configuration</local-command-stdout>"),
+                ]
+            ),
+            found
+        );
     }
 
     #[test]

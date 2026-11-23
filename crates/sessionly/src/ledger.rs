@@ -534,6 +534,8 @@ impl Ledger {
                 s.counts.files_changed,
                 s.counts.lines_added,
                 s.counts.lines_removed,
+                // The runs that are known: a list and a sum have no place for
+                // "not known", which the record itself keeps.
                 s.counts.reviews.unwrap_or(0),
                 search_text(s),
                 serde_json::to_string(s)?,

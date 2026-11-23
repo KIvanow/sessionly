@@ -51,7 +51,8 @@ A record without `counts.reviews` is from a Sessionly that did not count them, o
 session whose rollout was not there to read: not known, which is not none.
 
 In Claude Code the commands are `/code-review`, `/review`, `/security-review` and
-`/ultrareview` (a plugin's `anything:code-review` too). A run starts in one of three ways:
+`/ultrareview` (a plugin's `anything:code-review` too; where it is typed, a plugin's name
+with a dot in it is not taken for one, since a file's name ends that way). A run starts in one of three ways:
 
 - the agent calls the `Skill` tool with one of them (`via: skill`),
 - you type it (`via: slash_command`), or
@@ -104,7 +105,7 @@ Each run has:
   what the command printed when it ended, or else the last thing said in its turn. In
   Cursor and Grok it is the last thing said in the turn. A reply that words its result
   another way, names two different numbers, or says there are none of one kind only ("no
-  blocking bugs"), has none (`null`), which is not zero.
+  blocking bugs", "no bugs that crash anything"), has none (`null`), which is not zero.
 
 Nothing else of the arguments is kept: no free text, no path. A run is the same record in
 every content mode.

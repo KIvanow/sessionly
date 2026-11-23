@@ -65,10 +65,22 @@ pub fn counted(source: &str) -> bool {
 /// ends in one (`/home/ann/notes.md:review`), which is no command and is not
 /// kept.
 pub fn is_review(name: &str) -> bool {
+    named_review(name, false)
+}
+
+/// True for the name of a review skill, as the agent calls it or Claude Code
+/// writes it down. A plugin's name may have a dot in it (`my.plugin:review`),
+/// which what is typed may not: there it is how a file's name ends.
+pub fn is_review_skill(name: &str) -> bool {
+    named_review(name, true)
+}
+
+fn named_review(name: &str, dots: bool) -> bool {
     let name = name.trim();
     let name = name.strip_prefix('/').unwrap_or(name);
     let part = |part: &str| {
-        let shaped = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+        let shaped =
+            |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-' || (dots && c == '.');
         !part.is_empty() && part.chars().all(shaped)
     };
     let last = name.rsplit(':').next().unwrap_or(name);
@@ -188,7 +200,7 @@ pub fn forked_launch(said: &str) -> Option<ForkedLaunch> {
     let launch: Value = serde_json::from_str(said[start..end].trim()).ok()?;
     let command = launch["skillName"]
         .as_str()
-        .filter(|name| is_review(name))?;
+        .filter(|name| is_review_skill(name))?;
     let typed = launch["description"].as_str().unwrap_or_default();
     Some(ForkedLaunch {
         command: command.to_string(),
@@ -230,7 +242,8 @@ fn ran(command: &str, effort: Option<&str>) -> ReviewRan {
 /// None when the reply words it another way, and when it is not clear which
 /// number is meant: "the two earlier findings are fixed" counts nothing, two
 /// different numbers are none unless one is what was kept, and none of one
-/// kind ("no blocking bugs") is not none at all.
+/// kind ("no blocking bugs", "no bugs that crash anything") is not none at
+/// all.
 pub fn findings_in(reply: &str) -> Option<u64> {
     let reply = reply.trim();
     if let Some(block) = reply.strip_prefix("```json") {
@@ -255,6 +268,11 @@ pub fn findings_in(reply: &str) -> Option<u64> {
         "with",
         "reports",
         "reporting",
+    ];
+    // After "no bugs": what makes it none of some, not none at all.
+    const NARROWS: &[&str] = &[
+        "that", "which", "but", "except", "beyond", "other", "apart", "aside", "though",
+        "although", "however", "worth", "of",
     ];
     const NOT_A_KIND: &[&str] = &["of", "the", "in", "and", "or", "to", "for", "on", "from"];
     const WORDS: &[&str] = &[
@@ -310,8 +328,13 @@ pub fn findings_in(reply: &str) -> Option<u64> {
         let Some(count) = number(raw[at]) else {
             continue;
         };
-        // None of a kind says nothing of the other kinds.
-        if count == 0 && at != i - 1 {
+        // None of a kind says nothing of the other kinds, and nor does
+        // none that is then narrowed ("no bugs that block it", "no bugs,
+        // but several smaller problems").
+        let narrowed = raw
+            .get(i + 1)
+            .is_some_and(|next| NARROWS.contains(&clean(next).as_str()));
+        if count == 0 && (at != i - 1 || narrowed) {
             continue;
         }
         let before = at.checked_sub(1).map(|b| raw[b]);
@@ -480,7 +503,7 @@ impl Seen {
                 let input = &p["tool_input"];
                 match p["tool_name"].as_str() {
                     Some("Skill") => {
-                        if input["skill"].as_str().is_some_and(is_review) {
+                        if input["skill"].as_str().is_some_and(is_review_skill) {
                             let args = input["args"].as_str().unwrap_or_default();
                             self.skill_calls.insert(id.into(), parse_args_of(args));
                         }
@@ -627,6 +650,8 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
             .min()
     };
     let typed = typed_with(seen, facts, &next_prompt);
+    // The prompt of a typed command that a call's run stands for, by the run's id.
+    let mut prompts: HashMap<String, &str> = HashMap::new();
     for typed in &typed {
         let ran_at = ran(&typed.command, typed.effort.as_deref());
         // `/ultrareview` leads to a skill call in the same turn: one start.
@@ -658,6 +683,10 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
                 }
         });
         if let Some(run) = same_start {
+            // It keeps the call's id: what is said of the prompt is said of it.
+            if let Some(prompt) = &typed.prompt_id {
+                prompts.insert(run.id.clone(), prompt.as_str());
+            }
             run.via = ReviewVia::SlashCommand;
             run.at = typed.at;
             run.command = typed.command.clone();
@@ -719,7 +748,7 @@ pub fn runs(s: &Session, seen: &Seen, facts: Option<&Facts>) -> Vec<ReviewRun> {
         });
     }
     runs.sort_by(|a, b| a.at.cmp(&b.at).then(a.id.cmp(&b.id)));
-    measure(&mut runs, s, seen, &forks, facts);
+    measure(&mut runs, s, seen, &forks, &prompts, facts);
     runs
 }
 
@@ -837,6 +866,7 @@ fn measure(
     s: &Session,
     seen: &Seen,
     forks: &HashMap<String, &str>,
+    prompts: &HashMap<String, &str>,
     facts: Option<&Facts>,
 ) {
     let calls: HashMap<&str, &crate::session::ToolCall> = s
@@ -994,10 +1024,11 @@ fn measure(
                     said.findings
                 }
                 None => {
+                    let prompt = prompts.get(run.id.as_str()).copied().unwrap_or(&run.id);
                     let said = facts
                         .review_replies
                         .iter()
-                        .find(|r| r.prompt_id == run.id)?;
+                        .find(|r| r.prompt_id == prompt)?;
                     Some(said.findings)
                 }
             }
@@ -1567,6 +1598,31 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_review_that_led_to_a_call_has_what_was_said_of_its_prompt() {
+        use crate::transcript::ReviewSaid;
+        let facts = Facts {
+            review_replies: vec![ReviewSaid {
+                prompt_id: "p1".into(),
+                findings: 4,
+            }],
+            ..Default::default()
+        };
+        let s = session(
+            vec![
+                vec![prompt(0, "p1", "/security-review")],
+                skill(2, "t1", "security-review", "", None).into(),
+            ],
+            Some(&facts),
+        );
+        let runs: Vec<_> = s
+            .reviews
+            .iter()
+            .map(|r| (r.id.as_str(), r.via, r.findings))
+            .collect();
+        assert_eq!(runs, [("t1", ReviewVia::SlashCommand, Some(4))]);
+    }
+
+    #[test]
     fn a_typed_review_that_forked_none_has_what_the_main_threads_reply_found() {
         use crate::transcript::ReviewSaid;
         let facts = Facts {
@@ -1593,6 +1649,10 @@ mod tests {
             assert!(is_review(name), "{name}");
         }
         assert!(is_review("some-plugin:code-review"));
+        // a plugin's name may have a dot where the agent calls it, not where it is typed
+        assert!(is_review_skill("my.plugin:code-review"));
+        assert!(!is_review("my.plugin:code-review"));
+        assert!(!is_review_skill("/home/ann/notes.md:review"));
         for name in ["model", "clear", "code-reviewer", "my-review", ""] {
             assert!(!is_review(name), "{name}");
         }
@@ -1647,6 +1707,7 @@ mod tests {
         };
         let facts = Facts {
             review_modes: vec![review.clone(), review],
+            review_modes_read: true,
             reviewer_threads: vec![ReviewerThread {
                 agent_id: "rev".into(),
                 began: at(2),
@@ -1663,9 +1724,13 @@ mod tests {
             .collect();
         assert_eq!(runs, [("r1", Some("uncommitted_changes"), Some(3))]);
         assert_eq!(s.counts.reviews, Some(1));
-        // The reviews are in the rollout only: without it, not known.
-        let s = from_events(&[e], None, "codex").unwrap();
-        assert_eq!(s.counts.reviews, None);
+        // The reviews are in the rollout only: without it, or with facts
+        // saved before it was read for them, not known.
+        let unread = Facts::default();
+        for facts in [None, Some(&unread)] {
+            let s = from_events(std::slice::from_ref(&e), facts, "codex").unwrap();
+            assert_eq!(s.counts.reviews, None);
+        }
     }
 
     #[test]
@@ -1899,6 +1964,9 @@ mod tests {
             "This closes #12 issues aside.",
             // none of one kind is not none at all
             "PR #77 has no blocking bugs.",
+            "I reviewed PR 740 and found no bugs that would block it. There are four smaller ones.",
+            "I found no bugs, but the diff has several minor issues.",
+            "There are no issues of substance.",
             "I found no blocking bugs, but the diff has several minor issues.",
             "",
         ] {

@@ -178,7 +178,7 @@ pub(crate) fn add_reviews(s: &mut Session, seen: &crate::reviews::Seen, facts: O
     s.reviews = crate::reviews::runs(s, seen, facts);
     // Codex's `/review` is in its rollout only: without what that says, how
     // many there were is not known, which is not none.
-    let unseen = s.source == crate::paths::CODEX && facts.is_none();
+    let unseen = s.source == crate::paths::CODEX && !facts.is_some_and(|f| f.review_modes_read);
     let counted = crate::reviews::counted(&s.source) && !unseen;
     s.counts.reviews = counted.then_some(s.reviews.len() as u64);
 }
