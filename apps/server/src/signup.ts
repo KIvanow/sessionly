@@ -160,6 +160,39 @@ export function offers(accounts: Accounts) {
 }
 
 /**
+ * Whether a server of your own opens its dashboard for a page of this site
+ * (`http://localhost:8080`): this machine's name, an IP address, or the host
+ * of SESSIONLY_PUBLIC_URL. Not any other name: a page of someone else's
+ * site that their DNS then points at this server (DNS rebinding) is of
+ * their name, and must not be handed a session.
+ */
+export function opensAt(site: string, publicUrl: string | undefined): boolean {
+  let name: string;
+  try {
+    name = new URL(site).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (name === "localhost" || isIPv4(name) || isIPv6(name.replace(/^\[|\]$/g, ""))) return true;
+  if (!publicUrl) return false;
+  return new URL(publicUrl).hostname.toLowerCase() === name;
+}
+
+/**
+ * People of the default organisation who see only their own sessions, or see
+ * and change nothing: added while this server had signing in. A dashboard
+ * opened without signing in would make each of them its admin, so it does
+ * not open while there are any.
+ */
+export async function limitedPeople(db: Queryable): Promise<number> {
+  const [row] = await db.query<{ n: string | number }>(
+    `SELECT count(*) AS n FROM users WHERE org_id = $1 AND role IN ('member', 'viewer') AND removed_at IS NULL`,
+    [DEFAULT_ORG],
+  );
+  return Number(row?.n ?? 0);
+}
+
+/**
  * An address as it is kept and compared, or null if it is not one this
  * takes. Lower case, and the domain in its plain form (`domainToASCII`), so
  * that one domain is one however it is written. The part before the @ is
@@ -444,7 +477,9 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
   const notSetUp = (c: Context) => c.json({ error: "signing in that way is not set up here", code: "no_sign_in" }, 404);
   /** Back to the dashboard, which says what happened. */
   const back = (c: Context, problem: Problem) => c.redirect(`${home}/#problem=${problem}`);
-  const origin = home ? new URL(home).origin : undefined;
+  // The address people sign in at. A server of your own has no sign-in, and
+  // is opened at whichever of its names (opensAt says which).
+  const origin = home && accounts.hosted === true ? new URL(home).origin : undefined;
   /**
    * What only the dashboard asks: JSON, and from this very site if the
    * browser says where from. A form on another site cannot send JSON, and a
@@ -581,7 +616,28 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
   // who can reach the server can have one; a hosted service has none.
   open.post("/open", async (c) => {
     if (!offers(accounts).noSignIn) return c.json({ error: "this server is signed in to", code: "sign_in" }, 404);
+    // A browser says which site the page is of; what is not a browser, which host it asked for.
+    const site = c.req.header("origin") ?? c.req.url;
+    if (!opensAt(site, accounts.publicUrl)) {
+      return c.json(
+        {
+          error: "the dashboard opens at this machine's name, an IP address, or SESSIONLY_PUBLIC_URL; set that to the address it is opened at",
+          code: "elsewhere",
+        },
+        403,
+      );
+    }
     if (!(await perMinute(c, "auth-open", 20))) return tooMany(c);
+    const limited = await limitedPeople(db);
+    if (limited > 0) {
+      return c.json(
+        {
+          error: `${limited === 1 ? "one person" : `${limited} people`} added when this server had signing in would see everyone's sessions: open it with an admin token, and remove them on the Team page`,
+          code: "people",
+        },
+        409,
+      );
+    }
     const expiresAt = new Date(Date.now() + SIGN_IN_DAYS * 86_400_000);
     const email = accounts.admin ?? "admin@localhost";
     const [org] = await db.query<{ name: string }>(`SELECT name FROM orgs WHERE id = $1`, [DEFAULT_ORG]);

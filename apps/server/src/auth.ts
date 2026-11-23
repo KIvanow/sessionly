@@ -35,6 +35,8 @@ export interface Principal {
    * organisation is not offered there.
    */
   owner: boolean;
+  /** The token is a dashboard's of a server of your own, opened without signing in. */
+  opened?: boolean;
 }
 
 /** The one organisation of a self-hosted install. */
@@ -204,5 +206,6 @@ export async function authenticate(
     // person and is not: it must not be able to delete the organisation.
     // An opened dashboard is the owner as the admin token is: for export.
     owner: opened || (row.sign_in !== null && row.user_role === "owner"),
+    opened,
   };
 }

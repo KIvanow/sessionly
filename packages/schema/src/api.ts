@@ -27,6 +27,11 @@ export interface Me {
    * hosted. A token for a machine is not, even the owner's.
    */
   owner: boolean;
+  /**
+   * The dashboard of a server of your own, opened without signing in. There
+   * is no signing out of it: it is opened again. From `/me` only.
+   */
+  opened?: boolean;
 }
 
 /** A service people sign in with. */

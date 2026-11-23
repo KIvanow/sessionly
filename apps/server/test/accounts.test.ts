@@ -9,7 +9,7 @@ import { createApp, thisMachine, type Env } from "../src/app.ts";
 import { APP_ROLE, migrationAt, openDb, type Db } from "../src/db.ts";
 import { giveBack, take, tidy } from "../src/limits.ts";
 import { challengeOf, ProviderProblem, type Provider, type ProviderName } from "../src/oauth.ts";
-import { accountsFrom, hostedProblems, unheeded } from "../src/run.ts";
+import { accountsFrom, hostedProblems, notHostedProblems, unheeded } from "../src/run.ts";
 import { emailFrom, INVITATIONS_SHOWN, network, offers, orgIdFor, orgNameFrom, widerNetwork, type Accounts } from "../src/signup.ts";
 import { forgetAccount } from "../src/users.ts";
 import { storeUpload } from "../src/sessions.ts";
@@ -248,6 +248,66 @@ test("a server of your own opens its dashboard as its admin, and a hosted servic
   const out = await call(own, "DELETE", "/auth/session", { token: opened.body.token });
   assert.equal(out.status, 200);
   assert.equal((await call(own, "GET", "/me", { token: opened.body.token })).status, 401);
+});
+
+test("a server of your own opens its dashboard only at its own names", async () => {
+  const own = createApp(db, { accounts: { publicUrl: "https://s.test" } });
+  const openAt = (site: string, as: "origin" | "url" = "origin") =>
+    own.request(as === "url" ? `${site}/api/v1/auth/open` : "/api/v1/auth/open", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        "x-forwarded-for": nextCaller(),
+        ...(as === "origin" ? { origin: site } : {}),
+      },
+      body: "{}",
+    });
+  // This machine, an IP address, and the public address: none of them a name someone else's DNS can point here.
+  for (const site of ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "http://192.168.1.5:8080", "https://s.test"]) {
+    const opened = await openAt(site);
+    assert.equal(opened.status, 200, site);
+    const me = await call(own, "GET", "/me", { token: ((await opened.json()) as { token: string }).token });
+    assert.equal(me.body.opened, true);
+  }
+  // A page of another site whose name was pointed at this server (DNS rebinding) is of its own name.
+  const rebound = await openAt("http://attacker.example:8080");
+  assert.deepEqual([rebound.status, ((await rebound.json()) as { code: string }).code], [403, "elsewhere"]);
+  // What is not a browser is gone by the host it asked for.
+  assert.equal((await openAt("http://attacker.example:8080", "url")).status, 403);
+  assert.equal((await openAt("http://localhost:8080", "url")).status, 200);
+  // A token of any other kind is not an opened dashboard's.
+  const made = await tokenFor(db, { email: "pasted@example.com", role: "member" });
+  assert.equal((await call(own, "GET", "/me", { token: made })).body.opened, false);
+});
+
+test("a server that had signing in does not open while its members are in it", async () => {
+  const own = createApp(db, { accounts: {} });
+  const id = `u_open_${Date.now()}`;
+  await db.asOrg("default", (tx) =>
+    tx.query(`INSERT INTO users (id, org_id, email, role) VALUES ($1, 'default', 'member@example.com', 'member')`, [id]),
+  );
+  const closed = await call(own, "POST", "/auth/open", { body: {} });
+  assert.deepEqual([closed.status, closed.body.code], [409, "people"]);
+  assert.match(closed.body.error, /one person/);
+  // Once they are removed, it opens.
+  await db.asOrg("default", (tx) => tx.query(`UPDATE users SET removed_at = now() WHERE id = $1`, [id]));
+  assert.equal((await call(own, "POST", "/auth/open", { body: {} })).status, 200);
+});
+
+test("a server is a hosted service only when SESSIONLY_HOSTED says so plainly", () => {
+  assert.deepEqual(notHostedProblems({}), []);
+  assert.deepEqual(notHostedProblems({ SESSIONLY_HOSTED: "true", SESSIONLY_SIGNUP: "open" }), []);
+  assert.deepEqual(notHostedProblems({ SESSIONLY_HOSTED: "false" }), []);
+  for (const said of ["TRUE", "1", "yes", " true"]) {
+    assert.match(notHostedProblems({ SESSIONLY_HOSTED: said }).join(), /SESSIONLY_HOSTED is/, said);
+  }
+  // A hosted service's settings without it would open the dashboard to anyone.
+  assert.match(
+    notHostedProblems({ SESSIONLY_SIGNUP: "open", SESSIONLY_SIGNUPS_PER_HOUR: "100" }).join(),
+    /SESSIONLY_SIGNUP and SESSIONLY_SIGNUPS_PER_HOUR are set/,
+  );
+  assert.match(notHostedProblems({ SESSIONLY_HOSTED: "false", SESSIONLY_SIGNUP_CODE: "x" }).join(), /SESSIONLY_SIGNUP_CODE is set/);
 });
 
 test("the browser that comes back from a provider must be the one that left", async () => {

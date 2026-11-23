@@ -11,10 +11,15 @@ services:
   server:
     build: .
     ports:
-      - "${SESSIONLY_PORT:-8080}:8080"
+      # This machine only, unless SESSIONLY_BIND says another of its
+      # addresses (0.0.0.0: all of them): whoever reaches the port is its admin.
+      - "${SESSIONLY_BIND:-127.0.0.1}:${SESSIONLY_PORT:-8080}:8080"
     environment:
       DATABASE_URL: postgres://sessionly:sessionly@db:5432/sessionly
       SESSIONLY_ADMIN_EMAIL: ${SESSIONLY_ADMIN_EMAIL:-admin@localhost}
+      # The address the dashboard is opened at, if a name other than localhost
+      # (a proxy's, https://sessionly.example.com): it opens only there.
+      SESSIONLY_PUBLIC_URL: ${SESSIONLY_PUBLIC_URL:-}
       # Optional: an admin token that always works, for scripts and CI.
       SESSIONLY_ADMIN_TOKEN: ${SESSIONLY_ADMIN_TOKEN:-}
       # The dashboard counts which of its pages are opened (docs-site/dashboard.md); "off" stops it.

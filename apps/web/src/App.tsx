@@ -27,6 +27,9 @@ import { Team } from "./Team.tsx";
 import { dayLabel, modelName, toolName } from "./format.ts";
 import { useApi } from "./useApi.ts";
 
+/** How long before asking a server that did not answer again. */
+const RETRY_MS = 5_000;
+
 export interface Scope {
   /** "7", "30", "90" days back, or "all". */
   period: string;
@@ -158,21 +161,41 @@ export function App() {
   };
 
   useEffect(() => {
-    open<AuthOptions>("/auth/options")
-      // A server from before signing in with Google or GitHub names no providers.
-      .then((offered) => setOptions({ ...offered, providers: offered.providers ?? [] }))
-      // An older server, or none: a token is the way in.
-      .catch(() => setOptions({ hosted: false, providers: [], signup: false, inviteCode: false }));
+    let current = true;
+    let again: ReturnType<typeof setTimeout> | undefined;
+    const ask = () =>
+      open<AuthOptions>("/auth/options")
+        // A server from before signing in with Google or GitHub names no providers.
+        .then((offered) => current && setOptions({ ...offered, providers: offered.providers ?? [] }))
+        .catch((err: Error) => {
+          if (!current) return;
+          // An older server, or none: a token is the way in. One that did not
+          // answer is asked again, as it may open without signing in.
+          setOptions((had) => had ?? { hosted: false, providers: [], signup: false, inviteCode: false });
+          if (!(err instanceof ApiError) || err.status >= 500) again = setTimeout(ask, RETRY_MS);
+        });
+    void ask();
+    return () => {
+      current = false;
+      clearTimeout(again);
+    };
   }, []);
 
   // A server of your own opens without signing in: it hands this browser a
-  // session as its admin, and another once that one runs out.
+  // session as its admin, and another once that one runs out. What only
+  // happened to fail (no answer, too many at once) is tried again.
   useEffect(() => {
     if (token || !options?.noSignIn || unopened) return;
     let current = true;
     open<SignedIn>("/auth/open", {})
       .then((opened) => current && (setProblem(null), use(opened.token)))
-      .catch((err: Error) => current && setUnopened(err.message));
+      .catch((err: Error) => {
+        if (!current) return;
+        setUnopened(err.message);
+        if (!(err instanceof ApiError) || err.status === 429 || err.status >= 500) {
+          setTimeout(() => setUnopened((was) => (was === err.message ? null : was)), RETRY_MS);
+        }
+      });
     return () => {
       current = false;
     };
@@ -281,7 +304,7 @@ export function App() {
     return (
       <Login
         options={options}
-        problem={unopened ? `The dashboard could not be opened: ${unopened}` : problem}
+        problem={problem ?? (unopened ? `The dashboard could not be opened: ${unopened}` : null)}
         onRetry={unended.length ? endAgain : undefined}
         onToken={(value) => {
           setProblem(null);
@@ -482,7 +505,8 @@ function Shell({
             <span>
               {me.email} · {me.role}
             </span>
-            {!auth?.noSignIn && <button onClick={onLeave}>Sign out</button>}
+            {/* An opened dashboard would only be opened again. Any other session signs out, a pasted token too. */}
+            {!me.opened && <button onClick={onLeave}>Sign out</button>}
           </span>
         </div>
       </header>

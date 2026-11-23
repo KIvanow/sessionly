@@ -123,7 +123,7 @@ Action is a row of its own, and the row before it keeps the version that produce
 
 | | Who | |
 |---|---|---|
-| `GET /me` | person | Who the token is, and in which organisation. `owner` is true when they signed in as the organisation's owner. A token for a machine is not an owner, even the owner's own. On a server that is not hosted, the admin token from the environment and the dashboard (`POST /auth/open`) are the owner and nobody else is. |
+| `GET /me` | person | Who the token is, and in which organisation. `owner` is true when they signed in as the organisation's owner. A token for a machine is not an owner, even the owner's own. On a server that is not hosted, the admin token from the environment and the dashboard (`POST /auth/open`) are the owner and nobody else is; `opened` is true for the dashboard's. |
 | `GET /me/tokens` | person | Their own tokens. |
 | `POST /me/tokens` | person | A new `member` token for a machine of theirs: `{"name": "…"}`, optional. The token is in the answer, once. |
 | `DELETE /me/tokens/{id}` | person | Revokes one of them. |
@@ -145,7 +145,7 @@ Action is a row of its own, and the row before it keeps the version that produce
 | `GET /healthz` | `{"ok": true}` while the server runs. (Not under `/api/v1`.) |
 | `GET /readyz` | The same once the database has answered; `503` if it does not. (Not under `/api/v1`.) |
 | `GET /api/v1/auth/options` | How people can sign in here: the providers set up (on a hosted service only), whether this is a hosted service, and `noSignIn`, true where the dashboard opens without signing in. |
-| `POST /api/v1/auth/open` | On a server that is not hosted, a session for the dashboard as its admin (`SESSIONLY_ADMIN_EMAIL`), which lasts a week: what the dashboard opens with, as nobody signs in there. Asked by the dashboard only, as JSON. `404` on a hosted service. |
+| `POST /api/v1/auth/open` | On a server that is not hosted, a session for the dashboard as its admin (`SESSIONLY_ADMIN_EMAIL`), which lasts a week: what the dashboard opens with, as nobody signs in there. Asked by the dashboard only, as JSON, from a page at this machine's name (`localhost`), an IP address, or the host of `SESSIONLY_PUBLIC_URL` (`403` from any other). `409` while the organisation has members or viewers added when the server had signing in. `404` on a hosted service. |
 | `GET /api/v1/telemetry` | What the dashboard needs to [count its pages](dashboard.md#page-counts), or `null` where that is off. |
 | `/api/v1/auth/…` | The round trip of signing in with Google or GitHub, which the dashboard makes. Not for other callers. |
 

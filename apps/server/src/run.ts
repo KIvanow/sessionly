@@ -50,7 +50,7 @@ import {
   type Provider,
   type ProviderName,
 } from "./oauth.ts";
-import { offers, type Accounts } from "./signup.ts";
+import { limitedPeople, offers, type Accounts } from "./signup.ts";
 import { telemetryFrom } from "./telemetry.ts";
 
 export interface RunOptions {
@@ -150,6 +150,29 @@ const COUNTS = [
   ...DB_COUNTS,
 ] as const;
 
+/** A hosted service's own settings, which nothing else takes. */
+const HOSTED_ONLY = ["SESSIONLY_SIGNUP", "SESSIONLY_SIGNUP_CODE", "SESSIONLY_SIGNUPS_PER_HOUR", "SESSIONLY_SIGNUPS_PER_NETWORK"];
+
+/**
+ * Why a server would wrongly start as one of your own, whose dashboard
+ * opens to anyone without signing in: SESSIONLY_HOSTED written some other
+ * way than "true", or left out where a hosted service's settings are.
+ */
+export function notHostedProblems(env: NodeJS.ProcessEnv): string[] {
+  // As it is read everywhere else: " true" is not "true".
+  const said = env.SESSIONLY_HOSTED ?? "";
+  if (said !== "" && said !== "true" && said !== "false") {
+    return [`SESSIONLY_HOSTED is "${said}": it is "true" for a hosted service, or "false" or unset for a server of your own.`];
+  }
+  if (said === "true") return [];
+  const set = HOSTED_ONLY.filter((name) => env[name]?.trim());
+  return set.length
+    ? [
+        `${set.join(" and ")} ${set.length === 1 ? "is" : "are"} set, which only a hosted service takes, but SESSIONLY_HOSTED is not "true": this server would open its dashboard to anyone without signing in. Set SESSIONLY_HOSTED=true, or take ${set.length === 1 ? "it" : "them"} out.`,
+      ]
+    : [];
+}
+
 /** How people get in, as the environment sets it. */
 export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
   const hosted = env.SESSIONLY_HOSTED === "true";
@@ -231,6 +254,11 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       for (const problem of problems) console.error(`SESSIONLY_HOSTED: ${problem}`);
       process.exit(1);
     }
+  }
+  const misread = notHostedProblems(process.env);
+  if (misread.length) {
+    for (const problem of misread) console.error(problem);
+    process.exit(1);
   }
   for (const note of unheeded(process.env)) console.warn(note);
   // The embedded database lives next to the server's code, wherever it is started from.
@@ -326,6 +354,9 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
     });
   weighing();
 
+  // People added while this server had signing in: an opened dashboard would make them its admins.
+  const limited = offers(accounts).noSignIn ? await limitedPeople(db).catch(() => 0) : 0;
+
   const port = Number(process.env.PORT ?? 8080);
   const hostname = process.env.HOST ?? "127.0.0.1";
   const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
@@ -345,7 +376,11 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       const ways = offered.providers.map((name) => LABELS[name]).join(" and ");
       console.log(`Signing in with ${ways} is on${offered.signup ? ", and anyone may sign up" : ""}${offered.signup && offered.inviteCode ? " with the invitation code" : ""}.`);
     }
-    if (offered.noSignIn) {
+    if (offered.noSignIn && limited > 0) {
+      console.warn(
+        `The dashboard does not open without signing in while ${limited === 1 ? "one person" : `${limited} people`} added when this server had signing in (members and viewers, who see only part of it) ${limited === 1 ? "is" : "are"} in it: signing in with Google or GitHub is the hosted service's now. Open it with an admin token (SESSIONLY_ADMIN_TOKEN) and remove them on the Team page; their machines' tokens stop with them.`,
+      );
+    } else if (offered.noSignIn) {
       console.log(
         `The dashboard opens without signing in, as ${accounts.admin ?? "admin@localhost"}: anyone who can reach this server is its admin. Machines connect with a token from its Connect page.`,
       );

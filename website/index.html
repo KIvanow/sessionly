@@ -1004,8 +1004,8 @@ SESSIONLY_LINE_HASHES=on</pre>
             </div>
             <div class="term wide" aria-label="Commands to run a Sessionly server and connect to it">
               <header>A team</header>
-              <pre><span class="c"># on the server</span>
-<span class="c">$</span> docker compose up -d
+              <pre><span class="c"># on the server, behind your HTTPS proxy</span>
+<span class="c">$</span> SESSIONLY_PUBLIC_URL=https://sessionly.example.com docker compose up -d
 
 <span class="c"># on each developer's machine</span>
 <span class="c">$</span> sessionly connect https://sessionly.example.com --token sly_…
