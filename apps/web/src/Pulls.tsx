@@ -302,12 +302,26 @@ function ByModel({ summary }: { summary: PullSummary }) {
 /**
  * Review bots over these pull requests: what each commented, and how many
  * rounds followed its feedback; and all people together as one row beside
- * them. Not shown where no bot reviewed.
+ * them. Not shown where no bot reviewed; where that is not known of all of
+ * them yet (`pending`), it says so in place of the table.
  */
 export function ReviewBots({ rows, pending = 0 }: { rows: ReviewerSummary[]; pending?: number }) {
-  if (!rows.some((r) => r.author != null)) return null;
-  const unknown = rows.filter((r) => r.pulls_with_rounds_known < r.pulls);
   const pulls = (n: number) => (n === 1 ? "pull request" : "pull requests");
+  if (!rows.some((r) => r.author != null)) {
+    if (pending === 0) return null;
+    return (
+      <section className="card" aria-label="Review bots">
+        <div className="card-head">
+          <h2>Review bots: what each commented, and the rounds that followed</h2>
+        </div>
+        <p className="muted hint">
+          No bot is known to have reviewed these pull requests yet: who reviewed {count(pending)} of them is still
+          being worked out. Look again in a few minutes.
+        </p>
+      </section>
+    );
+  }
+  const unknown = rows.filter((r) => r.pulls_with_rounds_known < r.pulls);
   return (
     <section className="card" aria-label="Review bots">
       <div className="card-head">
