@@ -149,7 +149,7 @@ function importsAsWritten(text) {
 }
 
 /** What is wrong with how app.ts uses the owner's database. */
-function inApp(text, allowed = IN_APP) {
+function inApp(text, allowed = IN_APP, named = { as: /export function createApp\(ownerDb: Db\b/, what: "createApp" }) {
   const found = [];
   const lines = text.split("\n");
   lines.forEach((line, i) => {
@@ -160,12 +160,30 @@ function inApp(text, allowed = IN_APP) {
     }
   });
   // The parameter keeps that name, so a use of it cannot hide as `db`.
-  if (!/export function createApp\(ownerDb: Db\b/.test(text)) found.push(`: createApp must name its database "ownerDb"`);
+  if (!named.as.test(text)) found.push(`: ${named.what} must name its database "ownerDb"`);
   // An entry nothing uses any more would allow the next thing that looks like it.
   for (const ok of allowed) {
     if (!lines.some((line) => ok.test(line))) found.push(`: ${ok} in scripts/check-unscoped.mjs allows nothing; remove it`);
   }
   return found;
+}
+
+// Where the hosting (ee/src/hosted/index.ts) may use the owner's database:
+// what comes before an organisation is known, and what belongs to none. Its
+// request handlers take a request's database, as app.ts's do.
+const IN_HOSTING = [
+  /^export function hosting\(ownerDb: Db\b/,
+  // Signing in and signing up (signup.ts).
+  /\bopenRoutes\(ownerDb,/,
+  // The counter of people added an hour, which belongs to no organisation.
+  /\b(?:take|giveBack)\(ownerDb,/,
+  // The hourly job that removes organisations deleted a week ago.
+  /\bpurgeDeletedOrgs\(ownerDb\)/,
+];
+
+/** What is wrong with how the hosting uses the owner's database. */
+function inHosting(text, allowed = IN_HOSTING) {
+  return inApp(text, allowed, { as: /export function hosting\(ownerDb: Db\b/, what: "hosting" });
 }
 
 /** What is wrong with how run.ts starts the server. */
@@ -176,7 +194,7 @@ function inRun(text) {
   // But for a hosted service's hosting, which signs people in.
   if (/\boptions\.(?!hosting\?\.\(db\))\w+\??\.?\(\s*[^)]*\bdb\b/.test(text)) found.push(`: an option is called with the owner's database`);
   const options = /export interface RunOptions \{[\s\S]*?\n\}/.exec(text)?.[0] ?? "";
-  if (!options || /\bDb\b/.test(options.replace(/\n\s*hosting\?\s*:\s*\(\s*db\s*:\s*Db\s*\)\s*=>\s*Hosting\b[^;\n]*;/, ""))) {
+  if (!options || /\bDb\b/.test(options.replace(/\n\s*hosting\?\s*:\s*\(\s*db\s*:\s*Db\s*\)\s*=>\s*Hosting(?:\s*\|\s*undefined)?\s*;/, ""))) {
     found.push(`: RunOptions must not mention Db`);
   }
   return found;
@@ -187,7 +205,9 @@ function inRun(text) {
  * run.ts to the hosting (ee/src/hosted/index.ts) and to nothing else, so the
  * name it gets there is used just once more, in that call.
  */
-function inMain(text) {
+function inMain(source) {
+  // What a comment says of the database is no use of it.
+  const text = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").replace(/\s\/\/.*$/gm, "");
   const handed = /\bhosting\s*:\s*hosted\s*\?\s*\(\s*(\w+)\s*\)\s*=>\s*hosting\(\s*\1\s*,/.exec(text);
   if (!handed) return [`: the owner's database must go straight to hosting(), as "hosting: hosted ? (db) => hosting(db, …)"`];
   const uses = text.match(new RegExp(String.raw`\b${handed[1]}\b`, "g")).length;
@@ -260,7 +280,11 @@ const MUST_FAIL = [
   ["inRun", RUN.replace("migrations?: Migrations[];", "prepare?: (db: Db) => Promise<void>;")],
 ];
 const MAIN = `await runServer({\n  hosting: hosted\n    ? (db) =>\n        hosting(db, { accounts })\n    : undefined,\n});`;
+const HOSTING = `export function hosting(ownerDb: Db, settings: HostingSettings): Hosting {\n  app.route("/api/v1/auth", openRoutes(ownerDb, accounts));\n}`;
 MUST_FAIL.push(
+  ["inHosting", `${HOSTING}\n  api.delete("/org", async (c) => c.json(await ownerDb.query("SELECT * FROM orgs")));`],
+  ["inHosting", HOSTING.replace("hosting(ownerDb: Db", "hosting(db: Db").replace("openRoutes(ownerDb", "openRoutes(db")],
+  ["inRun", RUN.replace("migrations?: Migrations[];", "hosting?: (db: Db) => Hosting & { keep(db: Db): void };")],
   ["inMain", MAIN.replace("hosting(db,", "{ keep(db); return hosting(db,")],
   ["inMain", MAIN.replace("(db) =>\n        hosting(db, { accounts })", "(db) => hosting(db, { accounts, also: db })")],
   ["inMain", MAIN.replace("hosting(db,", "other(db,")],
@@ -280,9 +304,11 @@ const MUST_PASS = [
   ["inRun", RUN.replace("migrations?: Migrations[];", "migrations?: Migrations[];\n  hosting?: (db: Db) => Hosting;") + "\nconst hosting = options.hosting?.(db);"],
   ["inRun", RUN.replace("migrations?: Migrations[];", "migrations?: Migrations[];\n  hosting?: (db: Db) => Hosting | undefined;")],
   ["inMain", MAIN],
+  ["inMain", `// db is the owner's database, handed on once.\n${MAIN.replace("(db) =>", "(db) => /* only to the hosting: db */")}`],
+  ["inHosting", HOSTING],
 ];
 // The sample has the first three uses and none of the rest.
-const checks = { imports, inApp: (text) => inApp(text, IN_APP.slice(0, 3)), inRun, inMain };
+const checks = { imports, inApp: (text) => inApp(text, IN_APP.slice(0, 3)), inRun, inMain, inHosting: (text) => inHosting(text, IN_HOSTING.slice(0, 2)) };
 const wrong = [
   ...MUST_FAIL.filter(([check, text]) => checks[check](text).length === 0).map(([, text]) => `not caught:\n${text}`),
   ...MUST_PASS.filter(([check, text]) => checks[check](text).length > 0).map(([, text]) => `wrongly caught:\n${text}`),
@@ -304,6 +330,7 @@ for (const [dir, allowed] of Object.entries(ALLOWED)) {
     if (at === "apps/server/src/app.ts") found.push(...inApp(text).map((what) => `${at}${what}`));
     if (at === "apps/server/src/run.ts") found.push(...inRun(text).map((what) => `${at}${what}`));
     if (at === "ee/src/main.ts") found.push(...inMain(text).map((what) => `${at}${what}`));
+    if (at === "ee/src/hosted/index.ts") found.push(...inHosting(text).map((what) => `${at}${what}`));
   }
 }
 if (found.length) {

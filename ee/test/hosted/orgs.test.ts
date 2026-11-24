@@ -56,7 +56,7 @@ test("the owner deletes the organisation by its name, and it drops out of signin
   );
   const admin = await tokenFor(db, { email: "admin@end.example", role: "admin" }, "org-end");
   const accounts: Accounts = { publicUrl: "http://localhost:8080" };
-  const hosted = createApp(db, { accounts, hosting: hosting(db, { accounts }) });
+  const hosted = createApp(db, { hosting: hosting(db, { accounts }) });
   const secret = "owner-sign-in";
   await db.query(
     `INSERT INTO sign_in_codes (code_hash, provider, account, emails, expires_at)

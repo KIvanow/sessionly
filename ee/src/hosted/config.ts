@@ -18,10 +18,13 @@
 //                          in the second without anything that was typed or run, as
 //                          `node src/cli.ts demo import` copies them (see demo.ts); reports to the
 //                          second are kept without SESSIONLY_DEMO_HIDE: what of it not to show
-import { count, HASH_KEY_LENGTH, hashKeyOf, misset, providerSettings as settingsOf } from "@sessionly/server";
+import { coreAccountsFrom, count, HASH_KEY_LENGTH, hashKeyOf, misset, providerSettings as settingsOf } from "@sessionly/server";
 import { demoFrom, reportsShownIn } from "./demo.ts";
 import { github, google, PROVIDER_LABELS as LABELS, PROVIDER_NAMES, type Client, type Provider, type ProviderName } from "./oauth.ts";
 import type { Accounts } from "./signup.ts";
+
+/** A public address as it is taken: a scheme and a host, and no path. */
+const AN_ADDRESS = /^https?:\/\/[^/]+\/?$/i;
 
 /** A plain-HTTP address that leads nowhere but to this machine. */
 const ON_THIS_MACHINE = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/;
@@ -49,6 +52,8 @@ export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
   const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim();
   if (!publicUrl) {
     problems.push("SESSIONLY_PUBLIC_URL is not set: nobody could sign in or sign up.");
+  } else if (!AN_ADDRESS.test(publicUrl)) {
+    problems.push("SESSIONLY_PUBLIC_URL must be an address like https://app.example.com, with no path.");
   } else if (!publicUrl.startsWith("https://") && !ON_THIS_MACHINE.test(publicUrl)) {
     // Over plain HTTP the cookies that carry a sign-in are not kept to this
     // host or to an encrypted connection, and every token crosses in clear.
@@ -71,13 +76,16 @@ export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
   return problems;
 }
 
-/** How people get in, as the environment sets it. */
+/** How people get in, as the environment sets it: the core's settings, and the hosted service's. */
 export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
+  const core = coreAccountsFrom(env);
   const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim() || undefined;
-  if (publicUrl && !/^https?:\/\/[^/]+\/?$/.test(publicUrl)) {
+  if (publicUrl && !AN_ADDRESS.test(publicUrl)) {
     throw new Error("SESSIONLY_PUBLIC_URL must be an address like https://app.example.com, with no path");
   }
   return {
+    ...core,
+    ratePerMinute: core.ratePerMinute ?? 600,
     providers: PROVIDER_NAMES.flatMap((name) => {
       const client = clientOf(env, name);
       return client ? [MAKERS[name](client)] : [];
@@ -85,8 +93,6 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
     publicUrl,
     signup: env.SESSIONLY_SIGNUP === "off" ? "off" : "open",
     signupCode: env.SESSIONLY_SIGNUP_CODE?.trim() || undefined,
-    trustProxy: env.SESSIONLY_TRUST_PROXY === "true",
-    ratePerMinute: count(env.SESSIONLY_RATE_PER_MINUTE) ?? 600,
     signupsPerHour: count(env.SESSIONLY_SIGNUPS_PER_HOUR),
     signupsPerNetwork: count(env.SESSIONLY_SIGNUPS_PER_NETWORK),
   };

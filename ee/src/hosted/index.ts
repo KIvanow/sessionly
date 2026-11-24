@@ -6,6 +6,7 @@
 // the database as its owner sees it; the routes on the API reach data through
 // the request's organisation only.
 import {
+  addUser,
   ApiError,
   emailFrom,
   giveBack,
@@ -18,7 +19,6 @@ import {
 import { shownReport } from "./demo.ts";
 import { PROVIDER_LABELS as LABELS, PROVIDER_NAMES } from "./oauth.ts";
 import { deleteOrg, purgeDeletedOrgs } from "./orgs.ts";
-import { addUser } from "./people.ts";
 import { offers, openRoutes, type Accounts } from "./signup.ts";
 
 /** People an organisation may add an hour: anyone can add anyone, and be the admin of an organisation they just made. */
@@ -128,21 +128,21 @@ export function hosting(ownerDb: Db, { accounts, demo }: HostingSettings): Hosti
         await deleteOrg(c.get("db"), typeof body?.name === "string" ? body.name : "");
         return c.body(null, 204);
       });
+    },
 
-      // Someone who was added signs in with an account that has the address
-      // they were added under, and is shown the organisation then; nothing is
-      // sent to them. Only admins get here: the core's /users are theirs.
-      api.post("/users", async (c) => {
-        if (!offered.providers.length) {
-          return c.json({ error: "signing in is not set up here; create a token instead", code: "no_sign_in" }, 409);
-        }
-        const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-        const email = emailFrom(body.email);
-        const role = body.role ?? "member";
-        if (!email) throw new ApiError(400, "bad_email", "email is required, as a plain address of 254 characters at most");
-        if (role !== "admin" && role !== "member") throw new ApiError(400, "bad_role", "role must be admin or member");
-        return c.json(await addUser(c.get("db"), newUserId(), email, role, c.get("principal")), 201);
-      });
+    // Someone who was added signs in with an account that has the address
+    // they were added under, and is shown the organisation then; nothing is
+    // sent to them. The core puts this on its /users, which only admins reach.
+    async addUser(c) {
+      if (!offered.providers.length) {
+        return c.json({ error: "signing in is not set up here; create a token instead", code: "no_sign_in" }, 409);
+      }
+      const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+      const email = emailFrom(body.email);
+      const role = body.role ?? "member";
+      if (!email) throw new ApiError(400, "bad_email", "email is required, as a plain address of 254 characters at most");
+      if (role !== "admin" && role !== "member") throw new ApiError(400, "bad_role", "role must be admin or member");
+      return c.json(await addUser(c.get("db"), newUserId(), email, role, c.get("principal")), 201);
     },
 
     start() {

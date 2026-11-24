@@ -1,7 +1,7 @@
 // The HTTP API: uploads from the `sessionly` binary, and the questions the
 // dashboard asks. Everything under /api/v1 needs a bearer token.
 import { serveStatic } from "@hono/node-server/serve-static";
-import { Hono } from "hono";
+import { Hono, type Handler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import {
   authenticate,
@@ -94,8 +94,14 @@ export type Extension = (api: Api) => void;
 export interface Hosting {
   /** What `/api/v1/auth/options` answers. */
   offers: AuthOptions;
-  /** How people get in and how much they may ask, in place of the server's own `accounts`: a hosted service counts requests unless told otherwise. */
+  /**
+   * How people get in and how much they may ask: a hosted service's, which
+   * counts requests unless told otherwise. The only accounts a server with a
+   * hosting has (`Options` takes no others then).
+   */
   accounts: Accounts;
+  /** Adding a person, on /users, for admins: the core answers 409 no_sign_in without a hosting. */
+  addUser: Handler<Env>;
   /** On the server, ahead of everything else: its routes that need no token. */
   open(app: Hono<Env>): void;
   /** On the API, after the large bodies are read and before the transaction a request runs in. */
@@ -264,14 +270,25 @@ export function failureLog(
   };
 }
 
-export interface Options {
+export type Options = CommonOptions &
+  (
+    | {
+        /** A service many organisations share, with its own accounts. */
+        hosting: Hosting;
+        accounts?: never;
+      }
+    | {
+        /** None: a server of your own. */
+        hosting?: undefined;
+        accounts?: Accounts;
+      }
+  );
+
+interface CommonOptions {
   bootstrap?: Bootstrap;
   /** Folder with the built dashboard, served at the root if given. */
   webRoot?: string;
   extensions?: Extension[];
-  accounts?: Accounts;
-  /** A service many organisations share; none: a server of your own. */
-  hosting?: Hosting;
   /** Where the dashboard counts which of its pages are opened; none: it counts nothing. */
   telemetry?: Telemetry | null;
   /** What the committers kept of a pull request are hashed with (SESSIONLY_HASH_KEY); none: a plain hash. */
@@ -316,7 +333,7 @@ const readsPulls = (method: string, path: string): boolean => method === "GET" &
 
 export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
-  const accounts = options.hosting?.accounts ?? options.accounts ?? {};
+  const accounts = (options.hosting ? options.hosting.accounts : options.accounts) ?? {};
 
   api.use("*", async (c, next) => {
     const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap, {
@@ -839,11 +856,10 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     await next();
   });
   users.get("/", async (c) => c.json({ users: await listUsers(c.get("db")) }));
-  if (!options.hosting) {
-    users.post("/", (c) =>
-      c.json({ error: "signing in is not set up here; create a token instead", code: "no_sign_in" }, 409),
-    );
-  }
+  users.post(
+    "/",
+    options.hosting?.addUser ?? ((c) => c.json({ error: "signing in is not set up here; create a token instead", code: "no_sign_in" }, 409)),
+  );
   users.delete("/:id", async (c) => {
     // data=true also deletes their sessions and the repositories they stopped.
     // Anything else is the removal alone, as it always was.

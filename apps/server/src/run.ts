@@ -67,21 +67,11 @@ export function reason(err: unknown): string {
 /** The settings that are a count of something: `count` in db.ts says what one is. */
 export const COUNTS = ["SESSIONLY_RATE_PER_MINUTE", ...DB_COUNTS] as const;
 
-/**
- * A hosted service's own settings, which nothing else takes. The demo's are
- * among them: a server of your own would keep reports to its organisation
- * whole, SESSIONLY_DEMO_HIDE or not, so it does not start with them.
- */
-const HOSTED_ONLY = [
-  "SESSIONLY_SIGNUP",
-  "SESSIONLY_SIGNUP_CODE",
-  "SESSIONLY_SIGNUPS_PER_HOUR",
-  "SESSIONLY_SIGNUPS_PER_NETWORK",
-  "SESSIONLY_DEMO_FROM",
-  "SESSIONLY_DEMO_REPO",
-  "SESSIONLY_DEMO_ORG",
-  "SESSIONLY_DEMO_HIDE",
-];
+/** A hosted service's own settings, which nothing else takes. */
+const HOSTED_ONLY = ["SESSIONLY_SIGNUP", "SESSIONLY_SIGNUP_CODE", "SESSIONLY_SIGNUPS_PER_HOUR", "SESSIONLY_SIGNUPS_PER_NETWORK"];
+
+/** A demo's settings (ee/src/hosted/demo.ts), which only the hosted service heeds. */
+const DEMO = ["SESSIONLY_DEMO_FROM", "SESSIONLY_DEMO_REPO", "SESSIONLY_DEMO_ORG", "SESSIONLY_DEMO_HIDE"];
 
 /**
  * Why a server would wrongly start as one of your own, whose dashboard
@@ -127,6 +117,12 @@ export function unheeded(env: NodeJS.ProcessEnv, hosted = false): string[] {
       );
     }
   }
+  const demo = DEMO.filter((name) => env[name]?.trim());
+  if (!hosted && demo.length) {
+    notes.push(
+      `${demo.join(" and ")} ${demo.length === 1 ? "is" : "are"} set, but a demo is the hosted service's: nothing is shown in another organisation here, and reports to any organisation are kept whole.`,
+    );
+  }
   if (env.SESSIONLY_HASH_KEY?.trim() && !hashKeyOf(env)) {
     notes.push(`SESSIONLY_HASH_KEY is shorter than ${HASH_KEY_LENGTH} characters, and is not used.`);
   }
@@ -168,7 +164,6 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   // The dashboard, if it has been built (pnpm build).
   const webDist = fileURLToPath(new URL("../../web/dist", import.meta.url));
   const webRoot = existsSync(webDist) ? webDist : undefined;
-  const accounts = accountsFrom(process.env);
   const telemetry = telemetryFrom(process.env);
   // Old counters and sign-ins nobody finished are cleared away now and then.
   const tidying = setInterval(() => void tidy(db).catch((err) => console.error("tidying failed:", err)), 15 * 60_000);
@@ -177,6 +172,8 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   const pending = new Set<Promise<void>>();
   const hosting = options.hosting?.(db);
   hosting?.start?.();
+  // A hosted service's accounts are built on these (ee/src/hosted/config.ts), and are the only ones it has.
+  const accounts = hosting?.accounts ?? accountsFrom(process.env);
   const app = createApp(db, {
     background: (work) => {
       pending.add(work);
@@ -184,8 +181,7 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
     },
     hashKey: hashKeyOf(process.env),
     webRoot,
-    accounts,
-    hosting,
+    ...(hosting ? { hosting } : { accounts }),
     telemetry,
     extensions: options.extensions?.(),
     bootstrap: adminToken

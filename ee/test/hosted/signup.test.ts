@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { createApp, type Env, type Options } from "../../../apps/server/src/app.ts";
-import { accountsFrom as coreAccountsFrom } from "../../../apps/server/src/run.ts";
 import { APP_ROLE, migrationAt, openDb, type Db } from "../../../apps/server/src/db.ts";
 import { giveBack, network, take, tidy, widerNetwork } from "../../../apps/server/src/limits.ts";
 import { emailFrom, forgetAccount } from "../../../apps/server/src/users.ts";
@@ -46,13 +45,9 @@ const hosted: Accounts = {
   trustProxy: true,
 };
 
-/**
- * A server that is a hosted service, as the ee server starts one: the core's
- * own accounts, from an environment with none of these set, go to createApp,
- * and the hosted service's to its hosting.
- */
-function hostedApp(at: Db, accounts: Accounts, options: Options = {}, demo?: HostingSettings["demo"]): Hono<Env> {
-  return createApp(at, { ...options, accounts: coreAccountsFrom({}), hosting: hosting(at, { accounts, demo }) });
+/** A server that is a hosted service, as the ee server starts one: its accounts are the hosting's. */
+function hostedApp(at: Db, accounts: Accounts, options: Omit<Options, "accounts" | "hosting"> = {}, demo?: HostingSettings["demo"]): Hono<Env> {
+  return createApp(at, { ...options, hosting: hosting(at, { accounts, demo }) });
 }
 
 before(async () => {
@@ -963,6 +958,9 @@ test("an admin adds people, who sign in as what they were added as", async () =>
   assert.deepEqual([mo.body.org.id, mo.body.role], [owner.org.id, "member"]);
   // A member manages nobody.
   assert.equal((await get("/users", mo.body.token)).status, 403);
+  // Nor adds anyone: adding is on the core's /users, behind its check for admins.
+  const byMember = await post("/users", { email: "nope@team.example" }, mo.body.token);
+  assert.deepEqual([byMember.status, byMember.body.error], [403, "admins only"]);
   assert.equal((await post("/users", { email: "x@team.example" }, mo.body.token)).status, 403);
 
   assert.equal((await post("/users", { email: "mo@team.example" }, owner.token)).body.code, "already_a_user");
@@ -1161,7 +1159,7 @@ test("too many requests are refused, and too many organisations are not created"
 
   // Where none is set, a hosted service still counts: 600 a minute, as the ee server is started.
   const env = { SESSIONLY_PUBLIC_URL: "https://app.test", SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "secret" };
-  const started = createApp(db, { accounts: coreAccountsFrom(env), hosting: hosting(db, { accounts: accountsFrom(env) }) });
+  const started = createApp(db, { hosting: hosting(db, { accounts: accountsFrom(env) }) });
   const steady = await tokenFor(db, { email: "steady@example.com", role: "member" });
   const before = (await db.query<{ key: string }>(`SELECT key FROM rate_counters`)).map((row) => row.key);
   assert.equal((await call(started, "GET", "/ping", { token: steady })).status, 200);
@@ -1301,6 +1299,11 @@ test("the environment sets how people get in", () => {
   assert.doesNotMatch(`${google?.authorizeUrl(ask)}${github?.authorizeUrl(ask)}`, /secret-of/);
   assert.equal(accounts.ratePerMinute, 600);
   assert.equal(accounts.signupsPerHour, undefined);
+  // The core's settings come with them: a hosted server has no other accounts.
+  assert.deepEqual(
+    [accountsFrom({ ...env, SESSIONLY_TRUST_PROXY: "true", SESSIONLY_ADMIN_EMAIL: "ops@example.com" }).trustProxy, accountsFrom({ ...env, SESSIONLY_ADMIN_EMAIL: "ops@example.com" }).admin],
+    [true, "ops@example.com"],
+  );
   assert.equal(accountsFrom({ ...env, SESSIONLY_SIGNUPS_PER_HOUR: "20" }).signupsPerHour, 20);
   assert.equal(accountsFrom({ ...env, SESSIONLY_SIGNUPS_PER_HOUR: "lots" }).signupsPerHour, undefined);
   // A count is a whole number above 0, in plain digits. Anything else is
@@ -1328,6 +1331,8 @@ test("the environment sets how people get in", () => {
   // with no provider, with half of one, or with nowhere to send people back to.
   assert.match(hostedProblems({ ...env, SESSIONLY_GITHUB_CLIENT_SECRET: "" }).join(), /No way of signing in is set \(SESSIONLY_GOOGLE_CLIENT_ID with SESSIONLY_GOOGLE_CLIENT_SECRET, or SESSIONLY_GITHUB_CLIENT_ID with SESSIONLY_GITHUB_CLIENT_SECRET\)/);
   assert.match(hostedProblems({ ...env, SESSIONLY_PUBLIC_URL: " " }).join(), /SESSIONLY_PUBLIC_URL is not set/);
+  // Said before the server starts, not thrown once it is starting.
+  assert.match(hostedProblems({ ...env, SESSIONLY_PUBLIC_URL: "https://app.example.com/app" }).join(), /SESSIONLY_PUBLIC_URL must be an address like https:\/\/app\.example\.com, with no path/);
   // Or one reached over plain HTTP, where the cookies of a sign-in are not
   // kept to this host and every token crosses in clear. On the machine it
   // runs on nothing crosses anything, which is how one is tried.

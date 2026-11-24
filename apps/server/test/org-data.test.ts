@@ -31,6 +31,7 @@ async function call(token: string, method: string, path: string, body?: unknown)
 const HOSTED: Hosting = {
   offers: { hosted: true, noSignIn: false, providers: [], signup: false, inviteCode: false, publicUrl: null },
   accounts: {},
+  addUser: (c) => c.body(null, 404),
   open() {},
   early() {},
   routes() {},
