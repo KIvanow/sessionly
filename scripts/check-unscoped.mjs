@@ -7,7 +7,8 @@
 // uses the owner's database anywhere but where it finds a request's
 // organisation, and if starting the server hands the owner's database to
 // anything an edition supplies but the hosting of a hosted service, which signs
-// people in before any organisation is known.
+// people in before any organisation is known, and if ee/src/main.ts hands it
+// to anything but that hosting.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -175,10 +176,22 @@ function inRun(text) {
   // But for a hosted service's hosting, which signs people in.
   if (/\boptions\.(?!hosting\?\.\(db\))\w+\??\.?\(\s*[^)]*\bdb\b/.test(text)) found.push(`: an option is called with the owner's database`);
   const options = /export interface RunOptions \{[\s\S]*?\n\}/.exec(text)?.[0] ?? "";
-  if (!options || /\bDb\b/.test(options.replace(/\n\s*hosting\?: \(db: Db\) => Hosting;/, ""))) {
+  if (!options || /\bDb\b/.test(options.replace(/\n\s*hosting\?\s*:\s*\(\s*db\s*:\s*Db\s*\)\s*=>\s*Hosting\b[^;\n]*;/, ""))) {
     found.push(`: RunOptions must not mention Db`);
   }
   return found;
+}
+
+/**
+ * What is wrong with how ee/src/main.ts hands the owner's database on: from
+ * run.ts to the hosting (ee/src/hosted/index.ts) and to nothing else, so the
+ * name it gets there is used just once more, in that call.
+ */
+function inMain(text) {
+  const handed = /\bhosting\s*:\s*hosted\s*\?\s*\(\s*(\w+)\s*\)\s*=>\s*hosting\(\s*\1\s*,/.exec(text);
+  if (!handed) return [`: the owner's database must go straight to hosting(), as "hosting: hosted ? (db) => hosting(db, …)"`];
+  const uses = text.match(new RegExp(String.raw`\b${handed[1]}\b`, "g")).length;
+  return uses === 2 ? [] : [`: the owner's database (${handed[1]}) is used beyond handing it to hosting()`];
 }
 
 // The check checks itself first: every spelling that must be caught is.
@@ -246,6 +259,12 @@ const MUST_FAIL = [
   ["inRun", `${RUN}\nawait options.prepare?.(db);`],
   ["inRun", RUN.replace("migrations?: Migrations[];", "prepare?: (db: Db) => Promise<void>;")],
 ];
+const MAIN = `await runServer({\n  hosting: hosted\n    ? (db) =>\n        hosting(db, { accounts })\n    : undefined,\n});`;
+MUST_FAIL.push(
+  ["inMain", MAIN.replace("hosting(db,", "{ keep(db); return hosting(db,")],
+  ["inMain", MAIN.replace("(db) =>\n        hosting(db, { accounts })", "(db) => hosting(db, { accounts, also: db })")],
+  ["inMain", MAIN.replace("hosting(db,", "other(db,")],
+);
 const MUST_PASS = [
   ["imports", `import { rowLevelSecurity, toApp, type OrgDb } from "@sessionly/server";`],
   ["imports", `import type { OrgDb, Queryable } from "./db.ts";\nexport { toApp } from "./db.ts";`],
@@ -259,9 +278,11 @@ const MUST_PASS = [
   ["inApp", APP],
   ["inRun", RUN],
   ["inRun", RUN.replace("migrations?: Migrations[];", "migrations?: Migrations[];\n  hosting?: (db: Db) => Hosting;") + "\nconst hosting = options.hosting?.(db);"],
+  ["inRun", RUN.replace("migrations?: Migrations[];", "migrations?: Migrations[];\n  hosting?: (db: Db) => Hosting | undefined;")],
+  ["inMain", MAIN],
 ];
 // The sample has the first three uses and none of the rest.
-const checks = { imports, inApp: (text) => inApp(text, IN_APP.slice(0, 3)), inRun };
+const checks = { imports, inApp: (text) => inApp(text, IN_APP.slice(0, 3)), inRun, inMain };
 const wrong = [
   ...MUST_FAIL.filter(([check, text]) => checks[check](text).length === 0).map(([, text]) => `not caught:\n${text}`),
   ...MUST_PASS.filter(([check, text]) => checks[check](text).length > 0).map(([, text]) => `wrongly caught:\n${text}`),
@@ -282,6 +303,7 @@ for (const [dir, allowed] of Object.entries(ALLOWED)) {
     if (!allowed.includes(file)) found.push(...imports(text).map((what) => `${at}: ${what}`));
     if (at === "apps/server/src/app.ts") found.push(...inApp(text).map((what) => `${at}${what}`));
     if (at === "apps/server/src/run.ts") found.push(...inRun(text).map((what) => `${at}${what}`));
+    if (at === "ee/src/main.ts") found.push(...inMain(text).map((what) => `${at}${what}`));
   }
 }
 if (found.length) {

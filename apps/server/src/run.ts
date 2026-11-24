@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp, type Accounts, type Extension, type Hosting } from "./app.ts";
+import { PROVIDER_LABELS, PROVIDER_NAMES, providerSettings } from "./auth.ts";
 import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Db, type Migrations } from "./db.ts";
 import { tidy } from "./limits.ts";
 import { type SessionAt, UNWEIGHED, weighKeptSome } from "./pulls.ts";
@@ -43,7 +44,7 @@ export interface RunOptions {
 }
 
 /** The least a key to hash with may be. */
-const HASH_KEY_LENGTH = 32;
+export const HASH_KEY_LENGTH = 32;
 
 /** The key the committers kept of a pull request are hashed with, if one long enough is set. */
 export function hashKeyOf(env: NodeJS.ProcessEnv): string | undefined {
@@ -66,8 +67,21 @@ export function reason(err: unknown): string {
 /** The settings that are a count of something: `count` in db.ts says what one is. */
 export const COUNTS = ["SESSIONLY_RATE_PER_MINUTE", ...DB_COUNTS] as const;
 
-/** A hosted service's own settings, which nothing else takes. */
-const HOSTED_ONLY = ["SESSIONLY_SIGNUP", "SESSIONLY_SIGNUP_CODE", "SESSIONLY_SIGNUPS_PER_HOUR", "SESSIONLY_SIGNUPS_PER_NETWORK"];
+/**
+ * A hosted service's own settings, which nothing else takes. The demo's are
+ * among them: a server of your own would keep reports to its organisation
+ * whole, SESSIONLY_DEMO_HIDE or not, so it does not start with them.
+ */
+const HOSTED_ONLY = [
+  "SESSIONLY_SIGNUP",
+  "SESSIONLY_SIGNUP_CODE",
+  "SESSIONLY_SIGNUPS_PER_HOUR",
+  "SESSIONLY_SIGNUPS_PER_NETWORK",
+  "SESSIONLY_DEMO_FROM",
+  "SESSIONLY_DEMO_REPO",
+  "SESSIONLY_DEMO_ORG",
+  "SESSIONLY_DEMO_HIDE",
+];
 
 /**
  * Why a server would wrongly start as one of your own, whose dashboard
@@ -98,20 +112,18 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
   };
 }
 
-/** Signing in with these is the hosted service's, each with the two settings it needs. */
-const SIGN_IN_WITH = { Google: "SESSIONLY_GOOGLE_CLIENT", GitHub: "SESSIONLY_GITHUB_CLIENT" };
-
 /**
  * Settings that do not do what whoever set them expects. Said at the start,
- * since the server otherwise runs as if they were not there.
+ * since the server otherwise runs as if they were not there. A hosted
+ * service says what of its own settings is wrong (ee/src/hosted/config.ts).
  */
 export function unheeded(env: NodeJS.ProcessEnv, hosted = false): string[] {
-  const notes = misset(env, hosted ? [] : COUNTS);
-  for (const [label, prefix] of Object.entries(SIGN_IN_WITH)) {
-    const set = [`${prefix}_ID`, `${prefix}_SECRET`].filter((setting) => env[setting]?.trim());
+  const notes = misset(env, COUNTS);
+  for (const name of PROVIDER_NAMES) {
+    const set = providerSettings(name).filter((setting) => env[setting]?.trim());
     if (!hosted && set.length) {
       notes.push(
-        `${set.join(" and ")} ${set.length === 1 ? "is" : "are"} set, but signing in with ${label} is for the hosted service: this server's dashboard opens without signing in, and ${set.length === 1 ? "it is" : "they are"} not used.`,
+        `${set.join(" and ")} ${set.length === 1 ? "is" : "are"} set, but signing in with ${PROVIDER_LABELS[name]} is for the hosted service: this server's dashboard opens without signing in, and ${set.length === 1 ? "it is" : "they are"} not used.`,
       );
     }
   }

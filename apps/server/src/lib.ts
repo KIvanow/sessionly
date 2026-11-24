@@ -4,6 +4,9 @@ export {
   DEFAULT_ORG,
   hash,
   issueToken,
+  PROVIDER_LABELS,
+  PROVIDER_NAMES,
+  providerSettings,
   sameSecret,
   SIGN_IN_DAYS,
   type Principal,
@@ -26,7 +29,7 @@ export {
 export { allowed, callerOf, giveBack, invitesKey, network, orgRateKeys, take, widerNetwork, type Taken } from "./limits.ts";
 export { fromTheDashboard } from "./open.ts";
 export { chargeAgain, holdPull, holdPullSessions, IN_WORKTREE, rematchPulls, reportedPaths } from "./pulls.ts";
-export { COUNTS, hashKeyOf, reason, runServer, unheeded, type RunOptions } from "./run.ts";
+export { COUNTS, HASH_KEY_LENGTH, hashKeyOf, reason, runServer, unheeded, type RunOptions } from "./run.ts";
 export { Conflict, forgetLines, RemovedPerson, storeUpload } from "./sessions.ts";
 export { globalSetup, globalTeardown, testDb, testDbUrl } from "./testing.ts";
 export { emailFrom, newUserId, USER_COLUMNS, userInfo, UserProblem, type UserInfo } from "./users.ts";

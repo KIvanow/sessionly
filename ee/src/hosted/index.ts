@@ -49,6 +49,7 @@ export function hosting(ownerDb: Db, { accounts, demo }: HostingSettings): Hosti
   const offered = offers(accounts);
   return {
     offers: offered,
+    accounts,
 
     open(app) {
       // People sign in at one address, the public one: a provider sends them
@@ -130,9 +131,8 @@ export function hosting(ownerDb: Db, { accounts, demo }: HostingSettings): Hosti
 
       // Someone who was added signs in with an account that has the address
       // they were added under, and is shown the organisation then; nothing is
-      // sent to them.
+      // sent to them. Only admins get here: the core's /users are theirs.
       api.post("/users", async (c) => {
-        if (c.get("principal").role !== "admin") return c.json({ error: "admins only" }, 403);
         if (!offered.providers.length) {
           return c.json({ error: "signing in is not set up here; create a token instead", code: "no_sign_in" }, 409);
         }

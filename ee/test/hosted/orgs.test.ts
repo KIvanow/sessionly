@@ -79,7 +79,8 @@ test("the owner deletes the organisation by its name, and it drops out of signin
   assert.equal((await raw(admin, "DELETE", "/org", { name: "Ends Here" }, hosted)).status, 403);
   const selfHosted = createApp(db, { bootstrap: { token: "delete-bootstrap", email: "root@example.com" } });
   const refused = await raw("delete-bootstrap", "DELETE", "/org", { name: "Default" }, selfHosted);
-  assert.equal(refused.status, 404);
+  assert.equal(refused.status, 403);
+  assert.match(refused.text, /drop the database/);
   const [untouched] = await db.query<{ deleted_at: unknown }>(`SELECT deleted_at FROM orgs WHERE id = 'default'`);
   assert.equal(untouched?.deleted_at, null);
 

@@ -72,6 +72,12 @@ test("a server of your own opens its dashboard as its admin, and a hosted servic
   await db.asOrg("default", (tx) =>
     tx.query(`INSERT INTO users (id, org_id, email, role) VALUES ($1, 'default', 'kris@example.com', 'admin')`, [selfId]),
   );
+  // Nobody is added here, and the organisation is not deleted: there is no signing in, and whoever runs it drops the database.
+  const added = await call(own, "POST", "/users", { token: opened.body.token, body: { email: "new@example.com" } });
+  assert.deepEqual([added.status, added.body.code], [409, "no_sign_in"]);
+  const deleted = await call(own, "DELETE", "/org", { token: opened.body.token, body: { name: "Default" } });
+  assert.equal(deleted.status, 403);
+  assert.match(deleted.body.error, /drop the database/);
   const removed = await call(own, "DELETE", `/users/${selfId}`, { token: opened.body.token });
   assert.deepEqual([removed.status, removed.body.code], [409, "not_yourself"]);
   await db.asOrg("default", (tx) => tx.query(`UPDATE users SET removed_at = now() WHERE id = $1`, [selfId]));
@@ -92,6 +98,9 @@ test("a server is a hosted service only when SESSIONLY_HOSTED says so plainly", 
     notHostedProblems({ SESSIONLY_SIGNUP: "open", SESSIONLY_SIGNUPS_PER_HOUR: "100" }).join(),
     /SESSIONLY_SIGNUP and SESSIONLY_SIGNUPS_PER_HOUR are set/,
   );
+  // So would a demo's: what of its reports not to show would not be heeded.
+  assert.match(notHostedProblems({ SESSIONLY_DEMO_ORG: "demo", SESSIONLY_DEMO_HIDE: "notes" }).join(), /SESSIONLY_DEMO_ORG and SESSIONLY_DEMO_HIDE are set/);
+  assert.deepEqual(notHostedProblems({ SESSIONLY_HOSTED: "true", SESSIONLY_DEMO_HIDE: "notes" }), []);
 });
 
 test("a count is given back to the hour it was taken in", async () => {
@@ -176,8 +185,9 @@ test("a setting that does nothing as it is set is said at the start", () => {
       "SESSIONLY_GITHUB_CLIENT_ID and SESSIONLY_GITHUB_CLIENT_SECRET are set, but signing in with GitHub is for the hosted service: this server's dashboard opens without signing in, and they are not used.",
     ],
   );
-  // A hosted service says what it does not use of these itself.
-  assert.deepEqual(unheeded({ SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_RATE_PER_MINUTE: "x" }, true), []);
+  // A hosted service says what it does not use of its providers itself; a count is the core's to say either way.
+  assert.deepEqual(unheeded({ SESSIONLY_GITHUB_CLIENT_ID: "id" }, true), []);
+  assert.match(unheeded({ SESSIONLY_RATE_PER_MINUTE: "x" }, true).join(), /SESSIONLY_RATE_PER_MINUTE/);
   // What sent the links that people signed in with before.
   assert.deepEqual(unheeded({ RESEND_API_KEY: "re_test", SESSIONLY_EMAIL_FROM: "a@b.example" }), [
     "RESEND_API_KEY and SESSIONLY_EMAIL_FROM are set, but no email is sent any more: people sign in with Google or GitHub.",

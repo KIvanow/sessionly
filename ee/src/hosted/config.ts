@@ -18,7 +18,7 @@
 //                          in the second without anything that was typed or run, as
 //                          `node src/cli.ts demo import` copies them (see demo.ts); reports to the
 //                          second are kept without SESSIONLY_DEMO_HIDE: what of it not to show
-import { count, COUNTS, hashKeyOf, misset } from "@sessionly/server";
+import { count, HASH_KEY_LENGTH, hashKeyOf, misset, providerSettings as settingsOf } from "@sessionly/server";
 import { demoFrom, reportsShownIn } from "./demo.ts";
 import { github, google, PROVIDER_LABELS as LABELS, PROVIDER_NAMES, type Client, type Provider, type ProviderName } from "./oauth.ts";
 import type { Accounts } from "./signup.ts";
@@ -26,14 +26,8 @@ import type { Accounts } from "./signup.ts";
 /** A plain-HTTP address that leads nowhere but to this machine. */
 const ON_THIS_MACHINE = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/;
 
-/** The settings that are a count of something. */
-const HOSTED_COUNTS = [...COUNTS, "SESSIONLY_SIGNUPS_PER_HOUR", "SESSIONLY_SIGNUPS_PER_NETWORK"] as const;
-
-/** The two settings a provider needs. */
-function settingsOf(name: ProviderName): [id: string, secret: string] {
-  const prefix = `SESSIONLY_${name.toUpperCase()}_CLIENT`;
-  return [`${prefix}_ID`, `${prefix}_SECRET`];
-}
+/** The settings that are a count of something, beyond the core's (which it checks itself). */
+const HOSTED_COUNTS = ["SESSIONLY_SIGNUPS_PER_HOUR", "SESSIONLY_SIGNUPS_PER_NETWORK"] as const;
 
 /** What the environment has for a provider, if it has both halves. */
 function clientOf(env: NodeJS.ProcessEnv, name: ProviderName): Client | undefined {
@@ -66,7 +60,7 @@ export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
   }
   if (!hashKeyOf(env)) {
     problems.push(
-      `SESSIONLY_HASH_KEY is not set, or is shorter than 32 characters: what is kept of the addresses on a pull request's commits is hashed with it. Any long random text will do (openssl rand -hex 32); keep it, since pull requests kept with another have to be reported again before their lines can be matched again.`,
+      `SESSIONLY_HASH_KEY is not set, or is shorter than ${HASH_KEY_LENGTH} characters: what is kept of the addresses on a pull request's commits is hashed with it. Any long random text will do (openssl rand -hex 32); keep it, since pull requests kept with another have to be reported again before their lines can be matched again.`,
     );
   }
   if (!PROVIDER_NAMES.some((name) => clientOf(env, name))) {

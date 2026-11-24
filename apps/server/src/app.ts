@@ -94,6 +94,8 @@ export type Extension = (api: Api) => void;
 export interface Hosting {
   /** What `/api/v1/auth/options` answers. */
   offers: AuthOptions;
+  /** How people get in and how much they may ask, in place of the server's own `accounts`: a hosted service counts requests unless told otherwise. */
+  accounts: Accounts;
   /** On the server, ahead of everything else: its routes that need no token. */
   open(app: Hono<Env>): void;
   /** On the API, after the large bodies are read and before the transaction a request runs in. */
@@ -314,7 +316,7 @@ const readsPulls = (method: string, path: string): boolean => method === "GET" &
 
 export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
-  const accounts = options.accounts ?? {};
+  const accounts = options.hosting?.accounts ?? options.accounts ?? {};
 
   api.use("*", async (c, next) => {
     const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap, {
@@ -837,6 +839,11 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     await next();
   });
   users.get("/", async (c) => c.json({ users: await listUsers(c.get("db")) }));
+  if (!options.hosting) {
+    users.post("/", (c) =>
+      c.json({ error: "signing in is not set up here; create a token instead", code: "no_sign_in" }, 409),
+    );
+  }
   users.delete("/:id", async (c) => {
     // data=true also deletes their sessions and the repositories they stopped.
     // Anything else is the removal alone, as it always was.
@@ -850,7 +857,18 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   );
   api.route("/users", users);
 
-  options.hosting?.routes(api);
+  if (options.hosting) {
+    options.hosting.routes(api);
+  } else {
+    // A server of one team has no request to delete its organisation: whoever runs it drops the database.
+    api.delete("/org", (c) => {
+      if (!c.get("principal").owner) return c.json({ error: "only the owner of an organisation can do this" }, 403);
+      return c.json(
+        { error: "deleting an organisation is for the hosted service; on a server of your own, drop the database" },
+        403,
+      );
+    });
+  }
   for (const extend of options.extensions ?? []) extend(api);
 
   const app = new Hono<Env>();

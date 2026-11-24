@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { createApp, type Env, type Options } from "../../../apps/server/src/app.ts";
+import { accountsFrom as coreAccountsFrom } from "../../../apps/server/src/run.ts";
 import { APP_ROLE, migrationAt, openDb, type Db } from "../../../apps/server/src/db.ts";
 import { giveBack, network, take, tidy, widerNetwork } from "../../../apps/server/src/limits.ts";
 import { emailFrom, forgetAccount } from "../../../apps/server/src/users.ts";
@@ -45,9 +46,13 @@ const hosted: Accounts = {
   trustProxy: true,
 };
 
-/** A server that is a hosted service, as the ee server starts one. */
+/**
+ * A server that is a hosted service, as the ee server starts one: the core's
+ * own accounts, from an environment with none of these set, go to createApp,
+ * and the hosted service's to its hosting.
+ */
 function hostedApp(at: Db, accounts: Accounts, options: Options = {}, demo?: HostingSettings["demo"]): Hono<Env> {
-  return createApp(at, { ...options, accounts, hosting: hosting(at, { accounts, demo }) });
+  return createApp(at, { ...options, accounts: coreAccountsFrom({}), hosting: hosting(at, { accounts, demo }) });
 }
 
 before(async () => {
@@ -1154,6 +1159,18 @@ test("too many requests are refused, and too many organisations are not created"
   for (let i = 0; i < 5; i++) answers.push((await call(limited, "GET", "/ping", { token })).status);
   assert.deepEqual(answers, [200, 200, 200, 429, 429]);
 
+  // Where none is set, a hosted service still counts: 600 a minute, as the ee server is started.
+  const env = { SESSIONLY_PUBLIC_URL: "https://app.test", SESSIONLY_GITHUB_CLIENT_ID: "id", SESSIONLY_GITHUB_CLIENT_SECRET: "secret" };
+  const started = createApp(db, { accounts: coreAccountsFrom(env), hosting: hosting(db, { accounts: accountsFrom(env) }) });
+  const steady = await tokenFor(db, { email: "steady@example.com", role: "member" });
+  const before = (await db.query<{ key: string }>(`SELECT key FROM rate_counters`)).map((row) => row.key);
+  assert.equal((await call(started, "GET", "/ping", { token: steady })).status, 200);
+  const counted = await db.query<{ key: string }>(`SELECT key FROM rate_counters WHERE key LIKE 'token:%' AND NOT key = ANY($1)`, [before]);
+  assert.equal(counted.length, 1);
+  await db.query(`UPDATE rate_counters SET n = 599 WHERE key = $1`, [counted[0]?.key]);
+  assert.equal((await call(started, "GET", "/ping", { token: steady })).status, 200);
+  assert.equal((await call(started, "GET", "/ping", { token: steady })).status, 429);
+
   // Counters of windows long past are cleared away.
   await db.query(`UPDATE rate_counters SET window_start = window_start - interval '3 hours'`);
   await tidy(db);
@@ -1400,11 +1417,11 @@ test("a setting that does nothing as it is set is said at the start", () => {
     assert.match(hostedNotes({ ...github, SESSIONLY_PUBLIC_URL: there }).join(), /^SESSIONLY_PUBLIC_URL is plain HTTP on a host that is not this machine/, there);
   }
   assert.deepEqual(hostedNotes({ SESSIONLY_PUBLIC_URL: "http://sessionly.corp.example" }), []);
-  // A count that is not one.
-  assert.deepEqual(hostedNotes({ SESSIONLY_RATE_PER_MINUTE: "600", SESSIONLY_SIGNUPS_PER_HOUR: "100", SESSIONLY_DB_POOL: "8", SESSIONLY_SIGNUPS_PER_NETWORK: "" }), []);
+  // A count of its own that is not one; the core's (SESSIONLY_RATE_PER_MINUTE, SESSIONLY_DB_POOL) the core says itself.
+  assert.deepEqual(hostedNotes({ SESSIONLY_SIGNUPS_PER_HOUR: "100", SESSIONLY_SIGNUPS_PER_NETWORK: "" }), []);
   const notes = hostedNotes({ SESSIONLY_RATE_PER_MINUTE: "0.5", SESSIONLY_SIGNUPS_PER_HOUR: "many", SESSIONLY_SIGNUPS_PER_NETWORK: "0", SESSIONLY_DB_POOL: "-1" });
-  assert.equal(notes.length, 4);
-  assert.match(notes[0] ?? "", /^SESSIONLY_RATE_PER_MINUTE is "0\.5", which is not a whole number above 0/);
+  assert.equal(notes.length, 2);
+  assert.match(notes[0] ?? "", /^SESSIONLY_SIGNUPS_PER_HOUR is "many", which is not a whole number above 0/);
   assert.equal(accountsFrom({ SESSIONLY_SIGNUPS_PER_NETWORK: "25" }).signupsPerNetwork, 25);
 });
 

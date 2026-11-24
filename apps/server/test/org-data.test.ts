@@ -30,6 +30,7 @@ async function call(token: string, method: string, path: string, body?: unknown)
 /** A hosted service as far as the core can tell: it has one, and nobody signs in to it here. */
 const HOSTED: Hosting = {
   offers: { hosted: true, noSignIn: false, providers: [], signup: false, inviteCode: false, publicUrl: null },
+  accounts: {},
   open() {},
   early() {},
   routes() {},

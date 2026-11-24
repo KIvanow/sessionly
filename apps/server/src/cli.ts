@@ -37,6 +37,13 @@ function usage(): never {
   );
   process.exit(2);
 }
+if (group === "org" || group === "demo") {
+  // As an old cron line still asks: said plainly, since nothing else would.
+  console.error(
+    `"${group}" is a hosted service's, and is ee's command line now: run node src/cli.ts ${positionals.join(" ")} in ee/ (in the container, with -w /app/ee instead of -w /app/apps/server).`,
+  );
+  process.exit(2);
+}
 if (group !== "token" && group !== "person") usage();
 
 const embedded = fileURLToPath(new URL("../data/pglite", import.meta.url));

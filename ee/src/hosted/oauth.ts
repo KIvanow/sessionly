@@ -6,12 +6,9 @@
 // away.
 import { createHash } from "node:crypto";
 
-import type { ProviderName } from "@sessionly/server";
+import { PROVIDER_LABELS, PROVIDER_NAMES, type ProviderName } from "@sessionly/server";
 
-export type { ProviderName };
-export const PROVIDER_NAMES: readonly ProviderName[] = ["google", "github"];
-/** Each, as it is written to people. */
-export const PROVIDER_LABELS: Record<ProviderName, string> = { google: "Google", github: "GitHub" };
+export { PROVIDER_LABELS, PROVIDER_NAMES, type ProviderName };
 
 /** One way of signing in. */
 export interface Provider {
