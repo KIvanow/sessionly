@@ -8,8 +8,12 @@ nav_order: 10
 Everything outside `ee/` is Apache-2.0 ([`LICENSE`](https://github.com/KIvanow/sessionly/blob/main/LICENSE)): the `sessionly` binary (capture, ledger,
 rewrite rate, command line, upload), the server and the dashboard. It never needs a license key.
 
-`ee/` ([`LICENSE-EE`](https://github.com/KIvanow/sessionly/blob/main/LICENSE-EE)) holds the Business and Enterprise features. Nothing outside it
-imports from it, which CI checks.
+`ee/` ([`LICENSE-EE`](https://github.com/KIvanow/sessionly/blob/main/LICENSE-EE)) holds the Business and Enterprise features, and the hosted
+service: signing up, signing in with Google or GitHub, adding people by address, deleting an
+organisation, and showing a repository in an organisation of its own (`ee/src/hosted`, with
+`SESSIONLY_HOSTED=true`). Nothing outside it imports from it, which CI checks. A server of your
+own needs none of that: its dashboard opens without signing in, and machines connect with
+tokens.
 
 ## Running the ee server
 

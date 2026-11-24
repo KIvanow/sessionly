@@ -11,15 +11,31 @@
 // address, so it cannot be passed on in a link, and is in no history and no
 // log. Only its hash is stored, and it works once.
 import { randomBytes } from "node:crypto";
-import { isIPv4, isIPv6 } from "node:net";
-import { domainToASCII } from "node:url";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import { getConnInfo } from "@hono/node-server/conninfo";
-import { DEFAULT_ORG, hash, issueToken, sameSecret, type Role } from "./auth.ts";
-import type { Db, Queryable } from "./db.ts";
-import { allowed, giveBack, take, type Taken } from "./limits.ts";
+import type { AuthOptions } from "@sessionly/schema";
+import {
+  allowed,
+  callerOf,
+  emailFrom,
+  fromTheDashboard,
+  giveBack,
+  hash,
+  issueToken,
+  network,
+  newUserId,
+  sameSecret,
+  SIGN_IN_DAYS,
+  take,
+  widerNetwork,
+  type Accounts as CoreAccounts,
+  type Db,
+  type ProviderName,
+  type Queryable,
+  type Role,
+  type Taken,
+} from "@sessionly/server";
 import {
   challengeOf,
   errorWord,
@@ -29,11 +45,7 @@ import {
   ProviderProblem,
   type Person,
   type Provider,
-  type ProviderName,
 } from "./oauth.ts";
-
-/** How long a token from signing in lasts. */
-export const SIGN_IN_DAYS = 7;
 
 /** Someone is shown at most this many organisations they have signed in to before. */
 const MAX_ORGS = 50;
@@ -53,27 +65,15 @@ const AWAY_MINUTES = 10;
 /** How long the code the dashboard is handed works: long enough to choose an organisation, or name a new one. */
 export const CODE_MINUTES = 10;
 
-export interface Accounts {
-  /**
-   * The ways of signing in that are set up. Hosted only: a server of your
-   * own opens its dashboard without signing in. Without one, a hosted
-   * service is got into by token only.
-   */
+export interface Accounts extends CoreAccounts {
+  /** The ways of signing in that are set up. Without one, the service is got into by token only. */
   providers?: Provider[];
-  /** Whose the dashboard of a server of your own is, opened without signing in (SESSIONLY_ADMIN_EMAIL). */
-  admin?: string;
   /** Where the dashboard is reached, which is also where a provider sends people back: `https://app.example.com`. */
   publicUrl?: string;
-  /** A service many organisations share: signing up creates one. */
-  hosted?: boolean;
-  /** Whether anyone may sign up (hosted only). */
+  /** Whether anyone may sign up. */
   signup?: "open" | "off";
   /** If set, signing up needs this code as well: an invitation, or a waiting list. */
   signupCode?: string;
-  /** The server is behind a proxy of its own, whose X-Forwarded-For can be believed. */
-  trustProxy?: boolean;
-  /** Requests a token may make a minute. Not counted if unset. */
-  ratePerMinute?: number;
   /** Organisations created an hour, by everyone together. Default 100. */
   signupsPerHour?: number;
   /** Organisations created an hour from one network (a /24, or a /48 of IPv6). Default 10. */
@@ -142,103 +142,20 @@ export function orgNameFrom(typed: string): string | null {
   return plain.normalize("NFKC") === plain ? name : null;
 }
 
-/** What the server offers someone who is not signed in. */
-export function offers(accounts: Accounts) {
-  const hosted = accounts.hosted === true;
+/** What the service offers someone who is not signed in. */
+export function offers(accounts: Accounts): AuthOptions {
   // A provider sends people back to the public address: without one there is nowhere to come back to.
-  const providers = hosted && accounts.publicUrl ? (accounts.providers ?? []).map((provider) => provider.name) : [];
+  const providers = accounts.publicUrl ? (accounts.providers ?? []).map((provider) => provider.name) : [];
   return {
-    hosted,
-    // A server of your own: the dashboard opens as its admin, with nobody signing in.
-    noSignIn: !hosted,
+    hosted: true,
+    noSignIn: false,
     providers,
-    signup: providers.length > 0 && accounts.hosted === true && accounts.signup !== "off",
+    signup: providers.length > 0 && accounts.signup !== "off",
     inviteCode: Boolean(accounts.signupCode),
     // The one address people sign in at, to tell someone who was added where to go.
     publicUrl: providers.length ? (accounts.publicUrl?.replace(/\/+$/, "") ?? null) : null,
   };
 }
-
-/**
- * An address as it is kept and compared, or null if it is not one this
- * takes. Lower case, and the domain in its plain form (`domainToASCII`), so
- * that one domain is one however it is written. The part before the @ is
- * the letters, digits and signs of an ordinary address: no quotes, no
- * spaces, nothing invisible, and no letters from beyond ASCII, each of which
- * is a way to write one mailbox as many addresses.
- */
-export function emailFrom(typed: unknown): string | null {
-  if (typeof typed !== "string") return null;
-  const text = typed.trim();
-  const at = text.lastIndexOf("@");
-  if (at < 1) return null;
-  const local = text.slice(0, at).toLowerCase();
-  if (!/^[a-z0-9!#$%&'*+/=?^_`{|}~.-]+$/.test(local) || /^\.|\.$|\.\./.test(local)) return null;
-  const labels = domainToASCII(text.slice(at + 1).replace(/\.$/, "")).toLowerCase().split(".");
-  // A domain as the DNS has them: two labels or more, each of 63 characters
-  // at most with no hyphen at either end, and the last not a number (which
-  // would be an IP address, or nothing).
-  if (labels.length < 2 || !labels.every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return null;
-  if (/^\d+$/.test(labels.at(-1) ?? "")) return null;
-  const domain = labels.join(".");
-  const email = `${local}@${domain}`;
-  return email.length <= 254 ? email : null;
-}
-
-/** The groups of an IPv6 address, written out; null for anything else. */
-function groupsOf(address: string): string[] | null {
-  if (!isIPv6(address)) return null;
-  const [head = "", tail] = address.split("::");
-  const front = head ? head.split(":") : [];
-  const back = tail ? tail.split(":") : [];
-  const groups = tail === undefined ? front : [...front, ...Array(8 - front.length - back.length).fill("0"), ...back];
-  return groups.map((group) => group.toLowerCase().replace(/^0+(?=.)/, ""));
-}
-
-/** An address as it is compared: no brackets or zone, and an IPv4 address written as IPv6 as IPv4. */
-function plainAddress(address: string): string {
-  const plain = address.replace(/^\[|\]$/g, "").split("%")[0] ?? "";
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(plain)?.[1];
-  return mapped && isIPv4(mapped) ? mapped : plain;
-}
-
-/**
- * What to count an address under. One IPv4 address is one caller. An IPv6
- * caller usually has a whole /64 to pick addresses from, so its network is
- * what is counted.
- */
-export function network(address: string): string {
-  const plain = plainAddress(address);
-  const groups = groupsOf(plain);
-  return groups ? `${groups.slice(0, 4).join(":")}::/64` : plain;
-}
-
-/**
- * The wider network an address is in, for what is counted by the hour: a /24
- * of IPv4, and the /48 a site is usually given of IPv6.
- */
-export function widerNetwork(address: string): string {
-  const plain = plainAddress(address);
-  const groups = groupsOf(plain);
-  if (groups) return `${groups.slice(0, 3).join(":")}::/48`;
-  return isIPv4(plain) ? `${plain.split(".").slice(0, 3).join(".")}.0/24` : plain;
-}
-
-/** Who is asking, as far as it can be told: for counting, not for trusting. */
-function callerOf(c: Context, trustProxy: boolean | undefined): string {
-  if (trustProxy) {
-    // The last hop is the one the proxy added itself.
-    const hops = (c.req.header("x-forwarded-for") ?? "").split(",").map((hop) => hop.trim());
-    const last = hops.filter(Boolean).at(-1);
-    if (last) return last;
-  }
-  try {
-    return getConnInfo(c).remote.address ?? "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
 /** `Acme, Inc.` becomes `acme-inc-x7k2p9`: readable, and never taken. */
 export function orgIdFor(name: string): string {
   const slug = name
@@ -253,12 +170,6 @@ export function orgIdFor(name: string): string {
   const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
   const tail = Array.from(randomBytes(6), (byte) => alphabet[byte % alphabet.length]).join("");
   return `${slug || "org"}-${tail}`;
-}
-
-const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-/** `usr_` and 14 characters. */
-export function newUserId(): string {
-  return `usr_${Array.from(randomBytes(14), (byte) => ALPHABET[byte % ALPHABET.length]).join("")}`;
 }
 
 /** What a provider said of someone who has just come back from it. */
@@ -414,7 +325,7 @@ class Refused extends Error {
 const DEMO = "demo";
 
 /**
- * The routes under /api/v1/auth that need no token. `demoOrg` is the
+ * The routes under /api/v1/auth that sign in and sign up. `demoOrg` is the
  * organisation a repository is shown in (demo.ts), which anyone who signs in
  * may join as a viewer.
  */
@@ -433,8 +344,7 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
   // And one for whoever has come back, until they have said where to.
   const arrivedAs = `${prefix}sessionly-arrived`;
   const ours = { httpOnly: true, secure, sameSite: "Lax", path: "/" } as const;
-  const providerOf = (name: ProviderName) =>
-    home && accounts.hosted === true ? accounts.providers?.find((provider) => provider.name === name) : undefined;
+  const providerOf = (name: ProviderName) => (home ? accounts.providers?.find((provider) => provider.name === name) : undefined);
   const redirectUri = (provider: ProviderName) => `${home}/api/v1/auth/${provider}/callback`;
   const tooMany = (c: Context) => c.json({ error: "too many requests; try again in a minute", code: "rate_limited" }, 429);
   const perMinute = async (c: Context, what: string, max: number) =>
@@ -444,27 +354,8 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
   const notSetUp = (c: Context) => c.json({ error: "signing in that way is not set up here", code: "no_sign_in" }, 404);
   /** Back to the dashboard, which says what happened. */
   const back = (c: Context, problem: Problem) => c.redirect(`${home}/#problem=${problem}`);
-  // The address people sign in at: a server of your own has none, and is opened at any of its names.
-  const origin = home && accounts.hosted === true ? new URL(home).origin : undefined;
-  /**
-   * What only the dashboard asks: JSON, and from this very site if the
-   * browser says where from. A form on another site cannot send JSON, and a
-   * page of a neighbouring host (which the cookie's SameSite rule lets
-   * through) says it is not this one. Otherwise such a page could, in the
-   * name of whoever has just signed in, create an organisation or end
-   * their sign-in. What is not a browser says neither, and has no cookie.
-   */
-  const fromTheDashboard = async (c: Context, next: () => Promise<void>) => {
-    if (!/^application\/json\s*(;|$)/i.test(c.req.header("content-type") ?? "")) {
-      return c.json({ error: "this takes JSON (content-type: application/json)", code: "not_json" }, 415);
-    }
-    const from = c.req.header("origin");
-    const site = c.req.header("sec-fetch-site");
-    if ((from !== undefined && origin !== undefined && from !== origin) || (site !== undefined && site !== "same-origin" && site !== "none")) {
-      return c.json({ error: "this is asked by the dashboard itself, and by no other site", code: "elsewhere" }, 403);
-    }
-    await next();
-  };
+  // The address people sign in at, where the dashboard asks from.
+  const origin = home ? new URL(home).origin : undefined;
 
   // Nobody here is known yet, so nothing large is read from them, and
   // nothing they are answered is kept by anything in between.
@@ -476,8 +367,6 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
     await next();
     c.header("Cache-Control", "no-store");
   });
-
-  open.get("/options", (c) => c.json(offers(accounts)));
 
   // Off to the provider. The browser keeps, in a cookie only this server
   // reads, what it must show on the way back: that it is the browser that
@@ -575,28 +464,7 @@ export function openRoutes(db: Db, accounts: Accounts, demoOrg?: string): Hono {
     open.get(`/${name}/callback`, comeBack(name));
   }
 
-  for (const path of ["/check", "/cancel", "/verify", "/open"]) open.use(path, fromTheDashboard);
-
-  // A server of your own opens its dashboard without signing in: it is
-  // handed a session as the admin, which runs out as a sign-in does. Anyone
-  // who can reach the server can have one; a hosted service has none.
-  open.post("/open", async (c) => {
-    if (!offers(accounts).noSignIn) return c.json({ error: "this server is signed in to", code: "sign_in" }, 404);
-    if (!(await perMinute(c, "auth-open", 20))) return tooMany(c);
-    const expiresAt = new Date(Date.now() + SIGN_IN_DAYS * 86_400_000);
-    const email = accounts.admin ?? "admin@localhost";
-    const [org] = await db.query<{ name: string }>(`SELECT name FROM orgs WHERE id = $1`, [DEFAULT_ORG]);
-    const { token } = await issueToken(db, DEFAULT_ORG, { email, role: "admin", signIn: "open", expiresAt });
-    const opened: SignedIn = {
-      token,
-      org: { id: DEFAULT_ORG, name: org?.name ?? DEFAULT_ORG },
-      email,
-      role: "admin",
-      expires_at: expiresAt.toISOString(),
-      created: false,
-    };
-    return c.json(opened);
-  });
+  for (const path of ["/check", "/cancel", "/verify"]) open.use(path, (c, next) => fromTheDashboard(c, next, origin));
 
   const invalid = (c: Context) => {
     deleteCookie(c, arrivedAs, { path: "/", secure });

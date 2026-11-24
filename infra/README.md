@@ -5,7 +5,9 @@ This folder runs Sessionly as a service anyone can sign up to: copies of the ser
 itself does not need any of this: the `docker-compose.yml` at the top of the repository is for
 that.
 
-What a hosted service is, in the server's terms: `SESSIONLY_HOSTED=true`. Signing up creates an
+What a hosted service is, in the server's terms: the ee server (`ee/src/hosted`, under
+[`LICENSE-EE`](../LICENSE-EE), which does not let anyone else offer it as a hosted service)
+with `SESSIONLY_HOSTED=true`. Signing up creates an
 organisation, each organisation sees only its own rows (every query names it, and Postgres
 row-level security enforces it underneath), people sign in with Google or GitHub, and there
 is no admin of everything.
@@ -217,7 +219,7 @@ All in `infra/.env`; `.env.example` describes each. The ones that decide who get
 | `SESSIONLY_SIGNUP_CODE` | If set, signing up needs this code as well: a waiting list, or invitations. |
 | `SESSIONLY_HASH_KEY` | Required: 32 characters or more of random text (`openssl rand -hex 32`). What the server keeps of the email addresses on a pull request's commits is hashed with it, so the database alone does not confirm a guessed address. Keep it out of the database's backups, and keep it the same: after a change, pull requests have to be reported once more before their lines can be matched again. |
 | `SESSIONLY_RATE_PER_MINUTE` | Requests one token may make a minute (default 600). |
-| `SESSIONLY_DEMO_FROM`, `SESSIONLY_DEMO_REPO`, `SESSIONLY_DEMO_ORG`, `SESSIONLY_DEMO_HIDE` | One repository's sessions shown in a second organisation, without anything that was typed or run, as `node src/cli.ts demo import` copies them. See [the server's settings](https://docs.sessionly.dev/server-configuration.html#showing-a-repository-in-another-organisation). |
+| `SESSIONLY_DEMO_FROM`, `SESSIONLY_DEMO_REPO`, `SESSIONLY_DEMO_ORG`, `SESSIONLY_DEMO_HIDE` | One repository's sessions shown in a second organisation, without anything that was typed or run, as `node src/cli.ts demo import` (in `/app/ee`) copies them. See [the server's settings](https://docs.sessionly.dev/server-configuration.html#showing-a-repository-in-another-organisation). |
 
 A setting that is a count (this one, the two below, `SESSIONLY_DB_POOL`,
 `SESSIONLY_DB_QUERY_SECONDS`) is a whole number above 0 in plain digits. Anything else
@@ -344,7 +346,7 @@ Compose then warns that it did not make that volume itself, and uses it all the 
 
 - **Plans, quotas and billing.** Every organisation is unlimited. Exporting an
   organisation and deleting it are on the dashboard. Within 7 days, the same
-  `docker compose … run -w /app/apps/server` as `person forget-account` undoes a
+  `docker compose … run` as `person forget-account`, with `-w /app/ee`, undoes a
   deletion with `node src/cli.ts org restore <id>`, and `node src/cli.ts org purge`
   removes what is due.
 - **A deploy job.** Updating is the commands above, by hand.

@@ -1,7 +1,8 @@
 // The people of an organisation: who may sign in to it, and with what role.
+import { randomBytes } from "node:crypto";
+import { domainToASCII } from "node:url";
 import type { OrgDb } from "./db.ts";
-import type { Principal } from "./auth.ts";
-import type { ProviderName } from "./oauth.ts";
+import type { Principal, ProviderName } from "./auth.ts";
 import { forgetLines, holdUploads } from "./sessions.ts";
 
 export interface UserInfo {
@@ -30,7 +31,8 @@ export class UserProblem extends Error {
 const iso = (value: unknown): string | null =>
   value == null ? null : value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString();
 
-const info = (row: Record<string, unknown>): UserInfo => ({
+/** A row of `users` as it is answered. */
+const userInfo = (row: Record<string, unknown>): UserInfo => ({
   id: String(row.id),
   email: String(row.email),
   role: row.role as UserInfo["role"],
@@ -39,16 +41,17 @@ const info = (row: Record<string, unknown>): UserInfo => ({
   signed_in_with: (row.sign_in_provider as ProviderName | null) ?? null,
 });
 
-const COLUMNS = `id, email, role, created_at, removed_at, sign_in_provider`;
+/** What `userInfo` reads. */
+const USER_COLUMNS = `id, email, role, created_at, removed_at, sign_in_provider`;
 
 /** Everyone who is or was a user of the organisation, owners first. */
 export async function listUsers(db: OrgDb): Promise<UserInfo[]> {
   const rows = await db.query(
-    `SELECT ${COLUMNS} FROM users WHERE org_id = $1
+    `SELECT ${USER_COLUMNS} FROM users WHERE org_id = $1
      ORDER BY removed_at IS NOT NULL, role <> 'owner', role <> 'admin', email`,
     [db.orgId],
   );
-  return rows.map(info);
+  return rows.map(userInfo);
 }
 
 /** The organisation's name, for the messages it sends. */
@@ -58,7 +61,7 @@ export async function orgName(db: OrgDb): Promise<string> {
 }
 
 /**
- * Add a person, or bring back one who was removed. Their history was never
+ * Add a person, or bring back one who was removed (on the hosted service, ee/src/hosted). Their history was never
  * taken away: sessions are kept under the address they were filed under.
  */
 export async function addUser(
@@ -91,15 +94,47 @@ export async function addUser(
         `UPDATE users SET removed_at = NULL, role = $3, invited_by = $4, invited_via = $5, invited_at = now(),
                           confirmed_at = NULL, sign_in_provider = NULL, sign_in_account = NULL
          WHERE org_id = $1 AND id = $2
-         RETURNING ${COLUMNS}`,
+         RETURNING ${USER_COLUMNS}`,
         [db.orgId, existing.id, role, invitedBy, invitedVia],
       )
     : await db.query(
         `INSERT INTO users (id, org_id, email, role, invited_by, invited_via, invited_at) VALUES ($1, $2, $3, $4, $5, $6, now())
-         RETURNING ${COLUMNS}`,
+         RETURNING ${USER_COLUMNS}`,
         [id, db.orgId, address, role, invitedBy, invitedVia],
       );
-  return info(rows[0] ?? {});
+  return userInfo(rows[0] ?? {});
+}
+
+/**
+ * An address as it is kept and compared, or null if it is not one this
+ * takes. Lower case, and the domain in its plain form (`domainToASCII`), so
+ * that one domain is one however it is written. The part before the @ is
+ * the letters, digits and signs of an ordinary address: no quotes, no
+ * spaces, nothing invisible, and no letters from beyond ASCII, each of which
+ * is a way to write one mailbox as many addresses.
+ */
+export function emailFrom(typed: unknown): string | null {
+  if (typeof typed !== "string") return null;
+  const text = typed.trim();
+  const at = text.lastIndexOf("@");
+  if (at < 1) return null;
+  const local = text.slice(0, at).toLowerCase();
+  if (!/^[a-z0-9!#$%&'*+/=?^_`{|}~.-]+$/.test(local) || /^\.|\.$|\.\./.test(local)) return null;
+  const labels = domainToASCII(text.slice(at + 1).replace(/\.$/, "")).toLowerCase().split(".");
+  // A domain as the DNS has them: two labels or more, each of 63 characters
+  // at most with no hyphen at either end, and the last not a number (which
+  // would be an IP address, or nothing).
+  if (labels.length < 2 || !labels.every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return null;
+  if (/^\d+$/.test(labels.at(-1) ?? "")) return null;
+  const domain = labels.join(".");
+  const email = `${local}@${domain}`;
+  return email.length <= 254 ? email : null;
+}
+
+const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+/** `usr_` and 14 characters. */
+export function newUserId(): string {
+  return `usr_${Array.from(randomBytes(14), (byte) => ALPHABET[byte % ALPHABET.length]).join("")}`;
 }
 
 /**
@@ -182,7 +217,7 @@ export async function forgetAccount(db: OrgDb, who: { id: string } | { email: st
   const rows = await db.query(
     `UPDATE users SET confirmed_at = NULL, sign_in_provider = NULL, sign_in_account = NULL,
                       invited_by = $3, invited_via = $4, invited_at = now()
-     WHERE org_id = $1 AND id = $2 RETURNING ${COLUMNS}`,
+     WHERE org_id = $1 AND id = $2 RETURNING ${USER_COLUMNS}`,
     [db.orgId, user.id, by?.signedIn ? by.email : null, by ? (by.signedIn ? "sign_in" : "token") : null],
   );
   await db.query(
@@ -193,5 +228,5 @@ export async function forgetAccount(db: OrgDb, who: { id: string } | { email: st
   // other record of who decided it.
   const doer = by ? `${by.email}, ${by.signedIn ? "signed in" : "with a token"}` : "the command line";
   console.log(`"${db.orgId}": the account of ${user.email} (${user.role}) was forgotten by ${doer}; whoever signs in under that address next is that person`);
-  return info(rows[0] ?? {});
+  return userInfo(rows[0] ?? {});
 }

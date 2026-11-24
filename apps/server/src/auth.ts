@@ -5,11 +5,24 @@
 // stored.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Db, OrgDb, Queryable } from "./db.ts";
-import type { ProviderName } from "./oauth.ts";
-
 import type { Role, TokenInfo } from "@sessionly/schema";
 
 export type { Role, TokenInfo };
+
+/** What someone signed in with, on the hosted service (ee/src/hosted). */
+export type ProviderName = "google" | "github";
+export const PROVIDER_NAMES: readonly ProviderName[] = ["google", "github"];
+/** Each, as it is written to people. */
+export const PROVIDER_LABELS: Record<ProviderName, string> = { google: "Google", github: "GitHub" };
+
+/** The two settings a provider needs. */
+export function providerSettings(name: ProviderName): [id: string, secret: string] {
+  const prefix = `SESSIONLY_${name.toUpperCase()}_CLIENT`;
+  return [`${prefix}_ID`, `${prefix}_SECRET`];
+}
+
+/** How long a token from signing in lasts, and one a dashboard is opened with. */
+export const SIGN_IN_DAYS = 7;
 
 export interface Principal {
   /** The organisation the token belongs to. A request never names another. */

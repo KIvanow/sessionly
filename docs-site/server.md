@@ -88,15 +88,17 @@ sees only their own sessions, are the [hosted service's](https://app.sessionly.d
   needs nothing run by hand. If that fails the server says so and stops.
 - **Nothing is deleted by age.** Sessions and pull requests stay until someone
   [stops a repository](uploading.md#stopping-a-repository) or a session is taken back.
-  An organisation its owner deleted is removed after 7 days, and everything of it with
-  that. The server does this once an hour. `pnpm org purge` does that pass now, and
-  `pnpm org restore <id>` clears a deletion that has not been purged. The default
-  organisation is never removed.
+  On the hosted service (the ee server), an organisation its owner deleted is removed
+  after 7 days, and everything of it with that. That server does this once an hour.
+  `pnpm org purge` does that pass now, and `pnpm org restore <id>` clears a deletion that
+  has not been purged. The default organisation is never removed, and a server of your
+  own has no deleting of organisations: drop the database instead.
 - **There is no request log.** Errors the server did not expect are printed, the first five
   in any ten seconds and then a count of the rest.
 - **A request can be 32 MB at most**, which is far more than a session's upload.
 - **A limit on requests** per token is off on a server of your own unless
-  `SESSIONLY_RATE_PER_MINUTE` is set. Adding people is limited either way, to 30 an hour.
+  `SESSIONLY_RATE_PER_MINUTE` is set, and 600 a minute on the hosted service unless it is.
+  Adding people is the hosted service's, limited to 30 an hour per organisation.
 - **Stopping** it (`SIGINT`, `SIGTERM`) closes the server and its database connections first.
 
 ## What was checked

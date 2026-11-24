@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
-import { createApp, type Env } from "../src/app.ts";
-import type { Db, OrgDb } from "../src/db.ts";
-import { demoFrom, hideFrom, importDemo, inRepo, repoOf, reportsShownIn, shown, shownReport, type Rules } from "../src/demo.ts";
-import { unheeded } from "../src/run.ts";
-import { newOrg, testDb, tokenFor } from "./helpers.ts";
+import { createApp, type Env } from "../../../apps/server/src/app.ts";
+import type { Db, OrgDb } from "../../../apps/server/src/db.ts";
+import { newOrg, testDb, tokenFor } from "../../../apps/server/test/helpers.ts";
+import { hostedNotes as unheeded } from "../../src/hosted/config.ts";
+import { demoFrom, hideFrom, importDemo, inRepo, repoOf, reportsShownIn, shown, shownReport, type Rules } from "../../src/hosted/demo.ts";
+import { hosting, type HostingSettings } from "../../src/hosted/index.ts";
+
+/** A hosted service where one repository is shown in an organisation of its own. */
+const shownApp = (at: Db, demo: HostingSettings["demo"]) => createApp(at, { hosting: hosting(at, { accounts: {}, demo }) });
 
 const h = (n: number) => n.toString(16).padStart(16, "0");
 /** A JSON column as one database or the other gives it back. */
@@ -25,7 +29,7 @@ const KNOWN: Rules = { hide: ["notes"], known: new Set(["src/a.ts", "CLAUDE.md",
 
 before(async () => {
   db = await testDb();
-  app = createApp(db, { demo: { org: "demo", hide: ["notes"] } });
+  app = shownApp(db, { org: "demo", hide: ["notes"] });
   await newOrg(db, "work");
   await newOrg(db, "demo");
   work.admin = await tokenFor(db, { email: "boss@example.com", role: "admin" }, "work");
@@ -281,7 +285,7 @@ test("reports to the organisation a repository is shown in are never kept whole"
     files: [{ path: "src/a.ts", hashes: [h(1)] }, { path: "notes/SECRET-plan.md", hashes: [h(2)] }],
   });
   const kept = () => db.query(`SELECT * FROM pull_request_reports WHERE org_id = 'reported'`);
-  const misset = createApp(db, { demo: reportsShownIn({ ...all, SESSIONLY_DEMO_FROM: "" }) });
+  const misset = shownApp(db, reportsShownIn({ ...all, SESSIONLY_DEMO_FROM: "" }));
   assert.equal((await call(ci, "PUT", "/prs", report(1), misset)).status, 200);
   assert.equal((await kept()).length, 1);
   assert.doesNotMatch(JSON.stringify(await kept()), /SECRET/);
@@ -293,7 +297,7 @@ test("reports to the organisation a repository is shown in are never kept whole"
     [[{ path: "src/a.ts", hashes: [h(1)] }], [{ path: "src/a.ts", hashes: [h(1)] }], ["src/a.ts"]],
   );
   // with what is not to be shown not to be read, a report there is refused, and nothing of it is kept
-  const unreadable = createApp(db, { demo: reportsShownIn({ ...all, SESSIONLY_DEMO_HIDE: "notes, ../x" }) });
+  const unreadable = shownApp(db, reportsShownIn({ ...all, SESSIONLY_DEMO_HIDE: "notes, ../x" }));
   const refused = await call(ci, "PUT", "/prs", report(2), unreadable);
   assert.deepEqual([refused.status, refused.body.code], [503, "demo_hide_unusable"]);
   assert.equal((await kept()).length, 1);
