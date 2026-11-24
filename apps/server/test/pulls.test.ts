@@ -2774,13 +2774,22 @@ test("a report stores who reviewed and whose feedback each round followed; an ol
   for (const number of await mine()) await db.asOrg(DEFAULT_ORG, (tx) => splitReviews(tx, repo, number));
   assert.deepEqual([(await at(2)).review_split, (await at(3)).review_split, (await at(4)).review_split], [two, three, none]);
   assert.deepEqual(await mine(), []);
-  // one worked out by a later rule than this server's is that server's, and left
+  // one listed and then worked out by someone else (a report, another server) is not worked out again
+  await db.query(`UPDATE pull_requests SET review_split = jsonb_set(review_split, '{unknown}', '"kept"') WHERE repo = $1 AND number = 4`, [repo]);
+  await db.asOrg(DEFAULT_ORG, (tx) => splitReviews(tx, repo, 4));
+  assert.equal((await at(4)).review_split.unknown, "kept");
+  await db.query(`UPDATE pull_requests SET review_split = jsonb_set(review_split, '{unknown}', 'null') WHERE repo = $1 AND number = 4`, [repo]);
+  // one worked out by a later rule than this server's (a server put back to this version): not read by this one,
+  // which does not know what shape it has: not on its page, nor in the list, nor summed, and the summary says one is left out
   await db.query(`UPDATE pull_requests SET review_split_rule = 99 WHERE repo = $1 AND number = 3`, [repo]);
-  assert.deepEqual(await mine(), []);
-  // nor read by this one, which does not know what shape it has: not on its page, nor in the list, nor summed
   assert.equal((await at(3)).review_split, null);
-  const without = (await call(tokens.admin, "GET", `/prs/summary?repo=${encodeURIComponent(repo)}&state=merged`)).body.by_reviewer;
-  assert.deepEqual(without.map((r: any) => [r.author, r.pulls]), [[BOT, 2], [OTHER, 1], [null, 2]]);
+  const without = (await call(tokens.admin, "GET", `/prs/summary?repo=${encodeURIComponent(repo)}&state=merged`)).body;
+  assert.deepEqual(without.by_reviewer.map((r: any) => [r.author, r.pulls]), [[BOT, 2], [OTHER, 1], [null, 2]]);
+  assert.deepEqual([summary.reviewers_pending, without.reviewers_pending], [0, 1]);
+  // and worked out again by this one's rule
+  assert.deepEqual(await mine(), [3]);
+  await db.asOrg(DEFAULT_ORG, (tx) => splitReviews(tx, repo, 3));
+  assert.deepEqual([(await at(3)).review_split, await mine()], [three, []]);
   // one whose last report was stored by a server from before this, beside this one: its split is from the report before, and is gone through again
   await db.query(`UPDATE pull_requests SET updated_at = clock_timestamp(), review_rounds = 0 WHERE repo = $1 AND number = 2`, [repo]);
   assert.deepEqual(await mine(), [2]);

@@ -1249,14 +1249,18 @@ const SAYS_ROUNDS = "0.4.0";
 
 /**
  * A pull request whose reviewers and rounds by who asked (`review_split`)
- * are to be worked out: never yet, by an earlier rule, or from before its
- * last report (a server from before this stored that report, beside this
- * one, while it was being replaced). One worked out by a later rule is left
- * to the server that has that rule. (Nothing of `feedback` is asked here:
- * the server looks for these among every pull request, and must not read
- * each one's reviews and comments to find none.)
+ * are to be worked out: never yet, by another rule than this server's, or
+ * from before its last report (a server from before this stored that
+ * report, beside this one, while it was being replaced). By another rule,
+ * later ones too: a server put back to this version after a later one ran
+ * serves none of what that one worked out (`SPLIT_NOW`), and would
+ * otherwise leave it so for good. Two servers of two rules, side by side
+ * while one replaces the other, work out each other's until the older is
+ * gone; the one that stays has the last word within the hour. (Nothing of
+ * `feedback` is asked here: the server looks for these among every pull
+ * request, and must not read each one's reviews and comments to find none.)
  */
-export const UNSPLIT = `(review_split_rule IS NULL OR review_split_rule < ${SPLIT_RULE} OR review_split_at IS DISTINCT FROM updated_at)`;
+export const UNSPLIT = `(review_split_rule IS DISTINCT FROM ${SPLIT_RULE} OR review_split_at IS DISTINCT FROM updated_at)`;
 
 /**
  * Work out who reviewed a pull request and whose feedback its rounds
@@ -1299,7 +1303,7 @@ async function keepReviewSplit(db: OrgDb, repo: string, number: number, { report
 /**
  * A pull request's `review_split` where it is of its last report and by
  * this server's rule, and null otherwise: one left behind by a report that
- * a server from before this stored, or written by a later rule in a shape
+ * a server from before this stored, or written by another rule in a shape
  * this one does not know, is not served as current. The page then counts
  * the reviewers for itself, and says the rounds are not worked out.
  */
@@ -1328,11 +1332,14 @@ export async function unsplitPulls(db: OrgDb, after: PullAt | null = null, atOnc
 /**
  * Work out one pull request's `review_split` from what is already here,
  * with no report from GitHub. It is held as a report holds it: one arriving
- * meanwhile waits, and writes its own after.
+ * meanwhile waits, and writes its own after. Asked again once it is held
+ * whether it is still to be worked out: a report, or another server going
+ * through the same ones, may have done it since it was listed.
  */
 export async function splitReviews(db: OrgDb, repo: string, number: number): Promise<void> {
   await holdPull(db, repo, number);
-  await keepReviewSplit(db, repo, number);
+  const [still] = await db.query(`SELECT 1 FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 AND ${UNSPLIT}`, [db.orgId, repo, number]);
+  if (still) await keepReviewSplit(db, repo, number);
 }
 
 /**
@@ -2655,6 +2662,8 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
   // With who reviewed each one (`whole_split`), which nothing but the reviewers' rows wants.
   const found = await db.query(`SELECT ${ROW_COLUMNS}, ${SPLIT_NOW} AS whole_split, detail IS NOT NULL AS detailed FROM pull_requests ${sql}`, params);
   const byReviewer = summarizeReviewers(found.map((row) => (row.whole_split == null ? null : json<ReviewSplit>(row.whole_split))));
+  // Those not worked out yet have no part in it: said, so that the table is not read as all of them.
+  const reviewersPending = found.filter((row) => row.whole_split == null).length;
   const rows = await costed(db, found, { sql: `SELECT repo, number FROM pull_requests ${sql}`, params });
   // Of the pull requests seen from the start that have a cost: what the agent
   // lines they were opened with cost, and what those that survived count as,
@@ -2759,5 +2768,5 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
   // ACTION_WINDOW_DAYS days of those reports.
   const reporters = await repoReporters(db, [...new Set(rows.map(({ pull }) => pull.repo))]);
   const older = [...reporters].filter(([, one]) => one.older).map(([repo]) => repo);
-  return { by_model: sorted(byModel), by_reviewer: byReviewer, older_actions: older.sort(), total };
+  return { by_model: sorted(byModel), by_reviewer: byReviewer, reviewers_pending: reviewersPending, older_actions: older.sort(), total };
 }

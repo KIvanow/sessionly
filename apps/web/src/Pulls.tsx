@@ -137,7 +137,7 @@ export function Pulls({ token, scope, setScope, repos, readOnly = false, onSignO
           </section>
           <ByModel summary={summary.data!} />
           {/* A server from before this sends none. */}
-          <ReviewBots rows={summary.data!.by_reviewer ?? []} />
+          <ReviewBots rows={summary.data!.by_reviewer ?? []} pending={summary.data!.reviewers_pending ?? 0} />
         </>
       )}
       {/* Apart from the list: one that could not be read again does not take this with it. */}
@@ -304,7 +304,7 @@ function ByModel({ summary }: { summary: PullSummary }) {
  * rounds followed its feedback; and all people together as one row beside
  * them. Not shown where no bot reviewed.
  */
-export function ReviewBots({ rows }: { rows: ReviewerSummary[] }) {
+export function ReviewBots({ rows, pending = 0 }: { rows: ReviewerSummary[]; pending?: number }) {
   if (!rows.some((r) => r.author != null)) return null;
   const unknown = rows.filter((r) => r.pulls_with_rounds_known < r.pulls);
   const pulls = (n: number) => (n === 1 ? "pull request" : "pull requests");
@@ -350,6 +350,12 @@ export function ReviewBots({ rows }: { rows: ReviewerSummary[] }) {
           </tbody>
         </table>
       </div>
+      {pending > 0 && (
+        <p className="muted hint">
+          Not all of them yet: who reviewed {count(pending)} of these {pulls(pending)} is still being worked out,
+          and {pending === 1 ? "it is" : "they are"} not counted here. Look again in a few minutes.
+        </p>
+      )}
       {unknown.length > 0 && (
         <p className="muted hint">
           Rounds are counted only where it is known whose feedback each followed: for{" "}

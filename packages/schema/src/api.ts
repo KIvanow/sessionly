@@ -807,9 +807,12 @@ export interface PullRow {
   bot_review_comments: number;
   review_rounds: number;
   /**
-   * Whose feedback its rounds followed. Null only on a pull request stored
-   * before this was worked out that has not been gone through yet. Its
-   * page (`PullDetail`) has who reviewed it and who each round followed too.
+   * Whose feedback its rounds followed. Null while it is not worked out
+   * from the pull request's last report: on one stored before this was,
+   * or whose last report a server from before this stored, or worked out
+   * by another version's rule, until the server has gone through it (when
+   * it starts, and every hour). Its page (`PullDetail`) has who reviewed
+   * it and who each round followed too.
    */
   review_split: ReviewRounds | null;
   files_without_diff: number;
@@ -1116,6 +1119,12 @@ export interface PullSummary {
    * on the diff), or that a round of one followed.
    */
   by_reviewer: ReviewerSummary[];
+  /**
+   * Pull requests in the filter that `by_reviewer` leaves out, as who
+   * reviewed them is not worked out yet (`PullRow.review_split` is null):
+   * the rows are then of the others only.
+   */
+  reviewers_pending: number;
   /**
    * Repositories that have a pull request in the filter and report with an
    * older Action: the most recent report from the Action, or that named no
