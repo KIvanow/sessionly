@@ -424,7 +424,7 @@ export interface PullReport {
   review_rounds: number;
   /**
    * For each of those rounds, oldest first, whose feedback it followed: at
-   * most 1,000 rounds of at most 200 logins each, as many rounds as
+   * most 300 rounds of at most 50 logins each and 2,000 in all, as many rounds as
    * `review_rounds`. Left out by an Action before 0.4.0, on a pull request
    * with more, and in the report `backfill` makes up of how a pull request
    * began: whose feedback its rounds followed is then not known. One that
@@ -750,7 +750,7 @@ export interface ReviewRounds {
    * - `not_kept`: its last report was from an Action that says, and nothing
    *   of what it said is kept: the report went to a server from before
    *   this was kept, was the one `backfill` makes up of how the pull
-   *   request began, or counted more than 1,000 rounds. Its next report
+   *   request began, or counted more than 300 rounds. Its next report
    *   says.
    * Null when `rounds` is known.
    */

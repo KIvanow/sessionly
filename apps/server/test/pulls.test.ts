@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { countHashedLines, migrationAt, openDb, type Db } from "../src/db.ts";
 import { DEFAULT_ORG } from "../src/auth.ts";
 import { newOrg, testDb, testDbUrl, tokenFor } from "./helpers.ts";
-import { attribute, breakdown, charge, chargeAgain, CURRENT_ACTION, MAX_ROUND_AUTHORS, MAX_ROUNDS, type Claim, historyChange, holdPullSessions, MATCH_AT_ONCE, olderAction, type PullAt, splitReviews, unsplitPulls, UNKNOWN_REPORTER, weigh, weighKept, weighKeptSome, writers, type SessionAt } from "../src/pulls.ts";
+import { attribute, breakdown, charge, chargeAgain, CURRENT_ACTION, MAX_ROUND_AUTHORS, MAX_ROUND_NAMES, MAX_ROUNDS, type Claim, historyChange, holdPullSessions, MATCH_AT_ONCE, olderAction, type PullAt, splitReviews, unsplitPulls, UNKNOWN_REPORTER, weigh, weighKept, weighKeptSome, writers, type SessionAt } from "../src/pulls.ts";
 import { unionLines } from "../src/contributed.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
@@ -28,8 +28,8 @@ test("the Action version the server names is the one the Action ships", () => {
 });
 
 test("the server takes as many rounds, and names in one, as the Action sends", async () => {
-  const action: { MAX_ROUNDS: number; MAX_ROUND_AUTHORS: number } = await import(new URL("../../../action/src/report.mjs", import.meta.url).href);
-  assert.deepEqual([MAX_ROUNDS, MAX_ROUND_AUTHORS], [action.MAX_ROUNDS, action.MAX_ROUND_AUTHORS]);
+  const action: { MAX_ROUNDS: number; MAX_ROUND_AUTHORS: number; MAX_ROUND_NAMES: number } = await import(new URL("../../../action/src/report.mjs", import.meta.url).href);
+  assert.deepEqual([MAX_ROUNDS, MAX_ROUND_AUTHORS, MAX_ROUND_NAMES], [action.MAX_ROUNDS, action.MAX_ROUND_AUTHORS, action.MAX_ROUND_NAMES]);
 });
 
 test("an Action is old when it named no version, or an earlier one, number by number", () => {
@@ -2715,6 +2715,10 @@ test("a report stores who reviewed and whose feedback each round followed; an ol
     assert.match(refused.body.error, /review_round_authors/);
   }
   assert.equal((await send(1, { ...last, review_rounds: MAX_ROUNDS + 1, review_round_authors: Array.from({ length: MAX_ROUNDS + 1 }, () => who(BOT)) })).status, 422);
+  // as many rounds as it may name, each of as many as a round may: more names in all than are taken
+  const full = Array.from({ length: MAX_ROUNDS }, (_, r) => Array.from({ length: MAX_ROUND_AUTHORS }, (_, i) => ({ author: `u${r}-${i}`, bot: false })));
+  assert.ok(MAX_ROUNDS * MAX_ROUND_AUTHORS > MAX_ROUND_NAMES);
+  assert.equal((await send(1, { ...last, review_rounds: MAX_ROUNDS, review_round_authors: full })).status, 422);
   assert.deepEqual((await at(1)).review_split, one);
 
   // An Action from before it said. No round is none; whose feedback any round followed is not known, and who reviewed still is.

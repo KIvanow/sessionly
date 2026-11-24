@@ -701,17 +701,26 @@ function checkFeedback(value: unknown, fail: (what: string) => never): PullFeedb
   });
 }
 
-/** The most rounds, and logins in one, a report may name: the Action's own limits (action/src/report.mjs), past which it names none. */
-export const MAX_ROUNDS = 1000;
-export const MAX_ROUND_AUTHORS = 200;
+/**
+ * The most rounds a report may name, logins in one, and logins in all: the
+ * Action's own limits (action/src/report.mjs), past which it names none.
+ * Far more than a pull request has (as many names in all as reviews and
+ * comments are kept), and few enough that what is stored of them stays
+ * small beside the rest of the row: every one is read where reviewers are
+ * summed over many pull requests.
+ */
+export const MAX_ROUNDS = 300;
+export const MAX_ROUND_AUTHORS = 50;
+export const MAX_ROUND_NAMES = 2000;
 
 /**
  * Whose feedback each round followed, as the Action says it; nothing when
- * it does not. One that does not fit (not a list of at most 1,000 rounds,
- * each of 1 to 200 logins with whether it is a bot, as many rounds as the
- * report counted) is refused, as reviews and comments that do not fit are:
- * taken as not sent, the pull request would say its Action had not said. A
- * login named twice in a round is there once, a bot if either says so.
+ * it does not. One that does not fit (not a list of at most 300 rounds,
+ * each of 1 to 50 logins with whether it is a bot, at most 2,000 in all,
+ * as many rounds as the report counted) is refused, as reviews and
+ * comments that do not fit are: taken as not sent, the pull request would
+ * say its Action had not said. A login named twice in a round is there
+ * once, a bot if either says so.
  */
 function checkRoundAuthors(value: unknown, rounds: number): RoundAuthor[][] | undefined {
   if (value === undefined) return undefined;
@@ -719,8 +728,10 @@ function checkRoundAuthors(value: unknown, rounds: number): RoundAuthor[][] | un
   if (!Array.isArray(value) || value.length > MAX_ROUNDS) throw bad(`a list of at most ${MAX_ROUNDS} rounds`);
   if (value.length !== rounds) throw bad("as many rounds as review_rounds");
   const checked: RoundAuthor[][] = [];
+  let names = 0;
   for (const round of value as unknown[]) {
     if (!Array.isArray(round) || round.length === 0 || round.length > MAX_ROUND_AUTHORS) throw bad(`rounds of 1 to ${MAX_ROUND_AUTHORS} authors`);
+    if ((names += round.length) > MAX_ROUND_NAMES) throw bad(`at most ${MAX_ROUND_NAMES} authors in all`);
     const authors = new Map<string, boolean>();
     for (const a of round as Record<string, unknown>[]) {
       if (!a || typeof a !== "object" || typeof a.author !== "string" || a.author === "" || a.author.length > 100) throw bad("rounds of { author, bot }, the author a login of at most 100 characters");

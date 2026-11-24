@@ -14,9 +14,16 @@ const loginOf = (user) => user?.login ?? "unknown";
 
 const isBot = (user) => user?.type === "Bot" || /\[bot\]$/.test(user?.login ?? "");
 
-/** The server takes no more rounds than this for one pull request, and no more names for one round. */
-export const MAX_ROUNDS = 1000;
-export const MAX_ROUND_AUTHORS = 200;
+/** The server takes no more rounds than this for one pull request, no more names for one round, and no more names in all. */
+export const MAX_ROUNDS = 300;
+export const MAX_ROUND_AUTHORS = 50;
+export const MAX_ROUND_NAMES = 2000;
+
+/** Whether the server takes these rounds' names (`MAX_ROUNDS` and the two beside it). */
+const fits = (rounds) =>
+  rounds.length <= MAX_ROUNDS &&
+  rounds.every((round) => round.length <= MAX_ROUND_AUTHORS) &&
+  rounds.reduce((names, round) => names + round.length, 0) <= MAX_ROUND_NAMES;
 
 /**
  * The rounds of review, oldest first: for each time review feedback was
@@ -155,7 +162,7 @@ export function buildReport({ pull, files, reviews, comments, conversation = [],
     review_rounds: rounds.length,
     // Whose feedback each round followed. Left out where there is more of it
     // than the server takes, which would refuse the report: it is then not known.
-    ...(rounds.length <= MAX_ROUNDS && rounds.every((round) => round.length <= MAX_ROUND_AUTHORS) ? { review_round_authors: rounds } : {}),
+    ...(fits(rounds) ? { review_round_authors: rounds } : {}),
     files: reported,
     files_without_diff: withoutDiff,
     // On a pull request with more than the server takes, the latest are sent,

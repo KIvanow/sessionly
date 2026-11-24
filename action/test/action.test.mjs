@@ -103,7 +103,7 @@ test("each round says whose feedback it followed, by login, a bot's marked", () 
   const some = buildReport({ ...GITHUB, event: "synchronize", host: "github.com", ignored: () => false });
   assert.equal(some.review_round_authors.length, some.review_rounds);
   // more rounds than the server takes: the report says how many, and not whose
-  const many = Array.from({ length: 1001 }, (_, i) => i);
+  const many = Array.from({ length: 301 }, (_, i) => i);
   const long = buildReport({
     ...GITHUB,
     reviews: [],
@@ -111,7 +111,7 @@ test("each round says whose feedback it followed, by login, a bot's marked", () 
     commits: many.map((i) => ({ commit: { author: { email: "a@b.c" }, committer: { date: new Date(Date.UTC(2026, 10, 10, 10, 0, 2 * i + 1)).toISOString() } } })),
     event: "synchronize", host: "github.com", ignored: () => false,
   });
-  assert.deepEqual([long.review_rounds, "review_round_authors" in long], [1001, false]);
+  assert.deepEqual([long.review_rounds, "review_round_authors" in long], [301, false]);
 });
 
 const PULL = {

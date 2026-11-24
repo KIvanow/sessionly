@@ -112,7 +112,7 @@ pull requests the two round figures are over; and `reviewers_pending`, the pull 
 the filter that `by_reviewer` leaves out because their `review_split` is null.
 
 A report (`PUT /prs`) may carry `review_round_authors`: for each of its `review_rounds`,
-oldest first, a list of `{ author, bot }`, at most 1,000 rounds of 1 to 200 logins. One that
+oldest first, a list of `{ author, bot }`, at most 300 rounds of 1 to 50 logins, and 2,000 logins in all. One that
 does not fit, or is not as many rounds as `review_rounds`, is refused with the report (422).
 
 `GET /prs` and `GET /prs/detail` give `reporter_version` (null when none was kept) and
