@@ -6,11 +6,15 @@
   "type": "module",
   "scripts": {
     "start": "node --env-file-if-exists=../.env src/main.ts",
+    "org": "node --env-file-if-exists=../.env src/cli.ts org",
+    "demo": "node --env-file-if-exists=../.env src/cli.ts demo",
     "sign-license": "node scripts/sign-license.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --test-global-setup=test/global.ts \"test/*.test.ts\""
+    "test": "node --test --test-global-setup=test/global.ts \"test/*.test.ts\" \"test/hosted/*.test.ts\""
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.6",
+    "@sessionly/schema": "workspace:*",
     "@sessionly/server": "workspace:*",
     "hono": "^4.13.16",
     "zod": "^4.4.3"

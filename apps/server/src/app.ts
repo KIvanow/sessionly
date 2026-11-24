@@ -13,13 +13,10 @@ import {
   type Role,
 } from "./auth.ts";
 import type { Db, OrgDb } from "./db.ts";
-import { shownReport } from "./demo.ts";
 import { exportLines } from "./export.ts";
-import { allowed, exportKey, giveBack, invitesKey, onceEvery, take } from "./limits.ts";
-import { PROVIDER_NAMES } from "./oauth.ts";
-import { emailFrom, newUserId, offers, openRoutes, type Accounts } from "./signup.ts";
-import { deleteOrg, OrgNameError } from "./orgs.ts";
-import { addUser, forgetAccount, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
+import { allowed, exportKey, onceEvery } from "./limits.ts";
+import { openRoutes } from "./open.ts";
+import { emailFrom, forgetAccount, listUsers, orgName, removeUser, UserProblem } from "./users.ts";
 import {
   Conflict,
   excludeRepo,
@@ -39,7 +36,7 @@ import {
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
-import type { PullAfterMergeReport, PullDetail, PullReport, Telemetry } from "@sessionly/schema";
+import type { AuthOptions, PullAfterMergeReport, PullDetail, PullReport, Telemetry } from "@sessionly/schema";
 import {
   BadReport,
   checkReport,
@@ -88,14 +85,42 @@ export type Api = Hono<Env>;
  */
 export type Extension = (api: Api) => void;
 
+/**
+ * A service many organisations share (ee/src/hosted): signing in and signing
+ * up, which come before anyone is known and so see every organisation.
+ * Without it the server is one of your own, whose dashboard opens without
+ * signing in.
+ */
+export interface Hosting {
+  /** What `/api/v1/auth/options` answers. */
+  offers: AuthOptions;
+  /** On the server, ahead of everything else: its routes that need no token. */
+  open(app: Hono<Env>): void;
+  /** On the API, after the large bodies are read and before the transaction a request runs in. */
+  early(api: Api): void;
+  /** Its routes on the API, as an extension's. */
+  routes: Extension;
+  /** Started with the server: what it does now and then. */
+  start?(): void;
+  /** Said once the server listens. */
+  said?: string[];
+}
+
+/** How people get in, and how much they may ask. */
+export interface Accounts {
+  /** Whose the dashboard of a server of your own is, opened without signing in (SESSIONLY_ADMIN_EMAIL). */
+  admin?: string;
+  /** The server is behind a proxy of its own, whose X-Forwarded-For can be believed. */
+  trustProxy?: boolean;
+  /** Requests a token may make a minute. Not counted if unset. */
+  ratePerMinute?: number;
+}
+
 class BadRequest extends Error {}
 
 
 /** Thrown to undo what a request wrote, once its answer is already decided. */
 class Undo extends Error {}
-
-/** People an organisation may add an hour: each is a message to an address nobody confirmed. */
-const INVITES_PER_HOUR = 30;
 
 /** How long after it failed charging a session to its pull requests is tried again, each time it fails, in milliseconds. */
 const CHARGE_RETRIES_MS = [30_000, 5 * 60_000, 30 * 60_000];
@@ -237,24 +262,14 @@ export function failureLog(
   };
 }
 
-/**
- * A host (`localhost:8080`) as a name of this machine and a port, or null
- * if it is anything else: another machine's name, or an address of this
- * one that others can reach.
- */
-export function thisMachine(host: string, protocol: string): { name: string; port: string } | null {
-  const found = /^(localhost|127\.0\.0\.1|\[::1\])(?::(\d{1,5}))?$/i.exec(host.trim());
-  if (!found?.[1]) return null;
-  return { name: found[1].toLowerCase(), port: found[2] ?? (protocol === "https:" ? "443" : "80") };
-}
-
 export interface Options {
   bootstrap?: Bootstrap;
   /** Folder with the built dashboard, served at the root if given. */
   webRoot?: string;
   extensions?: Extension[];
-  /** Signing in and signing up with Google or GitHub, and what limits them. */
   accounts?: Accounts;
+  /** A service many organisations share; none: a server of your own. */
+  hosting?: Hosting;
   /** Where the dashboard counts which of its pages are opened; none: it counts nothing. */
   telemetry?: Telemetry | null;
   /** What the committers kept of a pull request are hashed with (SESSIONLY_HASH_KEY); none: a plain hash. */
@@ -263,12 +278,6 @@ export interface Options {
   chargeRetriesMs?: number[];
   /** Handed what goes on after an upload was answered (its pull requests matched and charged again): tests wait for it, and so does a server that is stopping. */
   background?: (work: Promise<void>) => void;
-  /**
-   * The organisation one repository is shown in (demo.ts), and the paths of
-   * it that are not shown; or why those cannot be trusted, and reports to it
-   * are refused (`reportsShownIn`).
-   */
-  demo?: { org: string; hide: string[] } | { org: string; problem: string };
 }
 
 /**
@@ -309,7 +318,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
 
   api.use("*", async (c, next) => {
     const principal = await authenticate(ownerDb, c.req.header("authorization"), options.bootstrap, {
-      hosted: options.accounts?.hosted === true,
+      hosted: options.hosting !== undefined,
     });
     if (!principal) return c.json({ error: "missing or unknown token" }, 401);
     if (accounts.ratePerMinute) {
@@ -392,15 +401,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     } catch {
       return c.json({ error: "the body is not JSON" }, 400);
     }
-    const report = checkReport(body);
-    // Where one repository is shown, a report is kept without the paths that
-    // are not; and not at all while which those are cannot be told.
-    const demo = options.demo?.org === c.get("principal").orgId ? options.demo : undefined;
-    if (demo && "problem" in demo) {
-      console.error(`a pull request reported to ${demo.org} is refused:`, demo.problem);
-      return c.json({ error: "this organisation shows a repository to others, and the server's setting of what not to show cannot be used: the report is not kept", code: "demo_hide_unusable" }, 503);
-    }
-    c.set("report", demo ? shownReport(report, demo.hide) : report);
+    c.set("report", checkReport(body));
     await next();
   });
 
@@ -475,24 +476,6 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     options.background?.(work);
   });
 
-  // Adding a person puts an organisation in front of them the next time
-  // they sign in, on an admin's word, and anyone can be the admin of an
-  // organisation they just made. So it is limited per organisation. Taken
-  // here, outside the transaction, and given back unless someone really
-  // was added.
-  api.post("/users", async (c, next) => {
-    const p = c.get("principal");
-    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const email = emailFrom(body.email);
-    // Anything else is refused further on, uncounted.
-    if (p.role !== "admin" || !email) return next();
-    const limited = (error: string) => c.json({ error, code: "rate_limited" }, 429);
-    const perOrg = await take(ownerDb, invitesKey(p.orgId), 3600, INVITES_PER_HOUR);
-    if (!perOrg) return limited(`an organisation can add ${INVITES_PER_HOUR} people an hour; try again later`);
-    await next();
-    if (c.res.status !== 201) await giveBack(ownerDb, perOrg);
-  });
-
   // The organisation's data, as a file. Read a page at a time, each in its
   // own transaction, and before the one transaction the rest of a request
   // runs in: the embedded database has a single connection, and holding it
@@ -538,6 +521,8 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     return c.body(body);
   });
 
+  options.hosting?.early(api);
+
   // The rest of the request runs in one transaction, as the organisation of
   // its token: `c.get("db")` sees that organisation's rows and no others.
   api.use("*", async (c, next) => {
@@ -560,7 +545,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
 
   const failed = failureLog();
   api.onError((err, c) => {
-    if (err instanceof BadRequest || err instanceof RepoNameError || err instanceof OrgNameError) {
+    if (err instanceof BadRequest || err instanceof RepoNameError) {
       return c.json({ error: err.message }, 400);
     }
     if (err instanceof RemovedPerson) {
@@ -574,23 +559,6 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   });
 
   const whoami = (p: Principal) => ({ ok: true, org: p.orgId, email: p.email, name: p.name, role: p.role });
-  // The owner asks for the organisation to be deleted. The name in the body
-  // is them saying so on purpose. From the next request, every token of it
-  // is refused. The rows go after 7 days. A server of one team has no such
-  // request: whoever runs it drops the database.
-  api.delete("/org", async (c) => {
-    if (!c.get("principal").owner) return c.json({ error: "only the owner of an organisation can do this" }, 403);
-    if (options.accounts?.hosted !== true) {
-      return c.json(
-        { error: "deleting an organisation is for the hosted service; on a server of your own, drop the database" },
-        403,
-      );
-    }
-    const body = (await c.req.json().catch(() => null)) as { name?: unknown } | null;
-    await deleteOrg(c.get("db"), typeof body?.name === "string" ? body.name : "");
-    return c.body(null, 204);
-  });
-
   api.get("/ping", (c) => c.json(whoami(c.get("principal"))));
   api.get("/me", async (c) => {
     const p = c.get("principal");
@@ -860,27 +828,15 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   );
   api.route("/tokens", admin);
 
-  // The people of the organisation, for admins. Someone who was added signs
-  // in with an account that has the address they were added under, and is
-  // shown the organisation then; nothing is sent to them.
+  // The people of the organisation, for admins. On the hosted service they
+  // are added there (ee/src/hosted); a server of your own has those it had
+  // when it had signing in, for an admin to remove.
   const users = new Hono<Env>();
   users.use("*", async (c, next) => {
     if (c.get("principal").role !== "admin") return c.json({ error: "admins only" }, 403);
     await next();
   });
   users.get("/", async (c) => c.json({ users: await listUsers(c.get("db")) }));
-  users.post("/", async (c) => {
-    if (!offers(accounts).providers.length) {
-      return c.json({ error: "signing in is not set up here; create a token instead", code: "no_sign_in" }, 409);
-    }
-    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const email = emailFrom(body.email);
-    const role = body.role ?? "member";
-    if (!email) throw new BadRequest("email is required, as a plain address of 254 characters at most");
-    if (role !== "admin" && role !== "member") throw new BadRequest("role must be admin or member");
-    const user = await addUser(c.get("db"), newUserId(), email, role, c.get("principal"));
-    return c.json(user, 201);
-  });
   users.delete("/:id", async (c) => {
     // data=true also deletes their sessions and the repositories they stopped.
     // Anything else is the removal alone, as it always was.
@@ -894,6 +850,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   );
   api.route("/users", users);
 
+  options.hosting?.routes(api);
   for (const extend of options.extensions ?? []) extend(api);
 
   const app = new Hono<Env>();
@@ -907,37 +864,9 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       return c.json({ ok: false }, 503);
     }
   });
-  // People sign in at one address, the public one: a provider sends them
-  // back there, and the cookie that says which browser left is kept for
-  // that host. A server tried on one's own machine has several names
-  // (localhost, 127.0.0.1, [::1]), and a browser at one of them would not
-  // show the cookie at another: nobody could finish signing in. So a
-  // browser that asks for the dashboard, or to leave for a provider, at
-  // another of this machine's names is sent to the same place at the
-  // public one.
-  //
-  // Only then, and only on the same port. What a proxy passes on as Host
-  // is often its own name for this server, not the one the browser asked
-  // for (nginx does so unless told otherwise): going by that would send the
-  // browser to the public address, and the proxy would hand it back here,
-  // without end. A proxy on this very machine listens on another port than
-  // this server does, so a Host that differs in the port is its doing too.
-  // Everything else is answered where it is asked.
-  const home = offers(accounts).publicUrl;
-  const known = home ? thisMachine(new URL(home).host, new URL(home).protocol) : null;
-  if (home && known) {
-    app.use("*", async (c, next) => {
-      const host = c.req.header("host") ?? "";
-      const asked = thisMachine(host, new URL(home).protocol);
-      if (c.req.method !== "GET" || !asked || asked.port !== known.port || asked.name === known.name) return next();
-      const { pathname, search } = new URL(c.req.url);
-      const leaving = PROVIDER_NAMES.some((name) => pathname === `/api/v1/auth/${name}`);
-      if (pathname.startsWith("/api/") && !leaving) return next();
-      return c.redirect(`${home}${pathname}${search}`, 307);
-    });
-  }
-  // Signing in and signing up need no token, so they come before the API that does.
-  app.route("/api/v1/auth", openRoutes(ownerDb, accounts, options.demo && !("problem" in options.demo) ? options.demo.org : undefined));
+  options.hosting?.open(app);
+  // What it offers, and opening a dashboard, need no token, so they come before the API that does.
+  app.route("/api/v1/auth", openRoutes(ownerDb, { ...accounts, offers: options.hosting?.offers }));
   // Asked before anyone signs in, so that a page is counted whoever opens it.
   const telemetry = options.telemetry ?? null;
   app.get("/api/v1/telemetry", (c) => c.json(telemetry));

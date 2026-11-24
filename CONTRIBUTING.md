@@ -23,8 +23,10 @@ under the license of the part of the repository it touches.
 - `ee/` is under `LICENSE-EE`.
 - Code outside `ee/` must never import from `ee/`; CI checks this. Capture, the local ledger,
   the command line, upload, the server and the dashboard must work with no license present.
-  `ee/` plugs in through the server's extension points (`extensions` and `migrations` in
-  `apps/server/src/run.ts`).
+  `ee/` plugs in through the server's extension points (`extensions`, `migrations` and
+  `hosting` in `apps/server/src/run.ts`).
+- Running Sessionly as a service for many organisations (signing up, signing in with Google or
+  GitHub, `SESSIONLY_HOSTED=true`) is `ee/src/hosted`, under `LICENSE-EE`.
 
 ## Before you open a pull request
 

@@ -6,7 +6,8 @@
 // a `?query`, a %-escape) and whichever kind of source file it is, if `app.ts`
 // uses the owner's database anywhere but where it finds a request's
 // organisation, and if starting the server hands the owner's database to
-// anything an edition supplies.
+// anything an edition supplies but the hosting of a hosted service, which signs
+// people in before any organisation is known.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -19,13 +20,22 @@ const ALLOWED = {
     "app.ts",
     "lib.ts",
     "testing.ts",
-    "signup.ts",
+    // Opening a server of your own's dashboard, before anyone is known.
+    "open.ts",
+  ],
+  "ee/src": [
+    "migrate.ts",
+    // A hosted service's operator, from the command line.
+    "cli.ts",
+    // Signing in and signing up, before anyone is known, and the counters of
+    // adding people, which belong to no organisation.
+    "hosted/index.ts",
+    "hosted/signup.ts",
     // Purging an organisation, and restoring one, run as the operator or the
     // hourly job. A request's token is already refused, and rate counters
     // have no organisation to set.
-    "orgs.ts",
+    "hosted/orgs.ts",
   ],
-  "ee/src": ["migrate.ts"],
 };
 // `import … from` and `export … from`: named, `* as`, `*`, or default. No
 // space is needed around braces, `*` or the module's quotes, and a name may
@@ -162,9 +172,12 @@ function inRun(text) {
   const found = [];
   // An edition adds tables by naming its migrations, and routes that get a
   // request's `OrgDb`. A callback given the database could keep it.
-  if (/\boptions\.\w+\??\.?\(\s*[^)]*\bdb\b/.test(text)) found.push(`: an option is called with the owner's database`);
+  // But for a hosted service's hosting, which signs people in.
+  if (/\boptions\.(?!hosting\?\.\(db\))\w+\??\.?\(\s*[^)]*\bdb\b/.test(text)) found.push(`: an option is called with the owner's database`);
   const options = /export interface RunOptions \{[\s\S]*?\n\}/.exec(text)?.[0] ?? "";
-  if (!options || /\bDb\b/.test(options)) found.push(`: RunOptions must not mention Db`);
+  if (!options || /\bDb\b/.test(options.replace(/\n\s*hosting\?: \(db: Db\) => Hosting;/, ""))) {
+    found.push(`: RunOptions must not mention Db`);
+  }
   return found;
 }
 
@@ -245,6 +258,7 @@ const MUST_PASS = [
   ["imports", `const docs = "https://example.com//db.ts";\nimport { helper } from "./other.ts?from=db.ts";`],
   ["inApp", APP],
   ["inRun", RUN],
+  ["inRun", RUN.replace("migrations?: Migrations[];", "migrations?: Migrations[];\n  hosting?: (db: Db) => Hosting;") + "\nconst hosting = options.hosting?.(db);"],
 ];
 // The sample has the first three uses and none of the rest.
 const checks = { imports, inApp: (text) => inApp(text, IN_APP.slice(0, 3)), inRun };

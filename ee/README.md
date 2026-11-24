@@ -20,6 +20,16 @@ installed it behaves exactly like the core server; the ee endpoints answer
 `SESSIONLY_ORG` is this install's org id (1-64 letters, digits, `-` or `_`). A license is
 accepted only if it names the same org.
 
+## The hosted service
+
+With `SESSIONLY_HOSTED=true` this server is a service many organisations share (`src/hosted`):
+signing up, signing in with Google or GitHub, adding people by address, deleting an organisation
+and purging it a week later, and one repository shown in an organisation of its own (the demo).
+It is the core's `hosting` (see `apps/server/src/app.ts`). It takes no licenses, and under
+`LICENSE-EE` nobody but the copyright holder may run it for others. Its settings are in
+`src/hosted/config.ts`; the operator's commands are `node src/cli.ts org restore <id>`,
+`org purge` and `demo import`, with `DATABASE_URL` set.
+
 ## License
 
 A license is a JSON file: an Ed25519 signature over its payload (`id`, `org`, `edition`,

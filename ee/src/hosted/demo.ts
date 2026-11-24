@@ -1,6 +1,6 @@
 // One repository's sessions shown in another organisation: a demo anyone may
 // be let into, of work that was really done. `importDemo` copies them, and is
-// run again (`node src/cli.ts demo import`) to bring them up to date. The
+// run again (`node src/cli.ts demo import`, in ee/) to bring them up to date. The
 // sessions stay where they were uploaded, with everything they hold. What is
 // copied is made anew from
 // what is safe to show (who, when, which models, what it cost, which files
@@ -27,10 +27,20 @@ import {
   type Subagent,
   type Upload,
 } from "@sessionly/schema";
-import type { Principal } from "./auth.ts";
-import type { OrgDb } from "./db.ts";
-import { chargeAgain, holdPull, holdPullSessions, IN_WORKTREE, rematchPulls, reportedPaths } from "./pulls.ts";
-import { Conflict, forgetLines, RemovedPerson, storeUpload } from "./sessions.ts";
+import {
+  chargeAgain,
+  Conflict,
+  forgetLines,
+  holdPull,
+  holdPullSessions,
+  IN_WORKTREE,
+  rematchPulls,
+  RemovedPerson,
+  reportedPaths,
+  storeUpload,
+  type OrgDb,
+  type Principal,
+} from "@sessionly/server";
 
 export interface Demo {
   /** The organisation the sessions are uploaded to. */

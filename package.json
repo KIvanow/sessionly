@@ -13,7 +13,7 @@
     "server": "pnpm --filter @sessionly/server start",
     "token": "pnpm --filter @sessionly/server token",
     "person": "pnpm --filter @sessionly/server person",
-    "org": "pnpm --filter @sessionly/server org",
+    "org": "pnpm --filter @sessionly/ee org",
     "build": "pnpm --filter @sessionly/web build",
     "dev": "pnpm --filter @sessionly/web dev"
   }

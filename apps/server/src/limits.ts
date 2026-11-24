@@ -1,5 +1,8 @@
 // Saying no to too much of something. Counters are kept in the database, so
 // they hold across several copies of the server.
+import { isIPv4, isIPv6 } from "node:net";
+import { getConnInfo } from "@hono/node-server/conninfo";
+import type { Context } from "hono";
 import type { Queryable } from "./db.ts";
 
 /** People an organisation has added in the current hour. */
@@ -88,4 +91,58 @@ export async function tidy(db: Queryable): Promise<void> {
   await db.query(`DELETE FROM rate_counters WHERE window_start < now() - interval '2 hours'`);
   await db.query(`DELETE FROM sign_in_codes WHERE expires_at < now()`);
   await db.query(`DELETE FROM sign_in_states WHERE expires_at < now()`);
+}
+
+/** The groups of an IPv6 address, written out; null for anything else. */
+function groupsOf(address: string): string[] | null {
+  if (!isIPv6(address)) return null;
+  const [head = "", tail] = address.split("::");
+  const front = head ? head.split(":") : [];
+  const back = tail ? tail.split(":") : [];
+  const groups = tail === undefined ? front : [...front, ...Array(8 - front.length - back.length).fill("0"), ...back];
+  return groups.map((group) => group.toLowerCase().replace(/^0+(?=.)/, ""));
+}
+
+/** An address as it is compared: no brackets or zone, and an IPv4 address written as IPv6 as IPv4. */
+function plainAddress(address: string): string {
+  const plain = address.replace(/^\[|\]$/g, "").split("%")[0] ?? "";
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(plain)?.[1];
+  return mapped && isIPv4(mapped) ? mapped : plain;
+}
+
+/**
+ * What to count an address under. One IPv4 address is one caller. An IPv6
+ * caller usually has a whole /64 to pick addresses from, so its network is
+ * what is counted.
+ */
+export function network(address: string): string {
+  const plain = plainAddress(address);
+  const groups = groupsOf(plain);
+  return groups ? `${groups.slice(0, 4).join(":")}::/64` : plain;
+}
+
+/**
+ * The wider network an address is in, for what is counted by the hour: a /24
+ * of IPv4, and the /48 a site is usually given of IPv6.
+ */
+export function widerNetwork(address: string): string {
+  const plain = plainAddress(address);
+  const groups = groupsOf(plain);
+  if (groups) return `${groups.slice(0, 3).join(":")}::/48`;
+  return isIPv4(plain) ? `${plain.split(".").slice(0, 3).join(".")}.0/24` : plain;
+}
+
+/** Who is asking, as far as it can be told: for counting, not for trusting. */
+export function callerOf(c: Context, trustProxy: boolean | undefined): string {
+  if (trustProxy) {
+    // The last hop is the one the proxy added itself.
+    const hops = (c.req.header("x-forwarded-for") ?? "").split(",").map((hop) => hop.trim());
+    const last = hops.filter(Boolean).at(-1);
+    if (last) return last;
+  }
+  try {
+    return getConnInfo(c).remote.address ?? "unknown";
+  } catch {
+    return "unknown";
+  }
 }

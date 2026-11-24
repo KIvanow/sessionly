@@ -18,16 +18,16 @@ Everything is set through the environment, or through the `.env` file `pnpm run 
 | `SESSIONLY_DB_QUERY_SECONDS` | Postgres only: how long a statement may take. Default 30, and a day (86400) at most. |
 | `SESSIONLY_ADMIN_TOKEN` | Optional: an admin token that always works, for scripts and CI. The dashboard needs none: it [opens without signing in](server.md#nobody-signs-in). |
 | `SESSIONLY_ADMIN_EMAIL` | Who the dashboard opens as, and who uploads made with that token belong to. Default `admin@localhost`. |
-| `SESSIONLY_PUBLIC_URL` | Hosted only. Where people reach the dashboard, e.g. `https://sessionly.example.com`: a scheme and a host, with no path, or the server does not start. Needed for signing in with Google or GitHub, which send people back there; open the dashboard at exactly this address. (A server on your own machine sends a browser at `127.0.0.1` on to `localhost`, or the other way; behind a proxy it sends nobody anywhere, whatever `Host` the proxy passes on.) Google takes a plain `http://` address only for `localhost`, `127.0.0.1` and `[::1]`. |
-| `SESSIONLY_GOOGLE_CLIENT_ID`, `SESSIONLY_GOOGLE_CLIENT_SECRET` | Hosted only, both together: people then sign in with Google (see [People, tokens and sign-in](people-and-tokens.md)). From an OAuth client of type "Web application" in Google Cloud, whose redirect URI is the public address followed by `/api/v1/auth/google/callback`. |
-| `SESSIONLY_GITHUB_CLIENT_ID`, `SESSIONLY_GITHUB_CLIENT_SECRET` | Hosted only, both together: people then sign in with GitHub. From an OAuth app on GitHub, whose callback URL is the public address followed by `/api/v1/auth/github/callback`. |
+| `SESSIONLY_PUBLIC_URL` | Hosted only (the ee server). Where people reach the dashboard, e.g. `https://sessionly.example.com`: a scheme and a host, with no path, or the server does not start. Needed for signing in with Google or GitHub, which send people back there; open the dashboard at exactly this address. (A server on your own machine sends a browser at `127.0.0.1` on to `localhost`, or the other way; behind a proxy it sends nobody anywhere, whatever `Host` the proxy passes on.) Google takes a plain `http://` address only for `localhost`, `127.0.0.1` and `[::1]`. |
+| `SESSIONLY_GOOGLE_CLIENT_ID`, `SESSIONLY_GOOGLE_CLIENT_SECRET` | Hosted only (the ee server), both together: people then sign in with Google (see [People, tokens and sign-in](people-and-tokens.md)). From an OAuth client of type "Web application" in Google Cloud, whose redirect URI is the public address followed by `/api/v1/auth/google/callback`. |
+| `SESSIONLY_GITHUB_CLIENT_ID`, `SESSIONLY_GITHUB_CLIENT_SECRET` | Hosted only (the ee server), both together: people then sign in with GitHub. From an OAuth app on GitHub, whose callback URL is the public address followed by `/api/v1/auth/github/callback`. |
 | `SESSIONLY_RATE_PER_MINUTE` | Requests a token may make in a minute; past that the answer is 429. Unset, a server of your own has no limit. |
 | `SESSIONLY_TRUST_PROXY` | `true` when the server is behind a proxy of yours that sets `X-Forwarded-For`: the caller's address is then taken from it. Used only for the limits on signing in, which are per address. |
 | `SESSIONLY_TELEMETRY`, `DO_NOT_TRACK` | `SESSIONLY_TELEMETRY=off` stops the dashboard counting its pages, and so does `DO_NOT_TRACK=1`. See [Dashboard](dashboard.md#page-counts). |
 | `SESSIONLY_HASH_KEY` | 32 characters or more of random text (`openssl rand -hex 32`). The server keeps a hash of each email address on a pull request's commits, to [match its lines again](pull-requests.md#the-pull-requests-page) later; with this set, the hash is keyed, and the database alone does not confirm a guessed address. Without it the hash is a plain one. Keep it the same: after a change, pull requests have to be reported once more before they can be matched again. |
-| `SESSIONLY_DEMO_FROM`, `SESSIONLY_DEMO_REPO`, `SESSIONLY_DEMO_ORG` | Shows one repository's sessions in a second organisation, for a demo of real work, as `node src/cli.ts demo import` copies them: see [below](#showing-a-repository-in-another-organisation). All three or none. |
-| `SESSIONLY_DEMO_HIDE` | What of that repository not to show, separated by commas: file names, paths, folders and patterns with `*`, as the Action's `ignore` takes them. See [below](#what-is-not-shown). |
-| `SESSIONLY_HOSTED` | `true` for a service many organisations sign up to; `false` or unset for a server of your own. Anything else, or the hosted service's own settings (`SESSIONLY_SIGNUP`, `SESSIONLY_SIGNUP_CODE` and the sign-up limits) without `true`, and the server does not start: see [`infra/`](https://github.com/KIvanow/sessionly/blob/main/infra/README.md). |
+| `SESSIONLY_DEMO_FROM`, `SESSIONLY_DEMO_REPO`, `SESSIONLY_DEMO_ORG` | Hosted only (the ee server). Shows one repository's sessions in a second organisation, for a demo of real work, as `node src/cli.ts demo import` (in `ee/`) copies them: see [below](#showing-a-repository-in-another-organisation). All three or none. |
+| `SESSIONLY_DEMO_HIDE` | Hosted only. What of that repository not to show, separated by commas: file names, paths, folders and patterns with `*`, as the Action's `ignore` takes them. See [below](#what-is-not-shown). |
+| `SESSIONLY_HOSTED` | `true` for a service many organisations sign up to, which is the ee server's (`ee/src/hosted`, under [`LICENSE-EE`](https://github.com/KIvanow/sessionly/blob/main/LICENSE-EE)): the core server does not start with it. `false` or unset for a server of your own. Anything else, or the hosted service's own settings (`SESSIONLY_SIGNUP`, `SESSIONLY_SIGNUP_CODE` and the sign-up limits) without `true`, and the server does not start: see [`infra/`](https://github.com/KIvanow/sessionly/blob/main/infra/README.md). |
 | `SESSIONLY_ORG` | The ee server only: this install's org id. See [Editions and license](editions.md). |
 
 What the server says at its start is worth reading once: it names a setting it could not use
@@ -72,12 +72,12 @@ mode in front of Postgres works.
 With `SESSIONLY_DEMO_FROM` (the id of the organisation sessions are uploaded to),
 `SESSIONLY_DEMO_REPO` (the repository, as sessions are filed under it:
 `github.com/owner/name`) and `SESSIONLY_DEMO_ORG` (the id of another organisation),
-`node src/cli.ts demo import` copies that repository's sessions from the first organisation to
+`node src/cli.ts demo import`, run in `ee/`, copies that repository's sessions from the first organisation to
 the second, in place of what it copied before. Run it again to bring the second up to date: by
 hand, or from cron, for example once a day:
 
 ```
-0 6 * * * cd /opt/sessionly/infra && docker compose --env-file .env -f docker-compose.hosted.yml run --rm --no-deps -T -w /app/apps/server server node src/cli.ts demo import
+0 6 * * * cd /opt/sessionly/infra && docker compose --env-file .env -f docker-compose.hosted.yml run --rm --no-deps -T -w /app/ee server node src/cli.ts demo import
 ```
 
 Nothing changes on anyone's machine, and no other repository's sessions are read. The repository may also be given as its address

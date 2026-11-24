@@ -5,11 +5,15 @@
 // stored.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Db, OrgDb, Queryable } from "./db.ts";
-import type { ProviderName } from "./oauth.ts";
-
 import type { Role, TokenInfo } from "@sessionly/schema";
 
 export type { Role, TokenInfo };
+
+/** What someone signed in with, on the hosted service (ee/src/hosted). */
+export type ProviderName = "google" | "github";
+
+/** How long a token from signing in lasts, and one a dashboard is opened with. */
+export const SIGN_IN_DAYS = 7;
 
 export interface Principal {
   /** The organisation the token belongs to. A request never names another. */
