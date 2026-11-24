@@ -506,7 +506,7 @@ test("a pull request where the repository is shown has its reviewers and rounds 
   };
   const reported = (await stored()).split;
   assert.deepEqual(reported.reviewers.map((r: any) => [r.author, r.inline, r.reviews]), [["coderabbitai[bot]", 1, 0], ["bob", 0, 1]]);
-  assert.deepEqual([reported.rounds, reported.counted_by], [{ bots: 0, people: 0, both: 0 }, "commits"]);
+  assert.deepEqual([reported.rounds, reported.unknown], [{ bots: 0, people: 0, both: 0 }, null]);
   // one stored there before this was worked out has it once the import has matched it again
   await db.query(`UPDATE pull_requests SET review_split = NULL, review_split_at = NULL WHERE org_id = $1`, [p.there]);
   await importDemo(p.from, p.to, { repo: REPO, hide: [] });

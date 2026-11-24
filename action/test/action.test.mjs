@@ -465,6 +465,8 @@ test("backfill first reports a pull request as it was when opened", async () => 
   // The first says nothing of reviews and comments, rather than that there
   // are none: the server would drop those it has until the second arrives.
   assert.deepEqual(["feedback" in opened, "feedback_total" in opened], [false, false]);
+  // Nor whose feedback its rounds followed, rather than that there were no rounds.
+  assert.deepEqual(["review_round_authors" in opened, "review_round_authors" in closed], [false, true]);
   assert.equal(closed.feedback_total, closed.feedback.length);
   assert.ok(closed.feedback.length > 0);
   assert.deepEqual([closed.event, closed.state, closed.commits, closed.reviews], ["closed", "merged", 3, 2]);

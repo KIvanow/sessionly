@@ -424,10 +424,11 @@ export interface PullReport {
   review_rounds: number;
   /**
    * For each of those rounds, oldest first, whose feedback it followed: at
-   * most 1,000 rounds of at most 200 logins each. Left out by an Action
-   * before 0.4.0, and on a pull request with more: the server then works
-   * out what it can from the times its reports arrived. One that does not
-   * fit, or is not as many rounds as `review_rounds`, is taken as left out.
+   * most 1,000 rounds of at most 200 logins each, as many rounds as
+   * `review_rounds`. Left out by an Action before 0.4.0, on a pull request
+   * with more, and in the report `backfill` makes up of how a pull request
+   * began: whose feedback its rounds followed is then not known. One that
+   * does not fit is refused, with the report.
    */
   review_round_authors?: RoundAuthor[][];
   /** The lines the pull request adds, per file, as it is now. */
@@ -719,7 +720,8 @@ export interface RoundAuthor {
 /**
  * Who reviewed a pull request, and whose feedback its rounds of review
  * followed. Worked out on the server when a report is stored, from its
- * reviews and comments and from what the report says of its rounds.
+ * reviews and comments and from what the report says of its rounds: the
+ * rounds are the Action's own, by the times of the commits.
  *
  * A round is review feedback followed by a new commit, as `review_rounds`
  * counts them: a review that comments or asks for changes, or a comment on
@@ -741,29 +743,18 @@ export interface ReviewRounds {
    */
   rounds: { bots: number; people: number; both: number } | null;
   /**
-   * Where the rounds are from. `commits`: the Action said whose feedback
-   * each followed, from the commits' own times, or counted no round at
-   * all. `pushes`: an older Action did not, and the server worked it out
-   * from the times its reports arrived, which it keeps only when it comes
-   * to as many rounds as `review_rounds`; a round may then be put down to
-   * the wrong kind. Null when `rounds` is.
-   */
-  counted_by: "commits" | "pushes" | null;
-  /**
-   * Why the rounds are not known. Always one of these when the report did
-   * not say whose feedback each round followed (an Action before 0.4.0):
-   * - `not_from_open`: the pull request was not reported from the moment it
-   *   was opened (first reported later, or brought in with `backfill`), so
-   *   not every push was seen;
-   * - `reports_not_kept`: its earliest reports are no longer kept;
-   * - `feedback_not_kept`: not all of its reviews and comments are kept
-   *   (only the latest, or none: an Action from before they were sent);
-   * - `pushes_not_seen`: the pushes the server saw do not come to as many
-   *   rounds as `review_rounds`: some push left no report, or one arrived
-   *   late.
+   * Why the rounds are not known:
+   * - `action_did_not_say`: its last report was from an Action before
+   *   0.4.0, which counts the rounds and does not say whose feedback each
+   *   followed. (One that counted no round is known to have none.)
+   * - `not_kept`: its last report was from an Action that says, and nothing
+   *   of what it said is kept: the report went to a server from before
+   *   this was kept, was the one `backfill` makes up of how the pull
+   *   request began, or counted more than 1,000 rounds. Its next report
+   *   says.
    * Null when `rounds` is known.
    */
-  unknown: "not_from_open" | "reports_not_kept" | "feedback_not_kept" | "pushes_not_seen" | null;
+  unknown: "action_did_not_say" | "not_kept" | null;
 }
 
 /**
@@ -796,12 +787,6 @@ export interface ReviewerSummary {
   rounds_shared: number;
   /** Of `pulls`, those whose rounds are known (`ReviewSplit.rounds`): the two figures above are over these. */
   pulls_with_rounds_known: number;
-  /**
-   * Of those, the ones whose rounds the server told from when the reports
-   * arrived (`counted_by` is `pushes`), as an older Action did not say: a
-   * round of theirs may be put down to the wrong kind.
-   */
-  pulls_with_rounds_by_pushes: number;
 }
 
 export interface PullRow {

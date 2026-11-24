@@ -314,17 +314,15 @@ export function roundsTitle(p: Pick<PullRow, "review_rounds" | "review_split">):
   if (p.review_rounds === 0) return undefined;
   const rounds = splitOf(p);
   if (!rounds) return "Whose feedback they followed is not known";
-  return `${roundsByWho(rounds)}${p.review_split?.counted_by === "pushes" ? " (told from when its reports arrived)" : ""}`;
+  return roundsByWho(rounds);
 }
 
-const NEWER_ACTION = " A report from version 0.4.0 of the Action or later says whose feedback each round followed.";
-
-/** Why the rounds' split is not known, as the server says it (`ReviewSplit.unknown`). */
+/** Why the rounds' split is not known, as the server says it (`ReviewSplit.unknown`), and what would make it known. */
 const UNKNOWN_ROUNDS: Record<NonNullable<ReviewSplit["unknown"]>, string> = {
-  not_from_open: "it was not reported from the moment it was opened, so not every push was seen",
-  reports_not_kept: "its earliest reports are no longer kept, so not every push is there to count",
-  feedback_not_kept: "not all of its reviews and comments are kept",
-  pushes_not_seen: "the pushes seen do not come to as many rounds: one left no report, or its report arrived late",
+  action_did_not_say:
+    "Not known: its last report was from an Action that counts the rounds and does not say whose feedback each followed. A report from version 0.4.0 of the Action or later says it.",
+  not_kept:
+    "Not known: what its Action said of them was not kept when it was last reported. Its next report brings it: run its workflow again.",
 };
 
 /**
@@ -335,14 +333,9 @@ export function roundsLine(p: Pick<PullDetail, "review_rounds" | "review_split">
   const rounds = splitOf(p);
   const split = p.review_split;
   if (rounds && p.review_rounds === 0) return "No round: no feedback was followed by a commit.";
-  if (rounds) {
-    // Not the Action's word: the reader is told, and what would make it exact.
-    const told = split?.counted_by === "pushes" ? ` Told from when its reports arrived, as its Action did not say: a round may be put down to the wrong kind.${NEWER_ACTION}` : "";
-    return `${roundsByWho(rounds)}.${told}`;
-  }
+  if (rounds) return `${roundsByWho(rounds)}.`;
   if (!split) return "Not worked out yet.";
-  const why = split.unknown ? UNKNOWN_ROUNDS[split.unknown] : undefined;
-  return `Not known${why ? `: ${why}` : ""}.${NEWER_ACTION}`;
+  return (split.unknown && UNKNOWN_ROUNDS[split.unknown]) || "Not known.";
 }
 
 /**

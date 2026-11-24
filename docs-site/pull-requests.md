@@ -290,37 +290,26 @@ the title of the rounds figure, and the **Review bots** table sums it for each b
 own times, as it counts the rounds. That is exact, and known for every pull request it
 reports, whenever it was first reported.
 
-**A pull request last reported by an older Action** has only what the server can tell from
-what it already has: the reviews and comments, and the times its reports arrived. It counts a
-push with feedback since the push before as a round, and keeps the result only where all of
-this holds; otherwise the page says the split is not known, and why, and gives no number:
+**A pull request last reported by an older Action** has its rounds counted and no word of
+whose feedback each followed, and the page says the split is not known and gives no number.
+Nothing the server has can tell it: when a commit was made is known only to the Action, and
+the times its reports arrived would put feedback given between a commit and its push in the
+wrong round. Its next report from 0.4.0 or later brings it. One that is merged or closed gets
+no further report by itself: run the workflow for it (the `pr-number` input) to have it.
 
-- the server saw the pull request being opened (its first report came within an hour of
-  that, and no report of more commits in the same seconds; one first reported later, or
-  brought in with `backfill`, was not);
-- its earliest reports are still kept (the latest 50 are);
-- all of its reviews and comments are kept (it has no more than 2,000);
-- every push was reported at its own time: where the commits of a push first show in a report
-  that something else prompted (a review, the merge), the report of the push never came, and
-  when it was pushed is not known;
-- the pushes seen come to as many rounds as the Action counted. A push that left no report
-  (an amended commit pushed over the last one, with as many lines), a report that arrived
-  late, and a comment made while a report was on its way mostly give another number.
+A pull request an older Action counted no rounds for has none of any kind, and that is known.
 
-Where the numbers agree, a round may still be put down to the wrong kind when feedback
-arrived in the minutes between a push and its report. The page and the list say of such a
-split that it was told from when the reports arrived. Running the workflow again with the
-newer Action settles it.
-
-A pull request with no rounds has none of any kind, whichever Action reported it.
+**Reported by 0.4.0 or later and still not known** means what the Action said was not kept
+when it was last reported: the report went to a server from before the upgrade, or the run
+stopped between the two reports `backfill` sends. Nothing newer is needed: its next report
+brings it.
 
 The Review bots table says for how many of a bot's pull requests the rounds are known, and
-counts rounds over those only; and for how many of those they were told from when the reports
-arrived. Its other figures are over all of them.
+counts rounds over those only. Its other figures are over all of them.
 
-A pull request stored by a server from before this was worked out gets it when the server
-starts after the upgrade, and at **Match again** where its lines can be matched again: neither
-asks GitHub.
+A pull request stored by a server from before this was worked out gets its reviewers when the
+server starts after the upgrade, within the hour after any later report an older server
+stored, and at **Match again** where its lines can be matched again: none of them asks GitHub.
 
 **Limits.**
 

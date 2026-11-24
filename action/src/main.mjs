@@ -222,8 +222,9 @@ export async function run(env, { api, deliver = send, server, log = console.log 
         // As it was before any review: the server keeps the lines of the first
         // report it gets, and takes the rest from the latest, which is the one
         // that follows. It says nothing of reviews and comments, so that those
-        // the server has stay.
-        const { feedback, feedback_total, ...opened } = buildReport({ ...data, ...then, reviews: [], comments: [], conversation: [], event: "opened", host, ignored });
+        // the server has stay; nor whose feedback its rounds followed, so that
+        // none are taken to be known if the report that follows fails.
+        const { feedback, feedback_total, review_round_authors, ...opened } = buildReport({ ...data, ...then, reviews: [], comments: [], conversation: [], event: "opened", host, ignored });
         await sendTo(named({ ...opened, state: "open", merged_at: null, closed_at: null }));
       }
     }

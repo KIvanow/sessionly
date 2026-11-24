@@ -308,8 +308,6 @@ export function ReviewBots({ rows }: { rows: ReviewerSummary[] }) {
   if (!rows.some((r) => r.author != null)) return null;
   const unknown = rows.filter((r) => r.pulls_with_rounds_known < r.pulls);
   const pulls = (n: number) => (n === 1 ? "pull request" : "pull requests");
-  // Rounds the server told from when reports arrived, as an older Action did not say whose feedback each followed.
-  const told = rows.filter((r) => (r.pulls_with_rounds_by_pushes ?? 0) > 0);
   return (
     <section className="card" aria-label="Review bots">
       <div className="card-head">
@@ -356,16 +354,8 @@ export function ReviewBots({ rows }: { rows: ReviewerSummary[] }) {
         <p className="muted hint">
           Rounds are counted only where it is known whose feedback each followed: for{" "}
           {unknown.map((r) => `${count(r.pulls_with_rounds_known)} of ${count(r.pulls)} ${pulls(r.pulls)} of ${r.author ?? "people"}`).join(", ")}.
-          A report from version 0.4.0 of the Action or later says it; for one from before, the server can tell only
-          where it saw every push.
-        </p>
-      )}
-      {told.length > 0 && (
-        <p className="muted hint">
-          Told from when its reports arrived, as its Action did not say whose feedback each round followed, and so
-          less sure of a round's kind: the rounds of{" "}
-          {told.map((r) => `${count(r.pulls_with_rounds_by_pushes)} of ${count(r.pulls_with_rounds_known)} ${pulls(r.pulls_with_rounds_known)} of ${r.author ?? "people"}`).join(", ")}.
-          A report from version 0.4.0 of the Action or later makes them exact.
+          A report from version 0.4.0 of the Action or later says it; one from before does not, and the rounds of a
+          pull request last reported by one are known only where there are none.
         </p>
       )}
     </section>

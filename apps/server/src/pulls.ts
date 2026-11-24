@@ -30,7 +30,7 @@ import type {
 import { createHash, createHmac } from "node:crypto";
 import type { OrgDb } from "./db.ts";
 import { EFFORTS, belongs } from "./review-runs.ts";
-import { byLogin, reviewSplit, saidRounds, summarizeReviewers } from "./reviews.ts";
+import { byLogin, reviewSplit, summarizeReviewers } from "./reviews.ts";
 import { type Lines, contributedAfter, copiesAt, countLines, lineKey, unionLines } from "./contributed.ts";
 
 export class BadReport extends Error {}
@@ -701,25 +701,29 @@ function checkFeedback(value: unknown, fail: (what: string) => never): PullFeedb
   });
 }
 
-const MAX_ROUNDS = 1000;
-const MAX_ROUND_AUTHORS = 200;
+/** The most rounds, and logins in one, a report may name: the Action's own limits (action/src/report.mjs), past which it names none. */
+export const MAX_ROUNDS = 1000;
+export const MAX_ROUND_AUTHORS = 200;
 
 /**
- * Whose feedback each round followed, as the Action says it, or nothing:
- * one that does not fit (not a list of at most 1,000 rounds, each of 1 to
- * 200 logins with whether it is a bot), or that is not as many rounds as
- * the report counted, is taken as not sent, and the report is stored
- * without it. A login named twice in a round is there once, a bot if either
- * says so.
+ * Whose feedback each round followed, as the Action says it; nothing when
+ * it does not. One that does not fit (not a list of at most 1,000 rounds,
+ * each of 1 to 200 logins with whether it is a bot, as many rounds as the
+ * report counted) is refused, as reviews and comments that do not fit are:
+ * taken as not sent, the pull request would say its Action had not said. A
+ * login named twice in a round is there once, a bot if either says so.
  */
 function checkRoundAuthors(value: unknown, rounds: number): RoundAuthor[][] | undefined {
-  if (!Array.isArray(value) || value.length > MAX_ROUNDS || value.length !== rounds) return undefined;
+  if (value === undefined) return undefined;
+  const bad = (why: string) => new BadReport(`review_round_authors must be ${why}`);
+  if (!Array.isArray(value) || value.length > MAX_ROUNDS) throw bad(`a list of at most ${MAX_ROUNDS} rounds`);
+  if (value.length !== rounds) throw bad("as many rounds as review_rounds");
   const checked: RoundAuthor[][] = [];
   for (const round of value as unknown[]) {
-    if (!Array.isArray(round) || round.length === 0 || round.length > MAX_ROUND_AUTHORS) return undefined;
+    if (!Array.isArray(round) || round.length === 0 || round.length > MAX_ROUND_AUTHORS) throw bad(`rounds of 1 to ${MAX_ROUND_AUTHORS} authors`);
     const authors = new Map<string, boolean>();
     for (const a of round as Record<string, unknown>[]) {
-      if (!a || typeof a !== "object" || typeof a.author !== "string" || a.author === "" || a.author.length > 100) return undefined;
+      if (!a || typeof a !== "object" || typeof a.author !== "string" || a.author === "" || a.author.length > 100) throw bad("rounds of { author, bot }, the author a login of at most 100 characters");
       authors.set(a.author, authors.get(a.author) === true || a.bot === true);
     }
     checked.push([...authors].sort(([a], [b]) => byLogin(a, b)).map(([author, bot]) => ({ author, bot })));
@@ -1240,6 +1244,9 @@ async function recordReport(
  */
 const SPLIT_RULE = 1;
 
+/** The first version of the Action that says whose feedback each round followed. */
+const SAYS_ROUNDS = "0.4.0";
+
 /**
  * A pull request whose reviewers and rounds by who asked (`review_split`)
  * are to be worked out: never yet, by an earlier rule, or from before its
@@ -1265,7 +1272,7 @@ export const UNSPLIT = `(review_split_rule IS NULL OR review_split_rule < ${SPLI
  */
 async function keepReviewSplit(db: OrgDb, repo: string, number: number, { reported = false }: { reported?: boolean } = {}): Promise<void> {
   const [r] = await db.query(
-    `SELECT author, feedback, feedback_total, review_rounds, round_authors, created_at, first_event,
+    `SELECT author, feedback, review_rounds, round_authors, reporter_name, reporter_version,
             round_authors_at IS NOT DISTINCT FROM updated_at AS rounds_current
      FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
     [db.orgId, repo, number],
@@ -1273,26 +1280,13 @@ async function keepReviewSplit(db: OrgDb, repo: string, number: number, { report
   if (!r) return;
   const feedback = r.feedback == null ? null : json<PullFeedback[] | null>(r.feedback);
   const current = reported || r.rounds_current === true;
-  const of = {
+  const version = typeof r.reporter_version === "string" ? r.reporter_version : null;
+  const split = reviewSplit({
     author: String(r.author),
     feedback: Array.isArray(feedback) ? feedback : null,
-    feedbackTotal: r.feedback_total == null ? null : num(r.feedback_total),
     reviewRounds: num(r.review_rounds),
     roundAuthors: current && r.round_authors != null ? json<RoundAuthor[][]>(r.round_authors) : null,
-    createdAt: iso(r.created_at),
-    firstEvent: String(r.first_event),
-  };
-  // The history is what the rounds are told from only when the Action's own word does not settle them.
-  const reports =
-    saidRounds(of) || !of.feedback
-      ? []
-      : await db.query(
-          `SELECT at, event, commits FROM pull_request_reports WHERE org_id = $1 AND repo = $2 AND number = $3 ORDER BY at, id`,
-          [db.orgId, repo, number],
-        );
-  const split = reviewSplit({
-    ...of,
-    reports: reports.map((row) => ({ at: iso(row.at) ?? "", event: String(row.event), commits: num(row.commits) })),
+    says: r.reporter_name === ACTION_REPORTER && actionNumbers(version) != null && !olderAction(version, SAYS_ROUNDS),
   });
   await db.query(
     `UPDATE pull_requests SET review_split = $4::jsonb, review_split_rule = $5, review_split_at = updated_at,
