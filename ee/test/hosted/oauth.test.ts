@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
-import { challengeOf, errorWord, github, google, GITHUB, GOOGLE, isSetupWord, PATIENCE, ProviderProblem } from "../src/oauth.ts";
+import { challengeOf, errorWord, github, google, GITHUB, GOOGLE, isSetupWord, PATIENCE, ProviderProblem } from "../../src/hosted/oauth.ts";
 
 interface Asked {
   method: string;

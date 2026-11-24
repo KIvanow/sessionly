@@ -10,7 +10,7 @@ import pg from "pg";
 import { ApiError, createApp, failureLog, type Env } from "../src/app.ts";
 import { createToken } from "../src/auth.ts";
 import { APP_ROLE, appRoleOf, capped, count, DB_COUNTS, FIRST_ORG_MIGRATION, misset, openDb, versionProblem, type Db } from "../src/db.ts";
-import { hostedProblems, reason } from "../src/run.ts";
+import { reason } from "../src/run.ts";
 import { adminRuns, newOrg, renameTestDb, testDbUrl, tokenFor, tokenWithId } from "./helpers.ts";
 
 let db: Db;
@@ -1028,19 +1028,4 @@ test("why the database could not be opened is said, whatever shape the error has
   assert.equal(reason(refused), "connect ECONNREFUSED ::1:5432; connect ECONNREFUSED 127.0.0.1:5432");
   assert.equal(reason(Object.assign(new Error(""), { code: "ETIMEDOUT" })), "ETIMEDOUT");
   assert.equal(reason("plain text"), "plain text");
-});
-
-test("a hosted service refuses what only a single install may have", () => {
-  const set = {
-    DATABASE_URL: "postgres://app@db.internal/sessionly",
-    SESSIONLY_GOOGLE_CLIENT_ID: "test.apps.googleusercontent.com",
-    SESSIONLY_GOOGLE_CLIENT_SECRET: "secret",
-    SESSIONLY_PUBLIC_URL: "https://app.example.com",
-    SESSIONLY_HASH_KEY: "k".repeat(32),
-  };
-  assert.deepEqual(hostedProblems(set), []);
-  assert.match(hostedProblems({ ...set, SESSIONLY_HASH_KEY: "short" }).join(), /SESSIONLY_HASH_KEY/);
-  assert.match(hostedProblems({ ...set, SESSIONLY_ADMIN_TOKEN: "x" }).join(), /no admin of every organisation/);
-  assert.match(hostedProblems({}).join(), /postgres:\/\//);
-  assert.match(hostedProblems({ ...set, DATABASE_URL: "file:/data" }).join(), /postgres:\/\//);
 });

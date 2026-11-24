@@ -4,11 +4,14 @@
 // owner: once it is marked deleted, a request's token is refused, and the
 // rate counters have no organisation to set. The default organisation of a
 // self-hosted server is never removed.
-import type { Db, OrgDb } from "./db.ts";
-import { orgRateKeys } from "./limits.ts";
+import { ApiError, orgRateKeys, type Db, type OrgDb } from "@sessionly/server";
 
-/** The name typed to delete an organisation was missing or wrong. The route says 400. */
-export class OrgNameError extends Error {}
+/** The name typed to delete an organisation was missing or wrong. */
+class OrgNameError extends ApiError {
+  constructor(message: string) {
+    super(400, "org_name", message);
+  }
+}
 
 /**
  * Mark an organisation deleted. The row stays until the purge. `name` is what
