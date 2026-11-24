@@ -122,37 +122,21 @@ test("reviews and comments are counted apart for people, for bots and for the au
   assert.deepEqual(feedback.map((f) => byOf(f, "ann")), ["bots", "bots", "bots", "bots", "author", "people", "people", "people", "bots", "people", "bots"]);
   // one that opened the pull request is its author there, as the Action has it
   assert.equal(byOf(one("inline", "dependabot[bot]", { bot: true }), "dependabot[bot]"), "author");
-  // the reviewers are the server's, as it has them and in its order; only the author's own row is counted here, replies apart
+  // the reviewers and the author's own row are the server's, as it has them and in its order: nothing is counted here
   const reviewer = (name: string, bot: boolean, inline: number) => ({ author: name, bot, reviews: 0, changes_requested: 0, inline, replies: 1, conversation: 0, first_at: "t", last_at: "t" });
   const row = ({ author, reviews, changes_requested, inline, replies, conversation }: ReturnType<typeof reviewer>) => ({ author, reviews, changes_requested, inline, replies, conversation });
   const reviewers = [reviewer("coderabbitai[bot]", true, 2), reviewer("renovate", true, 1), reviewer("bob", false, 1), reviewer("cy", false, 0)];
-  assert.deepEqual(countFeedback(feedback, "ann", reviewers), [
+  const own = { ...reviewer("ann", false, 0), bot: true };
+  assert.deepEqual(countFeedback({ reviewers, author: own }), [
     { by: "people", rows: [row(reviewers[2]!), row(reviewers[3]!)] },
     { by: "bots", rows: [row(reviewers[0]!), row(reviewers[1]!)] },
-    { by: "author", rows: [{ author: "ann", reviews: 0, changes_requested: 0, inline: 0, replies: 1, conversation: 0 }] },
+    // the author's row is the author's, also where the author is a bot
+    { by: "author", rows: [row(own)] },
   ]);
-  const own = [one("review", "ann", { state: "commented" }), one("inline", "ann"), one("conversation", "ann"), one("review", "ann", { state: "changes_requested" })];
-  assert.deepEqual(countFeedback(own, "ann", [])[2]!.rows, [{ author: "ann", reviews: 2, changes_requested: 1, inline: 1, replies: 0, conversation: 1 }]);
-  assert.deepEqual(countFeedback([], "ann", []), [{ by: "people", rows: [] }, { by: "bots", rows: [] }, { by: "author", rows: [] }]);
-  // the server has not worked the reviewers out yet: they are counted here from the reviews and comments, the busiest first
-  assert.deepEqual(countFeedback(feedback, "ann", null), [
-    {
-      by: "people",
-      rows: [
-        { author: "bob", reviews: 1, changes_requested: 1, inline: 1, replies: 0, conversation: 1 },
-        { author: "cy", reviews: 1, changes_requested: 0, inline: 0, replies: 0, conversation: 0 },
-      ],
-    },
-    {
-      by: "bots",
-      rows: [
-        { author: "coderabbitai[bot]", reviews: 1, changes_requested: 0, inline: 2, replies: 1, conversation: 0 },
-        { author: "renovate", reviews: 0, changes_requested: 0, inline: 1, replies: 0, conversation: 0 },
-        { author: "vercel[bot]", reviews: 0, changes_requested: 0, inline: 0, replies: 0, conversation: 1 },
-      ],
-    },
-    { by: "author", rows: [{ author: "ann", reviews: 0, changes_requested: 0, inline: 0, replies: 1, conversation: 0 }] },
-  ]);
+  const nobody = [{ by: "people", rows: [] }, { by: "bots", rows: [] }, { by: "author", rows: [] }];
+  assert.deepEqual(countFeedback({ reviewers: [], author: null }), nobody);
+  // a server from before it counted them
+  assert.deepEqual(countFeedback(null), nobody);
 });
 
 test("the rounds of review say whose feedback they followed, when that is known, and why not when it is not", () => {

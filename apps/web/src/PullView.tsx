@@ -292,7 +292,7 @@ export function PullView({
                 </tr>
               </thead>
               <tbody>
-                {countFeedback(p.feedback, p.author, p.review_split?.reviewers ?? null).flatMap((group) =>
+                {countFeedback(p.review_split).flatMap((group) =>
                   group.rows.length === 0 ? (
                     <tr key={group.by}>
                       <th scope="row" className="name">{BY[group.by]}</th>

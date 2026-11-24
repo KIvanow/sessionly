@@ -27,11 +27,14 @@ export const byLogin = (a: string, b: string): number => (a < b ? -1 : a > b ? 1
 
 const items = (r: PullReviewer): number => r.reviews + r.inline + r.replies + r.conversation;
 
-/** Everyone in the reviews and comments but the author, with what each did. */
-function reviewersOf(author: string, feedback: PullFeedback[]): PullReviewer[] {
+/**
+ * Everyone in the reviews and comments, with what each did: the author
+ * (null with nothing of their own), and everyone else. The one place that
+ * says what is a review, a reply, a comment on the diff and a bot.
+ */
+function countedBy(author: string, feedback: PullFeedback[]): { own: PullReviewer | null; others: PullReviewer[] } {
   const found = new Map<string, PullReviewer>();
   for (const f of feedback) {
-    if (f.author === author) continue;
     let one = found.get(f.author);
     if (!one) {
       one = { author: f.author, bot: false, reviews: 0, changes_requested: 0, inline: 0, replies: 0, conversation: 0, first_at: f.at, last_at: f.at };
@@ -47,9 +50,12 @@ function reviewersOf(author: string, feedback: PullFeedback[]): PullReviewer[] {
     if (Date.parse(f.at) < Date.parse(one.first_at)) one.first_at = f.at;
     if (Date.parse(f.at) > Date.parse(one.last_at)) one.last_at = f.at;
   }
-  return [...found.values()].sort(
+  const own = found.get(author) ?? null;
+  found.delete(author);
+  const others = [...found.values()].sort(
     (a, b) => Number(b.bot) - Number(a.bot) || items(b) - items(a) || byLogin(a.author, b.author),
   );
+  return { own, others };
 }
 
 type Unknown = NonNullable<ReviewSplit["unknown"]>;
@@ -79,7 +85,8 @@ export function saidRounds(of: Pick<SplitOf, "reviewRounds" | "roundAuthors" | "
 /**
  * A pull request's reviewers and its rounds by who asked.
  *
- * The reviewers are counted from whatever reviews and comments are kept.
+ * The reviewers, and the author's own answers beside them, are counted
+ * from whatever reviews and comments are kept.
  * The rounds are the Action's (`saidRounds`), from the commits' own times,
  * or not known, with why. A round is of bots when all who asked before it
  * are bots, of people when none is, and of both otherwise.
@@ -87,9 +94,9 @@ export function saidRounds(of: Pick<SplitOf, "reviewRounds" | "roundAuthors" | "
  * In whatever order `feedback` comes.
  */
 export function reviewSplit(of: SplitOf): ReviewSplit {
-  const reviewers = of.feedback ? reviewersOf(of.author, of.feedback) : [];
+  const { own, others: reviewers } = of.feedback ? countedBy(of.author, of.feedback) : { own: null, others: [] };
   const found = saidRounds(of);
-  if (typeof found === "string") return { reviewers, rounds: null, round_authors: null, unknown: found };
+  if (typeof found === "string") return { reviewers, author: own, rounds: null, round_authors: null, unknown: found };
   const rounds = { bots: 0, people: 0, both: 0 };
   for (const authors of found) {
     const bots = authors.some((a) => a.bot);
@@ -97,7 +104,7 @@ export function reviewSplit(of: SplitOf): ReviewSplit {
     // (A round nobody is named for cannot be: the Action names who it followed.)
     rounds[bots && people ? "both" : bots ? "bots" : "people"] += 1;
   }
-  return { reviewers, rounds, round_authors: found, unknown: null };
+  return { reviewers, author: own, rounds, round_authors: found, unknown: null };
 }
 
 const emptyRow = (author: string | null): ReviewerSummary => ({

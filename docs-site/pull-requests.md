@@ -307,9 +307,10 @@ brings it.
 The Review bots table says for how many of a bot's pull requests the rounds are known, and
 counts rounds over those only. Its other figures are over all of them.
 
-A pull request stored by a server from before this was worked out gets its reviewers when the
-server starts after the upgrade, within the hour after any later report an older server
-stored, and at **Match again** where its lines can be matched again: none of them asks GitHub.
+A pull request stored by a server from before this was worked out shows its reviewers on its
+own page at once. The list and the Review bots table have it once the server has gone through
+it: when it starts after the upgrade, within the hour after any later report an older server
+stored, and at **Match again** where its lines can be matched again. None of them asks GitHub.
 
 **Limits.**
 

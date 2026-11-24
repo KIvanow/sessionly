@@ -2691,7 +2691,7 @@ test("a report stores who reviewed and whose feedback each round followed; an ol
   // (as the Action that says it does; one that names no version is one from before it did)
   const says = { reporter: { name: "sessionly-action", version: CURRENT_ACTION } };
   assert.equal((await send(1, { ...says, feedback: [], review_round_authors: [] })).status, 200);
-  assert.deepEqual((await at(1)).review_split, { reviewers: [], rounds: { bots: 0, people: 0, both: 0 }, round_authors: [], unknown: null });
+  assert.deepEqual((await at(1)).review_split, { reviewers: [], author: null, rounds: { bots: 0, people: 0, both: 0 }, round_authors: [], unknown: null });
   await send(1, { ...says, event: "synchronize", commits: 2, review_rounds: 1, feedback: feedback.slice(0, 2), review_round_authors: [who(BOT)] });
   assert.deepEqual((await at(1)).review_split.rounds, { bots: 1, people: 0, both: 0 });
   const last = { ...says, ...merged, commits: 3, review_rounds: 2, feedback, review_round_authors: [who(BOT), who(BOT, "bob")] };
@@ -2703,6 +2703,8 @@ test("a report stores who reviewed and whose feedback each round followed; an ol
     [[BOT, true, 0, 0, 2, 1, 0], [OTHER, true, 0, 0, 1, 0, 0], ["bob", false, 1, 1, 0, 0, 1]],
   );
   assert.deepEqual([one.reviewers[0].first_at, one.reviewers[0].last_at], [when(1), when(12)]);
+  // nothing of the author's among them: no row for the author
+  assert.equal(one.author, null);
   // the list has the rounds by kind, and leaves who reviewed and who each round followed to the page
   const listed = (await call(tokens.admin, "GET", `/prs?repo=${encodeURIComponent(repo)}&state=merged`)).body.pulls;
   assert.deepEqual(listed.map((p: any) => p.review_split), [{ rounds: one.rounds, unknown: null }]);
@@ -2722,24 +2724,26 @@ test("a report stores who reviewed and whose feedback each round followed; an ol
   assert.deepEqual((await at(1)).review_split, one);
 
   // An Action from before it said. No round is none; whose feedback any round followed is not known, and who reviewed still is.
-  const later = [inline(BOT, when(1)), inline("cy", when(12))];
+  // (with an answer of the author's, which is no review: counted in the author's own row)
+  const later = [inline(BOT, when(1)), inline("cy", when(12)), inline("ann", when(13), true)];
   await send(2, { feedback: later.slice(0, 1) });
   assert.deepEqual((await at(2)).review_split.rounds, { bots: 0, people: 0, both: 0 });
   await send(2, { event: "synchronize", commits: 2, review_rounds: 1, feedback: later.slice(0, 1) });
   await send(2, { ...merged, commits: 2, review_rounds: 1, feedback: later });
   const two = (await at(2)).review_split;
   assert.deepEqual([two.rounds, two.round_authors, two.unknown, two.reviewers.map((r: any) => r.author)], [null, null, "action_did_not_say", [BOT, "cy"]]);
+  assert.deepEqual([two.author.author, two.author.inline, two.author.replies], ["ann", 0, 1]);
   // One that says, in a report that did not (the one its `backfill` makes up of how the pull request began, should
   // the report after it fail): not even no rounds are known.
   await send(3, { ...says, ...merged, commits: 3, feedback: [inline(BOT, when(1)), inline("dee", when(2))] });
   const three = (await at(3)).review_split;
   assert.deepEqual([three.rounds, three.unknown, three.reviewers.map((r: any) => r.author)], [null, "not_kept", [BOT, "dee"]]);
   // an Action from before reviews and comments were sent: no reviewers to name; no rounds are none, and some are not known
-  const none = { reviewers: [], rounds: { bots: 0, people: 0, both: 0 }, round_authors: [], unknown: null };
+  const none = { reviewers: [], author: null, rounds: { bots: 0, people: 0, both: 0 }, round_authors: [], unknown: null };
   await send(4, { ...merged });
   assert.deepEqual((await at(4)).review_split, none);
   await send(4, { ...merged, review_rounds: 2 });
-  assert.deepEqual((await at(4)).review_split, { reviewers: [], rounds: null, round_authors: null, unknown: "action_did_not_say" });
+  assert.deepEqual((await at(4)).review_split, { reviewers: [], author: null, rounds: null, round_authors: null, unknown: "action_did_not_say" });
   await send(4, { ...merged });
 
   const summary = (await call(tokens.admin, "GET", `/prs/summary?repo=${encodeURIComponent(repo)}&state=merged`)).body;
@@ -2758,8 +2762,12 @@ test("a report stores who reviewed and whose feedback each round followed; an ol
   const stored = async (number: number) => (await db.query(`SELECT review_split, review_split_at, updated_at FROM pull_requests WHERE repo = $1 AND number = $2`, [repo, number]))[0]!;
   const before = await stored(1);
   await db.query(`UPDATE pull_requests SET review_split = NULL, review_split_rule = NULL, review_split_at = NULL WHERE repo = $1`, [repo]);
-  assert.equal((await at(1)).review_split, null);
+  // (its page works it out as it is read, the same; the list and the sums wait for it to be stored)
+  assert.deepEqual((await at(1)).review_split, one);
+  assert.equal((await stored(1)).review_split, null);
+  assert.equal((await call(tokens.admin, "GET", `/prs?repo=${encodeURIComponent(repo)}&state=merged`)).body.pulls.find((p: any) => p.number === 1).review_split, null);
   assert.equal((await call(tokens.admin, "POST", "/prs/match", { repo, number: 1 })).status, 200);
+  assert.notEqual((await stored(1)).review_split, null);
   assert.deepEqual((await at(1)).review_split, one);
   assert.deepEqual((await stored(1)).updated_at, before.updated_at);
   // and the server goes through the rest once it is up, some at a time, each on its own
@@ -2784,9 +2792,10 @@ test("a report stores who reviewed and whose feedback each round followed; an ol
   assert.equal((await at(4)).review_split.unknown, "kept");
   await db.query(`UPDATE pull_requests SET review_split = jsonb_set(review_split, '{unknown}', 'null') WHERE repo = $1 AND number = 4`, [repo]);
   // one worked out by a later rule than this server's (a server put back to this version): not read by this one,
-  // which does not know what shape it has: not on its page, nor in the list, nor summed, and the summary says one is left out
-  await db.query(`UPDATE pull_requests SET review_split_rule = 99 WHERE repo = $1 AND number = 3`, [repo]);
-  assert.equal((await at(3)).review_split, null);
+  // which does not know what shape it has. Its page has this server's own; it is not in the list, nor summed, and
+  // the summary says one is left out
+  await db.query(`UPDATE pull_requests SET review_split_rule = 99, review_split = '{"of":"another rule"}' WHERE repo = $1 AND number = 3`, [repo]);
+  assert.deepEqual((await at(3)).review_split, three);
   const without = (await call(tokens.admin, "GET", `/prs/summary?repo=${encodeURIComponent(repo)}&state=merged`)).body;
   assert.deepEqual(without.by_reviewer.map((r: any) => [r.author, r.pulls]), [[BOT, 2], [OTHER, 1], [null, 2]]);
   assert.deepEqual([summary.reviewers_pending, without.reviewers_pending], [0, 1]);
@@ -2797,8 +2806,8 @@ test("a report stores who reviewed and whose feedback each round followed; an ol
   // one whose last report was stored by a server from before this, beside this one: its split is from the report before, and is gone through again
   await db.query(`UPDATE pull_requests SET updated_at = clock_timestamp(), review_rounds = 0 WHERE repo = $1 AND number = 2`, [repo]);
   assert.deepEqual(await mine(), [2]);
-  // and until then is not given out as that report's
-  assert.equal((await at(2)).review_split, null);
+  // and until then is not given out as that report's: its page works out that report's own, no rounds from an Action that counted none
+  assert.deepEqual([(await at(2)).review_split.rounds, (await at(2)).review_split.unknown], [{ bots: 0, people: 0, both: 0 }, null]);
   assert.deepEqual((await call(tokens.admin, "GET", `/prs?repo=${encodeURIComponent(repo)}&state=merged`)).body.pulls.find((p: any) => p.number === 2).review_split, null);
   await db.asOrg(DEFAULT_ORG, (tx) => splitReviews(tx, repo, 2));
   assert.deepEqual([(await at(2)).review_split.rounds, await mine()], [{ bots: 0, people: 0, both: 0 }, []]);

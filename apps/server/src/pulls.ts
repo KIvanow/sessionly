@@ -1273,6 +1273,30 @@ const SAYS_ROUNDS = "0.4.0";
  */
 export const UNSPLIT = `(review_split_rule IS DISTINCT FROM ${SPLIT_RULE} OR review_split_at IS DISTINCT FROM updated_at)`;
 
+/** What of a pull request's row its split is worked out from (`splitFrom`). */
+const SPLIT_FROM = `author, feedback, review_rounds, round_authors, reporter_name, reporter_version,
+  round_authors_at IS NOT DISTINCT FROM updated_at AS rounds_current`;
+
+/**
+ * A pull request's split from its row (`SPLIT_FROM`), as it is now. What
+ * the Action said of the rounds (`round_authors`) is used only if it came
+ * with the last report, or `reported`: that report was stored just now. A
+ * server from before this stores a report and leaves the rounds of the one
+ * before beside it.
+ */
+function splitFrom(r: Record<string, unknown>, reported = false): ReviewSplit {
+  const feedback = r.feedback == null ? null : json<PullFeedback[] | null>(r.feedback);
+  const current = reported || r.rounds_current === true;
+  const version = typeof r.reporter_version === "string" ? r.reporter_version : null;
+  return reviewSplit({
+    author: String(r.author),
+    feedback: Array.isArray(feedback) ? feedback : null,
+    reviewRounds: num(r.review_rounds),
+    roundAuthors: current && r.round_authors != null ? json<RoundAuthor[][]>(r.round_authors) : null,
+    says: r.reporter_name === ACTION_REPORTER && actionNumbers(version) != null && !olderAction(version, SAYS_ROUNDS),
+  });
+}
+
 /**
  * Work out who reviewed a pull request and whose feedback its rounds
  * followed (`reviewSplit`), from what is kept of it now, and store it with
@@ -1281,28 +1305,12 @@ export const UNSPLIT = `(review_split_rule IS DISTINCT FROM ${SPLIT_RULE} OR rev
  * request (`holdPull`).
  *
  * `reported` when that report was stored just now, by `storePull`: what it
- * said of the rounds (`round_authors`) is then that report's. Otherwise it
- * is used only if it came with the last report: a server from before this
- * stores a report and leaves the rounds of the one before beside it.
+ * said of the rounds (`round_authors`) is then that report's (`splitFrom`).
  */
 async function keepReviewSplit(db: OrgDb, repo: string, number: number, { reported = false }: { reported?: boolean } = {}): Promise<void> {
-  const [r] = await db.query(
-    `SELECT author, feedback, review_rounds, round_authors, reporter_name, reporter_version,
-            round_authors_at IS NOT DISTINCT FROM updated_at AS rounds_current
-     FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
-    [db.orgId, repo, number],
-  );
+  const [r] = await db.query(`SELECT ${SPLIT_FROM} FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`, [db.orgId, repo, number]);
   if (!r) return;
-  const feedback = r.feedback == null ? null : json<PullFeedback[] | null>(r.feedback);
-  const current = reported || r.rounds_current === true;
-  const version = typeof r.reporter_version === "string" ? r.reporter_version : null;
-  const split = reviewSplit({
-    author: String(r.author),
-    feedback: Array.isArray(feedback) ? feedback : null,
-    reviewRounds: num(r.review_rounds),
-    roundAuthors: current && r.round_authors != null ? json<RoundAuthor[][]>(r.round_authors) : null,
-    says: r.reporter_name === ACTION_REPORTER && actionNumbers(version) != null && !olderAction(version, SAYS_ROUNDS),
-  });
+  const split = splitFrom(r, reported);
   await db.query(
     `UPDATE pull_requests SET review_split = $4::jsonb, review_split_rule = $5, review_split_at = updated_at,
             round_authors_at = CASE WHEN $6::boolean THEN updated_at ELSE round_authors_at END
@@ -1315,8 +1323,9 @@ async function keepReviewSplit(db: OrgDb, repo: string, number: number, { report
  * A pull request's `review_split` where it is of its last report and by
  * this server's rule, and null otherwise: one left behind by a report that
  * a server from before this stored, or written by another rule in a shape
- * this one does not know, is not served as current. The page then counts
- * the reviewers for itself, and says the rounds are not worked out.
+ * this one does not know, is not served as current. A pull request's own
+ * page then has it worked out as it is read (`getPull`); a list says the
+ * rounds are not worked out, and the reviewers' sums leave it out.
  */
 const SPLIT_NOW = `CASE WHEN review_split_rule = ${SPLIT_RULE} AND review_split_at IS NOT DISTINCT FROM updated_at THEN review_split END`;
 
@@ -2477,7 +2486,7 @@ async function localReviewsIn(
 
 const ROW_COLUMNS = `repo, number, title, url, author, state, created_at, merged_at, first_event, commits,
   reviews, changes_requested, review_comments, bot_review_comments, review_rounds,
-  ${SPLIT_NOW} - 'reviewers' - 'round_authors' AS review_split, files_without_diff,
+  ${SPLIT_NOW} - 'reviewers' - 'author' - 'round_authors' AS review_split, files_without_diff,
   attribution, updated_at, matched_at, committers IS NOT NULL AS matchable, reporter_name, reporter_version`;
 
 function pullRow(r: Record<string, unknown>): PullRow {
@@ -2524,7 +2533,7 @@ function pullRow(r: Record<string, unknown>): PullRow {
  */
 export async function getPull(db: OrgDb, repo: string, number: number): Promise<Omit<PullDetail, "after_merge"> | null> {
   const [r] = await db.query(
-    `SELECT ${ROW_COLUMNS}, ${SPLIT_NOW} AS whole_split, draft, head_ref, base_ref, closed_at, detail, feedback, feedback_total
+    `SELECT ${ROW_COLUMNS}, ${SPLIT_NOW} AS whole_split, ${SPLIT_FROM}, draft, head_ref, base_ref, closed_at, detail, feedback_total
      FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
     [db.orgId, repo, number],
   );
@@ -2557,7 +2566,9 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
     sessions: shares && shares.map((s) => s.wrote),
     feedback: r.feedback == null ? null : json<PullFeedback[]>(r.feedback),
     feedback_total: r.feedback == null || r.feedback_total == null ? null : num(r.feedback_total),
-    review_split: r.whole_split == null ? null : json<ReviewSplit>(r.whole_split),
+    // One not stored of its last report (from before this, an older server's, another rule's) is worked out here,
+    // as the server will when it goes through it: the page has one answer, and counts nothing for itself.
+    review_split: r.whole_split == null ? splitFrom(r) : json<ReviewSplit>(r.whole_split),
     history,
   };
 }

@@ -731,6 +731,12 @@ export interface RoundAuthor {
 export interface ReviewSplit extends ReviewRounds {
   /** Bots first, then people; in each, most reviews and comments first, then by login. */
   reviewers: PullReviewer[];
+  /**
+   * What the author did in the same reviews and comments, counted the same
+   * way: answers, not review, and so no reviewer's row. Null when nothing
+   * kept is the author's.
+   */
+  author: PullReviewer | null;
   /** For each round, oldest first, whose feedback it followed, by login. Null when `rounds` is. */
   round_authors: RoundAuthor[][] | null;
 }
@@ -1052,7 +1058,11 @@ export interface PullDetail extends PullRow {
   sessions: PullSession[] | null;
   /** Oldest first. */
   feedback: PullFeedback[] | null;
-  /** With its reviewers, and who each round followed. */
+  /**
+   * With its reviewers, the author's own row, and who each round followed.
+   * Always there: where none is stored of its last report, it is worked
+   * out as the page is read. (Null only from a server from before this.)
+   */
   review_split: ReviewSplit | null;
   /** How many there are on GitHub: more than `feedback` has when only the latest were kept. */
   feedback_total: number | null;

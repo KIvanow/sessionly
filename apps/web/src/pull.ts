@@ -239,36 +239,17 @@ export interface FeedbackCount {
 /**
  * A pull request's reviews and comments by whose they are, one row each:
  * reviewers who are people, bots, and the author (whose own comments are
- * answers, not review). The reviewers are the server's (`reviewers`), in
- * its order. The author's row is counted here, the same way, replies apart
- * from the comments that start a thread; and so are the reviewers' on a
- * pull request the server has not worked them out for yet (null).
+ * answers, not review). All as the server counted them (`ReviewSplit`), in
+ * its order: nothing is counted here. Nobody, from a server from before it
+ * did (null).
  */
-export function countFeedback(feedback: PullFeedback[], author: string, reviewers: PullReviewer[] | null): FeedbackCount[] {
-  const rows = new Map<string, FeedbackRow & { bot: boolean }>();
-  for (const f of feedback) {
-    if (reviewers && f.author !== author) continue;
-    const row = rows.get(f.author) ?? { author: f.author, bot: false, reviews: 0, changes_requested: 0, inline: 0, replies: 0, conversation: 0 };
-    rows.set(f.author, row);
-    // A login is a bot when anything of its says so.
-    if (f.bot) row.bot = true;
-    if (f.kind === "review") {
-      row.reviews += 1;
-      if (f.state === "changes_requested") row.changes_requested += 1;
-    } else if (f.kind === "conversation") row.conversation += 1;
-    else if (f.reply) row.replies += 1;
-    else row.inline += 1;
-  }
-  const own = rows.get(author);
-  rows.delete(author);
-  const all = (r: FeedbackRow) => r.reviews + r.inline + r.replies + r.conversation;
-  const others: (FeedbackRow & { bot: boolean })[] =
-    reviewers ?? [...rows.values()].sort((a, b) => all(b) - all(a) || (a.author < b.author ? -1 : a.author > b.author ? 1 : 0));
+export function countFeedback(split: Pick<ReviewSplit, "reviewers" | "author"> | null): FeedbackCount[] {
   const shown = ({ author, reviews, changes_requested, inline, replies, conversation }: FeedbackRow): FeedbackRow => ({ author, reviews, changes_requested, inline, replies, conversation });
+  const reviewers = split?.reviewers ?? [];
   return [
-    { by: "people", rows: others.filter((r) => !r.bot).map(shown) },
-    { by: "bots", rows: others.filter((r) => r.bot).map(shown) },
-    { by: "author", rows: own ? [shown(own)] : [] },
+    { by: "people", rows: reviewers.filter((r) => !r.bot).map(shown) },
+    { by: "bots", rows: reviewers.filter((r) => r.bot).map(shown) },
+    { by: "author", rows: split?.author ? [shown(split.author)] : [] },
   ];
 }
 

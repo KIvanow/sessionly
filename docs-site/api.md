@@ -94,18 +94,20 @@ session it ran in.
 
 `GET /prs` and `GET /prs/detail` give `review_split`: whose feedback the pull request's rounds
 followed (see [Rounds by who asked](pull-requests.md#rounds-by-who-asked)). The list has its
-`rounds` and `unknown`; the detail has `reviewers` and `round_authors` too.
+`rounds` and `unknown`; the detail has `reviewers`, `author` and `round_authors` too.
 `reviewers` has one entry for
 everyone in its reviews and comments but its author, bots first: `author`, `bot`, `reviews`,
 `changes_requested`, `inline` (comments on the diff that start a thread), `replies`,
-`conversation`, `first_at` and `last_at`. `rounds` is `{ bots, people, both }`, which add up
+`conversation`, `first_at` and `last_at`. `author` is the same entry for the author's own
+comments and replies, which are answers and not review, or null with none. `rounds` is `{ bots, people, both }`, which add up
 to `review_rounds`, and `round_authors` lists for each round who it followed, as
 `{ author, bot }`. When that is not known, both are null and `unknown` says why:
 `action_did_not_say` (last reported by an Action before 0.4.0, which counted some rounds) or
 `not_kept` (by one that says, with nothing of it kept: its next report brings it).
-`review_split` itself is null while it is not worked out from the pull request's last report:
+In the list, `review_split` is null while none is stored of the pull request's last report:
 on one from before the upgrade, or whose last report a server of another version stored,
-until the server has gone through it, when it starts and every hour. `GET /prs/summary` gives `by_reviewer`: one row for each bot
+until the server has gone through it, when it starts and every hour. The detail always has
+one: it is worked out as it is read where none is stored. `GET /prs/summary` gives `by_reviewer`: one row for each bot
 that reviewed (`author` its login) and one for all people (`author` null), with `pulls`, the
 sums of those counts, `rounds_alone`, `rounds_shared` and `pulls_with_rounds_known`, the
 pull requests the two round figures are over; and `reviewers_pending`, the pull requests in

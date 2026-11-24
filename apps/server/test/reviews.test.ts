@@ -30,12 +30,12 @@ const split = (feedback: PullFeedback[] | null, more: More = {}) =>
 const who = (...logins: string[]): RoundAuthor[] => logins.map((author) => ({ author, bot: author.endsWith("[bot]") }));
 const known = (rounds: { bots: number; people: number; both: number }, authors: RoundAuthor[][]) => ({ rounds, round_authors: authors, unknown: null });
 const unknown = (why: string) => ({ rounds: null, round_authors: null, unknown: why });
-const rest = ({ reviewers: _, ...others }: ReturnType<typeof reviewSplit>) => others;
+const rest = ({ reviewers: _, author: __, ...others }: ReturnType<typeof reviewSplit>) => others;
 const none = known({ bots: 0, people: 0, both: 0 }, []);
 
 test("no reviews and comments: no reviewers and no rounds", () => {
-  assert.deepEqual(split([]), { reviewers: [], ...none });
-  assert.deepEqual(split([], { said: [] }), { reviewers: [], ...none });
+  assert.deepEqual(split([]), { reviewers: [], author: null, ...none });
+  assert.deepEqual(split([], { said: [] }), { reviewers: [], author: null, ...none });
 });
 
 test("the Action says whose feedback each round followed: that is the split", () => {
@@ -67,12 +67,16 @@ test("an Action that says, with nothing of it kept: not known, not even that the
   assert.deepEqual(rest(split([], { rounds: 2, said: [who(BOT)] })), unknown("not_kept"));
 });
 
-test("the author's own comments and replies make them no reviewer", () => {
-  const own = split([inline("ann", 5), inline("ann", 6, true), review("ann", 7), said("ann", 8)]);
-  assert.deepEqual(own, { reviewers: [], ...none });
+test("the author's own comments and replies make them no reviewer, and are counted in a row of their own", () => {
+  const own = split([inline("ann", 5), inline("ann", 6, true), review("ann", 7, "changes_requested"), said("ann", 8)]);
+  const row = { author: "ann", bot: false, reviews: 1, changes_requested: 1, inline: 1, replies: 1, conversation: 1, first_at: at(5), last_at: at(8) };
+  assert.deepEqual(own, { reviewers: [], author: row, ...none });
+  // nothing of the author's: no row
+  assert.equal(split([review("bob", 6)]).author, null);
+  assert.equal(split(null).author, null);
   // a bot that opened the pull request is its author
   const bot = split([inline(BOT, 5), review("bob", 6)], { author: BOT });
-  assert.deepEqual(bot.reviewers.map((r) => r.author), ["bob"]);
+  assert.deepEqual([bot.reviewers.map((r) => r.author), bot.author?.author, bot.author?.bot, bot.author?.inline], [["bob"], BOT, true, 1]);
 });
 
 test("comments in the conversation and approvals count for the reviewer", () => {
