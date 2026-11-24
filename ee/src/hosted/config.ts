@@ -27,7 +27,7 @@ import type { Accounts } from "./signup.ts";
 const AN_ADDRESS = /^https?:\/\/[^/]+\/?$/i;
 
 /** A plain-HTTP address that leads nowhere but to this machine. */
-const ON_THIS_MACHINE = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/;
+const ON_THIS_MACHINE = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/i;
 
 /** The settings that are a count of something, beyond the core's (which it checks itself). */
 const HOSTED_COUNTS = ["SESSIONLY_SIGNUPS_PER_HOUR", "SESSIONLY_SIGNUPS_PER_NETWORK"] as const;
@@ -54,7 +54,7 @@ export function hostedProblems(env: NodeJS.ProcessEnv): string[] {
     problems.push("SESSIONLY_PUBLIC_URL is not set: nobody could sign in or sign up.");
   } else if (!AN_ADDRESS.test(publicUrl)) {
     problems.push("SESSIONLY_PUBLIC_URL must be an address like https://app.example.com, with no path.");
-  } else if (!publicUrl.startsWith("https://") && !ON_THIS_MACHINE.test(publicUrl)) {
+  } else if (!/^https:\/\//i.test(publicUrl) && !ON_THIS_MACHINE.test(publicUrl)) {
     // Over plain HTTP the cookies that carry a sign-in are not kept to this
     // host or to an encrypted connection, and every token crosses in clear.
     // On this machine itself nothing crosses anything: that is how a hosted
@@ -90,7 +90,8 @@ export function accountsFrom(env: NodeJS.ProcessEnv): Accounts {
       const client = clientOf(env, name);
       return client ? [MAKERS[name](client)] : [];
     }),
-    publicUrl,
+    // As browsers and providers write it back: a scheme and a host in small letters, and no slash.
+    publicUrl: publicUrl && new URL(publicUrl).origin,
     signup: env.SESSIONLY_SIGNUP === "off" ? "off" : "open",
     signupCode: env.SESSIONLY_SIGNUP_CODE?.trim() || undefined,
     signupsPerHour: count(env.SESSIONLY_SIGNUPS_PER_HOUR),
@@ -114,7 +115,7 @@ export function hostedNotes(env: NodeJS.ProcessEnv): string[] {
     }
   }
   const publicUrl = env.SESSIONLY_PUBLIC_URL?.trim() ?? "";
-  if (publicUrl.startsWith("http://") && !ON_THIS_MACHINE.test(publicUrl) && PROVIDER_NAMES.some((name) => clientOf(env, name))) {
+  if (/^http:\/\//i.test(publicUrl) && !ON_THIS_MACHINE.test(publicUrl) && PROVIDER_NAMES.some((name) => clientOf(env, name))) {
     notes.push(
       "SESSIONLY_PUBLIC_URL is plain HTTP on a host that is not this machine: sign-ins and tokens cross the network in clear. Put it behind HTTPS.",
     );

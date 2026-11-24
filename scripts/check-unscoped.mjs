@@ -71,7 +71,7 @@ const IN_APP = [
   /\bownerDb\.transaction\(\(tx\) => onceEvery\(tx,/,
   // Whether the database answers at all.
   /\bownerDb\.query\(`SELECT 1`\)/,
-  // Signing in and signing up, before anyone is known (signup.ts).
+  // What a server of your own offers before anyone is known, and opening its dashboard (open.ts).
   /\bopenRoutes\(ownerDb,/,
 ];
 const COMMENT = /^\s*(\/\/|\*|\/\*)/;

@@ -1331,6 +1331,10 @@ test("the environment sets how people get in", () => {
   // with no provider, with half of one, or with nowhere to send people back to.
   assert.match(hostedProblems({ ...env, SESSIONLY_GITHUB_CLIENT_SECRET: "" }).join(), /No way of signing in is set \(SESSIONLY_GOOGLE_CLIENT_ID with SESSIONLY_GOOGLE_CLIENT_SECRET, or SESSIONLY_GITHUB_CLIENT_ID with SESSIONLY_GITHUB_CLIENT_SECRET\)/);
   assert.match(hostedProblems({ ...env, SESSIONLY_PUBLIC_URL: " " }).join(), /SESSIONLY_PUBLIC_URL is not set/);
+  // A scheme or a host in capitals is the same address.
+  assert.deepEqual(hostedProblems({ ...env, SESSIONLY_PUBLIC_URL: "HTTPS://App.Example.com" }), []);
+  assert.equal(accountsFrom({ ...env, SESSIONLY_PUBLIC_URL: "HTTPS://App.Example.com/" }).publicUrl, "https://app.example.com");
+  assert.deepEqual(hostedProblems({ ...env, SESSIONLY_PUBLIC_URL: "HTTP://LOCALHOST:8080" }), []);
   // Said before the server starts, not thrown once it is starting.
   assert.match(hostedProblems({ ...env, SESSIONLY_PUBLIC_URL: "https://app.example.com/app" }).join(), /SESSIONLY_PUBLIC_URL must be an address like https:\/\/app\.example\.com, with no path/);
   // Or one reached over plain HTTP, where the cookies of a sign-in are not
