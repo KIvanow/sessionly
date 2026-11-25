@@ -812,6 +812,7 @@ mod tests {
         let mut ledger = Ledger::open(&dir.path().join("l.db")).unwrap();
         run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
         assert!(ledger.get("r1").unwrap().is_some());
+        ledger.mark_uploaded("r1", "https://s", "h").unwrap();
 
         // Read into its parent, it goes; and is not made again from its capture.
         fs::write(
@@ -824,6 +825,13 @@ mod tests {
         let report = run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
         assert_eq!((report.synced, report.removed), (1, 1));
         assert!(ledger.get("g1").unwrap().is_some() && ledger.get("r1").unwrap().is_none());
+        // The server it went to gets it taken back, as part of its parent.
+        let back = ledger.withdrawals("https://s").unwrap();
+        let back: Vec<_> = back
+            .iter()
+            .map(|w| (w.session_id.as_str(), w.part_of.as_str()))
+            .collect();
+        assert_eq!(back, [("r1", "g1")]);
         let again = run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
         assert_eq!((again.synced, again.removed), (0, 0));
         assert!(ledger.get("r1").unwrap().is_none());
