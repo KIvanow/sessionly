@@ -449,6 +449,23 @@
               </p>
             </div>
             <div class="cell">
+              <h3>Review runs</h3>
+              <p>
+                Each time a review command ran in a session: <code>/code-review</code>,
+                <code>/review</code>, <code>/security-review</code>, <code>/ultrareview</code> and
+                Codex's <code>/review</code>. When, with what effort, for which pull request, what
+                its subagents cost, and how many findings it reported where the agent says.
+              </p>
+            </div>
+            <div class="cell">
+              <h3>Review bots</h3>
+              <p>
+                Who reviewed a pull request, people and each review bot apart, with what each
+                commented, and how many rounds of review followed only a bot's feedback, only
+                people's, or both. A Review bots table sums it per bot.
+              </p>
+            </div>
+            <div class="cell">
               <h3>Figure history</h3>
               <p>
                 Under a pull request's figures, each time they moved: when, what prompted the
@@ -523,6 +540,13 @@
                   <td>Yes</td>
                   <td>Yes</td>
                   <td>Yes</td>
+                </tr>
+                <tr>
+                  <th scope="row">Review runs</th>
+                  <td>Typed or started by the agent, with its subagents' cost and the findings it reported</td>
+                  <td>Its <code>/review</code>, with the reviewer's cost and its exact findings</td>
+                  <td>A command typed as a prompt: when, and for which pull request</td>
+                  <td>A command typed as a prompt; <code>/review</code> also with its reviewer's cost and time</td>
                 </tr>
                 <tr>
                   <th scope="row">Model and tokens</th>
@@ -714,6 +738,18 @@ SESSIONLY_LINE_HASHES=on</pre>
                 comment on GitHub: their text stays there.
               </li>
               <li>
+                <b>Who asked for each round:</b> one row for each reviewer, people and each review
+                bot apart, with their reviews, comments on the diff and replies; and how many of its
+                rounds of review followed only bots' feedback, only people's, or both. The Review
+                bots table sums that per bot over the pull requests shown. Version 0.4.0 of the
+                Action says whose feedback each round followed; with an older one that is not known.
+              </li>
+              <li>
+                <b>How often it was reviewed before that:</b> each review command run in the
+                sessions that wrote it, in order: run 2 of 5, how long after the one before, its
+                effort, cost and findings. Beside the review bots' comments on GitHub.
+              </li>
+              <li>
                 <b>What it cost:</b> what was spent on it, not what its remaining lines cost. Every
                 session that gave it lines is counted, also when review removes them, and one that
                 worked on several pull requests is split between them. With it, the cost of an
@@ -825,7 +861,7 @@ SESSIONLY_LINE_HASHES=on</pre>
                   <td>Relative to the repository, or to <code>~/</code></td>
                 </tr>
                 <tr>
-                  <th scope="row">Counts, timings, tool names, models, tokens, cost</th>
+                  <th scope="row">Counts, timings, tool and skill names, models, tokens, cost, review runs</th>
                   <td>Yes</td>
                   <td class="hl">Yes</td>
                   <td>Yes</td>
@@ -870,7 +906,9 @@ SESSIONLY_LINE_HASHES=on</pre>
           <p class="eyebrow">Editions</p>
           <h2>Open source at the core. Self-hosted, or hosted for you.</h2>
           <p class="lede">
-            Everything on this page is in the open-source edition. It never needs a license key.
+            Everything on this page is in the open-source edition, apart from what only the hosted
+            service does: signing up, signing in with Google or GitHub, and deleting an
+            organisation. It never needs a license key.
           </p>
           <div class="plans">
             <div class="plan sheet featured">
@@ -908,7 +946,10 @@ SESSIONLY_LINE_HASHES=on</pre>
               <p class="price">Free during early access</p>
               <p class="for">The same server, run for you.</p>
               <ul>
-                <li>The same code as the self-hosted server</li>
+                <li>
+                  The self-hosted server, with the hosted service's own parts (signing up, signing
+                  in with Google or GitHub, adding people by address) under LICENSE-EE
+                </li>
                 <li>The same content levels: metadata by default, previews opt-in</li>
                 <li>Sign in with Google or GitHub, and each person sees their own sessions; your org's data is kept apart from every other</li>
                 <li>The owner can download the organisation's data, or delete it</li>
