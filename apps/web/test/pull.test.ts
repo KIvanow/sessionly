@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PullFeedback } from "@sessionly/schema";
-import { afterMergeLine, afterMergeName, afterMergeTile, timeline, byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, localReviewsLine, matchAll, reviewGaps, reviewTarget, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web, survivingOnce } from "../src/pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, timeline, byOf, countFeedback, feedbackLabel, figureBecause, figureShift, historyEvent, localReviewsLine, matchAll, reviewGaps, reviewNote, reviewTarget, roundsLine, roundsTitle, matchedLine, nameSome, pullCost, pullCostNote, pullHref, pullsCostNote, sessionShare, web, survivingOnce } from "../src/pull.ts";
 
 test("a moved agent figure says what it was, and why", () => {
   const history = [
@@ -115,19 +115,70 @@ test("reviews and comments are counted apart for people, for bots and for the au
     one("inline", "bob"),
     one("review", "cy", { state: "approved" }),
     // a bot is a bot by what GitHub says of it, whatever it is called
-    one("inline", "ann", { bot: true }),
+    one("inline", "renovate", { bot: true }),
+    one("conversation", "bob"),
+    one("inline", "coderabbitai[bot]", { reply: true }),
   ];
-  assert.deepEqual(feedback.map((f) => byOf(f, "ann")), ["bots", "bots", "bots", "bots", "author", "people", "people", "people", "bots"]);
-  assert.deepEqual(countFeedback(feedback, "ann"), [
-    { by: "people", names: ["bob", "cy"], reviews: 2, changes_requested: 1, inline: 1, conversation: 0 },
-    { by: "bots", names: ["coderabbitai[bot]", "ann", "vercel[bot]"], reviews: 1, changes_requested: 0, inline: 3, conversation: 1 },
-    { by: "author", names: ["ann"], reviews: 0, changes_requested: 0, inline: 1, conversation: 0 },
+  assert.deepEqual(feedback.map((f) => byOf(f, "ann")), ["bots", "bots", "bots", "bots", "author", "people", "people", "people", "bots", "people", "bots"]);
+  // one that opened the pull request is its author there, as the Action has it
+  assert.equal(byOf(one("inline", "dependabot[bot]", { bot: true }), "dependabot[bot]"), "author");
+  // the reviewers and the author's own row are the server's, as it has them and in its order: nothing is counted here
+  const reviewer = (name: string, bot: boolean, inline: number) => ({ author: name, bot, reviews: 0, changes_requested: 0, inline, replies: 1, conversation: 0, first_at: "t", last_at: "t" });
+  const row = ({ author, reviews, changes_requested, inline, replies, conversation }: ReturnType<typeof reviewer>) => ({ author, reviews, changes_requested, inline, replies, conversation });
+  const reviewers = [reviewer("coderabbitai[bot]", true, 2), reviewer("renovate", true, 1), reviewer("bob", false, 1), reviewer("cy", false, 0)];
+  const own = { ...reviewer("ann", false, 0), bot: true };
+  assert.deepEqual(countFeedback({ reviewers, author: own }), [
+    { by: "people", rows: [row(reviewers[2]!), row(reviewers[3]!)] },
+    { by: "bots", rows: [row(reviewers[0]!), row(reviewers[1]!)] },
+    // the author's row is the author's, also where the author is a bot
+    { by: "author", rows: [row(own)] },
   ]);
-  assert.deepEqual(countFeedback([], "ann").map((row) => [row.by, row.names, row.reviews + row.inline + row.conversation]), [
-    ["people", [], 0],
-    ["bots", [], 0],
-    ["author", [], 0],
-  ]);
+  const nobody = [{ by: "people", rows: [] }, { by: "bots", rows: [] }, { by: "author", rows: [] }];
+  assert.deepEqual(countFeedback({ reviewers: [], author: null }), nobody);
+  // a server from before it counted them
+  assert.deepEqual(countFeedback(null), nobody);
+});
+
+test("the rounds of review say whose feedback they followed, when that is known, and why not when it is not", () => {
+  type Split = { bots: number; people: number; both: number };
+  const pull = (review_rounds: number, rounds: Split | null | undefined, unknown: string | null = null) => ({
+    review_comments: 9,
+    bot_review_comments: 14,
+    review_rounds,
+    review_split: rounds === undefined ? null : ({ reviewers: [], rounds, round_authors: rounds && [], unknown } as never),
+  });
+  const known = pull(4, { bots: 2, people: 1, both: 1 });
+  assert.equal(reviewNote(known), "9 by people, 14 by bots, in 4 rounds: 2 after bots only, 1 after people only, 1 after both");
+  assert.equal(roundsTitle(known), "2 after bots only, 1 after people only, 1 after both");
+  assert.equal(roundsLine(known), "2 after bots only, 1 after people only, 1 after both.");
+  assert.equal(reviewNote(pull(1, { bots: 1, people: 0, both: 0 })), "9 by people, 14 by bots, in 1 round: 1 after bots only");
+  // no rounds: nothing to split
+  const none = pull(0, { bots: 0, people: 0, both: 0 });
+  assert.equal(reviewNote(none), "9 by people, 14 by bots, in 0 rounds of review");
+  assert.equal(roundsTitle(none), undefined);
+  assert.equal(roundsLine(none), "No round: no feedback was followed by a commit.");
+  // not known: as before, no number that may be wrong, and the page says why
+  const older = pull(4, null, "action_did_not_say");
+  assert.equal(reviewNote(older), "9 by people, 14 by bots, in 4 rounds of review");
+  assert.equal(roundsTitle(older), "Whose feedback they followed is not known");
+  assert.equal(roundsTitle(pull(0, null, "not_kept")), undefined);
+  assert.equal(
+    roundsLine(older),
+    "Not known: its last report was from an Action that counts the rounds and does not say whose feedback each followed. A report from version 0.4.0 of the Action or later says it.",
+  );
+  // reported by an Action that says, to a server that kept none of it: no newer Action is asked for, only another report
+  for (const rounds of [4, 0])
+    assert.equal(roundsLine(pull(rounds, null, "not_kept")), "Not known: what its Action said of them was not kept when it was last reported. Its next report brings it: run its workflow again. (Never on one with more than 300 rounds, 50 names in one round or 2,000 in all: the Action names none for it.)");
+  // a reason this page does not know yet (a newer server): still not known, and no wrong reason
+  assert.equal(roundsLine(pull(4, null, "something_new")), "Not known.");
+  // nothing worked out
+  assert.equal(reviewNote(pull(4, undefined)), "9 by people, 14 by bots, in 4 rounds of review");
+  assert.equal(roundsLine(pull(4, undefined)), "Not worked out yet.");
+  // a split that is not of the rounds shown is not put beside them
+  const other = pull(4, { bots: 2, people: 0, both: 1 });
+  assert.equal(reviewNote(other), "9 by people, 14 by bots, in 4 rounds of review");
+  assert.equal(roundsTitle(other), "Whose feedback they followed is not known");
+  assert.equal(roundsLine(other), "Not known.");
 });
 
 test("a pull request's cost is said with what is not sure about it", () => {

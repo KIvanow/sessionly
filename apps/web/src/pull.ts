@@ -1,6 +1,6 @@
 // A pull request's page: where it is, how current its figures are, and its
 // reviews and comments counted by whose they are.
-import type { LocalReviewRun, LocalReviews, PullCost, PullFeedback, PullMatches, PullRow, PullSession } from "@sessionly/schema";
+import type { LocalReviewRun, LocalReviews, PullCost, PullDetail, PullFeedback, PullMatches, PullReviewer, PullRow, PullSession, ReviewSplit } from "@sessionly/schema";
 import { count, dateTime, usd, usdEach } from "./format.ts";
 
 /** Whether a cost is a floor: a session of it has no cost figure, or one that leaves requests out. */
@@ -218,35 +218,105 @@ export function feedbackLabel(f: PullFeedback): string {
   return `${f.reply ? "Reply" : "Comment"}${where}`;
 }
 
-/** Whose a review or comment is: a bot's, the pull request's author's, or another person's. */
+/**
+ * Whose a review or comment is: the pull request's author's, a bot's, or
+ * another person's. A bot that opened the pull request is its author there,
+ * as the Action and the server have it: what it says on its own pull request
+ * is no review.
+ */
 export type By = "people" | "bots" | "author";
-export const byOf = (f: PullFeedback, author: string): By => (f.bot ? "bots" : f.author === author ? "author" : "people");
+export const byOf = (f: PullFeedback, author: string): By => (f.author === author ? "author" : f.bot ? "bots" : "people");
+
+/** What one person or bot did on a pull request. */
+export type FeedbackRow = Pick<PullReviewer, "author" | "reviews" | "changes_requested" | "inline" | "replies" | "conversation">;
 
 export interface FeedbackCount {
   by: By;
-  /** Who they were, most active first. */
-  names: string[];
-  reviews: number;
-  changes_requested: number;
-  inline: number;
-  conversation: number;
+  /** Who they were, most active first, then by name. None for a group nobody is in. */
+  rows: FeedbackRow[];
 }
 
 /**
- * Reviews and comments counted by whose they are: reviewers who are people,
- * bots, and the author (whose own comments are answers, not review).
+ * A pull request's reviews and comments by whose they are, one row each:
+ * reviewers who are people, bots, and the author (whose own comments are
+ * answers, not review). All as the server counted them (`ReviewSplit`), in
+ * its order: nothing is counted here. Nobody, from a server from before it
+ * did (null).
  */
-export function countFeedback(feedback: PullFeedback[], author: string): FeedbackCount[] {
-  const rows = (["people", "bots", "author"] as By[]).map((by) => ({ by, names: new Map<string, number>(), reviews: 0, changes_requested: 0, inline: 0, conversation: 0 }));
-  for (const f of feedback) {
-    const row = rows.find((r) => r.by === byOf(f, author))!;
-    row.names.set(f.author, (row.names.get(f.author) ?? 0) + 1);
-    if (f.kind === "review") {
-      row.reviews += 1;
-      if (f.state === "changes_requested") row.changes_requested += 1;
-    } else row[f.kind] += 1;
-  }
-  return rows.map((r) => ({ ...r, names: [...r.names].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([name]) => name) }));
+export function countFeedback(split: Pick<ReviewSplit, "reviewers" | "author"> | null): FeedbackCount[] {
+  const shown = ({ author, reviews, changes_requested, inline, replies, conversation }: FeedbackRow): FeedbackRow => ({ author, reviews, changes_requested, inline, replies, conversation });
+  const reviewers = split?.reviewers ?? [];
+  return [
+    { by: "people", rows: reviewers.filter((r) => !r.bot).map(shown) },
+    { by: "bots", rows: reviewers.filter((r) => r.bot).map(shown) },
+    { by: "author", rows: split?.author ? [shown(split.author)] : [] },
+  ];
+}
+
+type Rounds = NonNullable<ReviewSplit["rounds"]>;
+const roundsWord = (n: number): string => (n === 1 ? "round" : "rounds");
+
+/** Rounds by whose feedback they followed: "2 after bots only, 1 after people only, 1 after both". Those with none are left out. */
+export function roundsByWho(rounds: Rounds): string {
+  return [
+    rounds.bots > 0 && `${count(rounds.bots)} after bots only`,
+    rounds.people > 0 && `${count(rounds.people)} after people only`,
+    rounds.both > 0 && `${count(rounds.both)} after both`,
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+/**
+ * The split of a pull request's rounds, when it is known and is of the
+ * rounds shown: the server keeps one only when it comes to as many, and one
+ * that does not (a server and a page of different versions) is not shown
+ * beside another number.
+ */
+function splitOf(p: Pick<PullRow, "review_rounds" | "review_split">): Rounds | null {
+  const rounds = p.review_split?.rounds;
+  return rounds && rounds.bots + rounds.people + rounds.both === p.review_rounds ? rounds : null;
+}
+
+type Reviewed = Pick<PullRow, "review_comments" | "bot_review_comments" | "review_rounds" | "review_split">;
+
+/**
+ * Under the review comments: how many by people and by bots, in how many
+ * rounds, and whose feedback the rounds followed when that is known.
+ */
+export function reviewNote(p: Reviewed): string {
+  const start = `${count(p.review_comments)} by people, ${count(p.bot_review_comments)} by bots, in ${count(p.review_rounds)} ${roundsWord(p.review_rounds)}`;
+  const rounds = splitOf(p);
+  return rounds && p.review_rounds > 0 ? `${start}: ${roundsByWho(rounds)}` : `${start} of review`;
+}
+
+/** The same split for the rounds of a pull request in a list, as a title. Nothing where there are no rounds. */
+export function roundsTitle(p: Pick<PullRow, "review_rounds" | "review_split">): string | undefined {
+  if (p.review_rounds === 0) return undefined;
+  const rounds = splitOf(p);
+  if (!rounds) return "Whose feedback they followed is not known";
+  return roundsByWho(rounds);
+}
+
+/** Why the rounds' split is not known, as the server says it (`ReviewSplit.unknown`), and what would make it known. */
+const UNKNOWN_ROUNDS: Record<NonNullable<ReviewSplit["unknown"]>, string> = {
+  action_did_not_say:
+    "Not known: its last report was from an Action that counts the rounds and does not say whose feedback each followed. A report from version 0.4.0 of the Action or later says it.",
+  not_kept:
+    "Not known: what its Action said of them was not kept when it was last reported. Its next report brings it: run its workflow again. (Never on one with more than 300 rounds, 50 names in one round or 2,000 in all: the Action names none for it.)",
+};
+
+/**
+ * Whose feedback a pull request's rounds followed, as a sentence for its
+ * page; and when that is not known, why not, and what would make it known.
+ */
+export function roundsLine(p: Pick<PullDetail, "review_rounds" | "review_split">): string {
+  const rounds = splitOf(p);
+  const split = p.review_split;
+  if (rounds && p.review_rounds === 0) return "No round: no feedback was followed by a commit.";
+  if (rounds) return `${roundsByWho(rounds)}.`;
+  if (!split) return "Not worked out yet.";
+  return (split.unknown && UNKNOWN_ROUNDS[split.unknown]) || "Not known.";
 }
 
 /**

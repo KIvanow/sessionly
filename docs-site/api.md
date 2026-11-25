@@ -92,6 +92,32 @@ and is not judged.
 sessions, oldest first, with its time, command, effort, where it ran, how it went, cost, findings and the
 session it ran in.
 
+`GET /prs` and `GET /prs/detail` give `review_split`: whose feedback the pull request's rounds
+followed (see [Rounds by who asked](pull-requests.md#rounds-by-who-asked)). The list has its
+`rounds` and `unknown`; the detail has `reviewers`, `author` and `round_authors` too.
+`reviewers` has one entry for
+everyone in its reviews and comments but its author, bots first: `author`, `bot`, `reviews`,
+`changes_requested`, `inline` (comments on the diff that start a thread), `replies`,
+`conversation`, `first_at` and `last_at`. `author` is the same entry for the author's own
+comments and replies, which are answers and not review, or null with none. `rounds` is `{ bots, people, both }`, which add up
+to `review_rounds`, and `round_authors` lists for each round who it followed, as
+`{ author, bot }`. When that is not known, both are null and `unknown` says why:
+`action_did_not_say` (last reported by an Action before 0.4.0, which counted some rounds) or
+`not_kept` (by one that says, with nothing of it kept: its next report brings it, unless the
+pull request has more rounds or logins than a report may name, below).
+In the list, `review_split` is null while none is stored of the pull request's last report:
+on one from before the upgrade, or whose last report a server of another version stored,
+until the server has gone through it, when it starts and every hour. The detail always has
+one: it is worked out as it is read where none is stored. `GET /prs/summary` gives `by_reviewer`: one row for each bot
+that reviewed (`author` its login) and one for all people (`author` null), with `pulls`, the
+sums of those counts, `rounds_alone`, `rounds_shared` and `pulls_with_rounds_known`, the
+pull requests the two round figures are over; and `reviewers_pending`, the pull requests in
+the filter that `by_reviewer` leaves out because their `review_split` is null.
+
+A report (`PUT /prs`) may carry `review_round_authors`: for each of its `review_rounds`,
+oldest first, a list of `{ author, bot }` (`bot` true or false), at most 300 rounds of 1 to 50 logins, and 2,000 logins in all. One that
+does not fit, or is not as many rounds as `review_rounds`, is refused with the report (422).
+
 `GET /prs` and `GET /prs/detail` give `reporter_version` (null when none was kept) and
 `reporter_older`. `GET /prs/detail` also gives `reporter_current`, the version of the Action
 this server knows, and `repo_reporter_older`: the repository's most recent report from the

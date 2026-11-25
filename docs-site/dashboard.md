@@ -38,7 +38,10 @@ light or dark as the system is, and serves the same two typefaces itself, from
   it ended and is there now, files changed with how much of each survives as last measured,
   tools, its review runs (when, which command, effort, where it ran, subagents, their cost,
   findings), and subagents.
-- **Pull requests** (admins): see [Pull requests](pull-requests.md).
+- **Pull requests** (admins): see [Pull requests](pull-requests.md). Above the list, **By
+  model** sums how the agents' lines fared in review, and **Review bots** has a row for each
+  bot that reviewed them and one for all people: pull requests, comments on the diff, and the
+  [rounds that followed its feedback](pull-requests.md#rounds-by-who-asked), alone or shared.
 - **Team** (admins): add and remove people where they sign in with Google or GitHub, and create
   and revoke tokens for what cannot sign in: a cloud environment, CI, or a machine set up for
   someone. On a server of your own it also shows the [license](editions.md).

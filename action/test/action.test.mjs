@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { all, branchFor, fileOn, filesAt, FILES_AT_ONCE, github } from "../src/github.mjs";
 import { addedHashes, fileHashes, ignoring, lineHash } from "../src/lines.mjs";
 import { ask, eventName, MOST_AT_ONCE, MOST_FILES, run, send, wanted, whenOpened } from "../src/main.mjs";
-import { buildReport, feedbackOf, MARKER, render, reviewRounds } from "../src/report.mjs";
+import { buildReport, feedbackOf, MARKER, render, roundAuthors } from "../src/report.mjs";
 
 const ACTION_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
@@ -55,7 +55,7 @@ const review = (login, state, minute, type = "User") => ({ user: { login, type }
 const comment = (login, minute, type = "User") => ({ user: { login, type }, created_at: at(minute) });
 
 test("a round of review is feedback followed by a commit", () => {
-  const rounds = (reviews, comments, commits) => reviewRounds("ann", reviews, comments, commits);
+  const rounds = (reviews, comments, commits) => roundAuthors("ann", reviews, comments, commits).length;
   assert.equal(rounds([], [], [commit(1), commit(2)]), 0);
   // two reviews, then one push: one round; then a bot comment and a push: two
   assert.equal(
@@ -69,6 +69,49 @@ test("a round of review is feedback followed by a commit", () => {
   // feedback nobody acted on, an approval, and the author's own replies are not rounds
   assert.equal(rounds([review("bob", "CHANGES_REQUESTED", 5)], [], [commit(1)]), 0);
   assert.equal(rounds([review("bob", "APPROVED", 5)], [comment("ann", 6)], [commit(1), commit(9)]), 0);
+});
+
+test("each round says whose feedback it followed, by login, a bot's marked", () => {
+  const rounds = (reviews, comments, commits) => roundAuthors("ann", reviews, comments, commits);
+  assert.deepEqual(rounds([], [], [commit(1), commit(2)]), []);
+  assert.deepEqual(
+    rounds(
+      [review("bob", "COMMENTED", 5), review("cy", "CHANGES_REQUESTED", 6), review("bob", "COMMENTED", 7), review("bob", "APPROVED", 30)],
+      // the first comes before any commit after it; the last has no commit after it
+      [comment("coderabbitai[bot]", 12, "Bot"), comment("ann", 13), comment("sonar", 14, "Bot"), comment("dee", 25)],
+      [commit(1), commit(10), commit(11), commit(20)],
+    ),
+    [
+      [{ author: "bob", bot: false }, { author: "cy", bot: false }],
+      [{ author: "coderabbitai[bot]", bot: true }, { author: "sonar", bot: true }],
+    ],
+  );
+  // feedback of an account deleted since is feedback, and no commit
+  const gone = { user: null, created_at: at(6) };
+  assert.deepEqual(rounds([], [comment("bob", 5), gone], [commit(1)]), []);
+  assert.deepEqual(rounds([], [comment("bob", 5), gone, comment("bob", 7)], [commit(1), commit(9)]), [[{ author: "bob", bot: false }, { author: "unknown", bot: false }]]);
+  assert.deepEqual(rounds([], [gone], [commit(1), commit(9)]), [[{ author: "unknown", bot: false }]]);
+  // the author's account was deleted too: what it said on its own pull request is the author's, and no feedback
+  assert.deepEqual(roundAuthors("unknown", [], [gone, comment("bob", 7)], [commit(1), commit(9)]), [[{ author: "bob", bot: false }]]);
+  assert.deepEqual(roundAuthors("unknown", [], [gone], [commit(1), commit(9)]), []);
+  // a comment drafted in a review before a push, in a review submitted after it: feedback from when it was submitted
+  const drafted = { ...comment("bob", 5), pull_request_review_id: 77 };
+  const sent = { ...review("bob", "COMMENTED", 12), id: 77 };
+  assert.deepEqual(rounds([sent], [drafted], [commit(1), commit(10)]), []);
+  assert.deepEqual(rounds([sent], [drafted], [commit(1), commit(10), commit(20)]), [[{ author: "bob", bot: false }]]);
+  // the report counts as many rounds as it names
+  const some = buildReport({ ...GITHUB, event: "synchronize", host: "github.com", ignored: () => false });
+  assert.equal(some.review_round_authors.length, some.review_rounds);
+  // more rounds than the server takes: the report says how many, and not whose
+  const many = Array.from({ length: 301 }, (_, i) => i);
+  const long = buildReport({
+    ...GITHUB,
+    reviews: [],
+    comments: many.map((i) => ({ user: { login: "bob", type: "User" }, created_at: new Date(Date.UTC(2026, 10, 10, 10, 0, 2 * i)).toISOString() })),
+    commits: many.map((i) => ({ commit: { author: { email: "a@b.c" }, committer: { date: new Date(Date.UTC(2026, 10, 10, 10, 0, 2 * i + 1)).toISOString() } } })),
+    event: "synchronize", host: "github.com", ignored: () => false,
+  });
+  assert.deepEqual([long.review_rounds, "review_round_authors" in long], [301, false]);
 });
 
 const PULL = {
@@ -133,6 +176,7 @@ test("a report says where the pull request stands and what it adds", () => {
     review_comments: 1,
     bot_review_comments: 2,
     review_rounds: 1,
+    review_round_authors: [[{ author: "bob", bot: false }, { author: "coderabbitai[bot]", bot: true }]],
     files: [{ path: "src/parser.rs", hashes: [lineHash("one();"), lineHash("two();")] }],
     files_without_diff: 1,
     feedback: [
@@ -421,6 +465,8 @@ test("backfill first reports a pull request as it was when opened", async () => 
   // The first says nothing of reviews and comments, rather than that there
   // are none: the server would drop those it has until the second arrives.
   assert.deepEqual(["feedback" in opened, "feedback_total" in opened], [false, false]);
+  // Nor whose feedback its rounds followed, rather than that there were no rounds.
+  assert.deepEqual(["review_round_authors" in opened, "review_round_authors" in closed], [false, true]);
   assert.equal(closed.feedback_total, closed.feedback.length);
   assert.ok(closed.feedback.length > 0);
   assert.deepEqual([closed.event, closed.state, closed.commits, closed.reviews], ["closed", "merged", 3, 2]);

@@ -22,11 +22,15 @@ import type {
   PullSession,
   PullSummary,
   PullsByModel,
+  ReviewRounds,
   ReviewRun,
+  ReviewSplit,
+  RoundAuthor,
 } from "@sessionly/schema";
 import { createHash, createHmac } from "node:crypto";
 import type { OrgDb } from "./db.ts";
 import { EFFORTS, belongs } from "./review-runs.ts";
+import { byLogin, reviewSplit, summarizeReviewers } from "./reviews.ts";
 import { type Lines, contributedAfter, copiesAt, countLines, lineKey, unionLines } from "./contributed.ts";
 
 export class BadReport extends Error {}
@@ -36,7 +40,7 @@ export class BadReport extends Error {}
  * string as `version` in `action/package.json`: a test fails when the two
  * differ. Bump both with every change to what a report contains.
  */
-export const CURRENT_ACTION = "0.3.0";
+export const CURRENT_ACTION = "0.4.0";
 
 /** Sessions that started longer than this before a pull request was opened are not looked at. */
 const LOOK_BACK_DAYS = 90;
@@ -697,6 +701,47 @@ function checkFeedback(value: unknown, fail: (what: string) => never): PullFeedb
   });
 }
 
+/**
+ * The most rounds a report may name, logins in one, and logins in all: the
+ * Action's own limits (action/src/report.mjs), past which it names none.
+ * Far more than a pull request has (as many names in all as reviews and
+ * comments are kept), and few enough that what is stored of them stays
+ * small beside the rest of the row: every one is read where reviewers are
+ * summed over many pull requests.
+ */
+export const MAX_ROUNDS = 300;
+export const MAX_ROUND_AUTHORS = 50;
+export const MAX_ROUND_NAMES = 2000;
+
+/**
+ * Whose feedback each round followed, as the Action says it; nothing when
+ * it does not. One that does not fit (not a list of at most 300 rounds,
+ * each of 1 to 50 logins with whether it is a bot, at most 2,000 in all,
+ * as many rounds as the report counted) is refused, as reviews and
+ * comments that do not fit are: taken as not sent, the pull request would
+ * say its Action had not said. A login named twice in a round is there
+ * once, a bot if either says so.
+ */
+function checkRoundAuthors(value: unknown, rounds: number): RoundAuthor[][] | undefined {
+  if (value === undefined) return undefined;
+  const bad = (why: string) => new BadReport(`review_round_authors must be ${why}`);
+  if (!Array.isArray(value) || value.length > MAX_ROUNDS) throw bad(`a list of at most ${MAX_ROUNDS} rounds`);
+  if (value.length !== rounds) throw bad("as many rounds as review_rounds");
+  const checked: RoundAuthor[][] = [];
+  let names = 0;
+  for (const round of value as unknown[]) {
+    if (!Array.isArray(round) || round.length === 0 || round.length > MAX_ROUND_AUTHORS) throw bad(`rounds of 1 to ${MAX_ROUND_AUTHORS} authors`);
+    if ((names += round.length) > MAX_ROUND_NAMES) throw bad(`at most ${MAX_ROUND_NAMES} authors in all`);
+    const authors = new Map<string, boolean>();
+    for (const a of round as Record<string, unknown>[]) {
+      if (!a || typeof a !== "object" || typeof a.author !== "string" || a.author === "" || a.author.length > 100 || typeof a.bot !== "boolean") throw bad("rounds of { author, bot }, the author a login of at most 100 characters and bot true or false");
+      authors.set(a.author, authors.get(a.author) === true || a.bot === true);
+    }
+    checked.push([...authors].sort(([a], [b]) => byLogin(a, b)).map(([author, bot]) => ({ author, bot })));
+  }
+  return checked;
+}
+
 /** A report as the Action sends it, checked; throws `BadReport` saying what is wrong with it. */
 export function checkReport(body: unknown): PullReport {
   const r = body as Record<string, unknown>;
@@ -757,6 +802,7 @@ export function checkReport(body: unknown): PullReport {
     review_comments: whole("review_comments"),
     bot_review_comments: whole("bot_review_comments"),
     review_rounds: whole("review_rounds"),
+    review_round_authors: checkRoundAuthors(r.review_round_authors, whole("review_rounds")),
     files: (files as FileHashes[]).map((f) => ({ path: f.path, hashes: f.hashes })),
     files_without_diff: whole("files_without_diff"),
     feedback,
@@ -1203,6 +1249,120 @@ async function recordReport(
 }
 
 /**
+ * The rule `review_split` is worked out by. One more with every change to
+ * `reviewSplit` that gives another answer from the same pull request: the
+ * server then goes through those it has again when it starts.
+ */
+const SPLIT_RULE = 1;
+
+/** The first version of the Action that says whose feedback each round followed. */
+const SAYS_ROUNDS = "0.4.0";
+
+/**
+ * A pull request whose reviewers and rounds by who asked (`review_split`)
+ * are to be worked out: never yet, by another rule than this server's, or
+ * from before its last report (a server from before this stored that
+ * report, beside this one, while it was being replaced). By another rule,
+ * later ones too: a server put back to this version after a later one ran
+ * serves none of what that one worked out (`SPLIT_NOW`), and would
+ * otherwise leave it so for good. Two servers of two rules, side by side
+ * while one replaces the other, work out each other's until the older is
+ * gone; the one that stays has the last word within the hour. (Nothing of
+ * `feedback` is asked here: the server looks for these among every pull
+ * request, and must not read each one's reviews and comments to find none.)
+ */
+export const UNSPLIT = `(review_split_rule IS DISTINCT FROM ${SPLIT_RULE} OR review_split_at IS DISTINCT FROM updated_at)`;
+
+/** What of a pull request's row its split is worked out from (`splitFrom`). */
+const SPLIT_FROM = `author, feedback, review_rounds, round_authors, reporter_name, reporter_version,
+  round_authors_at IS NOT DISTINCT FROM updated_at AS rounds_current`;
+
+/**
+ * A pull request's split from its row (`SPLIT_FROM`), as it is now. What
+ * the Action said of the rounds (`round_authors`) is used only if it came
+ * with the last report, or `reported`: that report was stored just now. A
+ * server from before this stores a report and leaves the rounds of the one
+ * before beside it.
+ */
+function splitFrom(r: Record<string, unknown>, reported = false): ReviewSplit {
+  const feedback = r.feedback == null ? null : json<PullFeedback[] | null>(r.feedback);
+  const current = reported || r.rounds_current === true;
+  const version = typeof r.reporter_version === "string" ? r.reporter_version : null;
+  return reviewSplit({
+    author: String(r.author),
+    feedback: Array.isArray(feedback) ? feedback : null,
+    reviewRounds: num(r.review_rounds),
+    roundAuthors: current && r.round_authors != null ? json<RoundAuthor[][]>(r.round_authors) : null,
+    says: r.reporter_name === ACTION_REPORTER && actionNumbers(version) != null && !olderAction(version, SAYS_ROUNDS),
+  });
+}
+
+/**
+ * Work out who reviewed a pull request and whose feedback its rounds
+ * followed (`reviewSplit`), from what is kept of it now, and store it with
+ * the rule and the report it is from. Called once the pull request and its
+ * history have the report that prompted it, by whoever holds the pull
+ * request (`holdPull`).
+ *
+ * `reported` when that report was stored just now, by `storePull`: what it
+ * said of the rounds (`round_authors`) is then that report's (`splitFrom`).
+ */
+async function keepReviewSplit(db: OrgDb, repo: string, number: number, { reported = false }: { reported?: boolean } = {}): Promise<void> {
+  const [r] = await db.query(`SELECT ${SPLIT_FROM} FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`, [db.orgId, repo, number]);
+  if (!r) return;
+  const split = splitFrom(r, reported);
+  await db.query(
+    `UPDATE pull_requests SET review_split = $4::jsonb, review_split_rule = $5, review_split_at = updated_at,
+            round_authors_at = CASE WHEN $6::boolean THEN updated_at ELSE round_authors_at END
+     WHERE org_id = $1 AND repo = $2 AND number = $3`,
+    [db.orgId, repo, number, JSON.stringify(split), SPLIT_RULE, reported],
+  );
+}
+
+/**
+ * A pull request's `review_split` where it is of its last report and by
+ * this server's rule, and null otherwise: one left behind by a report that
+ * a server from before this stored, or written by another rule in a shape
+ * this one does not know, is not served as current. A pull request's own
+ * page then has it worked out as it is read (`getPull`); a list says the
+ * rounds are not worked out, and the reviewers' sums leave it out.
+ */
+const SPLIT_NOW = `CASE WHEN review_split_rule = ${SPLIT_RULE} AND review_split_at IS NOT DISTINCT FROM updated_at THEN review_split END`;
+
+/** A pull request's place among those to go through, by repository and number. */
+export type PullAt = { repo: string; number: number };
+
+/**
+ * Some of the pull requests whose `review_split` is to be worked out
+ * (`UNSPLIT`): those after `after`, in order. Whoever goes through them
+ * takes each in a transaction of its own (`splitReviews`) and goes on from
+ * the last, so that one that fails holds up no other and is not met again
+ * in the same pass.
+ */
+export async function unsplitPulls(db: OrgDb, after: PullAt | null = null, atOnce = 50): Promise<PullAt[]> {
+  const some = await db.query<{ repo: string; number: unknown }>(
+    `SELECT repo, number FROM pull_requests
+     WHERE org_id = $1 AND ${UNSPLIT} AND ($2::text IS NULL OR (repo, number) > ($2::text, $3::integer))
+     ORDER BY repo, number LIMIT $4`,
+    [db.orgId, after?.repo ?? null, after?.number ?? null, atOnce],
+  );
+  return some.map((pull) => ({ repo: pull.repo, number: num(pull.number) }));
+}
+
+/**
+ * Work out one pull request's `review_split` from what is already here,
+ * with no report from GitHub. It is held as a report holds it: one arriving
+ * meanwhile waits, and writes its own after. Asked again once it is held
+ * whether it is still to be worked out: a report, or another server going
+ * through the same ones, may have done it since it was listed.
+ */
+export async function splitReviews(db: OrgDb, repo: string, number: number): Promise<void> {
+  await holdPull(db, repo, number);
+  const [still] = await db.query(`SELECT 1 FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 AND ${UNSPLIT}`, [db.orgId, repo, number]);
+  if (still) await keepReviewSplit(db, repo, number);
+}
+
+/**
  * Store a report, replacing the last one for the pull request, and work out
  * which of its lines agents wrote. The lines of the first report are kept
  * for good: they are what review started from.
@@ -1244,6 +1404,8 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     review_comments: report.review_comments,
     bot_review_comments: report.bot_review_comments,
     review_rounds: report.review_rounds,
+    // Whose feedback each round followed. Null from an Action that did not say: never the ones from a report before.
+    round_authors: report.review_round_authors ? JSON.stringify(report.review_round_authors) : null,
     files_without_diff: report.files_without_diff,
     last_files: JSON.stringify(report.files),
     attribution: JSON.stringify(attribution),
@@ -1271,6 +1433,7 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     attribution: "::jsonb",
     detail: "::jsonb",
     feedback: "::jsonb",
+    round_authors: "::jsonb",
     committers: "::jsonb",
     aliases: "::jsonb",
   };
@@ -1312,6 +1475,7 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     sessions: sessions.filter((s) => s.lines > 0).map(picked),
     reporter_version: typeof columns.reporter_version === "string" ? columns.reporter_version : null,
   });
+  await keepReviewSplit(db, report.repo, report.number, { reported: true });
   return attribution;
 }
 
@@ -1625,7 +1789,7 @@ export async function rematchPull(
   // waits, and its files are not left beside figures made from the ones before.
   const [r] = await db.query(
     `SELECT head_repo, head_ref, created_at, first_event, first_files, last_files, committers, aliases,
-            commits, reporter_version
+            commits, reporter_version, (${UNSPLIT}) AS unsplit
      FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
     [db.orgId, repo, number],
   );
@@ -1671,6 +1835,10 @@ export async function rematchPull(
     sessions: sessions.filter((s) => s.lines > 0).map(picked),
     reporter_version: typeof r.reporter_version === "string" ? r.reporter_version : null,
   });
+  // One stored before its reviewers and rounds were worked out gets them here, with no report
+  // from GitHub. Any other has them from its last report: matching brings no review and no push.
+  // (One whose lines cannot be matched again is left to the pass the server makes when it starts.)
+  if (r.unsplit === true) await keepReviewSplit(db, repo, number);
   return { attribution, matched_at: iso(stored?.matched_at) ?? new Date().toISOString() };
 }
 
@@ -2317,7 +2485,8 @@ async function localReviewsIn(
 }
 
 const ROW_COLUMNS = `repo, number, title, url, author, state, created_at, merged_at, first_event, commits,
-  reviews, changes_requested, review_comments, bot_review_comments, review_rounds, files_without_diff,
+  reviews, changes_requested, review_comments, bot_review_comments, review_rounds,
+  ${SPLIT_NOW} - 'reviewers' - 'author' - 'round_authors' AS review_split, files_without_diff,
   attribution, updated_at, matched_at, committers IS NOT NULL AS matchable, reporter_name, reporter_version`;
 
 function pullRow(r: Record<string, unknown>): PullRow {
@@ -2339,6 +2508,8 @@ function pullRow(r: Record<string, unknown>): PullRow {
     review_comments: num(r.review_comments),
     bot_review_comments: num(r.bot_review_comments),
     review_rounds: num(r.review_rounds),
+    // The rounds by kind. Who reviewed, and who each round followed, are read where they are wanted (`whole_split`).
+    review_split: r.review_split == null ? null : json<ReviewRounds>(r.review_split),
     files_without_diff: num(r.files_without_diff),
     attribution: json<PullAttribution>(r.attribution),
     cost: null,
@@ -2362,7 +2533,7 @@ function pullRow(r: Record<string, unknown>): PullRow {
  */
 export async function getPull(db: OrgDb, repo: string, number: number): Promise<Omit<PullDetail, "after_merge"> | null> {
   const [r] = await db.query(
-    `SELECT ${ROW_COLUMNS}, draft, head_ref, base_ref, closed_at, detail, feedback, feedback_total
+    `SELECT ${ROW_COLUMNS}, ${SPLIT_NOW} AS whole_split, ${SPLIT_FROM}, draft, head_ref, base_ref, closed_at, detail, feedback_total
      FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`,
     [db.orgId, repo, number],
   );
@@ -2395,6 +2566,9 @@ export async function getPull(db: OrgDb, repo: string, number: number): Promise<
     sessions: shares && shares.map((s) => s.wrote),
     feedback: r.feedback == null ? null : json<PullFeedback[]>(r.feedback),
     feedback_total: r.feedback == null || r.feedback_total == null ? null : num(r.feedback_total),
+    // One not stored of its last report (from before this, an older server's, another rule's) is worked out here,
+    // as the server will when it goes through it: the page has one answer, and counts nothing for itself.
+    review_split: r.whole_split == null ? splitFrom(r) : json<ReviewSplit>(r.whole_split),
     history,
   };
 }
@@ -2507,11 +2681,12 @@ export async function listPulls(
 /** How each agent and model's lines fared in review, over the matching pull requests. */
 export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<PullSummary> {
   const { sql, params } = where(db.orgId, filters);
-  const rows = await costed(
-    db,
-    await db.query(`SELECT ${ROW_COLUMNS}, detail IS NOT NULL AS detailed FROM pull_requests ${sql}`, params),
-    { sql: `SELECT repo, number FROM pull_requests ${sql}`, params },
-  );
+  // With who reviewed each one (`whole_split`), which nothing but the reviewers' rows wants.
+  const found = await db.query(`SELECT ${ROW_COLUMNS}, ${SPLIT_NOW} AS whole_split, detail IS NOT NULL AS detailed FROM pull_requests ${sql}`, params);
+  const byReviewer = summarizeReviewers(found.map((row) => (row.whole_split == null ? null : json<ReviewSplit>(row.whole_split))));
+  // Those not worked out yet have no part in it: said, so that the table is not read as all of them.
+  const reviewersPending = found.filter((row) => row.whole_split == null).length;
+  const rows = await costed(db, found, { sql: `SELECT repo, number FROM pull_requests ${sql}`, params });
   // Of the pull requests seen from the start that have a cost: what the agent
   // lines they were opened with cost, and what those that survived count as,
   // as each one's page has them.
@@ -2615,5 +2790,5 @@ export async function summarizePulls(db: OrgDb, filters: PullFilters): Promise<P
   // ACTION_WINDOW_DAYS days of those reports.
   const reporters = await repoReporters(db, [...new Set(rows.map(({ pull }) => pull.repo))]);
   const older = [...reporters].filter(([, one]) => one.older).map(([repo]) => repo);
-  return { by_model: sorted(byModel), older_actions: older.sort(), total };
+  return { by_model: sorted(byModel), by_reviewer: byReviewer, reviewers_pending: reviewersPending, older_actions: older.sort(), total };
 }

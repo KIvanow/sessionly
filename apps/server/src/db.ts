@@ -901,6 +901,23 @@ const MIGRATIONS: string[] = [
   // runs out as the others do and is no one's sign-in.
   `ALTER TABLE tokens DROP CONSTRAINT tokens_sign_in_check`,
   `ALTER TABLE tokens ADD CONSTRAINT tokens_sign_in_check CHECK (sign_in IN ('email', 'google', 'github', 'open'))`,
+  // Who reviewed a pull request on GitHub, and whose feedback each of its
+  // rounds followed (`reviewSplit` in reviews.ts): worked out when a report
+  // is stored, so that a list does not read every pull request's reviews and
+  // comments. `round_authors` is what the Action says of each round, null
+  // from one that did not; the rest is derived from what was already kept,
+  // and holds no path and no text. `review_split_rule` and `review_split_at`
+  // say by which rule and from which report it was worked out: the server
+  // goes through those it has that are from before either (`unsplitPulls`).
+  // `round_authors_at` is the report `round_authors` came with: a server
+  // from before this, storing a later report beside this one, leaves the
+  // rounds of the report before, which are then not that report's.
+  `ALTER TABLE pull_requests
+     ADD COLUMN round_authors jsonb,
+     ADD COLUMN round_authors_at timestamptz,
+     ADD COLUMN review_split jsonb,
+     ADD COLUMN review_split_rule integer,
+     ADD COLUMN review_split_at timestamptz`,
 ];
 
 /**

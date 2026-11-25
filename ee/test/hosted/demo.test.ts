@@ -494,3 +494,29 @@ test("a path hidden later is taken out of what a pull request's surviving lines 
   const gave = typeof after!.contributed === "string" ? JSON.parse(after!.contributed) : after!.contributed;
   assert.deepEqual([Number(after!.contributed_lines), Object.keys(gave)], [3, ["src/a.ts"]]);
 });
+
+test("a pull request where the repository is shown has its reviewers and rounds after an import, and hiding a path leaves them as they were", async () => {
+  const p = await pair("split");
+  assert.equal((await send(p.ann, session("r1", REPO))).status, 200);
+  const files = [{ path: "src/a.ts", hashes: [h(1)] }, { path: "notes/SECRET-plan.md", hashes: [h(900)] }];
+  const feedback = [
+    { kind: "inline", author: "coderabbitai[bot]", bot: true, at: "2026-11-10T13:00:00Z", path: "notes/SECRET-plan.md", line: 3 },
+    { kind: "review", author: "bob", bot: false, at: "2026-11-10T14:00:00Z", state: "changes_requested" },
+  ];
+  assert.equal((await call(p.ci, "PUT", "/prs", pullOf(1, files, { feedback, review_round_authors: [] }))).status, 200);
+  const stored = async () => {
+    const [row] = await db.query<{ review_split: unknown; feedback: unknown }>(`SELECT review_split, feedback FROM pull_requests WHERE org_id = $1 AND number = 1`, [p.there]);
+    return { split: row!.review_split == null ? null : (jsonOf(row!.review_split) as any), paths: (jsonOf(row!.feedback) as any[]).map((f) => f.path ?? null) };
+  };
+  const reported = (await stored()).split;
+  assert.deepEqual(reported.reviewers.map((r: any) => [r.author, r.inline, r.reviews]), [["coderabbitai[bot]", 1, 0], ["bob", 0, 1]]);
+  assert.deepEqual([reported.rounds, reported.unknown], [{ bots: 0, people: 0, both: 0 }, null]);
+  // one stored there before this was worked out has it once the import has matched it again
+  await db.query(`UPDATE pull_requests SET review_split = NULL, review_split_at = NULL WHERE org_id = $1`, [p.there]);
+  await importDemo(p.from, p.to, { repo: REPO, hide: [] });
+  assert.deepEqual(await stored(), { split: reported, paths: ["notes/SECRET-plan.md", null] });
+  // the path goes from where the comment is; who commented, and how often, was never of a path
+  await importDemo(p.from, p.to, { repo: REPO, hide: ["notes"] });
+  assert.deepEqual(await stored(), { split: reported, paths: [null, null] });
+  assert.doesNotMatch(JSON.stringify(reported), /SECRET|notes/);
+});
