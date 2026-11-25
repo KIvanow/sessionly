@@ -143,9 +143,11 @@ fn take_subagents(
 
 /// Grok runs a subagent as a session of its own, so the hooks capture it
 /// apart, and an import from before it was read into its parent has it
-/// alone. Neither is a session while the session that started it has an
-/// import, which reads it in: the importer notes which those are
-/// (`import_grok::parents`).
+/// alone. Neither is a session once the import of the session that started
+/// it has read it in: the importer notes which those are
+/// (`import_grok::parents`), and that import says it did (`read_in`). One
+/// that has not, as an import from before this or one that failed to be
+/// redone, leaves it standing on its own.
 fn take_grok_subagents(
     dirs: &SourceDirs,
     raw: &BTreeMap<String, PathBuf>,
@@ -156,7 +158,10 @@ fn take_grok_subagents(
     for (child, parent) in crate::import_grok::parents(&dirs.imported) {
         let child = crate::capture::file_stem(Some(&child));
         let parent = crate::capture::file_stem(Some(&parent));
-        if !imported.contains_key(&parent) || !stems.remove(&child) {
+        let read_in = imported
+            .get(&parent)
+            .is_some_and(|file| crate::import_grok::read_in(file).contains(&child));
+        if !read_in || !stems.remove(&child) {
             continue;
         }
         if let Some(capture) = raw.get(&child) {
@@ -814,7 +819,7 @@ mod tests {
         assert!(ledger.get("r1").unwrap().is_some());
         ledger.mark_uploaded("r1", "https://s", "h").unwrap();
 
-        // Read into its parent, it goes; and is not made again from its capture.
+        // Named as its parent's, it stays while the parent's import does not say it read it in.
         fs::write(
             dirs.imported.join("g1.jsonl"),
             line("g1", Some("transcript")),
@@ -822,6 +827,18 @@ mod tests {
         .unwrap();
         let parents = BTreeMap::from([("r1".to_string(), "g1".to_string())]);
         crate::import_grok::save_parents(&dirs.imported, &parents).unwrap();
+        let report = run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
+        assert_eq!(report.removed, 0);
+        assert!(ledger.get("r1").unwrap().is_some());
+
+        // Read into its parent, it goes; and is not made again from its capture.
+        let start = json!({ "hook": "SessionStart", "origin": "transcript", "received_at": "2026-11-13T10:00:00Z",
+            "payload": { "session_id": "g1", "source": "startup", "subagents": ["r1"] } });
+        fs::write(
+            dirs.imported.join("g1.jsonl"),
+            start.to_string() + "\n" + &line("g1", Some("transcript")),
+        )
+        .unwrap();
         let report = run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
         assert_eq!((report.synced, report.removed), (1, 1));
         assert!(ledger.get("g1").unwrap().is_some() && ledger.get("r1").unwrap().is_none());

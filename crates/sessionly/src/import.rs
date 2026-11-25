@@ -697,11 +697,22 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
         }
     }
     let where_is: HashMap<&str, &PathBuf> = grok.iter().map(|(id, p)| (id.as_str(), p)).collect();
+    let imports = data_dir.join("imported").join(GROK);
+    let before = crate::import_grok::parents(&imports);
     let mut parents: BTreeMap<String, String> = BTreeMap::new();
     let mut started: HashMap<String, Vec<PathBuf>> = HashMap::new();
     for (id, path) in &grok {
         let dir = path.parent().unwrap_or(Path::new("."));
-        for child in crate::import_grok::spawned(dir) {
+        // What cannot be read now leaves its subagents where they were: imported
+        // on their own, their cost would be counted a second time.
+        let Some(children) = crate::import_grok::spawned(dir) else {
+            let kept = before
+                .iter()
+                .filter(|(child, parent)| *parent == id && where_is.contains_key(child.as_str()));
+            parents.extend(kept.map(|(child, parent)| (child.clone(), parent.clone())));
+            continue;
+        };
+        for child in children {
             let Some(child_path) = where_is.get(child.as_str()).filter(|_| child != *id) else {
                 continue;
             };
@@ -714,7 +725,7 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
     }
     // Kept for `sync`, which leaves out what the hooks captured of them. One
     // that cannot be written leaves them standing on their own.
-    let _ = crate::import_grok::save_parents(&data_dir.join("imported").join(GROK), &parents);
+    let _ = crate::import_grok::save_parents(&imports, &parents);
     for (session_id, path) in grok {
         if parents.contains_key(&session_id) {
             continue;
@@ -1188,6 +1199,23 @@ mod tests {
         assert!(imports.join("g1.jsonl").exists() && !imports.join("r1.jsonl").exists());
         let kept = BTreeMap::from([("r1".to_string(), "g1".to_string())]);
         assert_eq!(crate::import_grok::parents(&imports), kept);
+        assert_eq!(
+            crate::import_grok::read_in(&imports.join("g1.jsonl")),
+            ["r1"]
+        );
+
+        // What the session says of its subagents cannot be read: the one known stays its.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let subagents = parent.parent().unwrap().join("subagents");
+            fs::set_permissions(&subagents, fs::Permissions::from_mode(0o000)).unwrap();
+            let report = import_all(&homes, &data, &[], &[]);
+            fs::set_permissions(&subagents, fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(crate::import_grok::parents(&imports), kept);
+            assert!(!imports.join("r1.jsonl").exists());
+            assert_eq!(report.failed, []);
+        }
 
         // The subagent going on is its session changing.
         fs::OpenOptions::new()

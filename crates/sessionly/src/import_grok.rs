@@ -83,10 +83,51 @@ fn child_of(meta: &Value) -> Option<&str> {
 }
 
 /// The sessions of the subagents that a session's folder says it started.
-pub fn spawned(session_dir: &Path) -> Vec<String> {
-    spawned_meta(session_dir)
-        .iter()
-        .filter_map(|meta| child_of(meta).map(String::from))
+/// None where what it says is there and cannot be read: which they are is
+/// then not known, which is not none.
+pub fn spawned(session_dir: &Path) -> Option<Vec<String>> {
+    let missing = |err: &std::io::Error| err.kind() == std::io::ErrorKind::NotFound;
+    let entries = match fs::read_dir(session_dir.join("subagents")) {
+        Ok(entries) => entries,
+        Err(err) if missing(&err) => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let dir = entry.ok()?.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let text = match fs::read_to_string(dir.join("meta.json")) {
+            Ok(text) => text,
+            Err(err) if missing(&err) => continue,
+            Err(_) => return None,
+        };
+        let meta: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        ids.extend(child_of(&meta).map(String::from));
+    }
+    ids.sort();
+    Some(ids)
+}
+
+/// The subagents an import of a session read in, as its first record says
+/// (`session` writes them there): what `sync` may leave out of the sessions.
+/// Nothing from an import that names none, as one from before this.
+pub fn read_in(import_file: &Path) -> Vec<String> {
+    use std::io::BufRead;
+    let mut line = String::new();
+    let Ok(file) = fs::File::open(import_file) else {
+        return Vec::new();
+    };
+    if std::io::BufReader::new(file).read_line(&mut line).is_err() {
+        return Vec::new();
+    }
+    let record: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+    record["payload"]["subagents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str().map(String::from))
         .collect()
 }
 
@@ -206,6 +247,8 @@ pub fn session(updates: &Path, subagents: &[PathBuf]) -> Result<(Vec<Value>, Opt
     };
 
     let mut subagent_facts = Vec::new();
+    // Those whose own session was read in: theirs is no session apart (`read_in`).
+    let mut read: Vec<String> = Vec::new();
     for meta in spawned_meta(dir) {
         let Some(id) = child_of(&meta) else {
             continue;
@@ -236,6 +279,9 @@ pub fn session(updates: &Path, subagents: &[PathBuf]) -> Result<(Vec<Value>, Opt
         // One whose folder is gone, or cannot be read, is still a subagent
         // the session started, with what the session says of it.
         let thread = folder.and_then(|u| read_thread(u, &mut out, Some(id)).ok());
+        if thread.is_some() {
+            read.push(id.to_string());
+        }
         if let (None, Some(first)) = (started, thread.as_ref().and_then(|t| t.first)) {
             out.push(&time_of(first), "SubagentStart", identity.clone());
         }
@@ -271,6 +317,9 @@ pub fn session(updates: &Path, subagents: &[PathBuf]) -> Result<(Vec<Value>, Opt
         .or(main.model.as_deref())
     {
         start["model"] = json!(model);
+    }
+    if !read.is_empty() {
+        start["subagents"] = json!(read);
     }
     out.push(&time_of(first), "SessionStart", start);
 
@@ -882,7 +931,10 @@ pub(crate) mod tests {
     fn a_subagent_is_read_into_the_session_that_started_it() {
         let dir = tempfile::tempdir().unwrap();
         let (parent, child) = reviewed(dir.path());
-        assert_eq!(spawned(parent.parent().unwrap()), ["r1"]);
+        assert_eq!(
+            spawned(parent.parent().unwrap()),
+            Some(vec!["r1".to_string()])
+        );
         let (events, facts) = session(&parent, std::slice::from_ref(&child)).unwrap();
         let s = crate::normalize::from_events(&events, facts.as_ref(), GROK).unwrap();
 
