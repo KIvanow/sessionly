@@ -17,7 +17,7 @@ What differs is where a session is read from, and so what is known of it:
 |---|---|---|---|
 | [Claude Code](claude-code.md) | its hooks, and its transcript | Claude Code's own total, with an estimate for what that leaves out | |
 | [Cursor](cursor-and-grok.md) (the editor) | its transcripts, and the hooks for what those leave out | an estimate at API list prices, for the turns the hooks saw | for turns from before the hooks: times, failures, the model |
-| [Grok](cursor-and-grok.md) | its session files | Grok's own figure | subagents, permission prompts |
+| [Grok](cursor-and-grok.md) | its session files | Grok's own figure | permission prompts |
 | [Codex](codex.md) | its rollout files, and its hooks for two things those leave out | an estimate: its tokens at OpenAI's API list prices, not what a ChatGPT plan bills | |
 
 One `sessionly install` sets up all four: Cursor and Grok run the hooks in

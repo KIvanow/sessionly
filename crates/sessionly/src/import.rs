@@ -483,7 +483,7 @@ impl AgentHomes {
 
 /// Raised when an importer reads more, or differently, from the same files,
 /// so that sessions imported by an older binary are imported again.
-const IMPORT_VERSION: u64 = 10;
+const IMPORT_VERSION: u64 = 11;
 
 /// The source file, its size, the importer's version and the stamp of the
 /// session's name recorded in an import file's first record.
@@ -539,7 +539,8 @@ struct Found {
     path: PathBuf,
     /// A Cursor session with no transcript yet: `path` is its hook capture.
     hooks_only: bool,
-    /// A Codex session's subagents: each is a thread with a file of its own.
+    /// A Codex or Grok session's subagents: each is a thread with a file of
+    /// its own (for Grok, its session's `updates.jsonl`).
     subagents: Vec<PathBuf>,
     /// What a Codex thread was called: Codex keeps that apart from the session.
     name: Option<String>,
@@ -559,7 +560,7 @@ fn capture_of(found: &Found, data_dir: &Path) -> PathBuf {
 fn source_bytes(found: &Found, data_dir: &Path) -> u64 {
     let size = |path: &Path| fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     match found.source {
-        GROK => crate::import_grok::session_bytes(&found.path),
+        GROK => crate::import_grok::session_bytes(&found.path, &found.subagents),
         CODEX => crate::import_codex::session_bytes(&found.path, &found.subagents),
         CURSOR if found.hooks_only => size(&found.path),
         CURSOR => {
@@ -592,7 +593,7 @@ fn import_one(found: &Found, data_dir: &Path, report: &mut Report) {
         return;
     }
     let built: Result<(Vec<Value>, Option<Facts>)> = match found.source {
-        GROK => crate::import_grok::session(&found.path),
+        GROK => crate::import_grok::session(&found.path, &found.subagents),
         CODEX => crate::import_codex::session(&found.path, &found.subagents, found.name.as_deref()),
         CURSOR if found.hooks_only => crate::import_cursor::session_from_hooks(&found.path),
         CURSOR => {
@@ -682,21 +683,65 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
             });
         }
     }
-    // Grok: <sessions>/<encoded cwd>/<session>/updates.jsonl
+    // Grok: <sessions>/<encoded cwd>/<session>/updates.jsonl. A subagent runs
+    // as a session of its own, under the project of the directory it ran in:
+    // it belongs to the session that started it, where that one is here. One
+    // whose session is gone stands on its own.
+    let mut grok: Vec<(String, PathBuf)> = Vec::new();
     for project in homes.grok_sessions.iter().flat_map(|d| subdirs(d)) {
         for session in subdirs(&project) {
             let path = session.join("updates.jsonl");
             if path.is_file() {
-                found.push(Found {
-                    source: GROK,
-                    session_id: name_of(&session),
-                    path,
-                    hooks_only: false,
-                    subagents: Vec::new(),
-                    name: None,
-                });
+                grok.push((name_of(&session), path));
             }
         }
+    }
+    let where_is: HashMap<&str, &PathBuf> = grok.iter().map(|(id, p)| (id.as_str(), p)).collect();
+    let imports = data_dir.join("imported").join(GROK);
+    let before = crate::import_grok::parents(&imports);
+    let mut parents: BTreeMap<String, String> = BTreeMap::new();
+    let mut started: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for (id, path) in &grok {
+        let dir = path.parent().unwrap_or(Path::new("."));
+        // What cannot be read now leaves its subagents where they were: imported
+        // on their own, their cost would be counted a second time.
+        let Some(children) = crate::import_grok::spawned(dir) else {
+            let kept = before
+                .iter()
+                .filter(|(child, parent)| *parent == id && where_is.contains_key(child.as_str()));
+            parents.extend(kept.map(|(child, parent)| (child.clone(), parent.clone())));
+            continue;
+        };
+        for child in children {
+            let Some(child_path) = where_is.get(child.as_str()).filter(|_| child != *id) else {
+                continue;
+            };
+            started
+                .entry(id.clone())
+                .or_default()
+                .push((*child_path).clone());
+            parents.insert(child, id.clone());
+        }
+    }
+    // Kept for `sync`, which leaves out what the hooks captured of them. Where
+    // that cannot be written, none is read into its parent: sync would keep
+    // it as a session too, and count its cost a second time.
+    if crate::import_grok::save_parents(&imports, &parents).is_err() {
+        parents.clear();
+        started.clear();
+    }
+    for (session_id, path) in grok {
+        if parents.contains_key(&session_id) {
+            continue;
+        }
+        found.push(Found {
+            source: GROK,
+            subagents: started.remove(&session_id).unwrap_or_default(),
+            session_id,
+            path,
+            hooks_only: false,
+            name: None,
+        });
     }
     // Cursor: <projects>/<project>/agent-transcripts/<session>/<session>.jsonl
     for project in homes.cursor_projects.iter().flat_map(|d| subdirs(d)) {
@@ -1141,6 +1186,73 @@ mod tests {
         fs::remove_dir_all(dir.path().join("proj")).unwrap();
         assert_eq!(refresh(&homes, &data), Report::default());
         assert!(file.exists());
+    }
+
+    #[test]
+    fn a_grok_subagent_is_imported_with_the_session_that_started_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let grok = dir.path().join("grok");
+        let (parent, child) = crate::import_grok::tests::reviewed(&grok);
+        let data = dir.path().join("data");
+        let homes = AgentHomes {
+            grok_sessions: Some(grok),
+            ..Default::default()
+        };
+        let imports = data.join("imported/grok");
+        assert_eq!(import_all(&homes, &data, &[], &[]).imported, 1);
+        assert!(imports.join("g1.jsonl").exists() && !imports.join("r1.jsonl").exists());
+        let kept = BTreeMap::from([("r1".to_string(), "g1".to_string())]);
+        assert_eq!(crate::import_grok::parents(&imports), kept);
+        assert_eq!(
+            crate::import_grok::read_in(&imports.join("g1.jsonl")),
+            ["r1"]
+        );
+
+        // What the session says of its subagents cannot be read: the one known stays its.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let subagents = parent.parent().unwrap().join("subagents");
+            fs::set_permissions(&subagents, fs::Permissions::from_mode(0o000)).unwrap();
+            let report = import_all(&homes, &data, &[], &[]);
+            fs::set_permissions(&subagents, fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(crate::import_grok::parents(&imports), kept);
+            assert!(!imports.join("r1.jsonl").exists());
+            assert_eq!(report.failed, []);
+        }
+
+        // The subagent going on is its session changing.
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&child)
+            .unwrap()
+            .write_all(b"{}\n")
+            .unwrap();
+        assert_eq!(refresh(&homes, &data).imported, 1);
+
+        // With the session that started it gone, it stands on its own.
+        fs::remove_dir_all(parent.parent().unwrap()).unwrap();
+        assert_eq!(import_all(&homes, &data, &[], &[]).imported, 1);
+        assert!(imports.join("r1.jsonl").exists());
+        assert!(crate::import_grok::parents(&imports).is_empty());
+    }
+
+    #[test]
+    fn a_grok_subagent_stands_alone_where_its_parent_cannot_be_noted() {
+        let dir = tempfile::tempdir().unwrap();
+        let grok = dir.path().join("grok");
+        crate::import_grok::tests::reviewed(&grok);
+        let data = dir.path().join("data");
+        let imports = data.join("imported/grok");
+        // Something in the way of the file sync reads the pairs from.
+        fs::create_dir_all(imports.join("_parents.json")).unwrap();
+        let homes = AgentHomes {
+            grok_sessions: Some(grok),
+            ..Default::default()
+        };
+        assert_eq!(import_all(&homes, &data, &[], &[]).imported, 2);
+        assert!(imports.join("r1.jsonl").exists());
+        assert!(crate::import_grok::read_in(&imports.join("g1.jsonl")).is_empty());
     }
 
     #[test]

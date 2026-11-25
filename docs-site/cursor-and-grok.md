@@ -35,8 +35,21 @@ not in the ledger.
 
 | | Read from | Has | Does not have |
 |---|---|---|---|
-| **Grok** | `~/.grok/sessions/<directory>/<session>/` (or under `$GROK_HOME`) | prompts, tool calls with their outcome, files and lines changed, times, model, tokens, and Grok's own cost figure | subagents; permission prompts (a call that was not allowed counts as failed) |
+| **Grok** | `~/.grok/sessions/<directory>/<session>/` (or under `$GROK_HOME`) | prompts, tool calls with their outcome, files and lines changed, times, model, tokens, Grok's own cost figure, and subagents | permission prompts (a call that was not allowed counts as failed) |
 | **Cursor** | `~/.cursor/projects/<project>/agent-transcripts/`, plus the hook capture | prompts and the minute each was sent, tool calls with their input, files and lines changed, subagents. For turns the hooks saw: exact times, how long each tool call took and whether it failed, the model, and tokens | anything but prompts, tool calls and files for turns that ran before the hooks were installed; Cursor's own cost figure |
+
+Grok runs a subagent as a session of its own, in a folder of its own, and its hooks capture it
+apart. It is read into the session that started it, as Claude Code's subagents are: its tool
+calls and files are that session's, marked as the subagent's, and it is not a session in the
+ledger. Its cost is Grok's own figure for it. The session's cost already includes it, as Grok
+counts every model call a subagent makes in the session that started it. A subagent whose own
+folder is gone stays on the session that started it, with only what that session says of it:
+what it was for and when it ran, with no tool calls or cost. Where the folder of the session
+that started it is gone instead, the subagent is imported as a session of its own. A subagent imported on its own by a Sessionly from
+before this is taken out of the ledger at the next sync once its parent is in, and taken back
+from the server at the next upload, as a Codex subagent's thread is. That takes the ledger's
+record of the upload: one that a newer Sessionly rebuilt since (a change to its layout does
+that) has none, and the copy on the server stays until it is deleted there.
 
 What Cursor's transcripts leave out, it tells the hooks: when a prompt was sent and its turn
 ended, the model, and the tokens the turn used. A turn the hooks saw is paired with its prompt
@@ -52,7 +65,9 @@ transcript is there.
 A `/code-review` typed in Cursor or Grok (`/review` and `/security-review` too) is a
 [review run](session-record.md#review-runs) of the session: when it ran and the pull request
 it named, and how many findings it had where the reply says so in its first lines. Neither
-agent says what a review cost apart from the rest of the session.
+agent says what a review cost apart from the rest of the session, with one exception: Grok's
+`/review` runs in a reviewer subagent, and has that subagent's cost, which is already part of
+the session's.
 
 ## Reading a Cursor session's figures
 

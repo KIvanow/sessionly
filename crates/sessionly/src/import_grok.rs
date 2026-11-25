@@ -5,14 +5,23 @@
 //!   tool calls with their inputs, diffs and outcome, turn ends, compactions.
 //! - `summary.json`: working directory, branch, title, creation and update time.
 //! - `usage.json`: tokens and Grok's own cost figure, per model.
+//! - `subagents/<id>/meta.json`: a subagent it started: what for, when it
+//!   ran and how it ended.
+//!
+//! A subagent runs as a session of its own, in a folder of its own (under the
+//! project of the directory it ran in). It is read into the session that
+//! started it, as Claude Code's are: its tool calls are that session's,
+//! marked as the subagent's. Its tokens are in that session's usage file
+//! already, which counts every model call the subagent made; its own usage
+//! file says how much of that was the subagent's.
 //!
 //! Grok names its tools differently from Claude Code. The common ones are
 //! mapped to the same names (Read, Edit, Write, Bash, Grep) so sessions from
 //! different agents can be compared.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -21,21 +30,133 @@ use serde_json::{json, Value};
 use crate::import::{edit_result, slim_input, Builder};
 use crate::paths::GROK;
 use crate::session::{Cost, CostSource, ModelUsage};
-use crate::transcript::{Facts, ReviewSaid};
+use crate::transcript::{Facts, ReviewSaid, SubagentFacts};
 
 /// Grok counts money in ticks: ten billion to the dollar.
 const TICKS_PER_USD: f64 = 1e10;
 
 const FILES: &[&str] = &["updates.jsonl", "usage.json", "summary.json"];
 
-/// Combined size of the files a session is imported from.
-pub fn session_bytes(updates: &Path) -> u64 {
+/// Combined size of the files a session is imported from: its own, what it
+/// says of its subagents, and theirs (`subagents`, their `updates.jsonl`).
+pub fn session_bytes(updates: &Path, subagents: &[PathBuf]) -> u64 {
+    let size = |path: &Path| fs::metadata(path).map_or(0, |m| m.len());
+    let files = |updates: &Path| -> u64 {
+        let dir = updates.parent().unwrap_or(Path::new("."));
+        FILES.iter().map(|name| size(&dir.join(name))).sum()
+    };
     let dir = updates.parent().unwrap_or(Path::new("."));
-    FILES
+    let metas: u64 = subagent_dirs(dir)
         .iter()
-        .filter_map(|name| fs::metadata(dir.join(name)).ok())
-        .map(|m| m.len())
-        .sum()
+        .map(|d| size(&d.join("meta.json")))
+        .sum();
+    files(updates) + metas + subagents.iter().map(|u| files(u)).sum::<u64>()
+}
+
+fn subagent_dirs(dir: &Path) -> Vec<PathBuf> {
+    fs::read_dir(dir.join("subagents"))
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// The subagents a session started, as its `subagents/<id>/meta.json` has
+/// them, in the order they started.
+fn spawned_meta(dir: &Path) -> Vec<Value> {
+    let mut metas: Vec<Value> = subagent_dirs(dir)
+        .iter()
+        .map(|d| read_json(&d.join("meta.json")))
+        .filter(|meta| child_of(meta).is_some())
+        .collect();
+    metas.sort_by(|a, b| a["started_at"].as_str().cmp(&b["started_at"].as_str()));
+    metas
+}
+
+/// The session a subagent ran as.
+fn child_of(meta: &Value) -> Option<&str> {
+    meta["child_session_id"]
+        .as_str()
+        .or(meta["subagent_id"].as_str())
+        .filter(|id| !id.is_empty())
+}
+
+/// The sessions of the subagents that a session's folder says it started.
+/// None where what it says is there and cannot be read: which they are is
+/// then not known, which is not none.
+pub fn spawned(session_dir: &Path) -> Option<Vec<String>> {
+    let missing = |err: &std::io::Error| err.kind() == std::io::ErrorKind::NotFound;
+    let entries = match fs::read_dir(session_dir.join("subagents")) {
+        Ok(entries) => entries,
+        Err(err) if missing(&err) => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let dir = entry.ok()?.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let text = match fs::read_to_string(dir.join("meta.json")) {
+            Ok(text) => text,
+            Err(err) if missing(&err) => continue,
+            Err(_) => return None,
+        };
+        let meta: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        ids.extend(child_of(&meta).map(String::from));
+    }
+    ids.sort();
+    Some(ids)
+}
+
+/// The subagents an import of a session read in, as its first record says
+/// (`session` writes them there): what `sync` may leave out of the sessions.
+/// Nothing from an import that names none, as one from before this.
+pub fn read_in(import_file: &Path) -> Vec<String> {
+    use std::io::BufRead;
+    let mut line = String::new();
+    let Ok(file) = fs::File::open(import_file) else {
+        return Vec::new();
+    };
+    if std::io::BufReader::new(file).read_line(&mut line).is_err() {
+        return Vec::new();
+    }
+    let record: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+    record["payload"]["subagents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str().map(String::from))
+        .collect()
+}
+
+const PARENTS_FILE: &str = "_parents.json";
+
+/// The subagents' sessions that are read into the session that started
+/// them, each with that session: kept beside the imports (`dir`) by the
+/// importer, for `sync` to leave them out of the sessions.
+pub fn parents(dir: &Path) -> BTreeMap<String, String> {
+    let saved = read_json(&dir.join(PARENTS_FILE));
+    saved
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(child, parent)| Some((child.clone(), parent.as_str()?.to_string())))
+        .collect()
+}
+
+/// Keep `parents` beside the imports in `dir`, if that is not what is kept.
+pub fn save_parents(dir: &Path, parents: &BTreeMap<String, String>) -> Result<()> {
+    if self::parents(dir) == *parents {
+        return Ok(());
+    }
+    crate::paths::create_private_dir(dir)?;
+    let file = dir.join(PARENTS_FILE);
+    let tmp = file.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string(parents)?)?;
+    fs::rename(&tmp, &file)?;
+    Ok(())
 }
 
 fn read_json(path: &Path) -> Value {
@@ -66,6 +187,8 @@ struct Call {
     diffs: Vec<(String, String)>,
     started: i64,
     prompt_id: Option<String>,
+    /// The subagent it started, for `spawn_subagent`.
+    started_agent: Option<String>,
 }
 
 /// Grok's tool and its input under the names used for Claude Code's tools.
@@ -88,9 +211,22 @@ fn canonical(call: &Call) -> (String, Value) {
     }
 }
 
+/// What one thread's updates came to, besides the events they gave.
+#[derive(Default)]
+struct Thread {
+    first: Option<i64>,
+    last: Option<i64>,
+    model: Option<String>,
+    /// What the answer to each typed review command says it found.
+    said: Vec<ReviewSaid>,
+    /// What was said after the last tool call: the thread's last word.
+    reply: String,
+}
+
 /// The session's events and what its usage file says. `updates` is the
-/// session's `updates.jsonl`.
-pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
+/// session's `updates.jsonl`, and `subagents` those of the subagents it
+/// started, where their folders are.
+pub fn session(updates: &Path, subagents: &[PathBuf]) -> Result<(Vec<Value>, Option<Facts>)> {
     let dir = updates
         .parent()
         .context("a Grok session lives in a folder")?;
@@ -105,13 +241,111 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
                 .into_owned()
         });
     let mut out = Builder::new(GROK, &session_id);
+    let main = read_thread(updates, &mut out, None)?;
+    let Some(first) = main.first else {
+        return Ok((Vec::new(), None));
+    };
 
+    let mut subagent_facts = Vec::new();
+    // Those whose own session was read in: theirs is no session apart (`read_in`).
+    let mut read: Vec<String> = Vec::new();
+    for meta in spawned_meta(dir) {
+        let Some(id) = child_of(&meta) else {
+            continue;
+        };
+        let folder = subagents.iter().find(|u| {
+            u.parent()
+                .and_then(Path::file_name)
+                .is_some_and(|n| n == id)
+        });
+        let mut facts = SubagentFacts {
+            agent_id: id.to_string(),
+            agent_type: meta["subagent_type"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .map(String::from),
+            description: meta["description"]
+                .as_str()
+                .filter(|d| !d.is_empty())
+                .map(String::from),
+            ..Default::default()
+        };
+        let identity = json!({ "agent_id": id, "agent_type": facts.agent_type });
+        let at = |t: DateTime<Utc>| t.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let started = parse_time(&meta["started_at"]);
+        if let Some(started) = started {
+            out.push(&at(started), "SubagentStart", identity.clone());
+        }
+        // One whose folder is gone, or cannot be read, is still a subagent
+        // the session started, with what the session says of it.
+        let thread = folder.and_then(|u| read_thread(u, &mut out, Some(id)).ok());
+        if thread.is_some() {
+            read.push(id.to_string());
+        }
+        if let (None, Some(first)) = (started, thread.as_ref().and_then(|t| t.first)) {
+            out.push(&time_of(first), "SubagentStart", identity.clone());
+        }
+        // One still running, or stopped with the session, has no end.
+        if let Some(ended) = parse_time(&meta["completed_at"]) {
+            out.push(&at(ended), "SubagentStop", identity);
+        }
+        if let Some(own) = folder.and_then(|u| u.parent()) {
+            let usage = &read_json(&own.join("usage.json"))["session"];
+            let n = |key: &str| usage[key].as_u64().unwrap_or(0);
+            facts.requests = n("modelCalls");
+            facts.input_tokens =
+                n("inputTokens").saturating_sub(n("cachedReadTokens") + n("cacheCreationTokens"));
+            facts.output_tokens = n("outputTokens");
+            facts.estimated_cost_usd = usage["costUsdTicks"].as_f64().map(|t| t / TICKS_PER_USD);
+        }
+        facts.findings = thread.and_then(|t| crate::reviews::findings_in(&t.reply));
+        subagent_facts.push(facts);
+    }
+
+    let mut start = json!({ "source": "startup" });
+    if let Some(cwd) = summary["info"]["cwd"].as_str() {
+        start["cwd"] = json!(cwd);
+    }
+    let title = ["generated_title", "session_summary"]
+        .iter()
+        .find_map(|key| summary[*key].as_str().filter(|t| !t.is_empty()));
+    if let Some(title) = title {
+        start["session_title"] = json!(title);
+    }
+    if let Some(model) = summary["current_model_id"]
+        .as_str()
+        .or(main.model.as_deref())
+    {
+        start["model"] = json!(model);
+    }
+    if !read.is_empty() {
+        start["subagents"] = json!(read);
+    }
+    out.push(&time_of(first), "SessionStart", start);
+
+    let created = parse_time(&summary["created_at"]).or(DateTime::from_timestamp(first, 0));
+    let updated = parse_time(&summary["updated_at"])
+        .or(main.last.and_then(|l| DateTime::from_timestamp(l, 0)));
+    let mut facts = facts(
+        &read_json(&dir.join("usage.json")),
+        &summary,
+        created,
+        updated,
+    );
+    facts.review_replies = main.said;
+    facts.subagents = subagent_facts;
+    Ok((out.finish(), Some(facts)))
+}
+
+/// Read one thread's updates into `out`: the session's own (`agent` none),
+/// or a subagent's. A subagent's tool calls are marked as its, and its
+/// prompt and turns are not the session's.
+fn read_thread(updates: &Path, out: &mut Builder, agent: Option<&str>) -> Result<Thread> {
+    let mut thread = Thread::default();
     let mut calls: HashMap<String, Call> = HashMap::new();
     let mut prompt_id: Option<String> = None;
     let mut prompt_text = String::new();
     let mut prompt_started = 0;
-    let (mut first, mut last) = (None::<i64>, None::<i64>);
-    let mut model: Option<String> = None;
 
     // The prompt last pushed and what has been said in answer to it since
     // the last tool call: a review's reply says how many findings it has.
@@ -137,7 +371,6 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
         Some((id.clone().unwrap_or_default(), std::mem::take(text)))
     }
     // What the answer to a review command says it found, once it is over.
-    let mut said: Vec<ReviewSaid> = Vec::new();
     fn flush_reply(
         said: &mut Vec<ReviewSaid>,
         asked: &mut Option<(String, String)>,
@@ -155,14 +388,13 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
         let Some(at) = row["timestamp"].as_i64() else {
             return;
         };
-        first = Some(first.map_or(at, |f| f.min(at)));
-        last = Some(last.map_or(at, |l| l.max(at)));
+        thread.first = Some(thread.first.map_or(at, |f| f.min(at)));
+        thread.last = Some(thread.last.map_or(at, |l| l.max(at)));
         let update = &row["params"]["update"];
         let kind = update["sessionUpdate"].as_str().unwrap_or_default();
         if kind != "user_message_chunk" {
-            if let Some(now) = flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started)
-            {
-                flush_reply(&mut said, &mut asked, &mut reply);
+            if let Some(now) = flush_prompt(out, &prompt_id, &mut prompt_text, prompt_started) {
+                flush_reply(&mut thread.said, &mut asked, &mut reply);
                 asked = Some(now);
             }
         }
@@ -170,22 +402,37 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
             "agent_message_chunk" => {
                 reply.push_str(update["content"]["text"].as_str().unwrap_or_default());
             }
+            // What a subagent was told is its parent's call, not the person's prompt.
+            "user_message_chunk" if agent.is_some() => {}
             "user_message_chunk" => {
                 let index = update["_meta"]["promptIndex"].as_u64().unwrap_or(0);
                 let id = Some(format!("p{index}"));
                 if id != prompt_id {
                     if let Some(now) =
-                        flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started)
+                        flush_prompt(out, &prompt_id, &mut prompt_text, prompt_started)
                     {
-                        flush_reply(&mut said, &mut asked, &mut reply);
+                        flush_reply(&mut thread.said, &mut asked, &mut reply);
                         asked = Some(now);
                     }
                     prompt_id = id;
                     prompt_started = at;
                 }
                 prompt_text.push_str(update["content"]["text"].as_str().unwrap_or_default());
-                if model.is_none() {
-                    model = update["_meta"]["modelId"].as_str().map(String::from);
+                if thread.model.is_none() {
+                    thread.model = update["_meta"]["modelId"].as_str().map(String::from);
+                }
+            }
+            // Written as the subagent starts, while the call that started it is still on.
+            "subagent_spawned" => {
+                let Some(spawned) = update["subagent_id"].as_str() else {
+                    return;
+                };
+                let call = calls
+                    .values_mut()
+                    .filter(|c| c.name == "spawn_subagent" && c.started_agent.is_none())
+                    .max_by_key(|c| c.started);
+                if let Some(call) = call {
+                    call.started_agent = Some(spawned.to_string());
                 }
             }
             "tool_call" | "tool_call_update" => {
@@ -224,13 +471,7 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
                     return;
                 }
                 let call = calls.remove(id).unwrap_or_default();
-                let (tool, input) = canonical(&call);
-                let base = json!({
-                    "prompt_id": call.prompt_id,
-                    "tool_use_id": id,
-                    "tool_name": tool,
-                    "tool_input": input,
-                });
+                let base = call_payload(id, &call, agent);
                 out.push(&time_of(call.started), "PreToolUse", base.clone());
                 let mut result = base;
                 result["duration_ms"] = json!((at - call.started).max(0) * 1000);
@@ -260,63 +501,58 @@ pub fn session(updates: &Path) -> Result<(Vec<Value>, Option<Facts>)> {
                             .map(|d| d.1.as_str())
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let created = tool == "Write" && old.is_empty();
+                        let created = result["tool_name"] == "Write" && old.is_empty();
                         edit_result(&old, &new, created)
                     };
+                    if let Some(started) = &call.started_agent {
+                        result["tool_response"]["agentId"] = json!(started);
+                    }
                     out.push(&time_of(at), "PostToolUse", result);
                 }
             }
-            "turn_completed" => out.push(&time_of(at), "Stop", json!({ "prompt_id": prompt_id })),
-            "auto_compact_completed" => out.push(&time_of(at), "PostCompact", json!({})),
+            "turn_completed" if agent.is_none() => {
+                out.push(&time_of(at), "Stop", json!({ "prompt_id": prompt_id }))
+            }
+            "auto_compact_completed" if agent.is_none() => {
+                out.push(&time_of(at), "PostCompact", json!({}))
+            }
             _ => {}
         }
     })?;
-    if let Some(now) = flush_prompt(&mut out, &prompt_id, &mut prompt_text, prompt_started) {
-        flush_reply(&mut said, &mut asked, &mut reply);
+    if let Some(now) = flush_prompt(out, &prompt_id, &mut prompt_text, prompt_started) {
+        flush_reply(&mut thread.said, &mut asked, &mut reply);
         asked = Some(now);
     }
-    flush_reply(&mut said, &mut asked, &mut reply);
+    thread.reply = reply.clone();
+    flush_reply(&mut thread.said, &mut asked, &mut reply);
     // Calls that never reported an outcome.
     let mut open: Vec<(String, Call)> = calls.into_iter().collect();
     open.sort_by_key(|(_, call)| call.started);
     for (id, call) in open {
-        let (tool, input) = canonical(&call);
         out.push(
             &time_of(call.started),
             "PreToolUse",
-            json!({ "prompt_id": call.prompt_id, "tool_use_id": id, "tool_name": tool, "tool_input": input }),
+            call_payload(&id, &call, agent),
         );
     }
+    Ok(thread)
+}
 
-    let Some(first) = first else {
-        return Ok((Vec::new(), None));
-    };
-    let mut start = json!({ "source": "startup" });
-    if let Some(cwd) = summary["info"]["cwd"].as_str() {
-        start["cwd"] = json!(cwd);
+/// What a tool call's events say of it. A subagent's calls are its own, of
+/// no prompt of the session's.
+fn call_payload(id: &str, call: &Call, agent: Option<&str>) -> Value {
+    let (tool, input) = canonical(call);
+    let mut payload = json!({
+        "prompt_id": call.prompt_id,
+        "tool_use_id": id,
+        "tool_name": tool,
+        "tool_input": input,
+    });
+    if let Some(agent) = agent {
+        payload["agent_id"] = json!(agent);
+        payload["prompt_id"] = Value::Null;
     }
-    let title = ["generated_title", "session_summary"]
-        .iter()
-        .find_map(|key| summary[*key].as_str().filter(|t| !t.is_empty()));
-    if let Some(title) = title {
-        start["session_title"] = json!(title);
-    }
-    if let Some(model) = summary["current_model_id"].as_str().or(model.as_deref()) {
-        start["model"] = json!(model);
-    }
-    out.push(&time_of(first), "SessionStart", start);
-
-    let created = parse_time(&summary["created_at"]).or(DateTime::from_timestamp(first, 0));
-    let updated =
-        parse_time(&summary["updated_at"]).or(last.and_then(|l| DateTime::from_timestamp(l, 0)));
-    let mut facts = facts(
-        &read_json(&dir.join("usage.json")),
-        &summary,
-        created,
-        updated,
-    );
-    facts.review_replies = said;
-    Ok((out.finish(), Some(facts)))
+    payload
 }
 
 /// Tokens and cost as Grok recorded them.
@@ -378,7 +614,7 @@ fn facts(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Write;
 
@@ -484,7 +720,7 @@ mod tests {
     #[test]
     fn rebuilds_a_grok_session() {
         let dir = tempfile::tempdir().unwrap();
-        let (events, facts) = session(&sample(dir.path())).unwrap();
+        let (events, facts) = session(&sample(dir.path()), &[]).unwrap();
         let facts = facts.unwrap();
         assert!(events
             .iter()
@@ -584,7 +820,7 @@ mod tests {
         ] {
             writeln!(f, "{row}").unwrap();
         }
-        let (events, facts) = session(&updates).unwrap();
+        let (events, facts) = session(&updates, &[]).unwrap();
         // What the reply says is a fact of the session, and no event of it.
         assert_eq!(events[0]["hook"], "SessionStart");
         let said = &facts.as_ref().unwrap().review_replies;
@@ -598,14 +834,201 @@ mod tests {
         assert_eq!(runs, [(Some(41), Some(2))]);
     }
 
+    /// A session in which `/review #64` ran its reviewer as a subagent: the
+    /// parent's folder, and the reviewer's own beside it. The parent's usage
+    /// counts the reviewer's model calls too.
+    pub(crate) fn reviewed(dir: &Path) -> (PathBuf, PathBuf) {
+        let t0 = 1_794_212_700;
+        let parent = dir.join("%2Fwork%2Frepo/g1");
+        let child = dir.join("%2Fwork%2Frepo/r1");
+        fs::create_dir_all(parent.join("subagents/r1")).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        let write = |path: PathBuf, rows: Vec<Value>| {
+            let mut f = fs::File::create(path).unwrap();
+            for row in rows {
+                writeln!(f, "{row}").unwrap();
+            }
+        };
+        write(
+            parent.join("updates.jsonl"),
+            vec![
+                update(
+                    t0,
+                    json!({ "sessionUpdate": "user_message_chunk", "_meta": { "promptIndex": 0 },
+                            "content": { "type": "text", "text": "/review #64" } }),
+                ),
+                update(t0 + 5, tool("c1", "spawn_subagent")),
+                update(
+                    t0 + 6,
+                    json!({ "sessionUpdate": "subagent_spawned", "subagent_id": "r1",
+                            "child_session_id": "r1", "description": "[reviewer] pr #64" }),
+                ),
+                update(
+                    t0 + 300,
+                    json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed" }),
+                ),
+                update(
+                    t0 + 310,
+                    json!({ "sessionUpdate": "agent_message_chunk",
+                            "content": { "type": "text", "text": "Posted a pending review." } }),
+                ),
+                update(t0 + 311, json!({ "sessionUpdate": "turn_completed" })),
+            ],
+        );
+        fs::write(
+            parent.join("subagents/r1/meta.json"),
+            json!({ "subagent_id": "r1", "child_session_id": "r1", "parent_session_id": "g1",
+                    "subagent_type": "general-purpose", "description": "[reviewer] pr #64",
+                    "status": "completed", "started_at": "2026-11-09T08:25:06.2Z",
+                    "completed_at": "2026-11-09T08:29:50.5Z" })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(parent.join("usage.json"), json!({
+            "session": { "costUsdTicks": 30_000_000_000u64, "modelUsage": { "grok-4.7-build": {
+                "inputTokens": 900, "outputTokens": 90, "modelCalls": 9, "costUsdTicks": 30_000_000_000u64 } } }
+        }).to_string()).unwrap();
+        write(
+            child.join("updates.jsonl"),
+            vec![
+                update(
+                    t0 + 6,
+                    json!({ "sessionUpdate": "user_message_chunk", "_meta": { "promptIndex": 0 },
+                            "content": { "type": "text", "text": "You are a meticulous code reviewer." } }),
+                ),
+                update(t0 + 7, tool("k1", "read_file")),
+                update(
+                    t0 + 7,
+                    json!({ "sessionUpdate": "tool_call_update", "toolCallId": "k1",
+                            "rawInput": { "variant": "ReadFile", "target_file": "/work/repo/a.rs" } }),
+                ),
+                update(
+                    t0 + 8,
+                    json!({ "sessionUpdate": "tool_call_update", "toolCallId": "k1", "status": "completed" }),
+                ),
+                update(
+                    t0 + 280,
+                    json!({ "sessionUpdate": "agent_message_chunk",
+                            "content": { "type": "text", "text": "I found 3 issues." } }),
+                ),
+                update(t0 + 281, json!({ "sessionUpdate": "turn_completed" })),
+            ],
+        );
+        fs::write(
+            child.join("summary.json"),
+            json!({ "info": { "id": "r1", "cwd": "/work/repo" }, "session_kind": "subagent" })
+                .to_string(),
+        )
+        .unwrap();
+        fs::write(child.join("usage.json"), json!({
+            "session": { "costUsdTicks": 20_000_000_000u64, "inputTokens": 600, "cachedReadTokens": 100,
+                         "outputTokens": 60, "modelCalls": 6 }
+        }).to_string()).unwrap();
+        (parent.join("updates.jsonl"), child.join("updates.jsonl"))
+    }
+
+    #[test]
+    fn a_subagent_is_read_into_the_session_that_started_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (parent, child) = reviewed(dir.path());
+        assert_eq!(
+            spawned(parent.parent().unwrap()),
+            Some(vec!["r1".to_string()])
+        );
+        let (events, facts) = session(&parent, std::slice::from_ref(&child)).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), GROK).unwrap();
+
+        // What it was told is no prompt of the session's, and its calls are its own.
+        let prompts: Vec<&str> = s.prompts.iter().map(|p| p.text.preview.as_str()).collect();
+        assert_eq!(prompts, ["/review #64"]);
+        let calls: Vec<_> = s
+            .tool_calls
+            .iter()
+            .map(|c| (c.tool.as_str(), c.agent_id.as_deref()))
+            .collect();
+        assert_eq!(calls, [("spawn_subagent", None), ("Read", Some("r1"))]);
+        assert_eq!(s.files[0].reads, 1);
+
+        let sub = &s.subagents[0];
+        assert_eq!(
+            (
+                sub.agent_id.as_str(),
+                sub.agent_type.as_deref(),
+                sub.description.as_deref()
+            ),
+            ("r1", Some("general-purpose"), Some("[reviewer] pr #64"))
+        );
+        assert_eq!(
+            (
+                sub.tool_calls,
+                sub.requests,
+                sub.input_tokens,
+                sub.output_tokens
+            ),
+            (1, 6, 500, 60)
+        );
+        assert_eq!(sub.estimated_cost_usd, Some(2.0));
+        // The session's own figure already has the subagent's in it.
+        assert_eq!(s.cost.as_ref().unwrap().total_usd, 3.0);
+
+        // The review is its parent's: it ran in the subagent, and took as long as that did.
+        let run = &s.reviews[0];
+        assert_eq!(
+            (
+                run.command.as_str(),
+                run.pull_number,
+                run.subagents,
+                run.estimated_cost_usd
+            ),
+            ("review", Some(64), 1, Some(2.0))
+        );
+        assert_eq!(run.duration_ms, Some(290_000));
+        // What it found is what the reviewer said, not its parent's reply about it.
+        assert_eq!(run.findings, Some(3));
+    }
+
+    #[test]
+    fn a_subagent_whose_folder_is_gone_is_what_its_session_says() {
+        let dir = tempfile::tempdir().unwrap();
+        let (parent, _) = reviewed(dir.path());
+        let (events, facts) = session(&parent, &[]).unwrap();
+        let s = crate::normalize::from_events(&events, facts.as_ref(), GROK).unwrap();
+        assert_eq!(s.tool_calls.len(), 1);
+        let sub = &s.subagents[0];
+        assert_eq!(
+            (
+                sub.agent_id.as_str(),
+                sub.tool_calls,
+                sub.estimated_cost_usd
+            ),
+            ("r1", 0, None)
+        );
+        assert!(sub.started_at.is_some() && sub.ended_at.is_some());
+        assert_eq!(
+            (s.reviews[0].subagents, s.reviews[0].estimated_cost_usd),
+            (1, None)
+        );
+    }
+
+    #[test]
+    fn the_parents_of_subagents_are_kept_once() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(parents(dir.path()).is_empty());
+        let kept = BTreeMap::from([("r1".to_string(), "g1".to_string())]);
+        save_parents(dir.path(), &kept).unwrap();
+        assert_eq!(parents(dir.path()), kept);
+        save_parents(dir.path(), &BTreeMap::new()).unwrap();
+        assert!(parents(dir.path()).is_empty());
+    }
+
     #[test]
     fn an_empty_session_imports_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("p/s");
         fs::create_dir_all(&session_dir).unwrap();
         fs::write(session_dir.join("updates.jsonl"), "").unwrap();
-        let (events, facts) = session(&session_dir.join("updates.jsonl")).unwrap();
+        let (events, facts) = session(&session_dir.join("updates.jsonl"), &[]).unwrap();
         assert!(events.is_empty() && facts.is_none());
-        assert_eq!(session_bytes(&session_dir.join("updates.jsonl")), 0);
+        assert_eq!(session_bytes(&session_dir.join("updates.jsonl"), &[]), 0);
     }
 }

@@ -19,7 +19,7 @@ pub struct Report {
     pub empty: u64,
     /// Sessions dropped from the ledger because their capture is gone
     /// (only a full rebuild does this), or because they turned out to be a
-    /// Codex subagent's thread.
+    /// Codex or Grok subagent's thread.
     pub removed: u64,
     pub failed: Vec<(PathBuf, String)>,
 }
@@ -137,6 +137,41 @@ fn take_subagents(
             }
             found.folded.push((stem, root));
         }
+    }
+    found
+}
+
+/// Grok runs a subagent as a session of its own, so the hooks capture it
+/// apart, and an import from before it was read into its parent has it
+/// alone. Neither is a session once the import of the session that started
+/// it has read it in: the importer notes which those are
+/// (`import_grok::parents`), and that import says it did (`read_in`). One
+/// that has not, as an import from before this or one that failed to be
+/// redone, leaves it standing on its own.
+fn take_grok_subagents(
+    dirs: &SourceDirs,
+    raw: &BTreeMap<String, PathBuf>,
+    imported: &BTreeMap<String, PathBuf>,
+    stems: &mut BTreeSet<&String>,
+) -> Subagents {
+    let mut found = Subagents::default();
+    for (child, parent) in crate::import_grok::parents(&dirs.imported) {
+        let child = crate::capture::file_stem(Some(&child));
+        let parent = crate::capture::file_stem(Some(&parent));
+        let read_in = imported
+            .get(&parent)
+            .is_some_and(|file| crate::import_grok::read_in(file).contains(&child));
+        if !read_in || !stems.remove(&child) {
+            continue;
+        }
+        if let Some(capture) = raw.get(&child) {
+            found
+                .captures
+                .entry(parent.clone())
+                .or_default()
+                .push(capture.clone());
+        }
+        found.folded.push((child, parent));
     }
     found
 }
@@ -334,10 +369,10 @@ pub fn run(
         let imported = jsonl_files(&dirs.imported);
         let mut stems: BTreeSet<&String> = raw.keys().chain(imported.keys()).collect();
         let mut roots = Roots::load(&dirs.imported);
-        let subagents = if dirs.source == crate::paths::CODEX {
-            take_subagents(&raw, &imported, &mut stems, &mut roots)
-        } else {
-            Subagents::default()
+        let subagents = match dirs.source.as_str() {
+            crate::paths::CODEX => take_subagents(&raw, &imported, &mut stems, &mut roots),
+            crate::paths::GROK => take_grok_subagents(dirs, &raw, &imported, &mut stems),
+            _ => Subagents::default(),
         };
         roots.save();
         let pass = Pass {
@@ -756,6 +791,67 @@ mod tests {
         assert_eq!(imported.counts.prompts, 2);
         assert_eq!(imported.captured_by, crate::session::CapturedBy::Transcript);
         assert_eq!(imported.source, "grok");
+    }
+
+    #[test]
+    fn a_grok_subagent_is_no_session_once_its_parent_is_imported() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = SourceDirs::in_data_dir(dir.path(), "grok");
+        fs::create_dir_all(&dirs.raw).unwrap();
+        fs::create_dir_all(&dirs.imported).unwrap();
+        let line = |session: &str, origin: Option<&str>| {
+            let mut record = json!({ "hook": "UserPromptSubmit", "received_at": "2026-11-13T10:00:00Z",
+                "payload": { "session_id": session, "prompt_id": "p1", "prompt": "x" } });
+            if let Some(origin) = origin {
+                record["origin"] = json!(origin);
+            }
+            record.to_string() + "\n"
+        };
+        // Its hooks captured it, and an older import had it alone: it was a session.
+        fs::write(dirs.raw.join("r1.jsonl"), line("r1", None)).unwrap();
+        fs::write(
+            dirs.imported.join("r1.jsonl"),
+            line("r1", Some("transcript")),
+        )
+        .unwrap();
+        let mut ledger = Ledger::open(&dir.path().join("l.db")).unwrap();
+        run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
+        assert!(ledger.get("r1").unwrap().is_some());
+        ledger.mark_uploaded("r1", "https://s", "h").unwrap();
+
+        // Named as its parent's, it stays while the parent's import does not say it read it in.
+        fs::write(
+            dirs.imported.join("g1.jsonl"),
+            line("g1", Some("transcript")),
+        )
+        .unwrap();
+        let parents = BTreeMap::from([("r1".to_string(), "g1".to_string())]);
+        crate::import_grok::save_parents(&dirs.imported, &parents).unwrap();
+        let report = run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
+        assert_eq!(report.removed, 0);
+        assert!(ledger.get("r1").unwrap().is_some());
+
+        // Read into its parent, it goes; and is not made again from its capture.
+        let start = json!({ "hook": "SessionStart", "origin": "transcript", "received_at": "2026-11-13T10:00:00Z",
+            "payload": { "session_id": "g1", "source": "startup", "subagents": ["r1"] } });
+        fs::write(
+            dirs.imported.join("g1.jsonl"),
+            start.to_string() + "\n" + &line("g1", Some("transcript")),
+        )
+        .unwrap();
+        let report = run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
+        assert_eq!((report.synced, report.removed), (1, 1));
+        assert!(ledger.get("g1").unwrap().is_some() && ledger.get("r1").unwrap().is_none());
+        // The server it went to gets it taken back, as part of its parent.
+        let back = ledger.withdrawals("https://s").unwrap();
+        let back: Vec<_> = back
+            .iter()
+            .map(|w| (w.session_id.as_str(), w.part_of.as_str()))
+            .collect();
+        assert_eq!(back, [("r1", "g1")]);
+        let again = run(std::slice::from_ref(&dirs), &mut ledger, "m", false).unwrap();
+        assert_eq!((again.synced, again.removed), (0, 0));
+        assert!(ledger.get("r1").unwrap().is_none());
     }
 
     #[test]

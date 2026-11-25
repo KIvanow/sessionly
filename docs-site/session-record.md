@@ -65,10 +65,13 @@ it is not: a file's name ends that way.
 In Cursor and Grok a run is the command typed as a prompt (`/code-review #41`, `via:
 slash_command`), on a machine or in Cursor's cloud. A prompt that opens with a path which
 ends in a command's name (`/home/ann/notes.md:review`) is no command; nor, there, is a
-plugin's command whose name has a dot in it, since a file's name ends that way. The review there runs in the session's
-own thread: such a run has when it ran and a pull request number, its findings where the
-reply says how many (seldom, in practice), and no cost or subagents of its own. The agent choosing to review without the command being typed is not
-seen.
+plugin's command whose name has a dot in it, since a file's name ends that way. Cursor's
+commands, and Grok's `/code-review`, run in the session's own thread: such a run has when it
+ran and a pull request number, its findings where the reply says how many (seldom, in
+practice), and no cost or subagents of its own. Grok's `/review` hands the review to a
+reviewer subagent: that run also has the subagent, its cost and how long it took. The agent
+choosing to review without the command being typed is not seen, even where it starts a
+reviewer subagent: that subagent is the session's, and no review run.
 
 In Codex it is `/review` (`via: codex_review`): the rollout says when review mode was entered
 and left. Such a run has no effort and no pull request number. It has a `target`, the kind
@@ -112,7 +115,9 @@ Each run has:
   findings"). The reply is read on your machine and only the number is kept. It is the reply
   of the subagent a Claude Code review ran in. For one typed there that forked none, it is
   what the command printed when it ended, or else the last thing said in its turn. In
-  Cursor and Grok it is the last thing said in the turn. A reply that words its result
+  Cursor and Grok it is the last thing said in the turn, except for Grok's `/review`, where
+  it is what its reviewers' last replies say, added up (one reviewer for each pull request of
+  a stack), and not known if any of them does not say. A reply that words its result
   another way, names two different numbers, or says there are none of one kind only ("no
   blocking bugs", "no bugs that crash anything"), has none (`null`), which is not zero.
 
