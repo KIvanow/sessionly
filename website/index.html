@@ -151,7 +151,7 @@
           <div class="sheet blue">
             <div class="sheet-head">
               <b>KIvanow/sessionly · by tool · last 30 days</b>
-              <span>The live demo, as of 22 Nov 2026</span>
+              <span>The live demo, as of 25 Nov 2026</span>
             </div>
             <div class="scroll">
               <table>
@@ -166,19 +166,19 @@
                 <tbody>
                   <tr>
                     <th scope="row">Claude Code</th>
-                    <td class="num">16</td>
-                    <td class="num">$888.06</td>
+                    <td class="num">21</td>
+                    <td class="num">$1,207.32</td>
                     <td>
                       <div class="share">
-                        <div class="track"><i class="w73"></i></div>
-                        <b>73%</b>
+                        <div class="track"><i class="w72"></i></div>
+                        <b>72%</b>
                       </div>
                     </td>
                   </tr>
                   <tr>
                     <th scope="row">Grok</th>
-                    <td class="num">8</td>
-                    <td class="num">$40.65</td>
+                    <td class="num">13</td>
+                    <td class="num">$53.23</td>
                     <td>
                       <div class="share">
                         <div class="track"><i class="w17"></i></div>
@@ -188,8 +188,8 @@
                   </tr>
                   <tr>
                     <th scope="row">Codex</th>
-                    <td class="num">2</td>
-                    <td class="num"><span class="none">no cost</span></td>
+                    <td class="num">3</td>
+                    <td class="num">$0.25</td>
                     <td>
                       <div class="share">
                         <div class="track"><i class="w89"></i></div>
@@ -199,7 +199,7 @@
                   </tr>
                   <tr>
                     <th scope="row">Cursor</th>
-                    <td class="num">1</td>
+                    <td class="num">2</td>
                     <td class="num"><span class="none">no cost</span></td>
                     <td>
                       <div class="share">
@@ -210,8 +210,8 @@
                   </tr>
                   <tr class="total">
                     <th scope="row">Total</th>
-                    <td class="num">27</td>
-                    <td class="num">$928.71</td>
+                    <td class="num">39</td>
+                    <td class="num">$1,260.80</td>
                     <td>
                       <div class="share">
                         <div class="track"><i class="all w63"></i></div>
@@ -224,12 +224,11 @@
             </div>
             <div class="sheet-foot">
               <p>
-                27 sessions, 37h 12m active, 688 files changed. 5 of the 27 costs are estimates and
-                4 sessions have no cost figure: the Codex ones were imported before Sessionly
-                estimated Codex costs from their tokens, and the Cursor session and one Grok
-                session reported none. One repository and one developer over nine days: a record
-                of this work, not a benchmark of the agents. The demo is brought up to date every
-                day, so its figures have moved on since.
+                39 sessions, 66h 2m active, 928 files changed. 9 of the 39 costs are estimates,
+                Codex's from its tokens, and 3 sessions have no cost figure: the two Cursor
+                sessions and one Grok session reported none. One repository and one developer over
+                thirteen days: a record of this work, not a benchmark of the agents. The demo is
+                brought up to date every day, so its figures have moved on since.
               </p>
               <a href="https://app.sessionly.dev/#/demo">Open these figures in the demo →</a>
             </div>
@@ -449,6 +448,23 @@
               </p>
             </div>
             <div class="cell">
+              <h3>Review runs</h3>
+              <p>
+                Each time a review command ran in a session: <code>/code-review</code>,
+                <code>/review</code>, <code>/security-review</code>, <code>/ultrareview</code> and
+                Codex's <code>/review</code>. When, with what effort, for which pull request, what
+                its subagents cost, and how many findings it reported where the agent says.
+              </p>
+            </div>
+            <div class="cell">
+              <h3>Review bots</h3>
+              <p>
+                Who reviewed a pull request, people and each review bot apart, with what each
+                commented, and how many rounds of review followed only a bot's feedback, only
+                people's, or both. A Review bots table sums it per bot.
+              </p>
+            </div>
+            <div class="cell">
               <h3>Figure history</h3>
               <p>
                 Under a pull request's figures, each time they moved: when, what prompted the
@@ -523,6 +539,13 @@
                   <td>Yes</td>
                   <td>Yes</td>
                   <td>Yes</td>
+                </tr>
+                <tr>
+                  <th scope="row">Review runs</th>
+                  <td>Typed or started by the agent, with its subagents' cost and the findings it reported</td>
+                  <td>Its <code>/review</code>, with the reviewer's cost and its exact findings</td>
+                  <td>A command typed as a prompt: when, and for which pull request</td>
+                  <td>A command typed as a prompt; <code>/review</code> also with its reviewer's cost and time</td>
                 </tr>
                 <tr>
                   <th scope="row">Model and tokens</th>
@@ -714,6 +737,18 @@ SESSIONLY_LINE_HASHES=on</pre>
                 comment on GitHub: their text stays there.
               </li>
               <li>
+                <b>Who asked for each round:</b> one row for each reviewer, people and each review
+                bot apart, with their reviews, comments on the diff and replies; and how many of its
+                rounds of review followed only bots' feedback, only people's, or both. The Review
+                bots table sums that per bot over the pull requests shown. Version 0.4.0 of the
+                Action says whose feedback each round followed; with an older one that is not known.
+              </li>
+              <li>
+                <b>How often it was reviewed before that:</b> each review command run in the
+                sessions that wrote it, in order: run 2 of 5, how long after the one before, its
+                effort, cost and findings. Beside the review bots' comments on GitHub.
+              </li>
+              <li>
                 <b>What it cost:</b> what was spent on it, not what its remaining lines cost. Every
                 session that gave it lines is counted, also when review removes them, and one that
                 worked on several pull requests is split between them. With it, the cost of an
@@ -825,7 +860,7 @@ SESSIONLY_LINE_HASHES=on</pre>
                   <td>Relative to the repository, or to <code>~/</code></td>
                 </tr>
                 <tr>
-                  <th scope="row">Counts, timings, tool names, models, tokens, cost</th>
+                  <th scope="row">Counts, timings, tool and skill names, models, tokens, cost, review runs</th>
                   <td>Yes</td>
                   <td class="hl">Yes</td>
                   <td>Yes</td>
@@ -870,7 +905,9 @@ SESSIONLY_LINE_HASHES=on</pre>
           <p class="eyebrow">Editions</p>
           <h2>Open source at the core. Self-hosted, or hosted for you.</h2>
           <p class="lede">
-            Everything on this page is in the open-source edition. It never needs a license key.
+            Everything on this page is in the open-source edition, apart from what only the hosted
+            service does: signing up, signing in with Google or GitHub, and deleting an
+            organisation. It never needs a license key.
           </p>
           <div class="plans">
             <div class="plan sheet featured">
@@ -908,7 +945,10 @@ SESSIONLY_LINE_HASHES=on</pre>
               <p class="price">Free during early access</p>
               <p class="for">The same server, run for you.</p>
               <ul>
-                <li>The same code as the self-hosted server</li>
+                <li>
+                  The self-hosted server, with the hosted service's own parts (signing up, signing
+                  in with Google or GitHub, adding people by address) under LICENSE-EE
+                </li>
                 <li>The same content levels: metadata by default, previews opt-in</li>
                 <li>Sign in with Google or GitHub, and each person sees their own sessions; your org's data is kept apart from every other</li>
                 <li>The owner can download the organisation's data, or delete it</li>
