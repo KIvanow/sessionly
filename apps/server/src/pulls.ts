@@ -734,7 +734,7 @@ function checkRoundAuthors(value: unknown, rounds: number): RoundAuthor[][] | un
     if ((names += round.length) > MAX_ROUND_NAMES) throw bad(`at most ${MAX_ROUND_NAMES} authors in all`);
     const authors = new Map<string, boolean>();
     for (const a of round as Record<string, unknown>[]) {
-      if (!a || typeof a !== "object" || typeof a.author !== "string" || a.author === "" || a.author.length > 100) throw bad("rounds of { author, bot }, the author a login of at most 100 characters");
+      if (!a || typeof a !== "object" || typeof a.author !== "string" || a.author === "" || a.author.length > 100 || typeof a.bot !== "boolean") throw bad("rounds of { author, bot }, the author a login of at most 100 characters and bot true or false");
       authors.set(a.author, authors.get(a.author) === true || a.bot === true);
     }
     checked.push([...authors].sort(([a], [b]) => byLogin(a, b)).map(([author, bot]) => ({ author, bot })));

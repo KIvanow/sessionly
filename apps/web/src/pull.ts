@@ -303,7 +303,7 @@ const UNKNOWN_ROUNDS: Record<NonNullable<ReviewSplit["unknown"]>, string> = {
   action_did_not_say:
     "Not known: its last report was from an Action that counts the rounds and does not say whose feedback each followed. A report from version 0.4.0 of the Action or later says it.",
   not_kept:
-    "Not known: what its Action said of them was not kept when it was last reported. Its next report brings it: run its workflow again.",
+    "Not known: what its Action said of them was not kept when it was last reported. Its next report brings it: run its workflow again. (Never on one with more than 300 rounds, 50 names in one round or 2,000 in all: the Action names none for it.)",
 };
 
 /**

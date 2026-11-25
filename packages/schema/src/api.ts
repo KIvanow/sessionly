@@ -756,8 +756,9 @@ export interface ReviewRounds {
    * - `not_kept`: its last report was from an Action that says, and nothing
    *   of what it said is kept: the report went to a server from before
    *   this was kept, was the one `backfill` makes up of how the pull
-   *   request began, or counted more than 300 rounds. Its next report
-   *   says.
+   *   request began. Its next report says. Or the pull request has more
+   *   than a report may name (300 rounds, 50 logins in one, 2,000 in
+   *   all): the Action then names none, in any report.
    * Null when `rounds` is known.
    */
   unknown: "action_did_not_say" | "not_kept" | null;

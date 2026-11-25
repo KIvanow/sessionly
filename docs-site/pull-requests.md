@@ -302,7 +302,9 @@ A pull request an older Action counted no rounds for has none of any kind, and t
 **Reported by 0.4.0 or later and still not known** means what the Action said was not kept
 when it was last reported: the report went to a server from before the upgrade, or the run
 stopped between the two reports `backfill` sends. Nothing newer is needed: its next report
-brings it.
+brings it. The one exception is a pull request with more than a report may name (300 rounds,
+50 logins in one round, or 2,000 in all): the Action names none for it, in any report, and
+its split stays not known.
 
 The Review bots table says for how many of a bot's pull requests the rounds are known, and
 counts rounds over those only. Its other figures are over all of them.

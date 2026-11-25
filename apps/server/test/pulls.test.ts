@@ -2711,7 +2711,7 @@ test("a report stores who reviewed and whose feedback each round followed; an ol
 
   // What it says is taken only whole: not as many rounds as it counted, or not of the shape, and the report is refused.
   const long = Array.from({ length: MAX_ROUND_AUTHORS + 1 }, (_, i) => ({ author: `u${i}`, bot: false }));
-  for (const bad of [[who(BOT)], [who(BOT), []], [who(BOT), [{ author: "" }]], "two", null, [who(BOT), who(BOT), who(BOT)], [who(BOT), long]]) {
+  for (const bad of [[who(BOT)], [who(BOT), []], [who(BOT), [{ author: "" }]], [who(BOT), [{ author: "bob" }]], [who(BOT), [{ author: BOT, bot: "true" }]], "two", null, [who(BOT), who(BOT), who(BOT)], [who(BOT), long]]) {
     const refused = await send(1, { ...last, review_round_authors: bad });
     assert.equal(refused.status, 422, JSON.stringify(bad).slice(0, 80));
     assert.match(refused.body.error, /review_round_authors/);

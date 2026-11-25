@@ -168,7 +168,7 @@ test("the rounds of review say whose feedback they followed, when that is known,
   );
   // reported by an Action that says, to a server that kept none of it: no newer Action is asked for, only another report
   for (const rounds of [4, 0])
-    assert.equal(roundsLine(pull(rounds, null, "not_kept")), "Not known: what its Action said of them was not kept when it was last reported. Its next report brings it: run its workflow again.");
+    assert.equal(roundsLine(pull(rounds, null, "not_kept")), "Not known: what its Action said of them was not kept when it was last reported. Its next report brings it: run its workflow again. (Never on one with more than 300 rounds, 50 names in one round or 2,000 in all: the Action names none for it.)");
   // a reason this page does not know yet (a newer server): still not known, and no wrong reason
   assert.equal(roundsLine(pull(4, null, "something_new")), "Not known.");
   // nothing worked out
