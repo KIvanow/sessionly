@@ -360,11 +360,14 @@ pub(crate) fn assemble(
             }
             "SubagentStart" => {
                 // Also fires when a subagent is resumed: keep the first start.
-                if let Some(id) = text("agent_id").filter(|id| !sub_ix.contains_key(id)) {
+                // Grok's hooks name it in their own words, and say what it is for.
+                let id = text("agent_id").or_else(|| text("subagentId"));
+                if let Some(id) = id.filter(|id| !sub_ix.contains_key(id)) {
                     sub_ix.insert(id.clone(), s.subagents.len());
                     s.subagents.push(Subagent {
                         agent_id: id,
-                        agent_type: text("agent_type"),
+                        agent_type: text("agent_type").or_else(|| text("subagentType")),
+                        description: text("description"),
                         started_at: at,
                         ..Default::default()
                     });
@@ -986,6 +989,25 @@ mod tests {
         assert_eq!(s.counts.subagents, 1);
         assert_eq!(s.subagents[0].started_at.unwrap().timestamp() % 60, 1);
         assert_eq!(s.subagents[0].ended_at.unwrap().timestamp() % 60, 4);
+    }
+
+    #[test]
+    fn grok_names_the_subagent_it_starts_in_its_own_words() {
+        let events = vec![event(
+            1,
+            "SubagentStart",
+            json!({ "subagentId": "r1", "subagentType": "general-purpose", "description": "[reviewer] pr #64" }),
+        )];
+        let s = from_events(&events, None, "grok").unwrap();
+        let sub = &s.subagents[0];
+        assert_eq!(
+            (
+                sub.agent_id.as_str(),
+                sub.agent_type.as_deref(),
+                sub.description.as_deref()
+            ),
+            ("r1", Some("general-purpose"), Some("[reviewer] pr #64"))
+        );
     }
 
     #[test]

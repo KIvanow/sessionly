@@ -35,8 +35,17 @@ not in the ledger.
 
 | | Read from | Has | Does not have |
 |---|---|---|---|
-| **Grok** | `~/.grok/sessions/<directory>/<session>/` (or under `$GROK_HOME`) | prompts, tool calls with their outcome, files and lines changed, times, model, tokens, and Grok's own cost figure | subagents; permission prompts (a call that was not allowed counts as failed) |
+| **Grok** | `~/.grok/sessions/<directory>/<session>/` (or under `$GROK_HOME`) | prompts, tool calls with their outcome, files and lines changed, times, model, tokens, Grok's own cost figure, and subagents | permission prompts (a call that was not allowed counts as failed) |
 | **Cursor** | `~/.cursor/projects/<project>/agent-transcripts/`, plus the hook capture | prompts and the minute each was sent, tool calls with their input, files and lines changed, subagents. For turns the hooks saw: exact times, how long each tool call took and whether it failed, the model, and tokens | anything but prompts, tool calls and files for turns that ran before the hooks were installed; Cursor's own cost figure |
+
+Grok runs a subagent as a session of its own, in a folder of its own, and its hooks capture it
+apart. It is read into the session that started it, as Claude Code's subagents are: its tool
+calls and files are that session's, marked as the subagent's, and it is not a session in the
+ledger. Its cost is Grok's own figure for it. The session's cost already includes it, as Grok
+counts every model call a subagent makes in the session that started it. A subagent whose
+session's folder is gone stands on its own. A subagent imported on its own by a Sessionly from
+before this is taken out of the ledger at the next sync once its parent is in, and taken back
+from the server at the next upload, as a Codex subagent's thread is.
 
 What Cursor's transcripts leave out, it tells the hooks: when a prompt was sent and its turn
 ended, the model, and the tokens the turn used. A turn the hooks saw is paired with its prompt
