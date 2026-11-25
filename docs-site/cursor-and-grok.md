@@ -45,7 +45,9 @@ ledger. Its cost is Grok's own figure for it. The session's cost already include
 counts every model call a subagent makes in the session that started it. A subagent whose
 session's folder is gone stands on its own. A subagent imported on its own by a Sessionly from
 before this is taken out of the ledger at the next sync once its parent is in, and taken back
-from the server at the next upload, as a Codex subagent's thread is.
+from the server at the next upload, as a Codex subagent's thread is. That takes the ledger's
+record of the upload: one that a newer Sessionly rebuilt since (a change to its layout does
+that) has none, and the copy on the server stays until it is deleted there.
 
 What Cursor's transcripts leave out, it tells the hooks: when a prompt was sent and its turn
 ended, the model, and the tokens the turn used. A turn the hooks saw is paired with its prompt
