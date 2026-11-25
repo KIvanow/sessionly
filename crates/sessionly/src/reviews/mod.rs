@@ -960,6 +960,16 @@ fn measure(
                     let said = facts.subagents.iter().find(|sub| sub.agent_id == *fork)?;
                     said.findings
                 }
+                // Grok's `/review` runs in reviewers started from the session's
+                // own thread, one for each pull request of a stack: what they
+                // say they found, where each says.
+                None if s.source == crate::paths::GROK && !members[i].is_empty() => members[i]
+                    .iter()
+                    .map(|agent| {
+                        let said = facts.subagents.iter().find(|sub| sub.agent_id == *agent);
+                        said.and_then(|sub| sub.findings)
+                    })
+                    .sum::<Option<u64>>(),
                 None => {
                     let prompt = prompts.get(run.id.as_str()).copied().unwrap_or(&run.id);
                     let said = facts

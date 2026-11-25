@@ -377,7 +377,8 @@ pub(crate) fn assemble(
             // SubagentStop without a SubagentStart: a stop alone doesn't make
             // a subagent. One with its own transcript is added from there.
             "SubagentStop" => {
-                if let Some(&i) = text("agent_id").and_then(|id| sub_ix.get(&id)) {
+                let id = text("agent_id").or_else(|| text("subagentId"));
+                if let Some(&i) = id.and_then(|id| sub_ix.get(&id)) {
                     s.subagents[i].ended_at = at;
                 }
             }
@@ -993,13 +994,18 @@ mod tests {
 
     #[test]
     fn grok_names_the_subagent_it_starts_in_its_own_words() {
-        let events = vec![event(
-            1,
-            "SubagentStart",
-            json!({ "subagentId": "r1", "subagentType": "general-purpose", "description": "[reviewer] pr #64" }),
-        )];
+        let events = vec![
+            event(
+                1,
+                "SubagentStart",
+                json!({ "subagentId": "r1", "subagentType": "general-purpose", "description": "[reviewer] pr #64" }),
+            ),
+            event(2, "SubagentStop", json!({ "subagentId": "r1" })),
+        ];
         let s = from_events(&events, None, "grok").unwrap();
         let sub = &s.subagents[0];
+        assert_eq!(sub.started_at.unwrap().timestamp() % 60, 1);
+        assert_eq!(sub.ended_at.unwrap().timestamp() % 60, 2);
         assert_eq!(
             (
                 sub.agent_id.as_str(),

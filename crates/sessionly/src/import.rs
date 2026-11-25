@@ -723,9 +723,13 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
             parents.insert(child, id.clone());
         }
     }
-    // Kept for `sync`, which leaves out what the hooks captured of them. One
-    // that cannot be written leaves them standing on their own.
-    let _ = crate::import_grok::save_parents(&imports, &parents);
+    // Kept for `sync`, which leaves out what the hooks captured of them. Where
+    // that cannot be written, none is read into its parent: sync would keep
+    // it as a session too, and count its cost a second time.
+    if crate::import_grok::save_parents(&imports, &parents).is_err() {
+        parents.clear();
+        started.clear();
+    }
     for (session_id, path) in grok {
         if parents.contains_key(&session_id) {
             continue;
@@ -1231,6 +1235,24 @@ mod tests {
         assert_eq!(import_all(&homes, &data, &[], &[]).imported, 1);
         assert!(imports.join("r1.jsonl").exists());
         assert!(crate::import_grok::parents(&imports).is_empty());
+    }
+
+    #[test]
+    fn a_grok_subagent_stands_alone_where_its_parent_cannot_be_noted() {
+        let dir = tempfile::tempdir().unwrap();
+        let grok = dir.path().join("grok");
+        crate::import_grok::tests::reviewed(&grok);
+        let data = dir.path().join("data");
+        let imports = data.join("imported/grok");
+        // Something in the way of the file sync reads the pairs from.
+        fs::create_dir_all(imports.join("_parents.json")).unwrap();
+        let homes = AgentHomes {
+            grok_sessions: Some(grok),
+            ..Default::default()
+        };
+        assert_eq!(import_all(&homes, &data, &[], &[]).imported, 2);
+        assert!(imports.join("r1.jsonl").exists());
+        assert!(crate::import_grok::read_in(&imports.join("g1.jsonl")).is_empty());
     }
 
     #[test]

@@ -115,7 +115,9 @@ Each run has:
   findings"). The reply is read on your machine and only the number is kept. It is the reply
   of the subagent a Claude Code review ran in. For one typed there that forked none, it is
   what the command printed when it ended, or else the last thing said in its turn. In
-  Cursor and Grok it is the last thing said in the turn. A reply that words its result
+  Cursor and Grok it is the last thing said in the turn, except for Grok's `/review`, where
+  it is what its reviewers' last replies say, added up (one reviewer for each pull request of
+  a stack), and not known if any of them does not say. A reply that words its result
   another way, names two different numbers, or says there are none of one kind only ("no
   blocking bugs", "no bugs that crash anything"), has none (`null`), which is not zero.
 

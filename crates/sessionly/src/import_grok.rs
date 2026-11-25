@@ -983,6 +983,8 @@ pub(crate) mod tests {
             ("review", Some(64), 1, Some(2.0))
         );
         assert_eq!(run.duration_ms, Some(290_000));
+        // What it found is what the reviewer said, not its parent's reply about it.
+        assert_eq!(run.findings, Some(3));
     }
 
     #[test]
