@@ -1,6 +1,7 @@
 //! API list prices, used to estimate cost from token counts: for Claude Code
 //! when a transcript has no recorded total (a session that is still running,
-//! or one that crashed), and for Codex and Cursor, which record no cost.
+//! or one that crashed), for Codex and Cursor, which record no cost, and for
+//! OpenCode when it records none.
 //!
 //! Prices are USD per million tokens. Anthropic's cache writes cost 1.25x
 //! input (5-minute TTL) or 2x input (1-hour TTL); cache reads vary by model.

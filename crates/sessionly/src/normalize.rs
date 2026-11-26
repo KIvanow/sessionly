@@ -599,7 +599,13 @@ fn apply_facts(s: &mut Session, facts: &Facts, sub_ix: &mut HashMap<String, usiz
     s.agent_version = facts.version.clone();
     s.entrypoint = facts.entrypoint.clone();
     s.cost = facts.cost.clone();
-    s.models = facts.usage.iter().map(|u| u.model.clone()).collect();
+    // A model two providers served is one model.
+    s.models = Vec::new();
+    for u in &facts.usage {
+        if !s.models.contains(&u.model) {
+            s.models.push(u.model.clone());
+        }
+    }
     s.usage = facts.usage.clone();
     for call in s.tool_calls.iter_mut().filter(|c| c.model.is_none()) {
         call.model = facts.tool_models.get(&call.tool_use_id).cloned();

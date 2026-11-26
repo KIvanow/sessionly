@@ -342,6 +342,7 @@ impl TranscriptSummary {
             .filter(|(model, u)| u.requests > 0 && model.as_str() != "<synthetic>")
             .map(|(model, u)| session::ModelUsage {
                 model: model.clone(),
+                provider: None,
                 requests: u.requests,
                 input_tokens: u.input,
                 output_tokens: u.output,

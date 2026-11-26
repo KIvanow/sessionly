@@ -577,6 +577,7 @@ fn facts(
             let written = n(u, "cacheCreationTokens");
             ModelUsage {
                 model: model.clone(),
+                provider: None,
                 requests: n(u, "modelCalls"),
                 // Grok's input count includes what was read from and written to the cache.
                 input_tokens: n(u, "inputTokens").saturating_sub(cached + written),

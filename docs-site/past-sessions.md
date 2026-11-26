@@ -7,7 +7,7 @@ parent: Command line
 # Past sessions
 
 ```sh
-sessionly import                 # every session Claude Code, Cursor, Grok and Codex still have files for
+sessionly import                 # every session Claude Code, Cursor, Grok, Codex and OpenCode still have files for
 sessionly import 2b02c8f5        # only sessions whose id starts with this
 sessionly import --tool cursor   # only one agent's; give --tool again for another
 ```
@@ -18,9 +18,11 @@ and the lines needed for the rewrite rate. Cost and tokens come from the transcr
 transcripts (100 sessions) into 99 MB in about a minute.
 
 - Each agent's files are read from where it keeps them: `~/.claude/projects` (or
-  `$CLAUDE_CONFIG_DIR/projects`), `~/.cursor/projects`, `~/.grok` (or `$GROK_HOME`) and
-  `~/.codex` (or `$CODEX_HOME`). What is read of Cursor, Grok and Codex is under
-  [Cursor and Grok](cursor-and-grok.md) and [Codex](codex.md).
+  `$CLAUDE_CONFIG_DIR/projects`), `~/.cursor/projects`, `~/.grok` (or `$GROK_HOME`),
+  `~/.codex` (or `$CODEX_HOME`) and OpenCode's `opencode.db` (`$OPENCODE_DB`, or
+  `$XDG_DATA_HOME/opencode/opencode.db`, or `~/.local/share/opencode/opencode.db`). What is
+  read of Cursor, Grok, Codex and OpenCode is under [Cursor and Grok](cursor-and-grok.md),
+  [Codex](codex.md) and [OpenCode](opencode.md).
 - The result is saved under `~/.sessionly/imported/`, so an imported session survives its
   transcript being deleted. Tool output is not copied, only its size.
 - An imported session is marked `captured_by: transcript`. If a session also has a hook capture

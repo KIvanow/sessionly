@@ -9,7 +9,8 @@
 //! needs, so the saved file is far smaller than the original.
 //!
 //! This file has the shared parts and Claude Code's transcripts; Grok,
-//! Cursor and Codex are in `import_grok`, `import_cursor` and `import_codex`.
+//! Cursor, Codex and OpenCode are in `import_grok`, `import_cursor`,
+//! `import_codex` and `import_opencode`.
 //!
 //! What a Claude Code transcript cannot tell us: permission prompts that were
 //! approved, and when the session ended.
@@ -21,7 +22,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::paths::{CLAUDE_CODE, CODEX, CURSOR, GROK};
+use crate::paths::{CLAUDE_CODE, CODEX, CURSOR, GROK, OPENCODE};
 use crate::transcript::{self, Facts};
 
 /// Rows a user row can be besides a prompt the person typed.
@@ -123,6 +124,15 @@ impl Builder {
         if let Some((_, event)) = self.events.last_mut() {
             event[key] = value;
         }
+    }
+
+    /// The time of the earliest event added so far that has one.
+    pub(crate) fn earliest(&self) -> Option<&str> {
+        self.events
+            .iter()
+            .map(|(at, _)| at.as_str())
+            .filter(|at| !at.is_empty())
+            .min()
     }
 
     /// The events in time order, with the session start first among equals.
@@ -460,6 +470,8 @@ pub struct AgentHomes {
     pub cursor_projects: Option<PathBuf>,
     /// `~/.codex`, which has `sessions` and `archived_sessions`
     pub codex_home: Option<PathBuf>,
+    /// OpenCode's `opencode.db`, when that file exists.
+    pub opencode_db: Option<PathBuf>,
 }
 
 impl AgentHomes {
@@ -477,6 +489,7 @@ impl AgentHomes {
             ),
             cursor_projects: existing(home.as_ref().map(|h| h.join(".cursor").join("projects"))),
             codex_home: existing(crate::paths::codex_home()),
+            opencode_db: crate::paths::opencode_db().filter(|path| path.is_file()),
         }
     }
 }
@@ -504,6 +517,11 @@ fn imported_from(import_file: &Path) -> Option<(PathBuf, u64, u64, u64)> {
             .and_then(|hex| u64::from_str_radix(hex, 16).ok())
             .unwrap_or(0),
     ))
+}
+
+/// The size or stamp of its source that an import file records.
+pub(crate) fn recorded_bytes(import_file: &Path) -> Option<u64> {
+    imported_from(import_file).map(|(_, bytes, _, _)| bytes)
 }
 
 /// Write `events` as an import file, replacing any earlier one in one step.
@@ -562,6 +580,7 @@ fn source_bytes(found: &Found, data_dir: &Path) -> u64 {
     match found.source {
         GROK => crate::import_grok::session_bytes(&found.path, &found.subagents),
         CODEX => crate::import_codex::session_bytes(&found.path, &found.subagents),
+        OPENCODE => crate::import_opencode::session_bytes(&found.path, &found.session_id),
         CURSOR if found.hooks_only => size(&found.path),
         CURSOR => {
             crate::import_cursor::session_bytes(&found.path) + size(&capture_of(found, data_dir))
@@ -595,6 +614,7 @@ fn import_one(found: &Found, data_dir: &Path, report: &mut Report) {
     let built: Result<(Vec<Value>, Option<Facts>)> = match found.source {
         GROK => crate::import_grok::session(&found.path, &found.subagents),
         CODEX => crate::import_codex::session(&found.path, &found.subagents, found.name.as_deref()),
+        OPENCODE => crate::import_opencode::session(&found.path, &found.session_id),
         CURSOR if found.hooks_only => crate::import_cursor::session_from_hooks(&found.path),
         CURSOR => {
             let capture = capture_of(found, data_dir);
@@ -809,6 +829,26 @@ fn find_sessions(homes: &AgentHomes, data_dir: &Path) -> Vec<Found> {
             hooks_only: false,
         });
     }
+    // OpenCode keeps every session in one database. A child session is not
+    // its own row here: `session` folds it into the parent. One whose parent
+    // is gone, or is an agent OpenCode runs for itself, is a root of its own.
+    if let Some(db) = &homes.opencode_db {
+        match crate::import_opencode::root_ids(db) {
+            Ok(ids) => {
+                for session_id in ids {
+                    found.push(Found {
+                        source: OPENCODE,
+                        session_id,
+                        path: db.clone(),
+                        hooks_only: false,
+                        subagents: Vec::new(),
+                        name: None,
+                    });
+                }
+            }
+            Err(err) => eprintln!("warning: OpenCode sessions not read: {err:#}"),
+        }
+    }
     // Cursor writes a transcript when a turn ends. A session the hooks have
     // captured and that has none yet is read from its capture alone.
     let captures = fs::read_dir(data_dir.join("raw").join(CURSOR));
@@ -880,7 +920,13 @@ pub fn refresh(homes: &AgentHomes, data_dir: &Path) -> Report {
         // a sandbox nobody will run `import` for one whose capture began
         // partway (it moved in from a sandbox that is gone), so it is done here.
         let wanted = imported.exists()
-            || (captured.exists() && (found.source != CLAUDE_CODE || crate::runtime::in_cloud()));
+            || (captured.exists() && (found.source != CLAUDE_CODE || crate::runtime::in_cloud()))
+            || (found.source == OPENCODE
+                && crate::import_opencode::descendant_captured(
+                    &found.path,
+                    &found.session_id,
+                    data_dir,
+                ));
         if wanted {
             import_one(&found, data_dir, &mut report);
         }

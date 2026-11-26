@@ -115,7 +115,7 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
                   ? "unknown: Cursor's cloud agents do not report usage to hooks"
                   : s.source === "cursor"
                     ? "unknown: Cursor reports usage only to hooks, and they saw none of this session"
-                    : s.source === "codex"
+                    : s.source === "codex" || s.source === "opencode"
                       ? "unknown: no tokens on a model with a known price"
                       : "unknown"
             }
@@ -175,8 +175,11 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
               </thead>
               <tbody>
                 {(s.usage ?? []).map((u) => (
-                  <tr key={u.model}>
-                    <th scope="row">{u.model}</th>
+                  <tr key={`${u.provider ?? ""}/${u.model}`}>
+                    <th scope="row">
+                      {u.model}
+                      {u.provider && <span className="muted"> via {u.provider}</span>}
+                    </th>
                     <td className="num">{count(u.requests ?? 0)}</td>
                     <td className="num">{compact(u.input_tokens ?? 0)}</td>
                     <td className="num">{compact(u.output_tokens ?? 0)}</td>

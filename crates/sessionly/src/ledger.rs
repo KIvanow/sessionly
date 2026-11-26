@@ -232,7 +232,7 @@ impl Rewrite {
 /// ignoring case.
 #[derive(Debug, Default, Clone)]
 pub struct Filter {
-    /// The agent: claude-code, cursor, grok or codex.
+    /// The agent: claude-code, cursor, grok, codex or opencode.
     pub tool: Option<String>,
     pub repo: Option<String>,
     pub user: Option<String>,
@@ -277,7 +277,7 @@ pub struct Listed {
 
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum GroupBy {
-    /// The agent: Claude Code, Cursor, Grok, Codex
+    /// The agent: Claude Code, Cursor, Grok, Codex, OpenCode
     Tool,
     User,
     Repo,

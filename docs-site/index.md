@@ -7,7 +7,7 @@ nav_order: 1
 # Sessionly documentation
 
 Sessionly is a searchable ledger of AI coding agent sessions: what was asked, which tools ran,
-which files changed, and what it cost. For Claude Code, Cursor, Grok and Codex, side by side.
+which files changed, and what it cost. For Claude Code, Cursor, Grok, Codex and OpenCode, side by side.
 
 A local binary captures sessions on each developer's machine and keeps them in a local ledger.
 It can upload to a server, which shows the same figures for a whole team in a web dashboard.
@@ -15,9 +15,9 @@ It can upload to a server, which shows the same figures for a whole team in a we
 ```
 Claude Code ──hooks────────┐
 Cursor, Grok ──their files─┼─▶ sessionly (local Rust binary) ──▶ ~/.sessionly/   (raw + normalized sessions)
+OpenCode ────its database──┤             │
 cloud agents ──hooks a ────┘             │
                repository carries        │
-                                         │
                                          └──upload──▶ Sessionly server, hosted or self-hosted (TypeScript)
                                                                └─ team dashboard
 ```
@@ -59,7 +59,7 @@ sessionly connect https://sessionly.example.com
   [rewrite rate](rewrite-rate.md), [past sessions](past-sessions.md) and
   [cost](cost.md), with a [reference](commands.md) of every command.
 - [Agents](agents.md): what is known of a session of [Claude Code](claude-code.md),
-  [Cursor and Grok](cursor-and-grok.md) and [Codex](codex.md).
+  [Cursor and Grok](cursor-and-grok.md), [Codex](codex.md) and [OpenCode](opencode.md).
 - [Cloud sessions](cloud-sessions.md): capturing Claude Code's cloud sessions, Cursor's cloud
   agents and [Codex's cloud tasks](codex-cloud-tasks.md).
 

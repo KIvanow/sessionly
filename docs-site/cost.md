@@ -17,6 +17,8 @@ Where a session's cost comes from depends on the agent:
   bills (see [Codex](codex.md)).
 - **Cursor:** an estimate at API list prices, for the turns the hooks saw (see
   [Cursor and Grok](cursor-and-grok.md)).
+- **OpenCode:** its own figure when a message recorded one, and an estimate from the tokens
+  when that figure is 0 (see [OpenCode](opencode.md)).
 
 Claude Code records its own cost total in the transcript, but only for one run of a session
 (from the last start or resume until the total was last written). Sessionly combines that with

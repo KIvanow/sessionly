@@ -37,6 +37,9 @@ One install covers every agent on the machine:
 - **Codex** has a hooks file of its own, `~/.codex/hooks.json`, which `sessionly install`
   also writes when `~/.codex` exists. Codex asks you to approve the hooks before it runs them
   (see [Codex](codex.md)).
+- **OpenCode** gets a plugin file, `~/.config/opencode/plugins/sessionly.js`, when
+  `~/.config/opencode` exists (`$XDG_CONFIG_HOME/opencode` instead, when that is set). The
+  install does not edit `opencode.json` (see [OpenCode](opencode.md)).
 
 The settings file is always the one in your home directory: `CLAUDE_CONFIG_DIR` does not move
 where the hooks are written.

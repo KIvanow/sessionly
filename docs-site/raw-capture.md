@@ -14,8 +14,10 @@ Every hook event is appended to `~/.sessionly/raw/<tool>/<session_id>.jsonl` (or
  "session_id":"c4c90c8f-…","payload":{ …the raw payload Claude Code sent… }}
 ```
 
-`<tool>` is `claude-code`, `cursor`, `grok` or `codex`, told from what the payload carries. An
-event that names no session goes to `_unknown.jsonl` in the same folder.
+`<tool>` is `claude-code`, `cursor`, `grok`, `codex` or `opencode`, told from what the payload
+carries. An event that names no session goes to `_unknown.jsonl` in the same folder. OpenCode's
+line is written by its plugin, not by `sessionly capture`: it names the session and nothing
+that was typed. The database is the record.
 
 The payload is stored as the agent sent it, re-serialized onto one line. A payload that isn't
 valid JSON is kept as text. Beside it a line can have what Sessionly itself noted when the

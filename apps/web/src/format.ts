@@ -63,7 +63,7 @@ export function groupCost(g: { cost_usd: number; sessions: number; sessions_with
   return g.sessions > 0 && g.sessions_without_cost === g.sessions ? "–" : usd(g.cost_usd);
 }
 
-const TOOL_NAMES: Record<string, string> = { "claude-code": "Claude Code", cursor: "Cursor", grok: "Grok", codex: "Codex" };
+const TOOL_NAMES: Record<string, string> = { "claude-code": "Claude Code", cursor: "Cursor", grok: "Grok", codex: "Codex", opencode: "OpenCode" };
 
 /** "claude-code" -> "Claude Code"; an agent this dashboard doesn't know keeps its id. */
 export function toolName(source: string): string {

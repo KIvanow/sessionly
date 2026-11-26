@@ -293,7 +293,7 @@ pub fn session(
             "unknown (Cursor reports usage to hooks when a turn ends, and they saw no turn of this session end)"
                 .into(),
         ),
-        None if s.source == crate::paths::CODEX => field(
+        None if s.source == crate::paths::CODEX || s.source == crate::paths::OPENCODE => field(
             &mut out,
             "Cost",
             "unknown (no tokens on a model with a known price)".into(),
@@ -627,6 +627,7 @@ pub fn tool_name(source: &str) -> &str {
         "cursor" => "Cursor",
         "grok" => "Grok",
         "codex" => "Codex",
+        "opencode" => "OpenCode",
         other => other,
     }
 }

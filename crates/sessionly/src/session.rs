@@ -195,7 +195,13 @@ impl Cost {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ModelUsage {
+    /// The model's id as its maker names it (`claude-sonnet-4-5`), the same
+    /// for every agent and whoever served it.
     pub model: String,
+    /// Who served the model, where the agent records it: OpenCode's provider
+    /// (`anthropic`, `openrouter`, `ollama`). Left out where it does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     pub requests: u64,
     pub input_tokens: u64,
     /// Includes thinking tokens.
@@ -225,7 +231,7 @@ pub struct Counts {
     pub subagents: u64,
     /// Review runs: the length of `Session::reviews`. Left out where they
     /// could not be read: for an agent whose review commands are not read
-    /// (none of the four today), and for a Codex session whose rollout,
+    /// (none today), and for a Codex session whose rollout,
     /// which alone has them, was not there to read. Not known, which is not
     /// none.
     #[serde(skip_serializing_if = "Option::is_none")]

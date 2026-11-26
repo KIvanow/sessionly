@@ -32,7 +32,8 @@ session's `reviews`.
 
 When a turn ends (at most every five minutes; in a cloud sandbox, every time) and when a
 session ends, the capture hook starts a background `sessionly` process and returns immediately. That process brings the ledger up to
-date (which includes sessions of Cursor, Grok and Codex that the hooks noticed), re-measures
+date (which includes sessions of Cursor, Grok and Codex that the hooks noticed, and OpenCode
+sessions the plugin noticed), re-measures
 rewrite rates, and uploads if a server is connected. It prints nothing; each
 run adds a line to `~/.sessionly/auto.log`, and `sessionly status` shows when the last one
 started.
