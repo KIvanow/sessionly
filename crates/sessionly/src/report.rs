@@ -627,6 +627,7 @@ pub fn tool_name(source: &str) -> &str {
         "cursor" => "Cursor",
         "grok" => "Grok",
         "codex" => "Codex",
+        "opencode" => "OpenCode",
         other => other,
     }
 }

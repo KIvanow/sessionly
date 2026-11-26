@@ -31,6 +31,7 @@ test("numbers and money", () => {
 test("agents and models", () => {
   assert.equal(f.toolName("claude-code"), "Claude Code");
   assert.equal(f.toolName("grok"), "Grok");
+  assert.equal(f.toolName("opencode"), "OpenCode");
   assert.equal(f.toolName("some-new-agent"), "some-new-agent");
   assert.equal(f.modelName("claude-opus-5-5"), "opus-5-5");
   assert.equal(f.modelName("grok-4.7-build"), "grok-4.7-build");

@@ -38,7 +38,7 @@ export interface Scope {
   period: string;
   user: string;
   repo: string;
-  /** An agent (`claude-code`, `cursor`, `grok`, `codex`), or "" for all. */
+  /** An agent (`claude-code`, `cursor`, `grok`, `codex`, `opencode`), or "" for all. */
   tool: string;
   /** A model id, or "" for all. */
   model: string;

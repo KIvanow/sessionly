@@ -39,7 +39,10 @@ Files and folders there are created readable only by you (0600 and 0700).
 - `~/.claude/settings.json` and, where there is one, `~/.codex/hooks.json`: the hook entries
   `sessionly install` adds, with the file as it was before kept beside it as
   `settings.json.sessionly-bak` or `hooks.json.sessionly-bak`. See [Install](install.md).
+- `~/.config/opencode/plugins/sessionly.js` (or under `$XDG_CONFIG_HOME`), where that config
+  directory exists: the OpenCode plugin. Install writes that file and does not edit
+  `opencode.json`. Uninstall removes the file.
 - In a repository set up for cloud sessions: `.sessionly/hook.sh`, entries in
   `.claude/settings.json` and `.cursor/hooks.json`, and a section of `AGENTS.md`.
 - The agents' own files are read and never written: `~/.claude/projects`, `~/.cursor/projects`,
-  `~/.grok` and `~/.codex`.
+  `~/.grok`, `~/.codex` and OpenCode's `opencode.db`.

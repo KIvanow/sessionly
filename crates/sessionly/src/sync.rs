@@ -19,7 +19,7 @@ pub struct Report {
     pub empty: u64,
     /// Sessions dropped from the ledger because their capture is gone
     /// (only a full rebuild does this), or because they turned out to be a
-    /// Codex or Grok subagent's thread.
+    /// Codex or Grok subagent's thread, or an OpenCode child session.
     pub removed: u64,
     pub failed: Vec<(PathBuf, String)>,
 }
@@ -172,6 +172,38 @@ fn take_grok_subagents(
                 .push(capture.clone());
         }
         found.folded.push((child, parent));
+    }
+    found
+}
+
+/// OpenCode stores a child session in the same database as its parent, and
+/// the import writes the child into the parent's file. A child that was
+/// imported on its own, because its parent was missing then, stops being a
+/// session once the parent's import names it. The names are the
+/// `SubagentStart` events in that import: the database is not opened again
+/// here.
+fn opencode_children(
+    imported: &BTreeMap<String, PathBuf>,
+    stems: &mut BTreeSet<&String>,
+) -> Subagents {
+    let mut found = Subagents::default();
+    for (parent, path) in imported {
+        let mut children = Vec::new();
+        let _ = crate::jsonl::for_each(path, |record| {
+            if record["hook"] != "SubagentStart" {
+                return;
+            }
+            let Some(id) = record["payload"]["agent_id"].as_str() else {
+                return;
+            };
+            children.push(crate::capture::file_stem(Some(id)));
+        });
+        for child in children {
+            if child != *parent && stems.contains(&child) {
+                stems.remove(&child);
+                found.folded.push((child, parent.clone()));
+            }
+        }
     }
     found
 }
@@ -372,6 +404,7 @@ pub fn run(
         let subagents = match dirs.source.as_str() {
             crate::paths::CODEX => take_subagents(&raw, &imported, &mut stems, &mut roots),
             crate::paths::GROK => take_grok_subagents(dirs, &raw, &imported, &mut stems),
+            crate::paths::OPENCODE => opencode_children(&imported, &mut stems),
             _ => Subagents::default(),
         };
         roots.save();
@@ -390,7 +423,8 @@ pub fn run(
         // A thread that was left out of the sessions for its parent's sake
         // goes once the parent is in the ledger. Until then it keeps what it
         // has, which is all there is of the subagent's work: a parent that
-        // came to nothing leaves it to stand alone.
+        // came to nothing leaves it to stand alone. An OpenCode child session
+        // is the same.
         for (subagent, parent) in &subagents.folded {
             let parent_is_in = present.stems.contains(parent);
             if parent_is_in {

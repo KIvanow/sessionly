@@ -28,7 +28,8 @@ pub const CLAUDE_CODE: &str = "claude-code";
 pub const CURSOR: &str = "cursor";
 pub const GROK: &str = "grok";
 pub const CODEX: &str = "codex";
-pub const SOURCES: &[&str] = &[CLAUDE_CODE, CURSOR, GROK, CODEX];
+pub const OPENCODE: &str = "opencode";
+pub const SOURCES: &[&str] = &[CLAUDE_CODE, CURSOR, GROK, CODEX, OPENCODE];
 
 /// Where Codex keeps its settings and sessions: `$CODEX_HOME`, or `~/.codex`.
 pub fn codex_home() -> Option<PathBuf> {
@@ -36,6 +37,19 @@ pub fn codex_home() -> Option<PathBuf> {
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| home_dir().map(|h| h.join(".codex")))
+}
+
+/// OpenCode's database: `$OPENCODE_DB`, or `$XDG_DATA_HOME/opencode/opencode.db`,
+/// or `~/.local/share/opencode/opencode.db`.
+pub fn opencode_db() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("OPENCODE_DB").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|h| h.join(".local").join("share")))?;
+    Some(data.join("opencode").join("opencode.db"))
 }
 
 /// Folder holding every agent's raw hook payloads.

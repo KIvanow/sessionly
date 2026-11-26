@@ -64,8 +64,8 @@ know to `unknown`, and ignores fields it doesn't know.
 | a review run's `ran` | `local`, `cloud`, `unknown` |
 | a review run's `target` | For Codex: `base_branch`, `uncommitted_changes`, `commit`, `custom`. `other_repository` for a run that named a pull request of another repository (which one is not kept) |
 
-The agent (`source`) and a tool's name are plain text: `claude-code`, `cursor`, `grok` or
-`codex`, and whatever the tool is called. So is a skill's name (`code-review`, or a plugin's
+The agent (`source`) and a tool's name are plain text: `claude-code`, `cursor`, `grok`,
+`codex` or `opencode`, and whatever the tool is called. So is a skill's name (`code-review`, or a plugin's
 `plugin:name`), which leaves the machine in every content mode, as an MCP tool's name does: a
 team's own skills are named by it. A review run's arguments do not: only the effort and a pull
 request number parsed from them are sent, never their text, and never the findings themselves,

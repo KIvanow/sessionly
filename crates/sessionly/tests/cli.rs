@@ -10,6 +10,9 @@ fn sessionly(home: &Path) -> Command {
     cmd.env("HOME", home)
         .env("SESSIONLY_HOME", home.join("data"))
         .env_remove("CODEX_HOME")
+        .env_remove("OPENCODE_DB")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
         // no background runs unless a test asks for them
         .env("SESSIONLY_NO_AUTO", "1")
         // A release check that is not pointed elsewhere asks GitHub. A file
@@ -108,7 +111,10 @@ fn capture_without_a_home_writes_nothing() {
         .env_remove("HOME")
         .env_remove("USERPROFILE")
         .env_remove("SESSIONLY_HOME")
-        .env_remove("CODEX_HOME");
+        .env_remove("CODEX_HOME")
+        .env_remove("OPENCODE_DB")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME");
     let out = run_with_stdin(cmd, br#"{"session_id":"s1"}"#);
     assert_silent_success(&out, "no home");
     assert_eq!(fs::read_dir(cwd.path()).unwrap().count(), 0);
@@ -202,6 +208,9 @@ fn the_installed_command_really_runs_capture() {
         .env("HOME", home.path())
         .env("SESSIONLY_HOME", home.path().join("data"))
         .env_remove("CODEX_HOME")
+        .env_remove("OPENCODE_DB")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
         .args(["install", "--project"])
         .arg(&project);
     // Running a file right after copying it can fail with "text file busy"
@@ -229,7 +238,10 @@ fn the_installed_command_really_runs_capture() {
         .env("SESSIONLY_NO_AUTO", "1")
         .env("HOME", home.path())
         .env("SESSIONLY_HOME", home.path().join("data"))
-        .env_remove("CODEX_HOME");
+        .env_remove("CODEX_HOME")
+        .env_remove("OPENCODE_DB")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME");
     let out = run_with_stdin(hook, br#"{"session_id":"s9","hook_event_name":"Stop"}"#);
     assert_silent_success(&out, "installed hook command");
     assert!(home.path().join("data/raw/claude-code/s9.jsonl").exists());

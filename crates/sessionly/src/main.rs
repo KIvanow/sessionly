@@ -16,9 +16,11 @@ mod import;
 mod import_codex;
 mod import_cursor;
 mod import_grok;
+mod import_opencode;
 mod jsonl;
 mod ledger;
 mod normalize;
+mod opencode;
 mod paths;
 mod pricing;
 mod repo;
@@ -69,11 +71,11 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Bring in past sessions from the files Claude Code, Cursor, Grok and Codex keep
+    /// Bring in past sessions from the files Claude Code, Cursor, Grok, Codex and OpenCode keep
     Import {
         /// Session ids (or the start of one) to import [default: every session]
         sessions: Vec<String>,
-        /// Only this tool's sessions: claude-code, cursor, grok or codex (repeatable)
+        /// Only this tool's sessions: claude-code, cursor, grok, codex or opencode (repeatable)
         #[arg(long = "tool", value_name = "TOOL")]
         tools: Vec<String>,
     },
@@ -249,7 +251,7 @@ struct Target {
 /// Which sessions to include. Text filters match substrings, ignoring case.
 #[derive(Args)]
 struct FilterArgs {
-    /// Tool: claude-code, cursor, grok or codex
+    /// Tool: claude-code, cursor, grok, codex or opencode
     #[arg(long)]
     tool: Option<String>,
     /// Repository: part of its remote (owner/name) or its path
@@ -460,11 +462,16 @@ fn run(command: Command) -> Result<()> {
                     "Note: that path is specific to this machine. If this settings file is \
                      committed, use .claude/settings.local.json for the hooks instead."
                 );
-            } else if paths::codex_home().is_some_and(|home| home.is_dir()) {
+            } else {
                 // Codex reads its own file, not Claude Code's. A file that
                 // cannot be changed is no reason to undo the install above.
-                if let Err(err) = install_codex(&exe) {
-                    eprintln!("warning: Codex hooks not installed: {err:#}");
+                if paths::codex_home().is_some_and(|home| home.is_dir()) {
+                    if let Err(err) = install_codex(&exe) {
+                        eprintln!("warning: Codex hooks not installed: {err:#}");
+                    }
+                }
+                if let Err(err) = opencode::install() {
+                    eprintln!("warning: OpenCode plugin not installed: {err:#}");
                 }
             }
         }
@@ -491,6 +498,9 @@ fn run(command: Command) -> Result<()> {
             if target.project.is_none() {
                 if let Err(err) = uninstall_codex() {
                     eprintln!("warning: Codex hooks not removed: {err:#}");
+                }
+                if let Err(err) = opencode::uninstall() {
+                    eprintln!("warning: OpenCode plugin not removed: {err:#}");
                 }
             }
         }
@@ -1071,6 +1081,9 @@ fn status(target: &Target) -> Result<()> {
             },
             Err(err) => println!("Codex:      {err:#}"),
         }
+    }
+    if let Some(line) = opencode::status() {
+        println!("OpenCode:   {line}");
     }
     let raw = paths::raw_root()?;
     let (mut sessions, mut bytes) = (0u64, 0u64);

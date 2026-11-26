@@ -1,7 +1,7 @@
 # sessionly
 
 The local collector and ledger of [Sessionly](https://sessionly.dev): it captures the sessions of
-AI coding agents (Claude Code, Codex, Cursor and Grok) on your machine, keeps them in a local
+AI coding agents (Claude Code, Codex, Cursor, Grok and OpenCode) on your machine, keeps them in a local
 ledger, and can upload them to a Sessionly server.
 
 ```sh
@@ -11,7 +11,7 @@ cargo install sessionly
 Then:
 
 ```sh
-sessionly install     # adds the capture hooks for Claude Code, Codex, Cursor and Grok
+sessionly install     # adds the capture hooks for Claude Code, Codex, Cursor, Grok and OpenCode
 sessionly status      # hooks installed? how many sessions captured?
 sessionly import      # bring in sessions from before the hooks were installed
 ```

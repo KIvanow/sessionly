@@ -665,7 +665,7 @@
           "default": 0
         },
         "reviews": {
-          "description": "Review runs: the length of `Session::reviews`. Left out where they\ncould not be read: for an agent whose review commands are not read\n(none of the four today), and for a Codex session whose rollout,\nwhich alone has them, was not there to read. Not known, which is not\nnone.",
+          "description": "Review runs: the length of `Session::reviews`. Left out where they\ncould not be read: for an agent whose review commands are not read\n(none today), and for a Codex session whose rollout,\nwhich alone has them, was not there to read. Not known, which is not\nnone.",
           "type": [
             "integer",
             "null"

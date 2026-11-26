@@ -13,7 +13,7 @@ binary itself, and `sessionly --version` the version.
 
 | Command | |
 |---|---|
-| `sessionly install` | Add the capture hooks to `~/.claude/settings.json`, and to Codex's `hooks.json` where `~/.codex` exists. See [Install](install.md). |
+| `sessionly install` | Add the capture hooks to `~/.claude/settings.json`, to Codex's `hooks.json` where `~/.codex` exists, and the OpenCode plugin where `~/.config/opencode` exists. See [Install](install.md). |
 | `sessionly install --project DIR` | Add them to `DIR/.claude/settings.json` instead. |
 | `sessionly install --repo [DIR]` | Write the script and hook entries a repository carries for [cloud sessions](cloud-sessions.md), in `DIR` or here. `--checksums FILE` reads the release's `SHA256SUMS` from a file. |
 | `sessionly uninstall` | Remove the hooks again. Takes `--project DIR` and `--repo [DIR]` like `install`. |
@@ -30,7 +30,7 @@ binary itself, and `sessionly --version` the version.
 | `sessionly transcript <session>` | Tokens and cost per model, read from Claude Code's transcript. Takes a session or a path to a transcript file; `--json`. See [Cost and transcripts](cost.md). |
 | `sessionly watch` | Print hook events as they arrive. |
 | `sessionly sync` | Bring the ledger up to date. `--force` rebuilds every session, not only those that changed. See [The session record](session-record.md). |
-| `sessionly import [SESSION…]` | Bring in sessions the agents still have files for: all of them, or those whose id starts with what is given. `--tool TOOL` (`claude-code`, `cursor`, `grok` or `codex`; may be given more than once) keeps to an agent. See [Past sessions](past-sessions.md). |
+| `sessionly import [SESSION…]` | Bring in sessions the agents still have files for: all of them, or those whose id starts with what is given. `--tool TOOL` (`claude-code`, `cursor`, `grok`, `codex` or `opencode`; may be given more than once) keeps to an agent. See [Past sessions](past-sessions.md). |
 
 The filters of `list` and `summary`: `--repo`, `--user`, `--model`, `--tool`, `--file`,
 `--search` (`-s`), `--since`, `--until` and `--min-cost`.
@@ -87,6 +87,9 @@ These are run by the agents, not by you:
 | `CLAUDE_CONFIG_DIR` | Where Claude Code's transcripts are looked for (`projects/` under it), in place of `~/.claude`. The hooks are written to `~/.claude/settings.json` all the same. |
 | `CODEX_HOME` | Codex's folder, in place of `~/.codex`: its sessions and its `hooks.json`. |
 | `GROK_HOME` | Grok's folder, in place of `~/.grok`. |
+| `OPENCODE_DB` | OpenCode's database, in place of `$XDG_DATA_HOME/opencode/opencode.db` or `~/.local/share/opencode/opencode.db`. |
+| `XDG_DATA_HOME` | Where OpenCode's database is looked for when `OPENCODE_DB` is not set. |
+| `XDG_CONFIG_HOME` | Where OpenCode's config is looked for (`opencode/` under it), in place of `~/.config`. The plugin is written there when that directory exists. |
 
 The four that name a server and what is sent to it are meant for a
 [cloud environment](cloud-sessions.md), and are followed by `upload`, `exclude`, `include` and

@@ -27,7 +27,7 @@ substrings ignoring case:
 | `--repo TEXT` | in a repository whose remote or path contains TEXT |
 | `--user TEXT` | by a user whose git name or email contains TEXT |
 | `--model TEXT` | that used a model containing TEXT, e.g. `opus` |
-| `--tool TEXT` | from an agent whose name contains TEXT: `claude-code`, `cursor`, `grok` or `codex` |
+| `--tool TEXT` | from an agent whose name contains TEXT: `claude-code`, `cursor`, `grok`, `codex` or `opencode` |
 | `--file TEXT` | that read or changed a file whose path contains TEXT |
 | `--search TEXT`, `-s` | with TEXT in a prompt, title, shell command, search pattern, file path or subagent's description |
 | `--since WHEN`, `--until WHEN` | started at or after `--since` and before `--until`: a date (`2026-11-01`, which is midnight UTC), an RFC 3339 time, or an age in hours, days or weeks (`12h`, `7d`, `2w`) |

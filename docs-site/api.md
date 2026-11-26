@@ -46,7 +46,7 @@ curl -H "Authorization: Bearer $SESSIONLY_TOKEN" https://sessionly.example.com/a
 | `user`, `repo`, `model` | whose person, repository or models contain the text, in any case |
 | `user_is` | filed under exactly that address |
 | `repo_is`, `model_is` | of exactly that repository, or with exactly that main model; `(unknown)` for those with none |
-| `tool` | from one agent: `claude-code`, `cursor`, `grok` or `codex` |
+| `tool` | from one agent: `claude-code`, `cursor`, `grok`, `codex` or `opencode` |
 | `runtime` | `cloud`, or `local` for those on people's machines |
 | `q` | with the text in the title, repository, branch, session id, a prompt or a file's path |
 | `since`, `until` | that started at or after `since`, and before `until`: a date or a time |
