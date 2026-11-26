@@ -162,7 +162,7 @@ fn mix(mut hash: u64, bytes: impl AsRef<[u8]>) -> u64 {
 }
 
 /// A stamp of the session and the children folded into it: each one's update
-/// time, and for its messages and parts how many there are, their latest
+/// time and what going back undid, and for its messages and parts how many there are, their latest
 /// update time and the length of what they hold. OpenCode writes a turn's
 /// diffs into the user message after it updates the session, so the rows
 /// themselves have to be looked at. The database is one file for every
@@ -179,15 +179,17 @@ fn stamp(conn: &Connection, root: &str) -> Result<u64> {
     }
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for id in family(conn, root)? {
-        let updated: i64 = conn
+        let (updated, revert): (i64, String) = conn
             .query_row(
-                "SELECT COALESCE(time_updated, 0) FROM session WHERE id = ?1",
+                "SELECT COALESCE(time_updated, 0), COALESCE(revert, '') FROM session WHERE id = ?1",
                 params![id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .unwrap_or(0);
+            .unwrap_or_default();
         hash = mix(hash, id.as_bytes());
         hash = mix(hash, updated.to_le_bytes());
+        // What going back undid is left out of the import.
+        hash = mix(hash, revert.as_bytes());
         for table in ["message", "part"] {
             for value in rows_stamp(conn, table, &id)? {
                 hash = mix(hash, value.to_le_bytes());
@@ -266,13 +268,25 @@ fn number(value: &Value) -> u64 {
         .unwrap_or(0)
 }
 
-fn model_name(provider: &str, id: &str) -> String {
-    match (provider.is_empty(), id.is_empty()) {
-        (false, false) => format!("{provider}/{id}"),
-        (true, false) => id.to_string(),
-        (false, true) => provider.to_string(),
-        (true, true) => "unknown".to_string(),
+/// A model and who served it. OpenCode names a model by its provider and the
+/// id the provider gives it; a provider that serves other makers' models
+/// puts the maker in the id (`anthropic/claude-sonnet-4.5` at OpenRouter).
+/// The model is kept as its maker names it, as the other agents record it.
+#[derive(Clone)]
+struct Model {
+    name: String,
+    provider: Option<String>,
+}
+
+fn model_of(provider: &str, id: &str) -> Option<Model> {
+    if provider.is_empty() && id.is_empty() {
+        return None;
     }
+    let name = id.rsplit('/').next().unwrap_or(id);
+    Some(Model {
+        name: if name.is_empty() { "unknown" } else { name }.to_string(),
+        provider: (!provider.is_empty()).then(|| provider.to_string()),
+    })
 }
 
 fn text_of(value: &Value) -> String {
@@ -313,10 +327,8 @@ fn load_meta(conn: &Connection, id: &str) -> Result<Meta> {
                 .as_deref()
                 .and_then(|text| serde_json::from_str(text).ok())
                 .unwrap_or(Value::Null);
-            let named = match (parsed["providerID"].as_str(), parsed["id"].as_str()) {
-                (None, None) => None,
-                (provider, id) => Some(model_name(provider.unwrap_or(""), id.unwrap_or(""))),
-            };
+            let text = |key: &str| parsed[key].as_str().unwrap_or("");
+            let named = model_of(text("providerID"), text("id")).map(|model| model.name);
             let revert: Option<String> = row.get(6)?;
             Ok(Meta {
                 directory: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
@@ -351,7 +363,12 @@ fn parse_json(raw: &str, what: &str) -> Result<Value> {
     serde_json::from_str(raw).with_context(|| format!("{what} is not json"))
 }
 
-fn load_messages(conn: &Connection, id: &str, revert: &Value) -> Result<Vec<Msg>> {
+/// The session's messages with their parts, without what going back undid
+/// and without the ones a fork copied in. OpenCode's fork copies the
+/// messages up to a point into a new session that does not say where it
+/// came from; each copy keeps the time it was first written, which is before
+/// the new session was made. The original session has them already.
+fn load_messages(conn: &Connection, id: &str, meta: &Meta) -> Result<Vec<Msg>> {
     let mut stmt = conn.prepare(
         "SELECT id, time_created, data FROM message
          WHERE session_id = ?1 ORDER BY time_created, id",
@@ -389,6 +406,9 @@ fn load_messages(conn: &Connection, id: &str, revert: &Value) -> Result<Vec<Msg>
 
     let mut loaded = Vec::new();
     for (mid, at, raw) in messages.drain(..) {
+        if meta.time_created > 0 && at < meta.time_created {
+            continue;
+        }
         let data = parse_json(&raw, &format!("message {mid}"))?;
         let parts = by_message.remove(&mid).unwrap_or_default();
         loaded.push(Msg {
@@ -398,7 +418,7 @@ fn load_messages(conn: &Connection, id: &str, revert: &Value) -> Result<Vec<Msg>
             parts,
         });
     }
-    apply_revert(&mut loaded, revert);
+    apply_revert(&mut loaded, &meta.revert);
     Ok(loaded)
 }
 
@@ -570,6 +590,93 @@ fn diffs_of(data: &Value, root: &str) -> Vec<Diff> {
         .collect()
 }
 
+/// A turn's diffs from what its file tools returned, for a turn OpenCode
+/// recorded none for: it takes snapshots only in a git repository, and not
+/// when `snapshot` is off. `edit` returns its patch (`filediff`), and
+/// `apply_patch` one per file. `write` returns none: a new file is its
+/// content, and a file it wrote over has no lines that can be told.
+fn diffs_from_calls(calls: &[Call], cwd: &str) -> Vec<Diff> {
+    let mut diffs = Vec::new();
+    let mut add = |path: &str, lines: Vec<String>, created: bool| {
+        if !path.is_empty() && !lines.is_empty() {
+            diffs.push(Diff {
+                file: absolute(path, cwd),
+                written: path.to_string(),
+                lines,
+                created,
+            });
+        }
+    };
+    for call in calls.iter().filter(|call| call.status == CallStatus::Ok) {
+        let meta = &call.metadata;
+        match call.name.as_str() {
+            "edit" => {
+                let diff = &meta["filediff"];
+                let path = diff["file"]
+                    .as_str()
+                    .or(call.input["filePath"].as_str())
+                    .unwrap_or("");
+                add(
+                    path,
+                    patch_body(diff["patch"].as_str().unwrap_or("")),
+                    false,
+                );
+            }
+            "apply_patch" | "patch" => {
+                for file in meta["files"].as_array().into_iter().flatten() {
+                    let path = file["movePath"]
+                        .as_str()
+                        .or(file["filePath"].as_str())
+                        .unwrap_or("");
+                    let lines = patch_body(file["patch"].as_str().unwrap_or(""));
+                    add(path, lines, file["type"] == "add");
+                }
+            }
+            "write" if meta["exists"] == false => {
+                let content = call.input["content"].as_str().unwrap_or("");
+                let path = meta["filepath"]
+                    .as_str()
+                    .or(call.input["filePath"].as_str())
+                    .unwrap_or("");
+                add(path, patch_lines("", content), true);
+            }
+            _ => {}
+        }
+    }
+    diffs
+}
+
+/// Take out of a turn's diffs the lines the child sessions it started wrote.
+/// The turn's diff is a snapshot of the whole repository before and after,
+/// so it has their changes too; the children's own diffs count them.
+fn without_children(diffs: Vec<Diff>, children: &HashMap<String, Vec<String>>) -> Vec<Diff> {
+    if children.is_empty() {
+        return diffs;
+    }
+    diffs
+        .into_iter()
+        .filter_map(|mut diff| {
+            let Some(theirs) = children.get(&diff.file) else {
+                return Some(diff);
+            };
+            let mut left: HashMap<&str, usize> = HashMap::new();
+            for line in theirs {
+                *left.entry(line.as_str()).or_default() += 1;
+            }
+            diff.lines.retain(|line| match left.get_mut(line.as_str()) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    false
+                }
+                _ => true,
+            });
+            // A file a child made is not one this turn made.
+            diff.created = false;
+            (!diff.lines.is_empty()).then_some(diff)
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum CallStatus {
     Ok,
@@ -577,6 +684,7 @@ enum CallStatus {
     Open,
 }
 
+#[derive(Clone)]
 struct Call {
     id: String,
     name: String,
@@ -601,11 +709,10 @@ fn calls_of(msg: &Msg) -> Vec<Call> {
             Some("error" | "failed") => CallStatus::Failed,
             _ => CallStatus::Open,
         };
-        let id = part.data["callID"]
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .unwrap_or(part.id.as_str())
-            .to_string();
+        // The part's id, which is unique in the database. `callID` is the
+        // provider's, and one that numbers its calls per reply (`call_0`)
+        // gives two calls the same.
+        let id = part.id.clone();
         let output_bytes = match &state["output"] {
             Value::Null => 0,
             Value::String(text) => text.len() as u64,
@@ -846,13 +953,14 @@ struct Charge {
     usd: Option<f64>,
 }
 
-fn model_slot<'a>(usage: &'a mut Vec<ModelUsage>, model: &str) -> &'a mut ModelUsage {
+fn model_slot<'a>(usage: &'a mut Vec<ModelUsage>, model: &Model) -> &'a mut ModelUsage {
     let index = usage
         .iter()
-        .position(|entry| entry.model == model)
+        .position(|entry| entry.model == model.name && entry.provider == model.provider)
         .unwrap_or_else(|| {
             usage.push(ModelUsage {
-                model: model.to_string(),
+                model: model.name.clone(),
+                provider: model.provider.clone(),
                 ..Default::default()
             });
             usage.len() - 1
@@ -866,7 +974,12 @@ fn add_dollars(entry: &mut ModelUsage, usd: f64) {
 
 /// One assistant message. A non-zero `cost` is OpenCode's figure. Tokens with
 /// a cost of 0 are priced here; a model with no price keeps the tokens only.
-fn add_request(usage: &mut Vec<ModelUsage>, acc: &mut Acc, model: &str, tokens: &Tokens) -> Charge {
+fn add_request(
+    usage: &mut Vec<ModelUsage>,
+    acc: &mut Acc,
+    model: &Model,
+    tokens: &Tokens,
+) -> Charge {
     let output = tokens.output + tokens.reasoning;
     let entry = model_slot(usage, model);
     entry.requests += 1;
@@ -885,7 +998,7 @@ fn add_request(usage: &mut Vec<ModelUsage>, acc: &mut Acc, model: &str, tokens: 
         // The prompt's size, which picks a long prompt's price, counts cached
         // input too: OpenCode's `input` leaves it out.
         let prompt = tokens.input + tokens.cache_read + tokens.cache_write;
-        let priced = crate::pricing::price_for(model, prompt).map(|price| {
+        let priced = crate::pricing::price_for(&model.name, prompt).map(|price| {
             price.cost(&crate::pricing::Billed {
                 input: tokens.input,
                 output,
@@ -940,11 +1053,15 @@ fn charge_reply(
     usage: &mut Vec<ModelUsage>,
     acc: &mut Acc,
     mut child: Option<&mut SubagentFacts>,
-    model: Option<&str>,
+    model: Option<&Model>,
     reply: &Msg,
 ) {
+    let unknown = Model {
+        name: "unknown".to_string(),
+        provider: None,
+    };
     for tokens in requests_of(reply) {
-        let charge = add_request(usage, acc, model.unwrap_or("unknown"), &tokens);
+        let charge = add_request(usage, acc, model.unwrap_or(&unknown), &tokens);
         if let Some(child) = child.as_deref_mut() {
             child.requests += 1;
             child.input_tokens += charge.input;
@@ -956,14 +1073,9 @@ fn charge_reply(
     }
 }
 
-fn assistant_model(data: &Value) -> Option<String> {
-    let id = data["modelID"].as_str().unwrap_or("");
-    let provider = data["providerID"].as_str().unwrap_or("");
-    if id.is_empty() && provider.is_empty() {
-        None
-    } else {
-        Some(model_name(provider, id))
-    }
+fn assistant_model(data: &Value) -> Option<Model> {
+    let text = |key: &str| data[key].as_str().unwrap_or("");
+    model_of(text("providerID"), text("modelID"))
 }
 
 fn parent_of(data: &Value) -> String {
@@ -1028,12 +1140,10 @@ fn push_event(out: &mut Builder, call: &Call, event: ToolEvent, scope: &Scope) {
     }
 }
 
-fn patch_result(diff: &Diff, output_bytes: u64) -> Value {
-    let bytes = if output_bytes > 0 {
-        output_bytes
-    } else {
-        diff.lines.iter().map(String::len).sum::<usize>() as u64
-    };
+/// What a file tool returned: the diff's lines, and `bytes` as its size, or
+/// the size of the lines where that is not known.
+fn patch_result(diff: &Diff, bytes: Option<u64>) -> Value {
+    let bytes = bytes.unwrap_or_else(|| diff.lines.iter().map(String::len).sum::<usize>() as u64);
     let mut result = json!({
         "structuredPatch": [{ "lines": diff.lines }],
         "_bytes": bytes,
@@ -1088,14 +1198,22 @@ fn emit_calls(
                     call.id.clone()
                 };
                 let id = scoped_id(&id, scope.agent);
+                // One call that wrote many files: what it returned and how
+                // long it took are said once, with the first.
+                let mut part = call.clone();
+                if nth > 0 {
+                    part.end = Some(part.start);
+                    part.output_bytes = 0;
+                }
+                let bytes = (nth > 0 || part.output_bytes > 0).then_some(part.output_bytes);
                 push_event(
                     out,
-                    call,
+                    &part,
                     ToolEvent {
                         id,
                         tool: file_tool_name(&call.name, diff.created).to_string(),
                         input: json!({ "file_path": absolute(&diff.file, cwd) }),
-                        response: Some(patch_result(diff, call.output_bytes)),
+                        response: Some(patch_result(diff, bytes)),
                         changes: None,
                     },
                     &scoped,
@@ -1149,7 +1267,7 @@ fn emit_calls(
                 id,
                 tool: tool.to_string(),
                 input: json!({ "file_path": absolute(&diff.file, cwd) }),
-                response: Some(patch_result(diff, 0)),
+                response: Some(patch_result(diff, None)),
                 changes: None,
             },
             scope,
@@ -1201,34 +1319,37 @@ fn child_descriptions(messages: &[Msg]) -> HashMap<String, String> {
     found
 }
 
+/// Where a session's paths are from, and what its child sessions changed.
+#[derive(Clone, Copy)]
+struct Place<'a> {
+    /// The session's folder, which a tool's path is from.
+    cwd: &'a str,
+    /// The repository's root, which a recorded diff's path is from.
+    root: &'a str,
+    /// What each child session changed, by its id and then by file. A turn
+    /// that started one leaves that out.
+    child_lines: &'a HashMap<String, HashMap<String, Vec<String>>>,
+}
+
 /// Prompts, tools and tokens of one OpenCode session. Child sessions are not
 /// prompts of the parent: the caller emits them as subagents.
 fn emit_session(
     out: &mut Builder,
     messages: &[Msg],
-    (cwd, root): (&str, &str),
+    place: &Place,
     agent: Option<(&str, &str)>,
     usage: &mut Vec<ModelUsage>,
     acc: &mut Acc,
     mut child: Option<&mut SubagentFacts>,
 ) -> TurnOut {
-    let mut users = Vec::new();
-    let mut assistants: HashMap<String, Vec<&Msg>> = HashMap::new();
-    let mut last_ms = 0;
+    let Place {
+        cwd,
+        root,
+        child_lines,
+    } = *place;
+    let (users, assistants) = turns(messages);
+    let mut last_ms = messages.iter().map(|msg| msg.at).max().unwrap_or(0);
     let mut model = None;
-    for msg in messages {
-        last_ms = last_ms.max(msg.at);
-        match msg.data["role"].as_str() {
-            Some("user") => users.push(msg),
-            Some("assistant") => {
-                assistants
-                    .entry(parent_of(&msg.data))
-                    .or_default()
-                    .push(msg);
-            }
-            _ => {}
-        }
-    }
     let user_ids: HashSet<String> = users.iter().map(|msg| msg.id.clone()).collect();
     for user in &users {
         let text = prompt_text(&user.parts);
@@ -1248,19 +1369,19 @@ fn emit_session(
             for reply in replies {
                 let reply_model = assistant_model(&reply.data);
                 if model.is_none() {
-                    model = reply_model.clone();
+                    model = reply_model.as_ref().map(|m| m.name.clone());
                 }
                 charge_reply(
                     usage,
                     acc,
                     child.as_deref_mut(),
-                    reply_model.as_deref(),
+                    reply_model.as_ref(),
                     reply,
                 );
                 stop_at = stop_at.max(reply.data["time"]["completed"].as_i64().unwrap_or(reply.at));
                 last_ms = last_ms.max(stop_at);
                 for call in calls_of(reply) {
-                    models.push(reply_model.clone());
+                    models.push(reply_model.as_ref().map(|m| m.name.clone()));
                     calls.push(call);
                 }
             }
@@ -1271,14 +1392,22 @@ fn emit_session(
             agent,
             model: None,
         };
-        emit_calls(
-            out,
-            &calls,
-            &models,
-            &diffs_of(&user.data, root),
-            cwd,
-            &scope,
-        );
+        let diffs = match turn_diffs(user, &calls, cwd, root) {
+            (diffs, true) => {
+                let mut theirs: HashMap<String, Vec<String>> = HashMap::new();
+                for started in children_started(&calls) {
+                    for (file, lines) in child_lines.get(started).into_iter().flatten() {
+                        theirs
+                            .entry(file.clone())
+                            .or_default()
+                            .extend(lines.clone());
+                    }
+                }
+                without_children(diffs, &theirs)
+            }
+            (diffs, false) => diffs,
+        };
+        emit_calls(out, &calls, &models, &diffs, cwd, &scope);
         if agent.is_none() && !text.is_empty() {
             out.push(&time_of(stop_at), "Stop", json!({ "prompt_id": user.id }));
         }
@@ -1293,17 +1422,17 @@ fn emit_session(
     for reply in orphans {
         let reply_model = assistant_model(&reply.data);
         if model.is_none() {
-            model = reply_model.clone();
+            model = reply_model.as_ref().map(|m| m.name.clone());
         }
         charge_reply(
             usage,
             acc,
             child.as_deref_mut(),
-            reply_model.as_deref(),
+            reply_model.as_ref(),
             reply,
         );
         let calls = calls_of(reply);
-        let models = vec![reply_model; calls.len()];
+        let models = vec![reply_model.map(|m| m.name); calls.len()];
         let prompt_id = parent_of(&reply.data);
         let prompt_id = if prompt_id.is_empty() {
             reply.id.as_str()
@@ -1316,9 +1445,67 @@ fn emit_session(
             agent,
             model: None,
         };
-        emit_calls(out, &calls, &models, &[], cwd, &scope);
+        // No user message, so no diffs OpenCode recorded for it.
+        let diffs = diffs_from_calls(&calls, cwd);
+        emit_calls(out, &calls, &models, &diffs, cwd, &scope);
     }
     TurnOut { last_ms, model }
+}
+
+/// The user messages of a session, and the replies to each by its id.
+fn turns(messages: &[Msg]) -> (Vec<&Msg>, HashMap<String, Vec<&Msg>>) {
+    let mut users = Vec::new();
+    let mut assistants: HashMap<String, Vec<&Msg>> = HashMap::new();
+    for msg in messages {
+        match msg.data["role"].as_str() {
+            Some("user") => users.push(msg),
+            Some("assistant") => assistants
+                .entry(parent_of(&msg.data))
+                .or_default()
+                .push(msg),
+            _ => {}
+        }
+    }
+    (users, assistants)
+}
+
+/// A turn's diffs, and true when they are the ones OpenCode recorded rather
+/// than ones read from its tools.
+fn turn_diffs(user: &Msg, calls: &[Call], cwd: &str, root: &str) -> (Vec<Diff>, bool) {
+    let recorded = diffs_of(&user.data, root);
+    if recorded.is_empty() {
+        (diffs_from_calls(calls, cwd), false)
+    } else {
+        (recorded, true)
+    }
+}
+
+/// The child sessions a turn's `task` calls started.
+fn children_started(calls: &[Call]) -> impl Iterator<Item = &str> {
+    calls
+        .iter()
+        .filter(|call| matches!(call.name.as_str(), "task" | "subagent"))
+        .filter_map(|call| call.metadata["sessionId"].as_str())
+}
+
+/// Every line a session's turns changed, by file. A turn's diff has what the
+/// sessions it started changed too, so this is all of a child's work, its
+/// own children's with it.
+fn lines_by_file(messages: &[Msg], cwd: &str, root: &str) -> HashMap<String, Vec<String>> {
+    let (users, assistants) = turns(messages);
+    let mut found: HashMap<String, Vec<String>> = HashMap::new();
+    for user in users {
+        let calls: Vec<Call> = assistants
+            .get(user.id.as_str())
+            .into_iter()
+            .flatten()
+            .flat_map(|reply| calls_of(reply))
+            .collect();
+        for diff in turn_diffs(user, &calls, cwd, root).0 {
+            found.entry(diff.file).or_default().extend(diff.lines);
+        }
+    }
+    found
 }
 
 /// The session's events and the tokens and cost its messages record.
@@ -1331,8 +1518,10 @@ pub(crate) fn session(db: &Path, id: &str) -> Result<(Vec<Value>, Option<Facts>)
     }
     let ids = family(&conn, id)?;
     guard_layout(&conn, &ids)?;
-    let messages = load_messages(&conn, id, &meta.revert)?;
-    if messages.is_empty() && ids.len() == 1 {
+    let messages = load_messages(&conn, id, &meta)?;
+    // A session that going back emptied still has an import: one with
+    // nothing in it, which takes the place of what was imported before.
+    if messages.is_empty() && ids.len() == 1 && meta.revert.is_null() {
         return Ok((Vec::new(), None));
     }
     let mut out = Builder::new(OPENCODE, id);
@@ -1340,19 +1529,36 @@ pub(crate) fn session(db: &Path, id: &str) -> Result<(Vec<Value>, Option<Facts>)
     let mut acc = Acc::default();
     let cwd = meta.directory.clone();
     let repo_root = worktree(&conn, id)?.unwrap_or_else(|| cwd.clone());
-    let dirs = (cwd.as_str(), repo_root.as_str());
+    let mut children = Vec::new();
+    for child_id in ids.iter().skip(1) {
+        let child = load_meta(&conn, child_id)?;
+        let child_messages = load_messages(&conn, child_id, &child)?;
+        children.push((child_id, child, child_messages));
+    }
+    let child_lines = children
+        .iter()
+        .map(|(child_id, _, messages)| {
+            let lines = lines_by_file(messages, &cwd, &repo_root);
+            ((*child_id).clone(), lines)
+        })
+        .collect();
+    let place = Place {
+        cwd: &cwd,
+        root: &repo_root,
+        child_lines: &child_lines,
+    };
     note_compactions(&mut out, &messages);
     let descriptions = child_descriptions(&messages);
-    let root = emit_session(&mut out, &messages, dirs, None, &mut usage, &mut acc, None);
+    let root = emit_session(
+        &mut out, &messages, &place, None, &mut usage, &mut acc, None,
+    );
     // Not the session's `time_updated`: going back, a permission and other
     // changes that are not work move it too.
     let mut last_ms = root.last_ms.max(meta.time_created);
     let mut session_model = meta.model.clone().or(root.model);
     let mut subagents = Vec::new();
 
-    for child_id in ids.iter().skip(1) {
-        let child = load_meta(&conn, child_id)?;
-        let child_messages = load_messages(&conn, child_id, &child.revert)?;
+    for (child_id, child, child_messages) in &children {
         let agent_type = child.agent.clone().unwrap_or_default();
         let identity = json!({ "agent_id": child_id, "agent_type": agent_type });
         let started = if child.time_created > 0 {
@@ -1361,18 +1567,21 @@ pub(crate) fn session(db: &Path, id: &str) -> Result<(Vec<Value>, Option<Facts>)
             child_messages.first().map(|msg| msg.at).unwrap_or(0)
         };
         out.push(&time_of(started), "SubagentStart", identity.clone());
-        note_compactions(&mut out, &child_messages);
+        note_compactions(&mut out, child_messages);
         let mut facts = SubagentFacts {
-            agent_id: child_id.clone(),
+            agent_id: (*child_id).clone(),
             agent_type: child.agent.clone(),
-            description: descriptions.get(child_id).cloned().or(child.title.clone()),
+            description: descriptions
+                .get(child_id.as_str())
+                .cloned()
+                .or(child.title.clone()),
             ..Default::default()
         };
         let turned = emit_session(
             &mut out,
-            &child_messages,
-            dirs,
-            Some((child_id, &agent_type)),
+            child_messages,
+            &place,
+            Some((child_id.as_str(), &agent_type)),
             &mut usage,
             &mut acc,
             Some(&mut facts),
@@ -1386,11 +1595,19 @@ pub(crate) fn session(db: &Path, id: &str) -> Result<(Vec<Value>, Option<Facts>)
         subagents.push(facts);
     }
 
-    let start_ms = if meta.time_created > 0 {
+    let mut start_ms = if meta.time_created > 0 {
         meta.time_created
     } else {
         messages.first().map(|msg| msg.at).unwrap_or(last_ms)
     };
+    // The session starts no later than its first event, so that its start is
+    // the import's first line, which says what the import was made from.
+    if let Some(first) = out
+        .earliest()
+        .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+    {
+        start_ms = start_ms.min(first.timestamp_millis());
+    }
     let mut start = json!({ "source": "startup" });
     if !cwd.is_empty() {
         start["cwd"] = json!(cwd);
@@ -1805,11 +2022,7 @@ mod tests {
         assert_eq!(cost.source, CostSource::PartialEstimate);
         assert!((cost.total_usd - 2.0).abs() < 1e-9);
         assert_eq!(cost.unpriced_requests, 1);
-        let local = s
-            .usage
-            .iter()
-            .find(|u| u.model == "ollama/qwen2.5:7b")
-            .unwrap();
+        let local = s.usage.iter().find(|u| u.model == "qwen2.5:7b").unwrap();
         assert_eq!(
             (
                 local.input_tokens,
@@ -1817,6 +2030,336 @@ mod tests {
                 local.estimated_cost_usd
             ),
             (100, 5, None)
+        );
+        assert_eq!(local.provider.as_deref(), Some("ollama"));
+        let mut models = s.models.clone();
+        models.sort();
+        assert_eq!(models, ["claude-sonnet-4-5", "qwen2.5:7b"]);
+    }
+
+    fn diff(file: &str, patch: &str) -> Value {
+        json!({ "file": file, "status": "modified", "patch": patch })
+    }
+
+    #[test]
+    fn what_a_child_changed_is_counted_once() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_p", None, "build", "p", 10, json!({}));
+        // The parent's turn: its own edit of b.rs, and a.rs, which its child
+        // changed while the turn ran.
+        add_message(
+            &conn,
+            "u",
+            "ses_p",
+            10,
+            json!({ "role": "user", "summary": { "diffs": [
+                diff("a.rs", "@@ -1 +1,2 @@\n-x\n+y\n+z\n"),
+                diff("b.rs", "@@ -1 +1 @@\n-b\n+c\n"),
+            ] } }),
+        );
+        add_part(&conn, "t", "u", "ses_p", 10, text_part("go"));
+        add_message(
+            &conn,
+            "a",
+            "ses_p",
+            20,
+            assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1),
+        );
+        let mut task = tool(
+            "task",
+            "call_task",
+            json!({ "description": "fix a", "prompt": "fix a.rs" }),
+            "completed",
+            20,
+        );
+        task["state"]["metadata"] = json!({ "sessionId": "ses_c" });
+        add_part(&conn, "task", "a", "ses_p", 20, task);
+        add_part(
+            &conn,
+            "eb",
+            "a",
+            "ses_p",
+            40,
+            tool(
+                "edit",
+                "call_b",
+                json!({ "filePath": "/work/repo/b.rs" }),
+                "completed",
+                40,
+            ),
+        );
+        add_session(&conn, "ses_c", Some("ses_p"), "general", "c", 21, json!({}));
+        add_message(
+            &conn,
+            "cu",
+            "ses_c",
+            21,
+            json!({ "role": "user", "summary": { "diffs": [
+                diff("a.rs", "@@ -1 +1,2 @@\n-x\n+y\n+z\n"),
+            ] } }),
+        );
+        add_part(&conn, "ct", "cu", "ses_c", 21, text_part("fix a.rs"));
+        add_message(
+            &conn,
+            "ca",
+            "ses_c",
+            22,
+            assistant("cu", "ollama/qwen2.5:7b", 0.0, 1, 1),
+        );
+        add_part(
+            &conn,
+            "ce",
+            "ca",
+            "ses_c",
+            22,
+            tool(
+                "edit",
+                "call_a",
+                json!({ "filePath": "/work/repo/a.rs" }),
+                "completed",
+                22,
+            ),
+        );
+        drop(conn);
+        let s = normalized(&path, "ses_p");
+        let a = s.files.iter().find(|f| f.path.ends_with("a.rs")).unwrap();
+        assert_eq!((a.lines_added, a.lines_removed), (2, 1));
+        assert_eq!((s.counts.lines_added, s.counts.lines_removed), (3, 2));
+    }
+
+    #[test]
+    fn a_fork_leaves_out_what_it_copied() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        let t0 = 1_763_000_000_000_i64;
+        add_session(
+            &conn,
+            "ses_fork",
+            None,
+            "build",
+            "x (fork #1)",
+            t0 + 100,
+            json!({}),
+        );
+        // Copied in by the fork: written before the fork was made.
+        add_message(&conn, "u1", "ses_fork", t0, json!({ "role": "user" }));
+        add_part(&conn, "t1", "u1", "ses_fork", t0, text_part("first"));
+        add_message(
+            &conn,
+            "a1",
+            "ses_fork",
+            t0 + 10,
+            assistant("u1", "anthropic/claude-sonnet-4-5", 5.0, 10, 1),
+        );
+        add_message(&conn, "u2", "ses_fork", t0 + 200, json!({ "role": "user" }));
+        add_part(&conn, "t2", "u2", "ses_fork", t0 + 200, text_part("after"));
+        add_message(
+            &conn,
+            "a2",
+            "ses_fork",
+            t0 + 210,
+            assistant("u2", "anthropic/claude-sonnet-4-5", 1.0, 10, 1),
+        );
+        drop(conn);
+        let (events, facts) = session(&path, "ses_fork").unwrap();
+        assert_eq!(events[0]["hook"], "SessionStart");
+        let s = crate::normalize::from_events(&events, facts.as_ref(), OPENCODE).unwrap();
+        let said: Vec<_> = s.prompts.iter().map(|p| p.text.preview.as_str()).collect();
+        assert_eq!(said, ["after"]);
+        assert!((s.cost.unwrap().total_usd - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_session_going_back_emptied_is_imported_as_empty() {
+        let (dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_gone", None, "build", "gone", 10, json!({}));
+        add_message(&conn, "u", "ses_gone", 10, json!({ "role": "user" }));
+        add_part(&conn, "t", "u", "ses_gone", 10, text_part("hello"));
+        add_message(
+            &conn,
+            "a",
+            "ses_gone",
+            20,
+            assistant("u", "anthropic/claude-sonnet-4-5", 0.4, 8, 2),
+        );
+        drop(conn);
+        let homes = crate::import::AgentHomes {
+            opencode_db: Some(path.clone()),
+            ..Default::default()
+        };
+        let data = dir.path().join("data");
+        marker(&data, "ses_gone");
+        assert_eq!(
+            crate::import::import_all(&homes, &data, &[], &[]).imported,
+            1
+        );
+
+        let conn = write(&path);
+        conn.execute(
+            "UPDATE session SET revert = ?1",
+            params![json!({ "messageID": "u" }).to_string()],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(
+            crate::import::import_all(&homes, &data, &[], &[]).imported,
+            1
+        );
+        assert_eq!(
+            crate::import::import_all(&homes, &data, &[], &[]).up_to_date,
+            1
+        );
+        let saved = fs::read_to_string(data.join("imported/opencode/ses_gone.jsonl")).unwrap();
+        assert!(!saved.contains("hello") && !saved.contains("UserPromptSubmit"));
+        let dirs = crate::sync::SourceDirs::in_data_dir(&data, OPENCODE);
+        let built = crate::normalize::build_from_raw(
+            &data.join("imported/opencode/ses_gone.jsonl"),
+            &dirs.facts,
+            OPENCODE,
+        )
+        .unwrap();
+        assert!(built.is_none());
+    }
+
+    #[test]
+    fn without_diffs_the_tools_say_what_changed() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_nogit", None, "build", "nogit", 10, json!({}));
+        add_message(&conn, "u", "ses_nogit", 10, json!({ "role": "user" }));
+        add_part(&conn, "t", "u", "ses_nogit", 10, text_part("write"));
+        add_message(
+            &conn,
+            "a",
+            "ses_nogit",
+            20,
+            assistant("u", "ollama/qwen2.5:7b", 0.0, 0, 0),
+        );
+        let mut new_file = tool(
+            "write",
+            "call_w",
+            json!({ "filePath": "/work/repo/new.txt", "content": "a\nb\n" }),
+            "completed",
+            20,
+        );
+        new_file["state"]["metadata"] =
+            json!({ "filepath": "/work/repo/new.txt", "exists": false });
+        add_part(&conn, "w", "a", "ses_nogit", 20, new_file);
+        let mut edit = tool(
+            "edit",
+            "call_e",
+            json!({ "filePath": "/work/repo/old.txt" }),
+            "completed",
+            30,
+        );
+        edit["state"]["metadata"] = json!({ "filediff": {
+            "file": "/work/repo/old.txt", "patch": "@@ -1 +1 @@\n-x\n+y\n"
+        } });
+        add_part(&conn, "e", "a", "ses_nogit", 30, edit);
+        drop(conn);
+        let s = normalized(&path, "ses_nogit");
+        assert_eq!((s.counts.lines_added, s.counts.lines_removed), (3, 1));
+        let made = s
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("new.txt"))
+            .unwrap();
+        assert!(made.created);
+        assert_eq!(s.tool_calls.len(), 2);
+    }
+
+    #[test]
+    fn one_patch_of_two_files_is_timed_once_and_ids_are_the_parts() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_ids", None, "build", "ids", 10, json!({}));
+        add_message(
+            &conn,
+            "u",
+            "ses_ids",
+            10,
+            json!({ "role": "user", "summary": { "diffs": [
+                { "file": "a.txt", "status": "added", "patch": "@@ -0,0 +1 @@\n+a\n" },
+                { "file": "b.txt", "status": "added", "patch": "@@ -0,0 +1 @@\n+b\n" },
+            ] } }),
+        );
+        add_part(&conn, "t", "u", "ses_ids", 10, text_part("go"));
+        add_message(
+            &conn,
+            "a",
+            "ses_ids",
+            20,
+            assistant("u", "ollama/qwen2.5:7b", 0.0, 0, 0),
+        );
+        let mut patch = tool(
+            "apply_patch",
+            "call_0",
+            json!({ "patchText": "*** Begin Patch" }),
+            "completed",
+            20,
+        );
+        patch["state"]["metadata"] = json!({ "files": [
+            { "filePath": "/work/repo/a.txt" }, { "filePath": "/work/repo/b.txt" }
+        ] });
+        add_part(&conn, "p", "a", "ses_ids", 20, patch);
+        // Another reply's call with the same provider id.
+        add_part(
+            &conn,
+            "r",
+            "a",
+            "ses_ids",
+            40,
+            tool(
+                "read",
+                "call_0",
+                json!({ "filePath": "/work/repo/a.txt" }),
+                "completed",
+                40,
+            ),
+        );
+        drop(conn);
+        let s = normalized(&path, "ses_ids");
+        let tools: Vec<_> = s.tool_calls.iter().map(|c| c.tool.as_str()).collect();
+        assert_eq!(tools, ["Write", "Write", "Read"]);
+        let durations: Vec<_> = s.tool_calls.iter().map(|c| c.duration_ms).collect();
+        assert_eq!(durations, [Some(10), Some(0), Some(10)]);
+    }
+
+    #[test]
+    fn a_model_is_kept_as_its_maker_names_it_and_its_provider_apart() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_two", None, "build", "two", 10, json!({}));
+        add_message(&conn, "u", "ses_two", 10, json!({ "role": "user" }));
+        add_part(&conn, "t", "u", "ses_two", 10, text_part("go"));
+        add_message(
+            &conn,
+            "a1",
+            "ses_two",
+            20,
+            assistant("u", "anthropic/claude-sonnet-4-5", 1.0, 10, 1),
+        );
+        // OpenRouter puts the maker in the model's id.
+        let mut routed = assistant("u", "openrouter/x", 1.0, 10, 1);
+        routed["modelID"] = json!("anthropic/claude-sonnet-4-5");
+        add_message(&conn, "a2", "ses_two", 30, routed);
+        drop(conn);
+        let s = normalized(&path, "ses_two");
+        assert_eq!(s.models, ["claude-sonnet-4-5"]);
+        let mut served: Vec<_> = s
+            .usage
+            .iter()
+            .map(|u| (u.model.as_str(), u.provider.as_deref()))
+            .collect();
+        served.sort();
+        assert_eq!(
+            served,
+            [
+                ("claude-sonnet-4-5", Some("anthropic")),
+                ("claude-sonnet-4-5", Some("openrouter"))
+            ]
         );
     }
 

@@ -227,7 +227,16 @@ export interface BranchCost {
   usd?: number;
 }
 export interface ModelUsage {
+  /**
+   * The model's id as its maker names it (`claude-sonnet-4-5`), the same
+   * for every agent and whoever served it.
+   */
   model?: string;
+  /**
+   * Who served the model, where the agent records it: OpenCode's provider
+   * (`anthropic`, `openrouter`, `ollama`). Left out where it does not.
+   */
+  provider?: string | null;
   requests?: number;
   input_tokens?: number;
   /**

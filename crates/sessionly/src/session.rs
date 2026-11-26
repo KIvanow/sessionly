@@ -195,7 +195,13 @@ impl Cost {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ModelUsage {
+    /// The model's id as its maker names it (`claude-sonnet-4-5`), the same
+    /// for every agent and whoever served it.
     pub model: String,
+    /// Who served the model, where the agent records it: OpenCode's provider
+    /// (`anthropic`, `openrouter`, `ollama`). Left out where it does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     pub requests: u64,
     pub input_tokens: u64,
     /// Includes thinking tokens.

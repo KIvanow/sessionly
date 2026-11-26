@@ -175,8 +175,11 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
               </thead>
               <tbody>
                 {(s.usage ?? []).map((u) => (
-                  <tr key={u.model}>
-                    <th scope="row">{u.model}</th>
+                  <tr key={`${u.provider ?? ""}/${u.model}`}>
+                    <th scope="row">
+                      {u.model}
+                      {u.provider && <span className="muted"> via {u.provider}</span>}
+                    </th>
                     <td className="num">{count(u.requests ?? 0)}</td>
                     <td className="num">{compact(u.input_tokens ?? 0)}</td>
                     <td className="num">{compact(u.output_tokens ?? 0)}</td>

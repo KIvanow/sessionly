@@ -39,15 +39,27 @@ does not run the `opencode` command to find it: that command can migrate the dat
   root of the repository (the project's worktree), which is not the session's directory when
   OpenCode was started below it. Those lines are put on the file tool that wrote them, or on
   the shell command when that is what changed the file, or on a Write or Edit of their own
-  when neither is there.
+  when neither is there. A turn that started a child session leaves out what the child
+  changed, which the child's own diff counts. OpenCode records no diff outside a git
+  repository, or with `snapshot` off: there the lines are what `edit` and `apply_patch`
+  returned, and a new file `write` made. A file `write` wrote over has no lines.
 - **A child session** (`parent_id` set, including one a `task` tool started) is folded into the
   session that started it, with its tool calls and tokens. A child whose parent is gone, or
   whose parent is one of OpenCode's own agents (`title`, `summary`, `compaction`), stands
   alone. Those three are not sessions.
+- **A fork** copies the messages up to a point into a new session that does not say where it
+  came from. The copies keep the time they were first written, which is before the fork was
+  made, and are left out: the original session counts them.
 - **Going back** (`session.revert`) drops what it undid, as OpenCode does at the next prompt:
   the message named and every later one, or, when a part is named, that part and what came
-  after it. A session stored only in `session_message`, with nothing in `message`, is not
-  read: import fails that session rather than reporting it empty.
+  after it. A session it emptied is imported with nothing in it; the ledger keeps what it
+  had until a full rebuild (`sessionly sync --force`), as a sync never removes a session. A
+  session stored only in `session_message`, with nothing in `message`, is not read: import
+  fails that session rather than reporting it empty.
+- **Models** are kept as their maker names them (`claude-sonnet-4-5`), as the other agents
+  record them, and who served each one (`anthropic`, `openrouter`, `ollama`) as its
+  `provider` in the session's usage. OpenRouter's ids name the maker too
+  (`anthropic/claude-sonnet-4.5`); the model is the part after it.
 - **Times** come from the messages. The session's own update time is not its end: going back
   and other changes that are not work move it.
 - **Cost.** A non-zero cost on an assistant message is OpenCode's figure. A message that
@@ -75,9 +87,12 @@ machine (not `--project`), `sessionly install` writes `plugins/sessionly.js`. It
 `opencode.json`.
 
 The file only notes that a session was created or went idle, as one line under
-`~/.sessionly/raw/opencode/`. That line names the session and nothing the person typed.
-`sessionly uninstall` removes the file and nothing else. A session the plugin has seen is
-brought in from the database at the next sync without running `import`. The database is the
+`~/.sessionly/raw/opencode/`. That line names the session and nothing the person typed. When
+a session goes idle, the plugin also runs `sessionly capture` (the binary `install` ran from;
+a moved binary needs `install` again), which starts the [automatic sync](cli.md#automatic-sync)
+as the end of any agent's turn does. `sessionly uninstall` removes the file and
+nothing else. A session the plugin has seen is brought in from the database at the next sync
+without running `import`. The database is the
 record; the plugin says the session happened. `sessionly import --tool opencode` is the
 backfill for sessions from before the plugin was installed.
 

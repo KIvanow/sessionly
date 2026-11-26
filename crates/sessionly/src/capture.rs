@@ -25,10 +25,14 @@ const LOCK_WAIT: Duration = Duration::from_millis(1500);
 /// for Claude Code (they read `~/.claude/settings.json`), and Codex sends
 /// payloads of the same shape from its own hooks file, so one capture
 /// command hears from all four and has to tell them apart by the payload.
+/// OpenCode's plugin sends one when a session goes idle.
 pub fn detect_source(payload: &Value) -> &'static str {
     let has = |key: &str| payload.get(key).is_some();
     let transcript = payload["transcript_path"].as_str().unwrap_or_default();
-    if has("cursor_version") || has("conversation_id") || transcript.contains("/.cursor/") {
+    // OpenCode's plugin, which `sessionly install` writes, says it is.
+    if has("opencode_plugin") {
+        crate::paths::OPENCODE
+    } else if has("cursor_version") || has("conversation_id") || transcript.contains("/.cursor/") {
         crate::paths::CURSOR
     } else if has("workspaceRoot") || has("hookEventName") || transcript.contains("/.grok/") {
         crate::paths::GROK
@@ -312,6 +316,15 @@ mod tests {
             serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap())
                 .unwrap();
         assert_eq!(last.get("runtime"), None);
+    }
+
+    #[test]
+    fn the_opencode_plugin_is_filed_under_opencode() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = br#"{"session_id":"ses_1","hook_event_name":"Stop","opencode_plugin":1}"#;
+        let (path, hook) = capture(dir.path(), &mut &payload[..], "t", local).unwrap();
+        assert_eq!(path, dir.path().join("opencode/ses_1.jsonl"));
+        assert_eq!(hook, "Stop");
     }
 
     #[test]

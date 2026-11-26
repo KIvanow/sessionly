@@ -470,7 +470,7 @@ fn run(command: Command) -> Result<()> {
                         eprintln!("warning: Codex hooks not installed: {err:#}");
                     }
                 }
-                if let Err(err) = opencode::install() {
+                if let Err(err) = opencode::install(&exe) {
                     eprintln!("warning: OpenCode plugin not installed: {err:#}");
                 }
             }

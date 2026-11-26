@@ -126,6 +126,15 @@ impl Builder {
         }
     }
 
+    /// The time of the earliest event added so far that has one.
+    pub(crate) fn earliest(&self) -> Option<&str> {
+        self.events
+            .iter()
+            .map(|(at, _)| at.as_str())
+            .filter(|at| !at.is_empty())
+            .min()
+    }
+
     /// The events in time order, with the session start first among equals.
     /// The sort is stable, so events pushed in order stay in order.
     pub(crate) fn finish(mut self) -> Vec<Value> {
