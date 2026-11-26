@@ -173,11 +173,15 @@ pub(crate) fn install_into(config: &Path, exe: &Path) -> Result<bool> {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let tmp = path.with_extension(format!("js.{}.tmp", std::process::id()));
-    write_plugin(&tmp, &text)?;
-    if let Err(err) = fs::rename(&tmp, &path) {
+    // A file half written, or not moved into place, does not stay behind in
+    // OpenCode's plugins folder.
+    let written = write_plugin(&tmp, &text).and_then(|()| {
+        fs::rename(&tmp, &path).with_context(|| format!("installing {}", path.display()))
+    });
+    if written.is_err() {
         let _ = fs::remove_file(&tmp);
-        return Err(err).with_context(|| format!("installing {}", path.display()));
     }
+    written?;
     Ok(true)
 }
 

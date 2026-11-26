@@ -103,24 +103,59 @@ fn family(conn: &Connection, root: &str) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-/// The root of the repository the session's project is: the folder git
-/// writes the paths of a diff from. `None` for a project that is not one
-/// (OpenCode's worktree is then `/`), or a database without projects.
+/// The root of the checkout the session ran in: the folder git writes the
+/// paths of a diff from. One project is every checkout of a repository:
+/// `project.worktree` is the first OpenCode saw, and the others (git
+/// worktrees) are its `sandboxes` and its `project_directory` rows. The
+/// session's is the deepest of them its folder is in. `None` for a project
+/// that is not a repository (its worktree is `/`), a folder in none of
+/// them, or a database without projects.
 fn worktree(conn: &Connection, id: &str) -> Result<Option<String>> {
     if !table_exists(conn, "project")? || !column_exists(conn, "session", "project_id")? {
         return Ok(None);
     }
-    let found: Option<String> = conn
+    let sandboxes = if column_exists(conn, "project", "sandboxes")? {
+        "project.sandboxes"
+    } else {
+        "NULL"
+    };
+    let found: Option<(String, String, String, Option<String>)> = conn
         .query_row(
-            "SELECT project.worktree FROM session
-             JOIN project ON project.id = session.project_id
-             WHERE session.id = ?1",
+            &format!(
+                "SELECT session.directory, project.id, project.worktree, {sandboxes}
+                 FROM session JOIN project ON project.id = session.project_id
+                 WHERE session.id = ?1"
+            ),
             params![id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        .optional()?
-        .flatten();
-    Ok(found.filter(|dir| !dir.is_empty() && dir != "/"))
+        .optional()?;
+    let Some((directory, project, main, sandboxes)) = found else {
+        return Ok(None);
+    };
+    let mut checkouts = vec![main];
+    if let Some(list) = sandboxes.and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok()) {
+        checkouts.extend(list);
+    }
+    if table_exists(conn, "project_directory")? {
+        let mut stmt =
+            conn.prepare("SELECT directory FROM project_directory WHERE project_id = ?1")?;
+        let rows = stmt.query_map(params![project], |row| row.get::<_, String>(0))?;
+        checkouts.extend(rows.collect::<std::result::Result<Vec<_>, _>>()?);
+    }
+    Ok(checkouts
+        .into_iter()
+        .filter(|dir| !dir.is_empty() && dir != "/" && inside(&directory, dir))
+        .max_by_key(String::len))
+}
+
+/// True when `path` is `folder` or in it.
+fn inside(path: &str, folder: &str) -> bool {
+    let folder = folder.trim_end_matches(['/', '\\']);
+    path == folder
+        || path
+            .strip_prefix(folder)
+            .is_some_and(|rest| rest.starts_with(['/', '\\']))
 }
 
 fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
@@ -412,6 +447,9 @@ struct Msg {
     /// the undone part of the turn wrote. Its diff, which OpenCode does not
     /// write again, still has them.
     undone: HashSet<String>,
+    /// A reply going back cut short that had step parts: its own tokens and
+    /// cost are of every step, the undone ones too, and are not charged.
+    cut: bool,
 }
 
 struct Part {
@@ -484,6 +522,7 @@ fn load_messages(conn: &Connection, id: &str, meta: &Meta) -> Result<Vec<Msg>> {
             data,
             parts,
             undone: HashSet::new(),
+            cut: false,
         });
     }
     apply_revert(&mut loaded, &meta.revert, &meta.directory);
@@ -519,13 +558,16 @@ fn apply_revert(loaded: &mut Vec<Msg>, revert: &Value, cwd: &str) {
     gone.retain(|msg| parent_of(&msg.data) == turn);
     let parts = &mut loaded[index].parts;
     if let Some(cut) = parts.iter().position(|part| part.id == part_id) {
+        let stepped = parts.iter().any(|part| part.data["type"] == "step-finish");
         gone.push(Msg {
             id: String::new(),
             at: 0,
             data: Value::Null,
             parts: parts.split_off(cut),
             undone: HashSet::new(),
+            cut: false,
         });
+        loaded[index].cut = stepped;
     }
     let wrote = |messages: &[&Msg]| {
         let calls: Vec<Call> = messages.iter().flat_map(|msg| calls_of(msg)).collect();
@@ -626,8 +668,11 @@ fn ends_with_file(tool_path: &str, diff_file: &str, cwd: &str) -> bool {
 /// Which diffs each call made. A path a tool was given takes one diff: the
 /// one at that path, or else the one whose path it ends with, when no other
 /// path left over ends with it too. A diff nothing takes is left over.
-fn claim_diffs(calls: &[Call], diffs: &[Diff], cwd: &str) -> Vec<Vec<usize>> {
-    let mut owned: Vec<Vec<usize>> = vec![Vec::new(); calls.len()];
+/// Each diff a call took comes with the file as the tool named it: the path
+/// a diff was matched by its end alone is the tool's, which knows where the
+/// file is.
+fn claim_diffs(calls: &[Call], diffs: &[Diff], cwd: &str) -> Vec<Vec<(usize, String)>> {
+    let mut owned: Vec<Vec<(usize, String)>> = vec![Vec::new(); calls.len()];
     let mut paths: Vec<(usize, String)> = Vec::new();
     for (index, call) in calls.iter().enumerate() {
         if call.status != CallStatus::Ok || !is_file_tool(&call.name) {
@@ -649,7 +694,7 @@ fn claim_diffs(calls: &[Call], diffs: &[Diff], cwd: &str) -> Vec<Vec<usize>> {
         {
             free[slot] = false;
             claimed[diff_index] = true;
-            owned[paths[slot].0].push(diff_index);
+            owned[paths[slot].0].push((diff_index, diff.file.clone()));
         }
     }
     for (diff_index, diff) in diffs.iter().enumerate() {
@@ -659,13 +704,19 @@ fn claim_diffs(calls: &[Call], diffs: &[Diff], cwd: &str) -> Vec<Vec<usize>> {
         let fits: Vec<usize> = (0..paths.len())
             .filter(|&slot| free[slot] && ends_with_file(&paths[slot].1, &diff.written, cwd))
             .collect();
-        if let [slot] = fits[..] {
+        // Only one file may fit, though more than one call may have
+        // written it: the first of those takes the diff.
+        let files: HashSet<String> = fits
+            .iter()
+            .map(|&slot| absolute(&paths[slot].1, cwd))
+            .collect();
+        if let (Some(&slot), 1) = (fits.first(), files.len()) {
             free[slot] = false;
-            owned[paths[slot].0].push(diff_index);
+            owned[paths[slot].0].push((diff_index, absolute(&paths[slot].1, cwd)));
         }
     }
     for list in &mut owned {
-        list.sort_unstable();
+        list.sort_unstable_by_key(|(diff_index, _)| *diff_index);
     }
     owned
 }
@@ -1151,7 +1202,7 @@ fn requests_of(reply: &Msg) -> Vec<Tokens> {
         .filter(|part| part.data["type"] == "step-finish")
         .map(|part| tokens_of(&part.data))
         .collect();
-    if steps.is_empty() {
+    if steps.is_empty() && !reply.cut {
         vec![tokens_of(&reply.data)]
     } else {
         steps
@@ -1283,7 +1334,7 @@ fn emit_calls(
 ) {
     let owned = claim_diffs(calls, diffs, cwd);
     let mut claimed = vec![false; diffs.len()];
-    for diff_index in owned.iter().flatten() {
+    for (diff_index, _) in owned.iter().flatten() {
         claimed[*diff_index] = true;
     }
     let leftovers: Vec<usize> = claimed
@@ -1298,10 +1349,13 @@ fn emit_calls(
 
     for (index, call) in calls.iter().enumerate() {
         let model = models.get(index).and_then(Option::as_deref);
-        let scoped = Scope { model, ..*scope };
+        let scoped = Scope {
+            model: model.or(scope.model),
+            ..*scope
+        };
         if call.status == CallStatus::Ok && !owned[index].is_empty() {
             let many = owned[index].len() > 1;
-            for (nth, diff_index) in owned[index].iter().enumerate() {
+            for (nth, (diff_index, file)) in owned[index].iter().enumerate() {
                 let diff = &diffs[*diff_index];
                 let id = if many {
                     format!("{}:{nth}", call.id)
@@ -1323,7 +1377,7 @@ fn emit_calls(
                     ToolEvent {
                         id,
                         tool: file_tool_name(&call.name, diff.created).to_string(),
-                        input: json!({ "file_path": absolute(&diff.file, cwd) }),
+                        input: json!({ "file_path": file }),
                         response: Some(patch_result(diff, bytes)),
                         changes: None,
                     },
@@ -1497,11 +1551,17 @@ fn emit_session(
                 }
             }
         }
+        // A diff no call took is put on the model of the turn's last reply.
+        let turn_model = assistants
+            .get(user.id.as_str())
+            .and_then(|replies| replies.last())
+            .and_then(|reply| assistant_model(&reply.data))
+            .map(|model| model.name);
         let scope = Scope {
             prompt_id: &user.id,
             prompt_at: user.at,
             agent,
-            model: None,
+            model: turn_model.as_deref(),
         };
         let TurnDiffs {
             recorded,
@@ -1558,7 +1618,8 @@ fn emit_session(
             reply,
         );
         let calls = calls_of(reply);
-        let models = vec![reply_model.map(|m| m.name); calls.len()];
+        let reply_model = reply_model.map(|m| m.name);
+        let models = vec![reply_model.clone(); calls.len()];
         let prompt_id = parent_of(&reply.data);
         let prompt_id = if prompt_id.is_empty() {
             reply.id.as_str()
@@ -1569,7 +1630,7 @@ fn emit_session(
             prompt_id,
             prompt_at: reply.at,
             agent,
-            model: None,
+            model: reply_model.as_deref(),
         };
         // No user message, so no diffs OpenCode recorded for it.
         let diffs = diffs_from_calls(&calls, cwd);
@@ -3817,6 +3878,177 @@ mod tests {
         assert_eq!(files, ["/work/other/y.txt", "/work/repo/src/x.ts"]);
         assert_eq!(s.tool_calls[0].tool, "Edit");
         assert_eq!(s.counts.lines_added, 2);
+    }
+
+    #[test]
+    fn a_session_in_a_git_worktree_reads_its_diffs_from_that_worktree() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        conn.execute_batch(
+            "ALTER TABLE session ADD COLUMN project_id TEXT;
+             CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL, sandboxes TEXT);
+             CREATE TABLE project_directory (project_id TEXT, directory TEXT, strategy TEXT);
+             INSERT INTO project VALUES ('prj', '/main', '[]');
+             INSERT INTO project_directory VALUES ('prj', '/main', NULL);
+             INSERT INTO project_directory VALUES ('prj', '/main/.claude/worktrees/a', 'git_worktree');",
+        )
+        .unwrap();
+        add_session(&conn, "ses_wt", None, "build", "wt", 10, json!({}));
+        conn.execute(
+            "UPDATE session SET project_id = 'prj', directory = '/main/.claude/worktrees/a'",
+            [],
+        )
+        .unwrap();
+        add_message(
+            &conn,
+            "u",
+            "ses_wt",
+            10,
+            json!({ "role": "user", "summary": { "diffs": [diff("src/x.ts", "@@ -1 +1 @@\n-a\n+b\n")] } }),
+        );
+        add_part(&conn, "t", "u", "ses_wt", 10, text_part("go"));
+        add_message(
+            &conn,
+            "a",
+            "ses_wt",
+            20,
+            assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1),
+        );
+        let mut edit = edit_of("x", "@@ -1 +1 @@\n-a\n+b\n");
+        edit["state"]["input"]["filePath"] = json!("/main/.claude/worktrees/a/src/x.ts");
+        edit["state"]["metadata"]["filediff"]["file"] = json!("/main/.claude/worktrees/a/src/x.ts");
+        add_part(&conn, "e", "a", "ses_wt", 20, edit);
+        drop(conn);
+        let s = normalized(&path, "ses_wt");
+        let files: Vec<_> = s.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(files, ["/main/.claude/worktrees/a/src/x.ts"]);
+        assert_eq!((s.counts.lines_added, s.counts.lines_removed), (1, 1));
+        assert!(inside("/main/a", "/main/"));
+        assert!(!inside("/mainline", "/main"));
+    }
+
+    #[test]
+    fn a_diff_matched_by_its_end_is_on_the_tools_file_once() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        // No project says where the repository's root is, and OpenCode ran
+        // in a folder below it: the diff's path is from the root.
+        add_session(&conn, "ses_sub", None, "build", "sub", 10, json!({}));
+        conn.execute("UPDATE session SET directory = '/work/repo/pkg'", [])
+            .unwrap();
+        add_message(
+            &conn,
+            "u",
+            "ses_sub",
+            10,
+            json!({ "role": "user", "summary": { "diffs": [diff("pkg/a.ts", "@@ -1 +1 @@\n-a\n+b\n")] } }),
+        );
+        add_part(&conn, "t", "u", "ses_sub", 10, text_part("go"));
+        add_message(
+            &conn,
+            "a",
+            "ses_sub",
+            20,
+            assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1),
+        );
+        for n in 0..2 {
+            add_part(
+                &conn,
+                &format!("e{n}"),
+                "a",
+                "ses_sub",
+                20 + n,
+                tool(
+                    "edit",
+                    &format!("e{n}"),
+                    json!({ "filePath": "/work/repo/pkg/a.ts" }),
+                    "completed",
+                    20 + n,
+                ),
+            );
+        }
+        drop(conn);
+        let s = normalized(&path, "ses_sub");
+        let files: Vec<_> = s.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(files, ["/work/repo/pkg/a.ts"]);
+        assert_eq!((s.counts.lines_added, s.counts.lines_removed), (1, 1));
+    }
+
+    #[test]
+    fn a_reply_cut_before_its_step_ended_costs_nothing() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(
+            &conn,
+            "ses_cut",
+            None,
+            "build",
+            "cut",
+            10,
+            json!({ "revert": { "messageID": "a", "partID": "w" } }),
+        );
+        add_message(&conn, "u", "ses_cut", 10, json!({ "role": "user" }));
+        add_part(&conn, "t", "u", "ses_cut", 10, text_part("go"));
+        add_message(
+            &conn,
+            "a",
+            "ses_cut",
+            20,
+            assistant("u", "anthropic/claude-sonnet-4-5", 5.0, 100, 10),
+        );
+        add_part(&conn, "said", "a", "ses_cut", 20, text_part("on it"));
+        add_part(
+            &conn,
+            "w",
+            "a",
+            "ses_cut",
+            21,
+            tool(
+                "write",
+                "w",
+                json!({ "filePath": "x", "content": "x" }),
+                "completed",
+                21,
+            ),
+        );
+        add_part(
+            &conn,
+            "s",
+            "a",
+            "ses_cut",
+            22,
+            json!({ "type": "step-finish", "cost": 5.0,
+                    "tokens": { "input": 100, "output": 10, "reasoning": 0, "cache": { "read": 0, "write": 0 } } }),
+        );
+        drop(conn);
+        let s = normalized(&path, "ses_cut");
+        assert!(s.cost.is_none_or(|cost| cost.total_usd == 0.0));
+        assert_eq!(s.usage.iter().map(|u| u.requests).sum::<u64>(), 0);
+    }
+
+    #[test]
+    fn a_diff_no_call_took_is_on_its_turns_model() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_mcp", None, "build", "mcp", 10, json!({}));
+        add_message(
+            &conn,
+            "u",
+            "ses_mcp",
+            10,
+            json!({ "role": "user", "summary": { "diffs": [diff("a.rs", "@@ -1 +1 @@\n-a\n+b\n")] } }),
+        );
+        add_part(&conn, "t", "u", "ses_mcp", 10, text_part("go"));
+        add_message(
+            &conn,
+            "a",
+            "ses_mcp",
+            20,
+            assistant("u", "openai/gpt-5", 0.1, 1, 1),
+        );
+        drop(conn);
+        let s = normalized(&path, "ses_mcp");
+        assert_eq!(s.tool_calls[0].model.as_deref(), Some("gpt-5"));
     }
 
     #[test]

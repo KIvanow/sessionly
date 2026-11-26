@@ -47,8 +47,11 @@ does not run the `opencode` command to find it: that command can migrate the dat
 - **Titles.** OpenCode's placeholder (`New session - <time>`, `Child session - <time>`), which
   it keeps until its title agent names the session, is not taken for a title.
 - **Files and lines.** OpenCode records a turn's diff on the user message, with paths from the
-  root of the repository (the project's worktree), which is not the session's directory when
-  OpenCode was started below it. Those lines are put on the file tool that wrote them, or on
+  root of the checkout the session ran in, which is not the session's directory when OpenCode
+  was started below it. One project is every checkout of a repository: the root is the deepest
+  of the project's `worktree`, its `sandboxes` and its `project_directory` rows (a git
+  worktree, such as one under `.claude/worktrees/`) that the session's directory is in. A diff
+  matched to its tool by the end of its path is put on the file the tool named. Those lines are put on the file tool that wrote them, or on
   the shell command when that is what changed the file, or on a Write or Edit of their own
   when neither is there. On Windows the paths are written with `\`, as OpenCode's tools write
   theirs.
