@@ -6,7 +6,7 @@
     <title>Sessionly: a ledger of AI coding agent sessions</title>
     <meta
       name="description"
-      content="What your coding agents were asked, which tools ran, which files changed, what it cost and how much of it survived. For Claude Code, Codex, Cursor and Grok, side by side. Open source; runs on your machine."
+      content="What your coding agents were asked, which tools ran, which files changed, what it cost and how much of it survived. For Claude Code, Codex, Cursor, Grok and OpenCode, side by side. Open source; runs on your machine."
     />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#14161a" media="(prefers-color-scheme: light)" />
@@ -24,7 +24,7 @@
     <meta property="og:title" content="Sessionly: a ledger of AI coding agent sessions" />
     <meta
       property="og:description"
-      content="What your coding agents did, what it cost, and how much of it survived. Claude Code, Codex, Cursor and Grok in one ledger, on your machine first."
+      content="What your coding agents did, what it cost, and how much of it survived. Claude Code, Codex, Cursor, Grok and OpenCode in one ledger, on your machine first."
     />
     <meta property="og:url" content="https://sessionly.dev/" />
     <meta property="og:type" content="website" />
@@ -34,13 +34,13 @@
     <meta property="og:image:height" content="630" />
     <meta
       property="og:image:alt"
-      content="Sessionly: what your agents did, what it cost, what survived. A ledger for Claude Code, Codex, Cursor and Grok sessions."
+      content="Sessionly: what your agents did, what it cost, what survived. A ledger for Claude Code, Codex, Cursor, Grok and OpenCode sessions."
     />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Sessionly: a ledger of AI coding agent sessions" />
     <meta
       name="twitter:description"
-      content="What your coding agents did, what it cost, and how much of it survived. Claude Code, Codex, Cursor and Grok in one ledger, on your machine first."
+      content="What your coding agents did, what it cost, and how much of it survived. Claude Code, Codex, Cursor, Grok and OpenCode in one ledger, on your machine first."
     />
     <meta name="twitter:image" content="https://www.sessionly.dev/og.png" />
     <script defer src="/_vercel/insights/script.js"></script>
@@ -103,7 +103,7 @@
               <span>What <em>survived.</em></span>
             </h1>
             <p class="lede">
-              Sessionly records every Claude Code, Codex, Cursor and Grok session: what was asked,
+              Sessionly records every Claude Code, Codex, Cursor, Grok and OpenCode session: what was asked,
               which tools ran, which files changed and what it cost. Then it counts how many of the
               agent's lines are still in the file later, and still in the pull request after
               review.
@@ -243,10 +243,10 @@
               </p>
             </div>
             <div>
-              <h3>Four agents, one record</h3>
+              <h3>Five agents, one record</h3>
               <p>
-                Claude Code, Codex, Cursor and Grok sessions sit in the same ledger, so a row means
-                the same thing whichever agent produced it.
+                Claude Code, Codex, Cursor, Grok and OpenCode sessions sit in the same ledger, so a
+                row means the same thing whichever agent produced it.
               </p>
             </div>
             <div>
@@ -272,8 +272,8 @@
             <div class="cell">
               <h3>Every agent, one way</h3>
               <p>
-                Claude Code, Codex, Cursor and Grok, on a machine or in the cloud, mapped to the
-                same tool names and the same session record.
+                Claude Code, Codex, Cursor, Grok and OpenCode on a machine, and Claude Code, Cursor
+                and Codex in the cloud, mapped to the same tool names and the same session record.
               </p>
             </div>
             <div class="cell">
@@ -310,14 +310,15 @@
                 <h3>Capture</h3>
                 <p>
                   A hook appends each agent event to a local file in 2–4 ms. It only observes:
-                  it cannot block or change a session.
+                  it cannot block or change a session. OpenCode is read from its database; a
+                  plugin only notes that a session happened.
                 </p>
               </li>
               <li>
                 <h3>Read</h3>
                 <p>
                   Tokens, models and cost come from the transcripts and session files the agents
-                  keep themselves.
+                  keep, and from OpenCode's database.
                 </p>
               </li>
               <li>
@@ -365,7 +366,7 @@
             </div>
           </div>
           <p class="flow">
-            agent → hook and transcripts → sessionly → ~/.sessionly, then, if connected, upload →
+            agents → hooks, their files, OpenCode's database → sessionly → ~/.sessionly, then, if connected, upload →
             Sessionly server → team dashboard
           </p>
           <p class="note">
@@ -416,8 +417,8 @@
               <h3>Past sessions</h3>
               <p>
                 <code>sessionly import</code> rebuilds sessions from the files the agents still
-                keep, so the ledger does not start empty. On one machine, 100 sessions in 2.5 GB
-                of transcripts took about a minute.
+                keep, and from OpenCode's database, so the ledger does not start empty. On one
+                machine, 100 sessions in 2.5 GB of transcripts took about a minute.
               </p>
             </div>
             <div class="cell">
@@ -501,14 +502,14 @@
       <section id="agents">
         <div class="wrap">
           <p class="eyebrow">Agents</p>
-          <h2>Claude Code, Codex, Cursor and Grok, side by side.</h2>
+          <h2>Claude Code, Codex, Cursor, Grok and OpenCode, side by side.</h2>
           <p class="lede">
             Each agent's tools are mapped to common names (Read, Edit, Write, Bash, Grep, Glob),
             and each agent's sessions are read from where that agent keeps them. Where an agent
             does not record something, Sessionly says so instead of filling it in.
           </p>
           <div class="table-wrap sheet">
-            <table class="cmp">
+            <table class="cmp wide">
               <thead>
                 <tr>
                   <th scope="col"></th>
@@ -516,6 +517,7 @@
                   <th scope="col">Codex</th>
                   <th scope="col">Cursor</th>
                   <th scope="col">Grok</th>
+                  <th scope="col">OpenCode</th>
                 </tr>
               </thead>
               <tbody>
@@ -525,9 +527,11 @@
                   <td>Its rollout files, plus its own hooks once you approve them in Codex</td>
                   <td>Its transcript files, plus the hooks, which Cursor also runs</td>
                   <td>Its session files, plus the hooks, which Grok also runs</td>
+                  <td>Its database, plus a plugin that notes a session so the next sync imports it</td>
                 </tr>
                 <tr>
                   <th scope="row">Prompts, tool calls, files and lines changed</th>
+                  <td>Yes</td>
                   <td>Yes</td>
                   <td>Yes</td>
                   <td>Yes</td>
@@ -539,6 +543,7 @@
                   <td>Yes</td>
                   <td>Yes</td>
                   <td>Yes</td>
+                  <td>Yes</td>
                 </tr>
                 <tr>
                   <th scope="row">Review runs</th>
@@ -546,6 +551,10 @@
                   <td>Its <code>/review</code>, with the reviewer's cost and its exact findings</td>
                   <td>A command typed as a prompt: when, and for which pull request</td>
                   <td>A command typed as a prompt; <code>/review</code> also with its reviewer's cost and time</td>
+                  <td>
+                    Its <code>/review</code>, kept as the command name. Arguments typed after it
+                    are not kept
+                  </td>
                 </tr>
                 <tr>
                   <th scope="row">Model and tokens</th>
@@ -553,6 +562,7 @@
                   <td>Per model response</td>
                   <td>Per turn, for turns the hooks saw</td>
                   <td>Yes</td>
+                  <td>Per step of a reply</td>
                 </tr>
                 <tr>
                   <th scope="row">Cost</th>
@@ -565,9 +575,11 @@
                     An estimate at API list prices for turns the hooks saw. Not what Cursor bills
                   </td>
                   <td>Grok's own figure</td>
+                  <td>OpenCode's own figure, and an estimate when that is 0</td>
                 </tr>
                 <tr>
                   <th scope="row">Rewrite rate</th>
+                  <td>Yes</td>
                   <td>Yes</td>
                   <td>Yes</td>
                   <td>Yes</td>
@@ -577,10 +589,12 @@
             </table>
           </div>
           <p class="note">
-            Checked with Codex 0.169.0, the Cursor editor 3.27 and Grok 1.0.77. Codex records
-            tokens but no cost, so its cost is an estimate from those tokens. Codex's editor
-            extension and its subagents are read but not checked yet, and Cursor's command-line
-            agent is not read yet. No agent's sign-in files are opened.
+            Checked with Codex 0.169.0, the Cursor editor 3.27 and Grok 1.0.77. OpenCode's record
+            is taken from OpenCode 1.19.6. Its database is opened read-only. A session has no
+            permission prompts and no branch, and the desktop app and <code>opencode github</code>
+            are not read. Codex records tokens but no cost, so its cost is an estimate from those
+            tokens. Codex's editor extension and its subagents are read but not checked yet, and
+            Cursor's command-line agent is not read yet. No agent's sign-in files are opened.
           </p>
         </div>
       </section>
@@ -918,7 +932,10 @@ SESSIONLY_LINE_HASHES=on</pre>
                 <li>The <code>sessionly</code> binary: capture, ledger, rewrite rate, upload</li>
                 <li>Server and team dashboard</li>
                 <li>Pull request attribution and the GitHub Action</li>
-                <li>Claude Code, Codex, Cursor and Grok, on a machine or in the cloud</li>
+                <li>
+                  Claude Code, Codex, Cursor, Grok and OpenCode on a machine, and Claude Code,
+                  Cursor and Codex in the cloud
+                </li>
                 <li>One Docker Compose file to self-host</li>
               </ul>
               <a class="btn primary" href="#start">Get started</a>
@@ -991,6 +1008,13 @@ SESSIONLY_LINE_HASHES=on</pre>
                   <code>codex</code> and accept the hooks it shows, or run <code>/hooks</code>.
                 </li>
                 <li>
+                  <b>OpenCode gets a plugin.</b> When its config directory exists,
+                  <code>sessionly install</code> writes <code>plugins/sessionly.js</code> and does
+                  not edit <code>opencode.json</code>. The plugin notes that a session happened;
+                  the database is the record. A project install does not write it, and uninstall
+                  removes only a plugin Sessionly wrote.
+                </li>
+                <li>
                   <b>Easy to undo.</b> <code>sessionly uninstall</code> takes the hooks out again.
                 </li>
                 <li>
@@ -1007,8 +1031,8 @@ SESSIONLY_LINE_HASHES=on</pre>
 <span class="c">$</span> mv sessionly ~/.local/bin/   <span class="c"># or anywhere on your PATH</span>
 <span class="c"># or, with Rust installed, from crates.io</span>
 <span class="c">$</span> cargo install sessionly
-<span class="c">$</span> sessionly install   <span class="c"># adds the agents' hooks</span>
-<span class="c">$</span> sessionly import    <span class="c"># past sessions of all four agents</span>
+<span class="c">$</span> sessionly install   <span class="c"># the agents' hooks, and OpenCode's plugin</span>
+<span class="c">$</span> sessionly import    <span class="c"># past sessions of all five agents</span>
 <span class="c">$</span> sessionly list
 <span class="c">$</span> sessionly summary --by tool
 <span class="c">$</span> sessionly show &lt;session&gt;</pre>
@@ -1062,7 +1086,8 @@ SESSIONLY_LINE_HASHES=on</pre>
             <h3>Read the numbers for what they are.</h3>
             <p>
               Cost is the agent's own recorded figure where there is one and an estimate from
-              token counts elsewhere, as for Codex, which records none. It is not an invoice. The rewrite rate measures whether
+              token counts elsewhere, as for Codex, which records none. OpenCode's figure is kept
+              when it is not zero, and estimated from its tokens when it is. It is not an invoice. The rewrite rate measures whether
               lines survived, not whether they were good or why they changed. The agent share of
               a pull request is a floor. Names and emails come from git config, or for a cloud
               session from the platform: a label, not a verified identity.
@@ -1101,7 +1126,7 @@ SESSIONLY_LINE_HASHES=on</pre>
           <p>
             A ledger of AI coding agent sessions. Open source under Apache-2.0 and
             <a href="https://docs.sessionly.dev/server.html">self-hosted</a>. Claude Code,
-            Codex, Cursor, Grok and GitHub are trademarks of their owners; Sessionly is not affiliated
+            Codex, Cursor, Grok, OpenCode and GitHub are trademarks of their owners; Sessionly is not affiliated
             with them.
           </p>
           <p>Email <a href="mailto:support@sessionly.dev">support@sessionly.dev</a>.</p>

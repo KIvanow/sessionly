@@ -565,6 +565,9 @@ tbody tr:last-child > * {
 .cmp {
   min-width: 860px;
 }
+.cmp.wide {
+  min-width: 1080px;
+}
 .cmp thead th {
   font-size: 17px;
 }

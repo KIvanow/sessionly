@@ -175,14 +175,14 @@
           <ul>
             <li>
               a random identifier of the machine, which agent ran the session (Claude Code,
-              Cursor, Grok or Codex) and its version, how it was started, the session's
+              Cursor, Grok, Codex or OpenCode) and its version, how it was started, the session's
               identifier, and when it started and ended;
             </li>
             <li>
               the git user name and email address, the repository's remote address and the
               branch name, as set in git on that machine, or, for a session that ran in the cloud, the email address the
               platform gives for the person who started it. They are a label, not a verified
-              identity;
+              identity. An OpenCode session has no branch, and no record of how it was started;
             </li>
             <li>
               counts and timings: prompts and how long each turn took, tool calls with the tool's
@@ -567,7 +567,7 @@
           <h2>Other Sites and Services</h2>
           <p>
             Sessionly reads sessions recorded by coding agents made by third parties (Claude Code,
-            Codex, Cursor, Grok) and its Action runs on GitHub. The website links to GitHub, where the
+            Codex, Cursor, Grok and OpenCode) and its Action runs on GitHub. The website links to GitHub, where the
             code is published. These links and integrations are not an endorsement of, or a
             representation that I am affiliated with, any third party. I do not control those
             services and am not responsible for their actions. Please read their privacy policies.
@@ -615,7 +615,7 @@
           <p>
             A ledger of AI coding agent sessions. Open source under Apache-2.0 and
             <a href="https://docs.sessionly.dev/server.html">self-hosted</a>. Claude Code,
-            Cursor, Grok, Codex and GitHub are trademarks of their owners; Sessionly is not affiliated
+            Cursor, Grok, Codex, OpenCode and GitHub are trademarks of their owners; Sessionly is not affiliated
             with them.
           </p>
           <p>Email <a href="mailto:support@sessionly.dev">support@sessionly.dev</a>.</p>
