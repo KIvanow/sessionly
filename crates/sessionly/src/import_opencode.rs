@@ -1455,18 +1455,20 @@ fn emit_session(
     acc: &mut Acc,
     mut child: Option<&mut SubagentFacts>,
 ) -> TurnOut {
-    let Place {
-        cwd, child_lines, ..
-    } = *place;
+    let cwd = place.cwd;
     let (users, assistants) = turns(messages);
     let mut last_ms = messages.iter().map(|msg| msg.at).max().unwrap_or(0);
     let mut model = None;
     let user_ids: HashSet<String> = users.iter().map(|msg| msg.id.clone()).collect();
-    for user in &users {
+    // A child's user message is the task it was given, not a prompt the
+    // person typed.
+    let typed: Vec<bool> = users
+        .iter()
+        .map(|user| agent.is_none() && !prompt_text(&user.parts).is_empty())
+        .collect();
+    for (index, user) in users.iter().enumerate() {
         let text = prompt_text(&user.parts);
-        // A child's user message is the task it was given, not a prompt the
-        // person typed.
-        if agent.is_none() && !text.is_empty() {
+        if typed[index] {
             out.push(
                 &time_of(user.at),
                 "UserPromptSubmit",
@@ -1475,7 +1477,6 @@ fn emit_session(
         }
         let mut calls = Vec::new();
         let mut models = Vec::new();
-        let mut stop_at = user.at;
         if let Some(replies) = assistants.get(user.id.as_str()) {
             for reply in replies {
                 let reply_model = assistant_model(&reply.data);
@@ -1489,8 +1490,7 @@ fn emit_session(
                     reply_model.as_ref(),
                     reply,
                 );
-                stop_at = stop_at.max(reply.data["time"]["completed"].as_i64().unwrap_or(reply.at));
-                last_ms = last_ms.max(stop_at);
+                last_ms = last_ms.max(finished_at(reply));
                 for call in calls_of(reply) {
                     models.push(reply_model.as_ref().map(|m| m.name.clone()));
                     calls.push(call);
@@ -1507,50 +1507,33 @@ fn emit_session(
             recorded,
             from_tools,
         } = turn_diffs(user, &calls, place, agent.map(|(id, _)| id));
-        let mut theirs: HashMap<String, Vec<String>> = HashMap::new();
-        for started in children_started(&calls) {
-            for (file, lines) in child_lines.get(started).into_iter().flatten() {
-                theirs
-                    .entry(file.clone())
-                    .or_default()
-                    .extend(lines.clone());
-            }
-        }
-        let mut diffs = without_children(recorded, &theirs);
+        let mut diffs = without_children(recorded, &lines_of_started(&calls, place));
         diffs.extend(from_tools);
         emit_calls(out, &calls, &models, &diffs, cwd, &scope);
-        if agent.is_none() && !text.is_empty() {
-            // How the turn's last reply ended: one that failed and was
-            // tried again is not how the turn ended. A turn with no reply
-            // yet, or whose last reply is still being written, has not ended:
-            // a sync can run while it does.
-            let last = assistants
-                .get(user.id.as_str())
-                .and_then(|replies| replies.last());
-            // OpenCode writes each step of a turn as a reply of its own and
-            // completes it before the next one starts; a step that stopped
-            // to call tools (`finish: tool-calls`) is followed by another.
-            let ended = last.map(|reply| {
-                let completed = reply.data["time"]["completed"].as_i64().is_some();
-                let more = matches!(
-                    reply.data["finish"].as_str(),
-                    Some("tool-calls" | "unknown")
-                );
-                (reply_error(&reply.data), completed && !more)
-            });
-            match ended {
-                // Stopped by the person, which is no error: as a turn
-                // interrupted in Claude Code, it has no end.
-                Some((Some(Ended::Aborted), _)) => {}
-                Some((Some(Ended::Failed(error)), _)) => out.push(
+        if typed[index] {
+            // The turn is the prompt and what OpenCode went on with by
+            // itself, up to the next prompt: the user message it writes
+            // after a subtask command, or to carry on after a compaction.
+            let next = (index + 1..users.len()).find(|&i| typed[i]);
+            let replies: Vec<&Msg> = users[index..next.unwrap_or(users.len())]
+                .iter()
+                .flat_map(|turn| assistants.get(turn.id.as_str()).into_iter().flatten())
+                .copied()
+                .collect();
+            let stop_at = replies
+                .iter()
+                .map(|reply| finished_at(reply))
+                .fold(user.at, i64::max);
+            match turn_end(replies.last().copied(), next.is_some()) {
+                Some(Ended::Failed(error)) => out.push(
                     &time_of(stop_at),
                     "StopFailure",
                     json!({ "prompt_id": user.id, "error": error }),
                 ),
-                Some((None, true)) => {
+                Some(Ended::Done) => {
                     out.push(&time_of(stop_at), "Stop", json!({ "prompt_id": user.id }));
                 }
-                Some((None, false)) | None => {}
+                Some(Ended::Aborted) | None => {}
             }
         }
     }
@@ -1562,8 +1545,7 @@ fn emit_session(
         .collect();
     orphans.sort_by(|a, b| a.at.cmp(&b.at).then(a.id.cmp(&b.id)));
     for reply in orphans {
-        let finished = reply.data["time"]["completed"].as_i64().unwrap_or(reply.at);
-        last_ms = last_ms.max(finished);
+        last_ms = last_ms.max(finished_at(reply));
         let reply_model = assistant_model(&reply.data);
         if model.is_none() {
             model = reply_model.as_ref().map(|m| m.name.clone());
@@ -1596,10 +1578,46 @@ fn emit_session(
     TurnOut { last_ms, model }
 }
 
-/// How a reply that did not finish ended.
+/// How a turn ended.
 enum Ended {
+    Done,
+    /// Stopped by the person, which is no error: as a turn interrupted in
+    /// Claude Code, it has no end.
     Aborted,
     Failed(String),
+}
+
+/// When a reply was done, or written where it is not done yet.
+fn finished_at(reply: &Msg) -> i64 {
+    reply.data["time"]["completed"].as_i64().unwrap_or(reply.at)
+}
+
+/// How a turn whose last reply is `last` ended, or `None` while it goes on:
+/// a sync can run while a turn does. OpenCode writes each step as a reply of
+/// its own and goes on to the next one unless the last step finished
+/// (`finish` other than `tool-calls` or `unknown`) with no tool call left to
+/// answer; some providers say `stop` with tool calls in the reply (the loop
+/// in OpenCode's `prompt.ts`). A failed reply and one the person stopped end
+/// the turn too, and so does a later prompt: the turn it follows is over.
+fn turn_end(last: Option<&Msg>, later_prompt: bool) -> Option<Ended> {
+    let reply = last?;
+    if let Some(ended) = reply_error(&reply.data) {
+        return Some(ended);
+    }
+    let pending = reply.parts.iter().any(|part| {
+        let state = &part.data["state"];
+        part.data["type"] == "tool"
+            && part.data["metadata"]["providerExecuted"] != true
+            // A call cleaned up after a retry or an abort is not one to answer.
+            && !(state["status"] == "error" && state["metadata"]["interrupted"] == true)
+    });
+    let finished = reply.data["time"]["completed"].as_i64().is_some()
+        && !matches!(
+            reply.data["finish"].as_str(),
+            None | Some("tool-calls" | "unknown")
+        )
+        && !pending;
+    (finished || later_prompt).then_some(Ended::Done)
 }
 
 /// The `error` OpenCode wrote on a reply: its name (`APIError`,
@@ -1818,18 +1836,69 @@ fn only_its_own(diffs: Vec<Diff>, child: Option<&str>, place: &Place) -> Vec<Dif
     }
 }
 
-/// Every line a child session's turns changed, by file. A turn's diff has
-/// what the sessions it started changed too, so this is all of a child's
-/// work, its own children's with it.
+/// The lines a child session counts as its own, by file: what each of its
+/// turns has once the sessions that turn started are taken out of it, as
+/// `emit_session` counts them. `place.child_lines` has its own children's.
 fn lines_by_file(messages: &[Msg], child: &str, place: &Place) -> HashMap<String, Vec<String>> {
     let mut found: HashMap<String, Vec<String>> = HashMap::new();
     for (user, calls) in calls_by_turn(messages) {
         let diffs = turn_diffs(user, &calls, place, Some(child));
-        for diff in diffs.recorded.into_iter().chain(diffs.from_tools) {
+        let recorded = without_children(diffs.recorded, &lines_of_started(&calls, place));
+        for diff in recorded.into_iter().chain(diffs.from_tools) {
             found.entry(diff.file).or_default().extend(diff.lines);
         }
     }
     found
+}
+
+/// All a turn's child sessions changed, by file: theirs and what their own
+/// children changed.
+fn lines_of_started(calls: &[Call], place: &Place) -> HashMap<String, Vec<String>> {
+    let mut theirs: HashMap<String, Vec<String>> = HashMap::new();
+    for started in children_started(calls) {
+        for (file, lines) in place.child_lines.get(started).into_iter().flatten() {
+            theirs
+                .entry(file.clone())
+                .or_default()
+                .extend(lines.iter().cloned());
+        }
+    }
+    theirs
+}
+
+/// What each child session and everything below it changed, by its id and
+/// then by file: a turn's snapshot has all of it, so a turn that started
+/// one takes it all out. Worked out from the deepest children up, so that a
+/// file a grandchild changed is taken out once at each level above it, and
+/// counted only by the grandchild.
+fn lines_below(
+    children: &[(&String, Meta, Vec<Msg>)],
+    first: &Place,
+) -> HashMap<String, HashMap<String, Vec<String>>> {
+    let mut below: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+    // `family` lists the children level by level: from the end, a child's
+    // own children come before it.
+    for (id, _, messages) in children.iter().rev() {
+        let mut lines = {
+            let place = Place {
+                child_lines: &below,
+                ..*first
+            };
+            lines_by_file(messages, id, &place)
+        };
+        for (kid, meta, _) in children {
+            if meta.parent.as_deref() == Some(id.as_str()) {
+                for (file, theirs) in below.get(kid.as_str()).into_iter().flatten() {
+                    lines
+                        .entry(file.clone())
+                        .or_default()
+                        .extend(theirs.iter().cloned());
+                }
+            }
+        }
+        below.insert((*id).clone(), lines);
+    }
+    below
 }
 
 /// The session's events and the tokens and cost its messages record.
@@ -1867,13 +1936,7 @@ pub(crate) fn session(db: &Path, id: &str) -> Result<(Vec<Value>, Option<Facts>)
         child_lines: &no_lines,
         kept: &kept,
     };
-    let child_lines = children
-        .iter()
-        .map(|(child_id, _, messages)| {
-            let lines = lines_by_file(messages, child_id, &first);
-            ((*child_id).clone(), lines)
-        })
-        .collect();
+    let child_lines = lines_below(&children, &first);
     let place = Place {
         child_lines: &child_lines,
         ..first
@@ -2091,6 +2154,7 @@ mod tests {
             "cost": cost,
             "tokens": { "input": input, "output": output, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
             "time": { "created": 1, "completed": 1 },
+            "finish": "stop",
         })
     }
 
@@ -2182,7 +2246,25 @@ mod tests {
                 "modelID": "claude-sonnet-4-5",
                 "cost": 0,
                 "tokens": { "input": 1000, "output": 20, "reasoning": 4, "cache": { "read": 0, "write": 0 } },
-                "time": { "created": t0 + 20, "completed": t0 + 500 }
+                "time": { "created": t0 + 20, "completed": t0 + 400 },
+                "finish": "tool-calls"
+            }),
+        );
+        // The step after the tools, which ends the turn.
+        add_message(
+            &conn,
+            "msg_done",
+            "ses_main",
+            t0 + 450,
+            json!({
+                "role": "assistant",
+                "parentID": "msg_user",
+                "providerID": "anthropic",
+                "modelID": "claude-sonnet-4-5",
+                "cost": 0,
+                "tokens": { "input": 0, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+                "time": { "created": t0 + 450, "completed": t0 + 500 },
+                "finish": "stop"
             }),
         );
         add_part(
@@ -2644,6 +2726,42 @@ mod tests {
     }
 
     #[test]
+    fn what_a_grandchilds_shell_made_is_counted_once() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        // The grandchild's shell command makes made.txt: every snapshot
+        // above it has the file too.
+        let made = json!({ "file": "made.txt", "status": "added", "patch": "@@ -0,0 +1 @@\n+m\n" });
+        parent(&conn, json!([made]), &["ses_c"], &[]);
+        let mut task = tool(
+            "task",
+            "g",
+            json!({ "description": "go on" }),
+            "completed",
+            22,
+        );
+        task["state"]["metadata"] = json!({ "sessionId": "ses_g" });
+        child(&conn, "ses_c", "ses_p", 21, json!([made]), &[task]);
+        let shell = tool(
+            "bash",
+            "sh",
+            json!({ "command": "echo m > made.txt" }),
+            "completed",
+            24,
+        );
+        child(&conn, "ses_g", "ses_c", 23, json!([made]), &[shell]);
+        drop(conn);
+        let s = normalized(&path, "ses_p");
+        assert_eq!(s.counts.lines_added, 1);
+        let shell = s
+            .tool_calls
+            .iter()
+            .find(|call| call.tool == "Bash")
+            .unwrap();
+        assert_eq!(shell.agent_id.as_deref(), Some("ses_g"));
+    }
+
+    #[test]
     fn a_parents_own_edit_beside_a_child_keeps_its_lines() {
         let (_dir, path) = fresh();
         let conn = write(&path);
@@ -2721,41 +2839,117 @@ mod tests {
         assert_eq!(s.counts.lines_added, 1);
     }
 
+    /// The prompts a session's Stop events end.
+    fn stopped(path: &Path, id: &str) -> Vec<String> {
+        let (events, _) = session(path, id).unwrap();
+        events
+            .iter()
+            .filter(|event| event["hook"] == "Stop")
+            .map(|event| event["payload"]["prompt_id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
     #[test]
     fn a_turn_still_running_has_not_ended() {
         let (_dir, path) = fresh();
         let conn = write(&path);
-        add_session(&conn, "ses_run", None, "build", "run", 10, json!({}));
-        add_message(&conn, "u", "ses_run", 10, json!({ "role": "user" }));
-        add_part(&conn, "t", "u", "ses_run", 10, text_part("go"));
-        let mut reply = assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1);
-        reply["time"] = json!({ "created": 20 });
-        add_message(&conn, "a", "ses_run", 20, reply);
-        add_message(&conn, "u2", "ses_run", 30, json!({ "role": "user" }));
-        add_part(&conn, "t2", "u2", "ses_run", 30, text_part("no reply yet"));
-        // A step that stopped to call tools, completed, with the next step
-        // not written yet.
-        add_message(&conn, "u3", "ses_run", 40, json!({ "role": "user" }));
-        add_part(&conn, "t3", "u3", "ses_run", 40, text_part("between steps"));
-        let mut step = assistant("u3", "ollama/qwen2.5:7b", 0.0, 1, 1);
-        step["finish"] = json!("tool-calls");
-        add_message(&conn, "a3", "ses_run", 50, step);
+        let mut being_written = assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1);
+        being_written["time"] = json!({ "created": 20 });
+        being_written.as_object_mut().unwrap().remove("finish");
+        let mut between_steps = assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1);
+        between_steps["finish"] = json!("tool-calls");
+        // Some providers say `stop` for a reply with tool calls in it.
+        let stop_with_tools = assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1);
+        let cases = [
+            ("ses_w", Some(being_written)),
+            ("ses_s", Some(between_steps)),
+            ("ses_t", Some(stop_with_tools)),
+            ("ses_n", None),
+        ];
+        for (id, reply) in &cases {
+            add_session(&conn, id, None, "build", id, 10, json!({}));
+            add_message(&conn, &format!("{id}_u"), id, 10, json!({ "role": "user" }));
+            add_part(
+                &conn,
+                &format!("{id}_t"),
+                &format!("{id}_u"),
+                id,
+                10,
+                text_part("go"),
+            );
+            if let Some(reply) = reply {
+                let mut reply = reply.clone();
+                reply["parentID"] = json!(format!("{id}_u"));
+                add_message(&conn, &format!("{id}_a"), id, 20, reply);
+                let call = tool("read", "r", json!({ "filePath": "a" }), "completed", 20);
+                add_part(&conn, &format!("{id}_r"), &format!("{id}_a"), id, 20, call);
+            }
+        }
         drop(conn);
-        let (events, _) = session(&path, "ses_run").unwrap();
-        assert!(!events.iter().any(|event| event["hook"] == "Stop"));
+        for (id, _) in &cases {
+            assert!(stopped(&path, id).is_empty(), "{id}");
+        }
+
+        // The next step, with nothing left to answer, ends the turn, and a
+        // later prompt ends the one before it.
+        let conn = write(&path);
+        add_message(
+            &conn,
+            "ses_s_b",
+            "ses_s",
+            30,
+            assistant("ses_s_u", "ollama/qwen2.5:7b", 0.0, 1, 1),
+        );
+        add_message(&conn, "ses_w_u2", "ses_w", 40, json!({ "role": "user" }));
+        add_part(&conn, "ses_w_t2", "ses_w_u2", "ses_w", 40, text_part("and"));
+        drop(conn);
+        assert_eq!(stopped(&path, "ses_s"), ["ses_s_u"]);
+        assert_eq!(stopped(&path, "ses_w"), ["ses_w_u"]);
+    }
+
+    #[test]
+    fn a_subtask_command_ends_when_what_opencode_went_on_with_does() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_cmd", None, "build", "cmd", 10, json!({}));
+        add_message(&conn, "u", "ses_cmd", 10, json!({ "role": "user" }));
+        add_part(
+            &conn,
+            "st",
+            "u",
+            "ses_cmd",
+            10,
+            json!({ "type": "subtask", "command": "review", "prompt": "Review it." }),
+        );
+        let mut ran = assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1);
+        ran["finish"] = json!("tool-calls");
+        add_message(&conn, "a", "ses_cmd", 20, ran);
+        let mut task = tool(
+            "task",
+            "task",
+            json!({ "description": "review" }),
+            "completed",
+            20,
+        );
+        task["state"]["metadata"] = json!({ "sessionId": "ses_child" });
+        add_part(&conn, "task", "a", "ses_cmd", 20, task);
+        // What OpenCode writes after the subtask, and goes on with.
+        add_message(&conn, "u2", "ses_cmd", 30, json!({ "role": "user" }));
+        let mut summarize = text_part("Summarize the task tool output above and continue.");
+        summarize["synthetic"] = json!(true);
+        add_part(&conn, "t2", "u2", "ses_cmd", 30, summarize);
+        drop(conn);
+        assert!(stopped(&path, "ses_cmd").is_empty());
 
         let conn = write(&path);
-        let mut last = assistant("u3", "ollama/qwen2.5:7b", 0.0, 1, 1);
-        last["finish"] = json!("stop");
-        add_message(&conn, "a4", "ses_run", 60, last);
+        let mut done = assistant("u2", "ollama/qwen2.5:7b", 0.0, 1, 1);
+        done["time"] = json!({ "created": 40, "completed": 90 });
+        add_message(&conn, "a2", "ses_cmd", 40, done);
         drop(conn);
-        let (events, _) = session(&path, "ses_run").unwrap();
-        let stops: Vec<_> = events
-            .iter()
-            .filter(|event| event["hook"] == "Stop")
-            .map(|event| event["payload"]["prompt_id"].as_str().unwrap())
-            .collect();
-        assert_eq!(stops, ["u3"]);
+        assert_eq!(stopped(&path, "ses_cmd"), ["u"]);
+        let s = normalized(&path, "ses_cmd");
+        assert_eq!(s.prompts[0].text.preview, "/review");
+        assert_eq!(s.prompts[0].ended_at, at(90));
     }
 
     #[test]

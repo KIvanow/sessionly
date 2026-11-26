@@ -38,9 +38,12 @@ does not run the `opencode` command to find it: that command can migrate the dat
 - **The end of a turn.** A reply OpenCode wrote an `error` on (the provider failed, the key
   was refused) ends its turn as an API error, with the error's name and status, not its
   message. A turn the person stopped (`MessageAbortedError`) has no end, as one interrupted
-  in Claude Code, and nor does one with no reply yet, or whose last reply is still being
-  written (no `time.completed`) or stopped to call tools (`finish: tool-calls`), when OpenCode
-  writes the next step as another reply: a sync can run while a turn does.
+  in Claude Code. A turn goes on, as OpenCode's own loop does, while its last reply is still
+  being written (no `time.completed`), stopped to call tools (`finish: tool-calls`), or has a
+  tool call left to answer (some providers say `stop` with tool calls in the reply): a sync
+  can run while a turn does. A later prompt ends the turn before it. A turn includes the
+  messages OpenCode writes itself after it, such as the one that sums up a subtask command,
+  so `/review` ends when that reply does.
 - **Titles.** OpenCode's placeholder (`New session - <time>`, `Child session - <time>`), which
   it keeps until its title agent names the session, is not taken for a title.
 - **Files and lines.** OpenCode records a turn's diff on the user message, with paths from the
