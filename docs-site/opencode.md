@@ -38,7 +38,8 @@ does not run the `opencode` command to find it: that command can migrate the dat
 - **The end of a turn.** A reply OpenCode wrote an `error` on (the provider failed, the key
   was refused) ends its turn as an API error, with the error's name and status, not its
   message. A turn the person stopped (`MessageAbortedError`) has no end, as one interrupted
-  in Claude Code.
+  in Claude Code, and nor does one with no reply yet or whose last reply is still being
+  written (no `time.completed`): a sync can run while a turn does.
 - **Titles.** OpenCode's placeholder (`New session - <time>`, `Child session - <time>`), which
   it keeps until its title agent names the session, is not taken for a title.
 - **Files and lines.** OpenCode records a turn's diff on the user message, with paths from the
@@ -49,9 +50,11 @@ does not run the `opencode` command to find it: that command can migrate the dat
   theirs.
   - The diff is a snapshot of the repository before and after the turn. A turn that started a
     child session leaves out what the child changed, which the child's own diff counts.
-    Children that ran at the same time each have the others' changes in their snapshot: a
-    child keeps the files its tools, or its children's, wrote, and a file none of them wrote
-    goes to the first that ran a shell command.
+    The children one turn started run at the same time, beside that turn's own tools, and
+    each has the others' changes in its snapshot. A child keeps the files its tools, or its
+    children's, wrote and nothing beside it did. A file something beside it wrote too is
+    counted from each one's tool patch. A file no tool wrote goes to the first child of the
+    turn that ran a shell command, unless the turn's own tools wrote it.
   - The snapshot has only what git sees in the session's folder: not a file git ignores
     (`.env`), and not one outside the folder. For those, the lines are what the tools
     returned: `edit` and `apply_patch` their patch, and `write` a new file's content. A file
@@ -67,7 +70,8 @@ does not run the `opencode` command to find it: that command can migrate the dat
   made, and are left out: the original session counts them.
 - **Going back** (`session.revert`) drops what it undid, as OpenCode does at the next prompt:
   the message named and every later one, or, when a part is named, that part and what came
-  after it. A session it emptied is imported with nothing in it; the ledger keeps what it
+  after it. OpenCode does not write that turn's diff again, so the files only the undone part
+  wrote are left out of it. A session it emptied is imported with nothing in it; the ledger keeps what it
   had until a full rebuild (`sessionly sync --force`), as a sync never removes a session. A
   session stored only in `session_message`, with nothing in `message`, is not read: import
   fails that session rather than reporting it empty.
@@ -103,7 +107,8 @@ the asks, so `permission requests` stays 0.
 OpenCode loads JavaScript from `plugins/` under its config directory (`~/.config/opencode`, or
 `$XDG_CONFIG_HOME/opencode`). When that directory exists and the install is for the whole
 machine (not `--project`), `sessionly install` writes `plugins/sessionly.js`. It does not edit
-`opencode.json`.
+`opencode.json`. A `plugins/sessionly.js` that Sessionly did not write is left alone: install
+says so and installs nothing, and uninstall does not remove it.
 
 The file only notes that a session was created or went idle, as one line under
 `~/.sessionly/raw/opencode/`. That line names the session and nothing the person typed. When

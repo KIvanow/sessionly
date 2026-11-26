@@ -1082,7 +1082,8 @@ fn status(target: &Target) -> Result<()> {
             Err(err) => println!("Codex:      {err:#}"),
         }
     }
-    if let Some(line) = opencode::status() {
+    // Installed for the whole machine only, as Codex's hooks are.
+    if let Some(line) = opencode::status().filter(|_| target.project.is_none()) {
         println!("OpenCode:   {line}");
     }
     let raw = paths::raw_root()?;

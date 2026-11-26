@@ -15,7 +15,8 @@ use anyhow::{Context, Result};
 /// message is kept out of the file so a test can say so. When a session goes
 /// idle, `sessionly capture` hears of it as of any agent's turn ending, and
 /// starts the sync that follows one.
-const PLUGIN: &str = r#"import { spawn } from "node:child_process";
+const PLUGIN: &str = r#"// Written by `sessionly install`; `sessionly uninstall` removes it.
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -128,13 +129,27 @@ fn write_plugin(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// True for a plugin Sessionly wrote: this version's, which says so on its
+/// first line, or an earlier one, which writes under `~/.sessionly`. A file
+/// of the same name that is someone else's is left alone.
+fn ours(text: &str) -> bool {
+    text.starts_with("// Written by `sessionly install`")
+        || (text.contains(r#"join(home, ".sessionly")"#) && text.contains(r#""raw", "opencode""#))
+}
+
 /// Write the plugin for the binary at `exe` under `config` (`…/opencode`).
-/// True when the file was written or replaced.
+/// True when the file was written or replaced. A file there that Sessionly
+/// did not write is an error, and is not touched.
 pub(crate) fn install_into(config: &Path, exe: &Path) -> Result<bool> {
     let path = plugin_path(config);
     let text = plugin(exe);
-    if fs::read(&path).ok().as_deref() == Some(text.as_bytes()) {
-        return Ok(false);
+    match fs::read_to_string(&path) {
+        Ok(found) if found == text => return Ok(false),
+        Ok(found) if !ours(&found) => anyhow::bail!(
+            "{} is not Sessionly's; move it away to install the plugin",
+            path.display()
+        ),
+        _ => {}
     }
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -148,9 +163,13 @@ pub(crate) fn install_into(config: &Path, exe: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// Remove only the plugin file. True when it was there.
+/// Remove only the plugin file, and only when Sessionly wrote it. True when
+/// it was there and was removed.
 pub(crate) fn uninstall_from(config: &Path) -> Result<bool> {
     let path = plugin_path(config);
+    if fs::read_to_string(&path).is_ok_and(|found| !ours(&found)) {
+        return Ok(false);
+    }
     match fs::remove_file(&path) {
         Ok(()) => Ok(true),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -230,5 +249,18 @@ mod tests {
             "keep"
         );
         assert!(!uninstall_from(&root).unwrap());
+
+        // Someone else's file of that name is left as it is.
+        fs::write(&path, "export default async () => ({})\n").unwrap();
+        assert!(install_into(&root, exe).is_err());
+        assert!(!uninstall_from(&root).unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "export default async () => ({})\n"
+        );
+        // An earlier version's is Sessionly's.
+        let earlier = PLUGIN.replacen("// Written by `sessionly install`", "//", 1);
+        fs::write(&path, earlier).unwrap();
+        assert!(install_into(&root, exe).unwrap());
     }
 }
