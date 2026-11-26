@@ -43,13 +43,14 @@ fn internal(agent: Option<&str>) -> bool {
     agent.is_some_and(|agent| INTERNAL.contains(&agent))
 }
 
-fn not_internal_sql() -> String {
+/// SQL that is true when `column` names no agent of OpenCode's own.
+fn not_internal_sql(column: &str) -> String {
     let list = INTERNAL
         .iter()
         .map(|agent| format!("'{agent}'"))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("COALESCE(agent, '') NOT IN ({list})")
+    format!("COALESCE({column}, '') NOT IN ({list})")
 }
 
 /// Session ids that stand on their own: no parent Sessionly imports, which
@@ -67,8 +68,8 @@ pub(crate) fn root_ids(path: &Path) -> Result<Vec<String>> {
              )
            )
          ORDER BY time_created, id",
-        keep = not_internal_sql(),
-        parent_keep = not_internal_sql().replace("agent", "parent.agent"),
+        keep = not_internal_sql("agent"),
+        parent_keep = not_internal_sql("parent.agent"),
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| row.get(0))?;
@@ -83,7 +84,7 @@ fn family(conn: &Connection, root: &str) -> Result<Vec<String>> {
         "SELECT id FROM session
          WHERE parent_id = ?1 AND id != ?1 AND {keep}
          ORDER BY time_created, id",
-        keep = not_internal_sql(),
+        keep = not_internal_sql("agent"),
     );
     let mut i = 0;
     while i < ids.len() {
@@ -726,11 +727,13 @@ fn diffs_from_calls(calls: &[Call], cwd: &str) -> Vec<Diff> {
                     .as_str()
                     .or(call.input["filePath"].as_str())
                     .unwrap_or("");
-                add(
-                    path,
-                    patch_body(diff["patch"].as_str().unwrap_or("")),
-                    false,
-                );
+                let lines = patch_body(diff["patch"].as_str().unwrap_or(""));
+                // An edit with nothing to replace writes the whole file; one
+                // that removed nothing made it.
+                let made = call.input["oldString"] == ""
+                    && !lines.is_empty()
+                    && !lines.iter().any(|line| line.starts_with('-'));
+                add(path, lines, made);
             }
             "apply_patch" | "patch" => {
                 for file in meta["files"].as_array().into_iter().flatten() {
@@ -1524,9 +1527,16 @@ fn emit_session(
             let last = assistants
                 .get(user.id.as_str())
                 .and_then(|replies| replies.last());
+            // OpenCode writes each step of a turn as a reply of its own and
+            // completes it before the next one starts; a step that stopped
+            // to call tools (`finish: tool-calls`) is followed by another.
             let ended = last.map(|reply| {
-                let done = reply.data["time"]["completed"].as_i64().is_some();
-                (reply_error(&reply.data), done)
+                let completed = reply.data["time"]["completed"].as_i64().is_some();
+                let more = matches!(
+                    reply.data["finish"].as_str(),
+                    Some("tool-calls" | "unknown")
+                );
+                (reply_error(&reply.data), completed && !more)
             });
             match ended {
                 // Stopped by the person, which is no error: as a turn
@@ -2723,9 +2733,52 @@ mod tests {
         add_message(&conn, "a", "ses_run", 20, reply);
         add_message(&conn, "u2", "ses_run", 30, json!({ "role": "user" }));
         add_part(&conn, "t2", "u2", "ses_run", 30, text_part("no reply yet"));
+        // A step that stopped to call tools, completed, with the next step
+        // not written yet.
+        add_message(&conn, "u3", "ses_run", 40, json!({ "role": "user" }));
+        add_part(&conn, "t3", "u3", "ses_run", 40, text_part("between steps"));
+        let mut step = assistant("u3", "ollama/qwen2.5:7b", 0.0, 1, 1);
+        step["finish"] = json!("tool-calls");
+        add_message(&conn, "a3", "ses_run", 50, step);
         drop(conn);
         let (events, _) = session(&path, "ses_run").unwrap();
         assert!(!events.iter().any(|event| event["hook"] == "Stop"));
+
+        let conn = write(&path);
+        let mut last = assistant("u3", "ollama/qwen2.5:7b", 0.0, 1, 1);
+        last["finish"] = json!("stop");
+        add_message(&conn, "a4", "ses_run", 60, last);
+        drop(conn);
+        let (events, _) = session(&path, "ses_run").unwrap();
+        let stops: Vec<_> = events
+            .iter()
+            .filter(|event| event["hook"] == "Stop")
+            .map(|event| event["payload"]["prompt_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(stops, ["u3"]);
+    }
+
+    #[test]
+    fn an_edit_with_nothing_to_replace_makes_its_file() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_new", None, "build", "new", 10, json!({}));
+        add_message(&conn, "u", "ses_new", 10, json!({ "role": "user" }));
+        add_part(&conn, "t", "u", "ses_new", 10, text_part("make it"));
+        add_message(
+            &conn,
+            "a",
+            "ses_new",
+            20,
+            assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1),
+        );
+        let mut made = edit_of("new.rs", "@@ -0,0 +1,2 @@\n+a\n+b\n");
+        made["state"]["input"]["oldString"] = json!("");
+        add_part(&conn, "e", "a", "ses_new", 20, made);
+        drop(conn);
+        let s = normalized(&path, "ses_new");
+        assert!(s.files[0].created);
+        assert_eq!(s.counts.lines_added, 2);
     }
 
     #[test]

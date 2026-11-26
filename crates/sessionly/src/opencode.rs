@@ -137,19 +137,37 @@ fn ours(text: &str) -> bool {
         || (text.contains(r#"join(home, ".sessionly")"#) && text.contains(r#""raw", "opencode""#))
 }
 
+/// What is at the plugin's path.
+enum There {
+    Nothing,
+    /// A plugin Sessionly wrote, and its text.
+    Ours(String),
+    /// Someone else's file, or one that cannot be read: either way, not one
+    /// to replace or remove.
+    Other,
+}
+
+fn there(path: &Path) -> There {
+    match fs::read_to_string(path) {
+        Ok(text) if ours(&text) => There::Ours(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => There::Nothing,
+        _ => There::Other,
+    }
+}
+
 /// Write the plugin for the binary at `exe` under `config` (`…/opencode`).
 /// True when the file was written or replaced. A file there that Sessionly
 /// did not write is an error, and is not touched.
 pub(crate) fn install_into(config: &Path, exe: &Path) -> Result<bool> {
     let path = plugin_path(config);
     let text = plugin(exe);
-    match fs::read_to_string(&path) {
-        Ok(found) if found == text => return Ok(false),
-        Ok(found) if !ours(&found) => anyhow::bail!(
+    match there(&path) {
+        There::Ours(found) if found == text => return Ok(false),
+        There::Other => anyhow::bail!(
             "{} is not Sessionly's; move it away to install the plugin",
             path.display()
         ),
-        _ => {}
+        There::Nothing | There::Ours(_) => {}
     }
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -167,7 +185,7 @@ pub(crate) fn install_into(config: &Path, exe: &Path) -> Result<bool> {
 /// it was there and was removed.
 pub(crate) fn uninstall_from(config: &Path) -> Result<bool> {
     let path = plugin_path(config);
-    if fs::read_to_string(&path).is_ok_and(|found| !ours(&found)) {
+    if !matches!(there(&path), There::Ours(_)) {
         return Ok(false);
     }
     match fs::remove_file(&path) {
@@ -258,6 +276,11 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             "export default async () => ({})\n"
         );
+        // So is a file that cannot be read as text.
+        fs::write(&path, [0xff, 0xfe, b'x']).unwrap();
+        assert!(install_into(&root, exe).is_err());
+        assert!(!uninstall_from(&root).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), [0xff, 0xfe, b'x']);
         // An earlier version's is Sessionly's.
         let earlier = PLUGIN.replacen("// Written by `sessionly install`", "//", 1);
         fs::write(&path, earlier).unwrap();
