@@ -87,7 +87,7 @@ These are run by the agents, not by you:
 | `CLAUDE_CONFIG_DIR` | Where Claude Code's transcripts are looked for (`projects/` under it), in place of `~/.claude`. The hooks are written to `~/.claude/settings.json` all the same. |
 | `CODEX_HOME` | Codex's folder, in place of `~/.codex`: its sessions and its `hooks.json`. |
 | `GROK_HOME` | Grok's folder, in place of `~/.grok`. |
-| `OPENCODE_DB` | OpenCode's database, in place of `$XDG_DATA_HOME/opencode/opencode.db` or `~/.local/share/opencode/opencode.db`. |
+| `OPENCODE_DB` | OpenCode's database, in place of `opencode.db` in `$XDG_DATA_HOME/opencode` or `~/.local/share/opencode`. A path that is not absolute is under that folder, as OpenCode reads it. |
 | `XDG_DATA_HOME` | Where OpenCode's database is looked for when `OPENCODE_DB` is not set. |
 | `XDG_CONFIG_HOME` | Where OpenCode's config is looked for (`opencode/` under it), in place of `~/.config`. The plugin is written there when that directory exists. |
 

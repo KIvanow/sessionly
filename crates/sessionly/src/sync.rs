@@ -333,6 +333,19 @@ struct Pass<'a> {
 }
 
 impl Pass<'_> {
+    /// What the fingerprint keeps of the session's transcript: its size. An
+    /// OpenCode transcript is the one database every session shares, which
+    /// changes whenever any session does, so the stamp of this session that
+    /// its import recorded stands in for it.
+    fn transcript_bytes(&self, transcript: Option<&Path>, imported: Option<&PathBuf>) -> u64 {
+        if self.dirs.source == crate::paths::OPENCODE {
+            return imported
+                .and_then(|path| crate::import::recorded_bytes(path))
+                .unwrap_or(0);
+        }
+        transcript.map_or(0, transcript::tree_size)
+    }
+
     /// Bring one session up to date. `subagent_raw` are the captures of
     /// subagents that are part of it.
     fn stem(&self, ledger: &mut Ledger, stem: &str, subagent_raw: &[PathBuf]) -> Result<Outcome> {
@@ -341,10 +354,8 @@ impl Pass<'_> {
             size(raw) + size(imported) + subagent_raw.iter().map(|p| size(Some(p))).sum::<u64>();
         if !self.force {
             if let Some(stored) = ledger.fingerprint(stem)? {
-                let transcript_bytes = stored
-                    .transcript_path
-                    .as_deref()
-                    .map_or(0, |p| transcript::tree_size(Path::new(p)));
+                let transcript_bytes = self
+                    .transcript_bytes(stored.transcript_path.as_deref().map(Path::new), imported);
                 if stored.built_with == self.built_with
                     && stored.raw_bytes == source_bytes
                     && stored.transcript_bytes == transcript_bytes
@@ -367,10 +378,8 @@ impl Pass<'_> {
                 let fingerprint = Fingerprint {
                     built_with: self.built_with.to_string(),
                     raw_bytes: source_bytes,
-                    transcript_bytes: built
-                        .transcript_path
-                        .as_deref()
-                        .map_or(0, transcript::tree_size),
+                    transcript_bytes: self
+                        .transcript_bytes(built.transcript_path.as_deref(), imported),
                     transcript_path: built
                         .transcript_path
                         .map(|p| p.to_string_lossy().into_owned()),

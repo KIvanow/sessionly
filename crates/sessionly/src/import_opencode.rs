@@ -17,7 +17,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::import::{patch_lines, slim_input, Builder};
@@ -102,6 +102,26 @@ fn family(conn: &Connection, root: &str) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+/// The root of the repository the session's project is: the folder git
+/// writes the paths of a diff from. `None` for a project that is not one
+/// (OpenCode's worktree is then `/`), or a database without projects.
+fn worktree(conn: &Connection, id: &str) -> Result<Option<String>> {
+    if !table_exists(conn, "project")? || !column_exists(conn, "session", "project_id")? {
+        return Ok(None);
+    }
+    let found: Option<String> = conn
+        .query_row(
+            "SELECT project.worktree FROM session
+             JOIN project ON project.id = session.project_id
+             WHERE session.id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(found.filter(|dir| !dir.is_empty() && dir != "/"))
+}
+
 fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -142,8 +162,12 @@ fn mix(mut hash: u64, bytes: impl AsRef<[u8]>) -> u64 {
 }
 
 /// A stamp of the session and the children folded into it: each one's update
-/// time and how many messages and parts it has. The database is one file for
-/// every session, so its size cannot say which session changed.
+/// time, and for its messages and parts how many there are, their latest
+/// update time and the length of what they hold. OpenCode writes a turn's
+/// diffs into the user message after it updates the session, so the rows
+/// themselves have to be looked at. The database is one file for every
+/// session, so its size cannot say which session changed. The stamp fits in
+/// a signed 64-bit number, which is what the ledger keeps.
 fn stamp(conn: &Connection, root: &str) -> Result<u64> {
     let present: i64 = conn.query_row(
         "SELECT COUNT(*) FROM session WHERE id = ?1",
@@ -162,22 +186,42 @@ fn stamp(conn: &Connection, root: &str) -> Result<u64> {
                 |row| row.get(0),
             )
             .unwrap_or(0);
-        let messages: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM message WHERE session_id = ?1",
-            params![id],
-            |row| row.get(0),
-        )?;
-        let parts: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM part WHERE session_id = ?1",
-            params![id],
-            |row| row.get(0),
-        )?;
         hash = mix(hash, id.as_bytes());
         hash = mix(hash, updated.to_le_bytes());
-        hash = mix(hash, messages.to_le_bytes());
-        hash = mix(hash, parts.to_le_bytes());
+        for table in ["message", "part"] {
+            for value in rows_stamp(conn, table, &id)? {
+                hash = mix(hash, value.to_le_bytes());
+            }
+        }
     }
+    let hash = hash & i64::MAX as u64;
     Ok(if hash == 0 { 1 } else { hash })
+}
+
+/// How many rows of `table` the session has, the latest time one was updated
+/// and the length of their data.
+fn rows_stamp(conn: &Connection, table: &str, id: &str) -> Result<[i64; 3]> {
+    let updated = if column_exists(conn, table, "time_updated")? {
+        "MAX(time_updated)"
+    } else {
+        "0"
+    };
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE({updated}, 0), COALESCE(SUM(LENGTH(data)), 0)
+         FROM {table} WHERE session_id = ?1"
+    );
+    Ok(conn.query_row(&sql, params![id], |row| {
+        Ok([row.get(0)?, row.get(1)?, row.get(2)?])
+    })?)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        params![table, column],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 /// The stamp `import` compares so a changed session is read again.
@@ -251,7 +295,6 @@ struct Meta {
     agent: Option<String>,
     model: Option<String>,
     time_created: i64,
-    time_updated: i64,
     revert: Value,
 }
 
@@ -261,7 +304,7 @@ fn optional_text(value: Option<String>) -> Option<String> {
 
 fn load_meta(conn: &Connection, id: &str) -> Result<Meta> {
     conn.query_row(
-        "SELECT directory, title, version, agent, model, time_created, time_updated, revert
+        "SELECT directory, title, version, agent, model, time_created, revert
          FROM session WHERE id = ?1",
         params![id],
         |row| {
@@ -274,7 +317,7 @@ fn load_meta(conn: &Connection, id: &str) -> Result<Meta> {
                 (None, None) => None,
                 (provider, id) => Some(model_name(provider.unwrap_or(""), id.unwrap_or(""))),
             };
-            let revert: Option<String> = row.get(7)?;
+            let revert: Option<String> = row.get(6)?;
             Ok(Meta {
                 directory: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
                 title: optional_text(row.get(1)?),
@@ -282,7 +325,6 @@ fn load_meta(conn: &Connection, id: &str) -> Result<Meta> {
                 agent: optional_text(row.get(3)?),
                 model: named.filter(|name| name != "unknown"),
                 time_created: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
-                time_updated: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
                 revert: revert
                     .and_then(|text| serde_json::from_str(&text).ok())
                     .unwrap_or(Value::Null),
@@ -356,15 +398,36 @@ fn load_messages(conn: &Connection, id: &str, revert: &Value) -> Result<Vec<Msg>
             parts,
         });
     }
-    if let Some(message_id) = revert["messageID"]
-        .as_str()
-        .or(revert["messageId"].as_str())
-    {
-        if let Some(cut) = loaded.iter().find(|msg| msg.id == message_id).map(|m| m.at) {
-            loaded.retain(|msg| msg.at <= cut);
-        }
-    }
+    apply_revert(&mut loaded, revert);
     Ok(loaded)
+}
+
+/// Leave out what going back undid. OpenCode deletes it at the next prompt;
+/// until then the rows are still there. Without a part, the message named
+/// and every later one are undone. With one, the message keeps its parts
+/// before that part, and the later messages are undone.
+fn apply_revert(loaded: &mut Vec<Msg>, revert: &Value) {
+    let text = |keys: [&str; 2]| {
+        keys.iter()
+            .find_map(|key| revert[*key].as_str())
+            .filter(|id| !id.is_empty())
+    };
+    let Some(message_id) = text(["messageID", "messageId"]) else {
+        return;
+    };
+    let Some(index) = loaded.iter().position(|msg| msg.id == message_id) else {
+        return;
+    };
+    match text(["partID", "partId"]) {
+        Some(part_id) => {
+            loaded.truncate(index + 1);
+            let parts = &mut loaded[index].parts;
+            if let Some(cut) = parts.iter().position(|part| part.id == part_id) {
+                parts.truncate(cut);
+            }
+        }
+        None => loaded.truncate(index),
+    }
 }
 
 /// `+` and `-` lines of a unified diff. File headers (`+++`, `---`) are not
@@ -402,7 +465,10 @@ fn patch_body(patch: &str) -> Vec<String> {
 }
 
 struct Diff {
+    /// The file, absolute.
     file: String,
+    /// The file as OpenCode wrote it: relative to the repository's root.
+    written: String,
     lines: Vec<String>,
     created: bool,
 }
@@ -417,32 +483,74 @@ fn absolute(path: &str, cwd: &str) -> String {
 }
 
 fn same_file(tool_path: &str, diff_file: &str, cwd: &str) -> bool {
-    let left = absolute(tool_path, cwd);
-    let right = absolute(diff_file, cwd);
-    if left == right {
-        return true;
-    }
-    // `right` is `diff_file` made absolute, so it always ends with a relative
-    // `diff_file`. Only the tool path is checked.
-    let rel = diff_file.trim_start_matches("./");
-    if !rel.is_empty() && left.ends_with(&format!("/{rel}")) {
-        return true;
-    }
-    let name = |path: &str| {
-        Path::new(path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-    };
-    matches!((name(&left), name(&right)), (Some(a), Some(b)) if a == b && !a.is_empty())
+    absolute(tool_path, cwd) == absolute(diff_file, cwd)
 }
 
-fn diffs_of(data: &Value, _cwd: &str) -> Vec<Diff> {
+/// The tool path ends with the diff's path as OpenCode wrote it: for a
+/// database that does not say where the repository's root is.
+fn ends_with_file(tool_path: &str, diff_file: &str, cwd: &str) -> bool {
+    let rel = diff_file.trim_start_matches("./");
+    !rel.is_empty() && absolute(tool_path, cwd).ends_with(&format!("/{rel}"))
+}
+
+/// Which diffs each call made. A path a tool was given takes one diff: the
+/// one at that path, or else the one whose path it ends with, when no other
+/// path left over ends with it too. A diff nothing takes is left over.
+fn claim_diffs(calls: &[Call], diffs: &[Diff], cwd: &str) -> Vec<Vec<usize>> {
+    let mut owned: Vec<Vec<usize>> = vec![Vec::new(); calls.len()];
+    let mut paths: Vec<(usize, String)> = Vec::new();
+    for (index, call) in calls.iter().enumerate() {
+        if call.status != CallStatus::Ok || !is_file_tool(&call.name) {
+            continue;
+        }
+        // The input and the metadata may name the same file twice.
+        let mut seen = HashSet::new();
+        for path in paths_of(call) {
+            if seen.insert(absolute(&path, cwd)) {
+                paths.push((index, path));
+            }
+        }
+    }
+    let mut free = vec![true; paths.len()];
+    let mut claimed = vec![false; diffs.len()];
+    for (diff_index, diff) in diffs.iter().enumerate() {
+        if let Some(slot) =
+            (0..paths.len()).find(|&slot| free[slot] && same_file(&paths[slot].1, &diff.file, cwd))
+        {
+            free[slot] = false;
+            claimed[diff_index] = true;
+            owned[paths[slot].0].push(diff_index);
+        }
+    }
+    for (diff_index, diff) in diffs.iter().enumerate() {
+        if claimed[diff_index] {
+            continue;
+        }
+        let fits: Vec<usize> = (0..paths.len())
+            .filter(|&slot| free[slot] && ends_with_file(&paths[slot].1, &diff.written, cwd))
+            .collect();
+        if let [slot] = fits[..] {
+            free[slot] = false;
+            owned[paths[slot].0].push(diff_index);
+        }
+    }
+    for list in &mut owned {
+        list.sort_unstable();
+    }
+    owned
+}
+
+/// The turn's diffs. Git wrote each path relative to `root`, the root of the
+/// repository, which is not the session's folder when OpenCode was started
+/// in one below it.
+fn diffs_of(data: &Value, root: &str) -> Vec<Diff> {
     let Some(rows) = data["summary"]["diffs"].as_array() else {
         return Vec::new();
     };
     rows.iter()
         .filter_map(|row| {
-            let file = row["file"].as_str()?.to_string();
+            let written = row["file"].as_str()?.to_string();
+            let file = absolute(&written, root);
             let mut lines = row["patch"].as_str().map(patch_body).unwrap_or_default();
             let before = row["before"].as_str().unwrap_or("");
             let after = row["after"].as_str().unwrap_or("");
@@ -454,6 +562,7 @@ fn diffs_of(data: &Value, _cwd: &str) -> Vec<Diff> {
                 || (status.is_empty() && before.is_empty() && !after.is_empty());
             Some(Diff {
                 file,
+                written,
                 lines,
                 created,
             })
@@ -530,38 +639,48 @@ fn is_shell(name: &str) -> bool {
     matches!(name, "bash" | "shell")
 }
 
+/// The files a call wrote. `write` and `edit` are given one (`filePath`), and
+/// say it again in what they return: `write` as `filepath`, `edit` in its
+/// `filediff`. `apply_patch` is given the patch's text, and returns each file
+/// it touched under `files`, at the path it moved to as well.
 fn paths_of(call: &Call) -> Vec<String> {
     let mut paths = Vec::new();
-    for key in ["filePath", "file_path", "path", "filepath"] {
-        if let Some(path) = call.input[key].as_str().filter(|p| !p.is_empty()) {
+    let mut add = |path: Option<&str>| {
+        if let Some(path) = path.filter(|p| !p.is_empty()) {
             paths.push(path.to_string());
         }
+    };
+    for key in ["filePath", "file_path", "path", "filepath"] {
+        add(call.input[key].as_str());
     }
-    if let Some(files) = call.input["files"].as_array() {
-        for file in files {
-            let path = file
-                .as_str()
-                .or(file["file"].as_str())
-                .or(file["path"].as_str())
-                .or(file["filePath"].as_str());
-            if let Some(path) = path.filter(|p| !p.is_empty()) {
-                paths.push(path.to_string());
-            }
-        }
-    }
-    if let Some(path) = call.metadata["filepath"].as_str().filter(|p| !p.is_empty()) {
-        paths.push(path.to_string());
+    add(call.metadata["filepath"].as_str());
+    add(call.metadata["filediff"]["file"].as_str());
+    for file in call.metadata["files"].as_array().into_iter().flatten() {
+        add(file["filePath"].as_str());
+        add(file["movePath"].as_str());
     }
     paths
 }
 
+/// What the person typed. OpenCode marks the text it wrote itself `synthetic`:
+/// a file read for an `@` mention and its contents, the message that carries
+/// on after a compaction or a command. `ignored` text is not shown to the
+/// model. A command run as a subtask (`/review`) keeps only its template,
+/// so its name stands for it.
 fn prompt_text(parts: &[Part]) -> String {
     let mut lines = Vec::new();
     for part in parts {
+        let flag = |key: &str| part.data[key].as_bool() == Some(true);
         match part.data["type"].as_str() {
+            Some("text") if flag("synthetic") || flag("ignored") => {}
             Some("text") => {
                 if let Some(text) = part.data["text"].as_str().filter(|t| !t.is_empty()) {
                     lines.push(text.to_string());
+                }
+            }
+            Some("subtask") => {
+                if let Some(command) = part.data["command"].as_str().filter(|c| !c.is_empty()) {
+                    lines.push(format!("/{command}"));
                 }
             }
             Some("file") => {
@@ -763,7 +882,10 @@ fn add_request(usage: &mut Vec<ModelUsage>, acc: &mut Acc, model: &str, tokens: 
         add_dollars(entry, tokens.cost);
         Some(tokens.cost)
     } else if any_tokens(tokens) {
-        let priced = crate::pricing::price_for(model, tokens.input).map(|price| {
+        // The prompt's size, which picks a long prompt's price, counts cached
+        // input too: OpenCode's `input` leaves it out.
+        let prompt = tokens.input + tokens.cache_read + tokens.cache_write;
+        let priced = crate::pricing::price_for(model, prompt).map(|price| {
             price.cost(&crate::pricing::Billed {
                 input: tokens.input,
                 output,
@@ -794,6 +916,46 @@ fn add_request(usage: &mut Vec<ModelUsage>, acc: &mut Acc, model: &str, tokens: 
     }
 }
 
+/// The requests one reply made to the model: one per step, each of which
+/// OpenCode closes with a `step-finish` part of its tokens and cost. The
+/// message's own `tokens` are its last step's only, while its `cost` is the
+/// sum; a reply with no step parts is taken as one request.
+fn requests_of(reply: &Msg) -> Vec<Tokens> {
+    let steps: Vec<Tokens> = reply
+        .parts
+        .iter()
+        .filter(|part| part.data["type"] == "step-finish")
+        .map(|part| tokens_of(&part.data))
+        .collect();
+    if steps.is_empty() {
+        vec![tokens_of(&reply.data)]
+    } else {
+        steps
+    }
+}
+
+/// Add a reply's requests to the session's usage and cost, and to the
+/// child session's when it is one.
+fn charge_reply(
+    usage: &mut Vec<ModelUsage>,
+    acc: &mut Acc,
+    mut child: Option<&mut SubagentFacts>,
+    model: Option<&str>,
+    reply: &Msg,
+) {
+    for tokens in requests_of(reply) {
+        let charge = add_request(usage, acc, model.unwrap_or("unknown"), &tokens);
+        if let Some(child) = child.as_deref_mut() {
+            child.requests += 1;
+            child.input_tokens += charge.input;
+            child.output_tokens += charge.output;
+            if let Some(usd) = charge.usd {
+                child.estimated_cost_usd = Some(child.estimated_cost_usd.unwrap_or(0.0) + usd);
+            }
+        }
+    }
+}
+
 fn assistant_model(data: &Value) -> Option<String> {
     let id = data["modelID"].as_str().unwrap_or("");
     let provider = data["providerID"].as_str().unwrap_or("");
@@ -815,6 +977,8 @@ fn parent_of(data: &Value) -> String {
 #[derive(Clone, Copy)]
 struct Scope<'a> {
     prompt_id: &'a str,
+    /// When the message the calls answer was written.
+    prompt_at: i64,
     agent: Option<(&'a str, &'a str)>,
     model: Option<&'a str>,
 }
@@ -896,25 +1060,10 @@ fn emit_calls(
     cwd: &str,
     scope: &Scope,
 ) {
+    let owned = claim_diffs(calls, diffs, cwd);
     let mut claimed = vec![false; diffs.len()];
-    let mut owned: Vec<Vec<usize>> = vec![Vec::new(); calls.len()];
-    for (index, call) in calls.iter().enumerate() {
-        if call.status != CallStatus::Ok || !is_file_tool(&call.name) {
-            continue;
-        }
-        let paths = paths_of(call);
-        if paths.is_empty() {
-            continue;
-        }
-        for (diff_index, diff) in diffs.iter().enumerate() {
-            if claimed[diff_index] {
-                continue;
-            }
-            if paths.iter().any(|path| same_file(path, &diff.file, cwd)) {
-                claimed[diff_index] = true;
-                owned[index].push(diff_index);
-            }
-        }
+    for diff_index in owned.iter().flatten() {
+        claimed[*diff_index] = true;
     }
     let leftovers: Vec<usize> = claimed
         .iter()
@@ -977,7 +1126,7 @@ fn emit_calls(
     if bash_at.is_some() {
         return;
     }
-    let start = calls.first().map(|call| call.start).unwrap_or(0);
+    let start = calls.first().map_or(scope.prompt_at, |call| call.start);
     for (nth, diff_index) in leftovers.into_iter().enumerate() {
         let diff = &diffs[diff_index];
         let tool = if diff.created { "Write" } else { "Edit" };
@@ -1057,7 +1206,7 @@ fn child_descriptions(messages: &[Msg]) -> HashMap<String, String> {
 fn emit_session(
     out: &mut Builder,
     messages: &[Msg],
-    cwd: &str,
+    (cwd, root): (&str, &str),
     agent: Option<(&str, &str)>,
     usage: &mut Vec<ModelUsage>,
     acc: &mut Acc,
@@ -1101,21 +1250,13 @@ fn emit_session(
                 if model.is_none() {
                     model = reply_model.clone();
                 }
-                let charge = add_request(
+                charge_reply(
                     usage,
                     acc,
-                    reply_model.as_deref().unwrap_or("unknown"),
-                    &tokens_of(&reply.data),
+                    child.as_deref_mut(),
+                    reply_model.as_deref(),
+                    reply,
                 );
-                if let Some(child) = child.as_deref_mut() {
-                    child.requests += 1;
-                    child.input_tokens += charge.input;
-                    child.output_tokens += charge.output;
-                    if let Some(usd) = charge.usd {
-                        child.estimated_cost_usd =
-                            Some(child.estimated_cost_usd.unwrap_or(0.0) + usd);
-                    }
-                }
                 stop_at = stop_at.max(reply.data["time"]["completed"].as_i64().unwrap_or(reply.at));
                 last_ms = last_ms.max(stop_at);
                 for call in calls_of(reply) {
@@ -1126,6 +1267,7 @@ fn emit_session(
         }
         let scope = Scope {
             prompt_id: &user.id,
+            prompt_at: user.at,
             agent,
             model: None,
         };
@@ -1133,7 +1275,7 @@ fn emit_session(
             out,
             &calls,
             &models,
-            &diffs_of(&user.data, cwd),
+            &diffs_of(&user.data, root),
             cwd,
             &scope,
         );
@@ -1153,20 +1295,13 @@ fn emit_session(
         if model.is_none() {
             model = reply_model.clone();
         }
-        let charge = add_request(
+        charge_reply(
             usage,
             acc,
-            reply_model.as_deref().unwrap_or("unknown"),
-            &tokens_of(&reply.data),
+            child.as_deref_mut(),
+            reply_model.as_deref(),
+            reply,
         );
-        if let Some(child) = child.as_deref_mut() {
-            child.requests += 1;
-            child.input_tokens += charge.input;
-            child.output_tokens += charge.output;
-            if let Some(usd) = charge.usd {
-                child.estimated_cost_usd = Some(child.estimated_cost_usd.unwrap_or(0.0) + usd);
-            }
-        }
         let calls = calls_of(reply);
         let models = vec![reply_model; calls.len()];
         let prompt_id = parent_of(&reply.data);
@@ -1177,6 +1312,7 @@ fn emit_session(
         };
         let scope = Scope {
             prompt_id,
+            prompt_at: reply.at,
             agent,
             model: None,
         };
@@ -1203,10 +1339,14 @@ pub(crate) fn session(db: &Path, id: &str) -> Result<(Vec<Value>, Option<Facts>)
     let mut usage = Vec::new();
     let mut acc = Acc::default();
     let cwd = meta.directory.clone();
+    let repo_root = worktree(&conn, id)?.unwrap_or_else(|| cwd.clone());
+    let dirs = (cwd.as_str(), repo_root.as_str());
     note_compactions(&mut out, &messages);
     let descriptions = child_descriptions(&messages);
-    let root = emit_session(&mut out, &messages, &cwd, None, &mut usage, &mut acc, None);
-    let mut last_ms = root.last_ms.max(meta.time_updated);
+    let root = emit_session(&mut out, &messages, dirs, None, &mut usage, &mut acc, None);
+    // Not the session's `time_updated`: going back, a permission and other
+    // changes that are not work move it too.
+    let mut last_ms = root.last_ms.max(meta.time_created);
     let mut session_model = meta.model.clone().or(root.model);
     let mut subagents = Vec::new();
 
@@ -1231,7 +1371,7 @@ pub(crate) fn session(db: &Path, id: &str) -> Result<(Vec<Value>, Option<Facts>)
         let turned = emit_session(
             &mut out,
             &child_messages,
-            &cwd,
+            dirs,
             Some((child_id, &agent_type)),
             &mut usage,
             &mut acc,
@@ -1240,7 +1380,7 @@ pub(crate) fn session(db: &Path, id: &str) -> Result<(Vec<Value>, Option<Facts>)
         if session_model.is_none() {
             session_model = turned.model;
         }
-        let ended = turned.last_ms.max(child.time_updated).max(started);
+        let ended = turned.last_ms.max(started);
         last_ms = last_ms.max(ended);
         out.push(&time_of(ended), "SubagentStop", identity);
         subagents.push(facts);
@@ -1816,10 +1956,10 @@ mod tests {
         assert!(session(&path, "ses_old").is_ok());
     }
 
-    #[test]
-    fn a_revert_drops_later_messages() {
-        let (_dir, path) = fresh();
-        let conn = write(&path);
+    /// A session of two turns, the second of which writes a file; `revert`
+    /// is what going back left on the session.
+    fn two_turns(path: &Path, revert: Value) {
+        let conn = write(path);
         add_session(
             &conn,
             "ses_back",
@@ -1827,39 +1967,75 @@ mod tests {
             "build",
             "back",
             10,
-            json!({ "revert": { "messageID": "keep" } }),
+            json!({ "revert": revert }),
         );
         add_message(&conn, "keep", "ses_back", 10, json!({ "role": "user" }));
         add_part(&conn, "t1", "keep", "ses_back", 10, text_part("keep this"));
-        add_message(&conn, "drop", "ses_back", 30, json!({ "role": "user" }));
-        add_part(&conn, "t2", "drop", "ses_back", 30, text_part("drop this"));
+        add_message(&conn, "undone", "ses_back", 30, json!({ "role": "user" }));
+        add_part(
+            &conn,
+            "t2",
+            "undone",
+            "ses_back",
+            30,
+            text_part("undo this"),
+        );
         add_message(
             &conn,
             "later",
             "ses_back",
             40,
-            assistant("drop", "anthropic/claude-sonnet-4-5", 0.0, 4, 1),
+            assistant("undone", "anthropic/claude-sonnet-4-5", 0.0, 4, 1),
+        );
+        add_part(
+            &conn,
+            "r",
+            "later",
+            "ses_back",
+            40,
+            tool(
+                "read",
+                "call_r",
+                json!({ "filePath": "kept.txt" }),
+                "completed",
+                40,
+            ),
         );
         add_part(
             &conn,
             "w",
             "later",
             "ses_back",
-            40,
+            50,
             tool(
                 "write",
                 "call_w",
                 json!({ "filePath": "gone.txt", "content": "x" }),
                 "completed",
-                40,
+                50,
             ),
         );
-        drop(conn);
+    }
+
+    #[test]
+    fn a_revert_drops_the_message_it_names_and_what_came_after() {
+        let (_dir, path) = fresh();
+        two_turns(&path, json!({ "messageID": "undone" }));
         let s = normalized(&path, "ses_back");
         assert_eq!(s.prompts.len(), 1);
         assert_eq!(s.prompts[0].text.preview, "keep this");
         assert!(s.tool_calls.is_empty());
         assert_eq!(s.usage.iter().map(|u| u.requests).sum::<u64>(), 0);
+    }
+
+    #[test]
+    fn a_revert_to_a_part_keeps_what_came_before_it() {
+        let (_dir, path) = fresh();
+        two_turns(&path, json!({ "messageID": "later", "partID": "w" }));
+        let s = normalized(&path, "ses_back");
+        assert_eq!(s.prompts.len(), 2);
+        let tools: Vec<_> = s.tool_calls.iter().map(|c| c.tool.as_str()).collect();
+        assert_eq!(tools, ["Read"]);
     }
 
     #[test]
@@ -1894,6 +2070,386 @@ mod tests {
     }
 
     #[test]
+    fn text_opencode_wrote_is_no_prompt_and_a_subtask_command_is_its_name() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_said", None, "build", "said", 10, json!({}));
+        add_message(&conn, "u1", "ses_said", 10, json!({ "role": "user" }));
+        add_part(
+            &conn,
+            "t1",
+            "u1",
+            "ses_said",
+            10,
+            text_part("look at @a.rs"),
+        );
+        let mut read = text_part("Called the Read tool with the following input: {}");
+        read["synthetic"] = json!(true);
+        add_part(&conn, "t2", "u1", "ses_said", 11, read);
+        let mut contents = text_part("fn secret() {}");
+        contents["synthetic"] = json!(true);
+        add_part(&conn, "t3", "u1", "ses_said", 12, contents);
+        let mut hidden = text_part("for the client only");
+        hidden["ignored"] = json!(true);
+        add_part(&conn, "t4", "u1", "ses_said", 13, hidden);
+        add_message(&conn, "u2", "ses_said", 20, json!({ "role": "user" }));
+        let mut carry_on = text_part("Continue if you have next steps");
+        carry_on["synthetic"] = json!(true);
+        add_part(&conn, "t5", "u2", "ses_said", 20, carry_on);
+        add_message(&conn, "u3", "ses_said", 30, json!({ "role": "user" }));
+        add_part(
+            &conn,
+            "t6",
+            "u3",
+            "ses_said",
+            30,
+            json!({
+                "type": "subtask",
+                "agent": "build",
+                "command": "review",
+                "description": "review changes",
+                "prompt": "You are a code reviewer. Review the uncommitted changes."
+            }),
+        );
+        drop(conn);
+        let (events, facts) = session(&path, "ses_said").unwrap();
+        let raw = serde_json::to_string(&events).unwrap();
+        assert!(!raw.contains("secret") && !raw.contains("Continue if"));
+        assert!(!raw.contains("client only") && !raw.contains("code reviewer"));
+        let s = crate::normalize::from_events(&events, facts.as_ref(), OPENCODE).unwrap();
+        let said: Vec<_> = s.prompts.iter().map(|p| p.text.preview.as_str()).collect();
+        assert_eq!(said, ["look at @a.rs", "/review"]);
+        assert_eq!(s.counts.reviews, Some(1));
+    }
+
+    #[test]
+    fn diffs_are_read_from_the_root_of_the_repository() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        conn.execute_batch(
+            "ALTER TABLE session ADD COLUMN project_id TEXT;
+             CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL);
+             INSERT INTO project (id, worktree) VALUES ('prj', '/work');",
+        )
+        .unwrap();
+        add_session(&conn, "ses_sub", None, "build", "sub", 10, json!({}));
+        conn.execute("UPDATE session SET project_id = 'prj'", [])
+            .unwrap();
+        add_message(
+            &conn,
+            "u",
+            "ses_sub",
+            10,
+            json!({
+                "role": "user",
+                "summary": { "diffs": [
+                    { "file": "repo/src/x.ts", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b\n" },
+                    { "file": "other/y.txt", "status": "added", "patch": "@@ -0,0 +1 @@\n+y\n" }
+                ] }
+            }),
+        );
+        add_part(&conn, "t", "u", "ses_sub", 10, text_part("edit"));
+        add_message(
+            &conn,
+            "a",
+            "ses_sub",
+            20,
+            assistant("u", "ollama/qwen2.5:7b", 0.0, 0, 0),
+        );
+        add_part(
+            &conn,
+            "e",
+            "a",
+            "ses_sub",
+            20,
+            tool(
+                "edit",
+                "call_edit",
+                json!({ "filePath": "src/x.ts" }),
+                "completed",
+                20,
+            ),
+        );
+        drop(conn);
+        let s = normalized(&path, "ses_sub");
+        let mut files: Vec<_> = s.files.iter().map(|f| f.path.as_str()).collect();
+        files.sort_unstable();
+        assert_eq!(files, ["/work/other/y.txt", "/work/repo/src/x.ts"]);
+        assert_eq!(s.tool_calls[0].tool, "Edit");
+        assert_eq!(s.counts.lines_added, 2);
+    }
+
+    #[test]
+    fn each_step_is_a_request_and_a_long_prompt_counts_its_cache() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_steps", None, "build", "steps", 10, json!({}));
+        add_message(&conn, "u", "ses_steps", 10, json!({ "role": "user" }));
+        add_part(&conn, "t", "u", "ses_steps", 10, text_part("go"));
+        let step = |input: u64, cache_read: u64, output: u64| {
+            json!({
+                "type": "step-finish",
+                "reason": "tool-calls",
+                "cost": 0,
+                "tokens": { "input": input, "output": output, "reasoning": 0,
+                            "cache": { "read": cache_read, "write": 0 } }
+            })
+        };
+        let mut reply = assistant("u", "openai/gpt-6.1-sol", 0.0, 0, 0);
+        // The message keeps its last step's tokens only.
+        reply["tokens"] = step(2_000, 300_000, 20)["tokens"].clone();
+        add_message(&conn, "a", "ses_steps", 20, reply);
+        add_part(&conn, "s1", "a", "ses_steps", 21, step(1_000, 0, 10));
+        add_part(&conn, "s2", "a", "ses_steps", 22, step(2_000, 300_000, 20));
+        drop(conn);
+        let s = normalized(&path, "ses_steps");
+        let used = &s.usage[0];
+        assert_eq!(
+            (
+                used.requests,
+                used.input_tokens,
+                used.output_tokens,
+                used.cache_read_tokens
+            ),
+            (2, 3_000, 30, 300_000)
+        );
+        let billed = |input, cache_read, output, prompt| {
+            crate::pricing::price_for("openai/gpt-6.1-sol", prompt)
+                .unwrap()
+                .cost(&crate::pricing::Billed {
+                    input,
+                    output,
+                    cache_read,
+                    ..Default::default()
+                })
+        };
+        let want = billed(1_000, 0, 10, 1_000) + billed(2_000, 300_000, 20, 302_000);
+        assert!((s.cost.unwrap().total_usd - want).abs() < 1e-9);
+        assert!(want > billed(1_000, 0, 10, 1_000) + billed(2_000, 300_000, 20, 2_000));
+    }
+
+    #[test]
+    fn a_later_change_to_the_session_is_not_more_time_in_it() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        let t0 = 1_763_000_000_000_i64;
+        add_session(&conn, "ses_old", None, "build", "old", t0, json!({}));
+        add_message(&conn, "u", "ses_old", t0, json!({ "role": "user" }));
+        add_part(&conn, "t", "u", "ses_old", t0, text_part("go"));
+        let mut reply = assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1);
+        reply["time"] = json!({ "created": t0 + 10, "completed": t0 + 1_000 });
+        add_message(&conn, "a", "ses_old", t0 + 10, reply);
+        let week = 7 * 24 * 3_600 * 1_000;
+        conn.execute("UPDATE session SET time_updated = ?1", params![t0 + week])
+            .unwrap();
+        drop(conn);
+        let s = normalized(&path, "ses_old");
+        assert_eq!(s.duration_ms, Some(1_000));
+    }
+
+    #[test]
+    fn a_diff_with_no_tool_is_at_the_time_of_its_prompt() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        let t0 = 1_763_000_000_000_i64;
+        add_session(&conn, "ses_when", None, "build", "when", t0, json!({}));
+        add_message(
+            &conn,
+            "u",
+            "ses_when",
+            t0 + 10,
+            json!({
+                "role": "user",
+                "summary": { "diffs": [{ "file": "x.txt", "status": "added", "patch": "@@ -0,0 +1 @@\n+x\n" }] }
+            }),
+        );
+        add_part(&conn, "t", "u", "ses_when", t0 + 10, text_part("make x"));
+        drop(conn);
+        let (events, _) = session(&path, "ses_when").unwrap();
+        let write = events
+            .iter()
+            .find(|event| event["hook"] == "PostToolUse")
+            .unwrap();
+        assert_eq!(write["received_at"], time_of(t0 + 10));
+        assert_eq!(events[0]["hook"], "SessionStart");
+    }
+
+    #[test]
+    fn an_edit_takes_only_its_own_file() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_same", None, "build", "same", 10, json!({}));
+        add_message(
+            &conn,
+            "u",
+            "ses_same",
+            10,
+            json!({
+                "role": "user",
+                "summary": { "diffs": [
+                    { "file": "src/lib.rs", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b\n" },
+                    { "file": "lib.rs", "status": "added", "patch": "@@ -0,0 +1 @@\n+c\n" },
+                    { "file": "a/mod.rs", "status": "added", "patch": "@@ -0,0 +1 @@\n+d\n" }
+                ] }
+            }),
+        );
+        add_part(&conn, "t", "u", "ses_same", 10, text_part("edit"));
+        add_message(
+            &conn,
+            "a",
+            "ses_same",
+            20,
+            assistant("u", "ollama/qwen2.5:7b", 0.0, 0, 0),
+        );
+        add_part(
+            &conn,
+            "e",
+            "a",
+            "ses_same",
+            20,
+            tool(
+                "edit",
+                "call_edit",
+                json!({ "filePath": "/work/repo/src/lib.rs" }),
+                "completed",
+                20,
+            ),
+        );
+        add_part(
+            &conn,
+            "m",
+            "a",
+            "ses_same",
+            30,
+            tool(
+                "edit",
+                "call_mod",
+                json!({ "filePath": "/work/repo/b/mod.rs" }),
+                "completed",
+                30,
+            ),
+        );
+        add_part(
+            &conn,
+            "s",
+            "a",
+            "ses_same",
+            40,
+            tool(
+                "bash",
+                "call_sh",
+                json!({ "command": "make" }),
+                "completed",
+                40,
+            ),
+        );
+        drop(conn);
+        let (events, _) = session(&path, "ses_same").unwrap();
+        let edits: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event["hook"] == "PostToolUse" && event["payload"]["tool_name"] == "Edit"
+            })
+            .map(|event| {
+                let payload = &event["payload"];
+                let lines = &payload["tool_response"]["structuredPatch"][0]["lines"];
+                (
+                    payload["tool_input"]["file_path"].as_str().unwrap(),
+                    lines.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            edits,
+            [
+                ("/work/repo/src/lib.rs", json!(["-a", "+b"])),
+                ("/work/repo/b/mod.rs", Value::Null),
+            ]
+        );
+        let shell = events
+            .iter()
+            .find(|event| event["hook"] == "PostToolUse" && event["payload"]["tool_name"] == "Bash")
+            .unwrap();
+        let changed: Vec<_> = shell["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|change| change["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(changed, ["/work/repo/lib.rs", "/work/repo/a/mod.rs"]);
+    }
+
+    #[test]
+    fn a_row_changed_in_place_changes_the_stamp() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_late", None, "build", "late", 10, json!({}));
+        add_message(&conn, "u", "ses_late", 10, json!({ "role": "user" }));
+        let before = stamp(&conn, "ses_late").unwrap();
+        conn.execute(
+            "UPDATE message SET data = ?1 WHERE id = 'u'",
+            params![json!({
+                "role": "user",
+                "summary": { "diffs": [{ "file": "x", "patch": "@@ -0,0 +1 @@\n+x\n" }] }
+            })
+            .to_string()],
+        )
+        .unwrap();
+        assert_ne!(stamp(&conn, "ses_late").unwrap(), before);
+        assert!(stamp(&conn, "ses_late").unwrap() <= i64::MAX as u64);
+    }
+
+    #[test]
+    fn another_session_in_the_database_leaves_this_one_unchanged() {
+        let (dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_one", None, "build", "one", 10, json!({}));
+        add_message(&conn, "u", "ses_one", 10, json!({ "role": "user" }));
+        add_part(&conn, "t", "u", "ses_one", 10, text_part("hello"));
+        drop(conn);
+        let homes = crate::import::AgentHomes {
+            opencode_db: Some(path.clone()),
+            ..Default::default()
+        };
+        let data = dir.path().join("data");
+        marker(&data, "ses_one");
+        assert_eq!(
+            crate::import::import_all(&homes, &data, &[], &[]).imported,
+            1
+        );
+        let mut ledger = crate::ledger::Ledger::open(&data.join("ledger.db")).unwrap();
+        let dirs = || vec![crate::sync::SourceDirs::in_data_dir(&data, OPENCODE)];
+        assert_eq!(
+            crate::sync::run(&dirs(), &mut ledger, "machine", false)
+                .unwrap()
+                .synced,
+            1
+        );
+
+        let size = fs::metadata(&path).unwrap().len();
+        let conn = write(&path);
+        add_session(&conn, "ses_two", None, "build", "two", 20, json!({}));
+        add_message(&conn, "u2", "ses_two", 20, json!({ "role": "user" }));
+        add_part(
+            &conn,
+            "t2",
+            "u2",
+            "ses_two",
+            20,
+            text_part(&"x".repeat(20_000)),
+        );
+        drop(conn);
+        assert_ne!(fs::metadata(&path).unwrap().len(), size);
+        crate::import::import_all(&homes, &data, &[], &[]);
+        let report = crate::sync::run(&dirs(), &mut ledger, "machine", false).unwrap();
+        assert_eq!((report.synced, report.unchanged), (1, 1));
+        assert!(ledger
+            .session_ids()
+            .unwrap()
+            .contains(&"ses_two".to_string()));
+    }
+
+    #[test]
     fn a_patch_with_two_files_is_two_edits() {
         let (_dir, path) = fresh();
         let conn = write(&path);
@@ -1925,13 +2481,21 @@ mod tests {
             "a",
             "ses_patch",
             20,
-            tool(
-                "apply_patch",
-                "call_patch",
-                json!({ "files": ["a.txt", "b.txt"] }),
-                "completed",
-                20,
-            ),
+            json!({
+                "type": "tool",
+                "tool": "apply_patch",
+                "callID": "call_patch",
+                "state": {
+                    "status": "completed",
+                    "input": { "patchText": "*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch" },
+                    "output": "ok",
+                    "metadata": { "files": [
+                        { "filePath": "/work/repo/a.txt", "relativePath": "a.txt", "type": "add" },
+                        { "filePath": "/work/repo/b.txt", "relativePath": "b.txt", "type": "update" }
+                    ] },
+                    "time": { "start": 20, "end": 30 }
+                }
+            }),
         );
         drop(conn);
         let s = normalized(&path, "ses_patch");

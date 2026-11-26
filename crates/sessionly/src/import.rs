@@ -510,6 +510,11 @@ fn imported_from(import_file: &Path) -> Option<(PathBuf, u64, u64, u64)> {
     ))
 }
 
+/// The size or stamp of its source that an import file records.
+pub(crate) fn recorded_bytes(import_file: &Path) -> Option<u64> {
+    imported_from(import_file).map(|(_, bytes, _, _)| bytes)
+}
+
 /// Write `events` as an import file, replacing any earlier one in one step.
 fn write_import(import_file: &Path, events: &[Value]) -> Result<()> {
     use std::io::Write;

@@ -39,17 +39,32 @@ pub fn codex_home() -> Option<PathBuf> {
         .or_else(|| home_dir().map(|h| h.join(".codex")))
 }
 
-/// OpenCode's database: `$OPENCODE_DB`, or `$XDG_DATA_HOME/opencode/opencode.db`,
-/// or `~/.local/share/opencode/opencode.db`.
+/// OpenCode's database, found the way OpenCode 1.19.6 finds it: `$OPENCODE_DB`
+/// as given when it is absolute, or else under OpenCode's data folder
+/// (`$XDG_DATA_HOME/opencode`, or `~/.local/share/opencode`); without it,
+/// `opencode.db` there. `:memory:` is a database no other program can read.
+///
+/// A build of the `latest`, `beta` or `prod` channel uses `opencode.db`, and
+/// so does any build with `OPENCODE_DISABLE_CHANNEL_DB`. Another channel's
+/// build (one built from source is `local`) uses `opencode-<channel>.db`,
+/// which is not read here: the channel is only known to the binary.
 pub fn opencode_db() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("OPENCODE_DB").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(path));
-    }
     let data = std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| home_dir().map(|h| h.join(".local").join("share")))?;
-    Some(data.join("opencode").join("opencode.db"))
+        .or_else(|| home_dir().map(|h| h.join(".local").join("share")))
+        .map(|dir| dir.join("opencode"));
+    opencode_db_in(std::env::var_os("OPENCODE_DB"), data)
+}
+
+/// `opencode_db` for a value of `$OPENCODE_DB` and OpenCode's data folder.
+fn opencode_db_in(setting: Option<std::ffi::OsString>, data: Option<PathBuf>) -> Option<PathBuf> {
+    match setting.filter(|v| !v.is_empty()) {
+        Some(path) if path == ":memory:" => None,
+        Some(path) if Path::new(&path).is_absolute() => Some(PathBuf::from(path)),
+        Some(path) => Some(data?.join(path)),
+        None => Some(data?.join("opencode.db")),
+    }
 }
 
 /// Folder holding every agent's raw hook payloads.
@@ -84,4 +99,32 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     }
     #[cfg(not(unix))]
     fs::create_dir_all(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_opencode_database_is_found_as_opencode_finds_it() {
+        let data = Some(PathBuf::from("/data/opencode"));
+        let find = |setting: Option<&str>| opencode_db_in(setting.map(Into::into), data.clone());
+        assert_eq!(
+            find(None),
+            Some(PathBuf::from("/data/opencode/opencode.db"))
+        );
+        assert_eq!(
+            find(Some("")),
+            Some(PathBuf::from("/data/opencode/opencode.db"))
+        );
+        assert_eq!(
+            find(Some("/elsewhere/x.db")),
+            Some(PathBuf::from("/elsewhere/x.db"))
+        );
+        assert_eq!(
+            find(Some("opencode-dev.db")),
+            Some(PathBuf::from("/data/opencode/opencode-dev.db"))
+        );
+        assert_eq!(find(Some(":memory:")), None);
+    }
 }
