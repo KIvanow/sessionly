@@ -63,6 +63,7 @@ function stopped(id) {
     const child = spawn(SESSIONLY, ["capture"], {
       stdio: ["pipe", "ignore", "ignore"],
       detached: true,
+      windowsHide: true,
     });
     child.on("error", () => {});
     child.stdin.on("error", () => {});

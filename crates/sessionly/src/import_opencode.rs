@@ -209,7 +209,10 @@ fn rows_stamp(conn: &Connection, table: &str, id: &str) -> Result<[i64; 3]> {
         "0"
     };
     let sql = format!(
-        "SELECT COUNT(*), COALESCE({updated}, 0), COALESCE(SUM(LENGTH(data)), 0)
+        // `octet_length` is read from the row's header, where `length` of
+        // text would read the text itself: a large tool output is read
+        // only when the session is imported, not at every sync.
+        "SELECT COUNT(*), COALESCE({updated}, 0), COALESCE(SUM(octet_length(data)), 0)
          FROM {table} WHERE session_id = ?1"
     );
     Ok(conn.query_row(&sql, params![id], |row| {
@@ -278,13 +281,32 @@ struct Model {
     provider: Option<String>,
 }
 
+/// The model's id as its maker writes it. A provider's id may carry the
+/// maker (`anthropic/claude-sonnet-4.5` at OpenRouter, `us.anthropic.…` at
+/// Bedrock), and some write Anthropic's versions with a dot where Anthropic
+/// writes a dash (`claude-sonnet-4.5` at OpenRouter and Copilot). Other
+/// makers' dots are theirs (`gpt-5.4`, `gemini-2.5-pro`).
+fn maker_name(id: &str) -> String {
+    let name = id.rsplit('/').next().unwrap_or(id);
+    let name = name.rsplit("anthropic.").next().unwrap_or(name);
+    if name.starts_with("claude-") {
+        name.replace('.', "-")
+    } else {
+        name.to_string()
+    }
+}
+
 fn model_of(provider: &str, id: &str) -> Option<Model> {
     if provider.is_empty() && id.is_empty() {
         return None;
     }
-    let name = id.rsplit('/').next().unwrap_or(id);
+    let name = maker_name(id);
     Some(Model {
-        name: if name.is_empty() { "unknown" } else { name }.to_string(),
+        name: if name.is_empty() {
+            "unknown".to_string()
+        } else {
+            name
+        },
         provider: (!provider.is_empty()).then(|| provider.to_string()),
     })
 }
@@ -310,6 +332,36 @@ struct Meta {
     model: Option<String>,
     time_created: i64,
     revert: Value,
+    parent: Option<String>,
+}
+
+/// The title OpenCode gives a session until its title agent names it:
+/// `New session - ` or `Child session - ` and the time it was made
+/// (`isDefaultTitle` in OpenCode). It is no title.
+fn default_title(title: &str) -> bool {
+    let Some(at) = ["New session - ", "Child session - "]
+        .iter()
+        .find_map(|prefix| title.strip_prefix(prefix))
+    else {
+        return false;
+    };
+    let b = at.as_bytes();
+    let digits = |range: std::ops::Range<usize>| b[range].iter().all(u8::is_ascii_digit);
+    b.len() == 24
+        && digits(0..4)
+        && b[4] == b'-'
+        && digits(5..7)
+        && b[7] == b'-'
+        && digits(8..10)
+        && b[10] == b'T'
+        && digits(11..13)
+        && b[13] == b':'
+        && digits(14..16)
+        && b[16] == b':'
+        && digits(17..19)
+        && b[19] == b'.'
+        && digits(20..23)
+        && b[23] == b'Z'
 }
 
 fn optional_text(value: Option<String>) -> Option<String> {
@@ -318,7 +370,7 @@ fn optional_text(value: Option<String>) -> Option<String> {
 
 fn load_meta(conn: &Connection, id: &str) -> Result<Meta> {
     conn.query_row(
-        "SELECT directory, title, version, agent, model, time_created, revert
+        "SELECT directory, title, version, agent, model, time_created, revert, parent_id
          FROM session WHERE id = ?1",
         params![id],
         |row| {
@@ -332,11 +384,12 @@ fn load_meta(conn: &Connection, id: &str) -> Result<Meta> {
             let revert: Option<String> = row.get(6)?;
             Ok(Meta {
                 directory: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                title: optional_text(row.get(1)?),
+                title: optional_text(row.get(1)?).filter(|title| !default_title(title)),
                 version: optional_text(row.get(2)?),
                 agent: optional_text(row.get(3)?),
                 model: named.filter(|name| name != "unknown"),
                 time_created: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                parent: optional_text(row.get(7)?),
                 revert: revert
                     .and_then(|text| serde_json::from_str(&text).ok())
                     .unwrap_or(Value::Null),
@@ -359,8 +412,10 @@ struct Part {
     data: Value,
 }
 
-fn parse_json(raw: &str, what: &str) -> Result<Value> {
-    serde_json::from_str(raw).with_context(|| format!("{what} is not json"))
+/// A row's data. One that is not an object is left out, not the session it
+/// is in: the rest of the session is still what it was.
+fn parse_json(raw: &str) -> Option<Value> {
+    serde_json::from_str(raw).ok().filter(Value::is_object)
 }
 
 /// The session's messages with their parts, without what going back undid
@@ -397,7 +452,9 @@ fn load_messages(conn: &Connection, id: &str, meta: &Meta) -> Result<Vec<Msg>> {
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut by_message: HashMap<String, Vec<Part>> = HashMap::new();
     for (pid, message_id, at, raw) in part_rows {
-        let data = parse_json(&raw, &format!("part {pid}"))?;
+        let Some(data) = parse_json(&raw) else {
+            continue;
+        };
         by_message
             .entry(message_id)
             .or_default()
@@ -409,7 +466,9 @@ fn load_messages(conn: &Connection, id: &str, meta: &Meta) -> Result<Vec<Msg>> {
         if meta.time_created > 0 && at < meta.time_created {
             continue;
         }
-        let data = parse_json(&raw, &format!("message {mid}"))?;
+        let Some(data) = parse_json(&raw) else {
+            continue;
+        };
         let parts = by_message.remove(&mid).unwrap_or_default();
         loaded.push(Msg {
             id: mid,
@@ -493,12 +552,29 @@ struct Diff {
     created: bool,
 }
 
+/// A Windows path: one with a drive (`C:\`, `C:/`) or a share (`\\host`).
+fn windows_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+        || path.starts_with("\\\\")
+}
+
+/// `path` made absolute from `cwd`. Git writes a diff's path with `/` on
+/// every system, so on Windows (a folder with a drive or a share) the path
+/// is written with `\` throughout, as OpenCode's tools write theirs.
 fn absolute(path: &str, cwd: &str) -> String {
-    let path_buf = Path::new(path);
-    if path_buf.is_absolute() || cwd.is_empty() {
+    let windows = windows_path(cwd) || windows_path(path);
+    let joined = if Path::new(path).is_absolute() || windows_path(path) || cwd.is_empty() {
         path.to_string()
+    } else if windows {
+        format!("{}\\{path}", cwd.trim_end_matches(['\\', '/']))
     } else {
-        Path::new(cwd).join(path_buf).to_string_lossy().into_owned()
+        Path::new(cwd).join(path).to_string_lossy().into_owned()
+    };
+    if windows {
+        joined.replace('/', "\\")
+    } else {
+        joined
     }
 }
 
@@ -509,8 +585,9 @@ fn same_file(tool_path: &str, diff_file: &str, cwd: &str) -> bool {
 /// The tool path ends with the diff's path as OpenCode wrote it: for a
 /// database that does not say where the repository's root is.
 fn ends_with_file(tool_path: &str, diff_file: &str, cwd: &str) -> bool {
-    let rel = diff_file.trim_start_matches("./");
-    !rel.is_empty() && absolute(tool_path, cwd).ends_with(&format!("/{rel}"))
+    let rel = diff_file.trim_start_matches("./").replace('\\', "/");
+    let tool = absolute(tool_path, cwd).replace('\\', "/");
+    !rel.is_empty() && tool.ends_with(&format!("/{rel}"))
 }
 
 /// Which diffs each call made. A path a tool was given takes one diff: the
@@ -1329,6 +1406,8 @@ struct Place<'a> {
     /// What each child session changed, by its id and then by file. A turn
     /// that started one leaves that out.
     child_lines: &'a HashMap<String, HashMap<String, Vec<String>>>,
+    /// The files of its recorded diffs each child session changed.
+    kept: &'a HashMap<String, HashSet<String>>,
 }
 
 /// Prompts, tools and tokens of one OpenCode session. Child sessions are not
@@ -1346,6 +1425,7 @@ fn emit_session(
         cwd,
         root,
         child_lines,
+        ..
     } = *place;
     let (users, assistants) = turns(messages);
     let mut last_ms = messages.iter().map(|msg| msg.at).max().unwrap_or(0);
@@ -1392,24 +1472,41 @@ fn emit_session(
             agent,
             model: None,
         };
-        let diffs = match turn_diffs(user, &calls, cwd, root) {
-            (diffs, true) => {
-                let mut theirs: HashMap<String, Vec<String>> = HashMap::new();
-                for started in children_started(&calls) {
-                    for (file, lines) in child_lines.get(started).into_iter().flatten() {
-                        theirs
-                            .entry(file.clone())
-                            .or_default()
-                            .extend(lines.clone());
-                    }
-                }
-                without_children(diffs, &theirs)
+        let TurnDiffs {
+            recorded,
+            from_tools,
+        } = turn_diffs(user, &calls, cwd, root);
+        let recorded = only_its_own(recorded, agent.map(|(id, _)| id), place);
+        let mut theirs: HashMap<String, Vec<String>> = HashMap::new();
+        for started in children_started(&calls) {
+            for (file, lines) in child_lines.get(started).into_iter().flatten() {
+                theirs
+                    .entry(file.clone())
+                    .or_default()
+                    .extend(lines.clone());
             }
-            (diffs, false) => diffs,
-        };
+        }
+        let mut diffs = without_children(recorded, &theirs);
+        diffs.extend(from_tools);
         emit_calls(out, &calls, &models, &diffs, cwd, &scope);
         if agent.is_none() && !text.is_empty() {
-            out.push(&time_of(stop_at), "Stop", json!({ "prompt_id": user.id }));
+            // How the turn's last reply ended: one that failed and was
+            // tried again is not how the turn ended.
+            let ended = assistants
+                .get(user.id.as_str())
+                .and_then(|replies| replies.last())
+                .and_then(|reply| reply_error(&reply.data));
+            match ended {
+                // Stopped by the person, which is no error: as a turn
+                // interrupted in Claude Code, it has no end.
+                Some(Ended::Aborted) => {}
+                Some(Ended::Failed(error)) => out.push(
+                    &time_of(stop_at),
+                    "StopFailure",
+                    json!({ "prompt_id": user.id, "error": error }),
+                ),
+                None => out.push(&time_of(stop_at), "Stop", json!({ "prompt_id": user.id })),
+            }
         }
     }
     let mut orphans: Vec<&Msg> = assistants
@@ -1452,6 +1549,31 @@ fn emit_session(
     TurnOut { last_ms, model }
 }
 
+/// How a reply that did not finish ended.
+enum Ended {
+    Aborted,
+    Failed(String),
+}
+
+/// The `error` OpenCode wrote on a reply: its name (`APIError`,
+/// `ProviderAuthError`, `MessageOutputLengthError`) and the HTTP status the
+/// provider answered with. Not its message, which a provider may write what
+/// it was sent into. `MessageAbortedError` is the person stopping the turn.
+fn reply_error(data: &Value) -> Option<Ended> {
+    let error = &data["error"];
+    if error.is_null() {
+        return None;
+    }
+    let name = error["name"].as_str().unwrap_or("error");
+    if name == "MessageAbortedError" {
+        return Some(Ended::Aborted);
+    }
+    Some(Ended::Failed(match error["data"]["statusCode"].as_u64() {
+        Some(status) => format!("{name} {status}"),
+        None => name.to_string(),
+    }))
+}
+
 /// The user messages of a session, and the replies to each by its id.
 fn turns(messages: &[Msg]) -> (Vec<&Msg>, HashMap<String, Vec<&Msg>>) {
     let mut users = Vec::new();
@@ -1469,15 +1591,111 @@ fn turns(messages: &[Msg]) -> (Vec<&Msg>, HashMap<String, Vec<&Msg>>) {
     (users, assistants)
 }
 
-/// A turn's diffs, and true when they are the ones OpenCode recorded rather
-/// than ones read from its tools.
-fn turn_diffs(user: &Msg, calls: &[Call], cwd: &str, root: &str) -> (Vec<Diff>, bool) {
+/// A turn's diffs: the ones OpenCode recorded, and from its tools the files
+/// those leave out. A snapshot has only what git sees in the session's
+/// folder: not a file git ignores (`.env`), nor one outside the folder.
+struct TurnDiffs {
+    recorded: Vec<Diff>,
+    from_tools: Vec<Diff>,
+}
+
+fn turn_diffs(user: &Msg, calls: &[Call], cwd: &str, root: &str) -> TurnDiffs {
     let recorded = diffs_of(&user.data, root);
-    if recorded.is_empty() {
-        (diffs_from_calls(calls, cwd), false)
-    } else {
-        (recorded, true)
+    let covered: HashSet<&str> = recorded.iter().map(|diff| diff.file.as_str()).collect();
+    let from_tools = diffs_from_calls(calls, cwd)
+        .into_iter()
+        .filter(|diff| !covered.contains(diff.file.as_str()))
+        .collect();
+    TurnDiffs {
+        recorded,
+        from_tools,
     }
+}
+
+/// The files a session's file tools wrote, and whether it ran a shell
+/// command that worked.
+fn tools_wrote(messages: &[Msg], cwd: &str) -> (HashSet<String>, bool) {
+    let mut wrote = HashSet::new();
+    let mut shell = false;
+    for call in messages.iter().flat_map(calls_of) {
+        if call.status != CallStatus::Ok {
+            continue;
+        }
+        shell |= is_shell(&call.name);
+        if is_file_tool(&call.name) {
+            wrote.extend(paths_of(&call).iter().map(|path| absolute(path, cwd)));
+        }
+    }
+    (wrote, shell)
+}
+
+/// Of the files its recorded diffs name, the ones each child session
+/// changed. A child's diff is a snapshot of the whole repository, so the
+/// children that ran beside it, and the parent's own tools at the same
+/// time, put their changes in it too. A child keeps a file its tools, or
+/// its own children's, wrote. A file no tool beside it wrote, which a shell
+/// command may have changed, goes to the first of the children beside it
+/// that ran one.
+fn files_of_children(
+    children: &[(&String, Meta, Vec<Msg>)],
+    cwd: &str,
+    root: &str,
+) -> HashMap<String, HashSet<String>> {
+    let parent: HashMap<&str, &str> = children
+        .iter()
+        .filter_map(|(id, meta, _)| Some((id.as_str(), meta.parent.as_deref()?)))
+        .collect();
+    let mut wrote_below: HashMap<&str, HashSet<String>> = HashMap::new();
+    let mut shell: HashMap<&str, bool> = HashMap::new();
+    let mut named: HashMap<&str, HashSet<String>> = HashMap::new();
+    for (id, _, messages) in children {
+        let (wrote, ran) = tools_wrote(messages, cwd);
+        shell.insert(id.as_str(), ran);
+        let mut files = HashSet::new();
+        for msg in messages {
+            files.extend(diffs_of(&msg.data, root).into_iter().map(|diff| diff.file));
+        }
+        named.insert(id.as_str(), files);
+        // What a child wrote, its parent and theirs wrote below them.
+        let mut at = Some(id.as_str());
+        let mut steps = 0;
+        while let Some(session) = at.filter(|_| steps <= children.len()) {
+            wrote_below
+                .entry(session)
+                .or_default()
+                .extend(wrote.iter().cloned());
+            at = parent.get(session).copied();
+            steps += 1;
+        }
+    }
+    let empty = HashSet::new();
+    let mut kept: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut taken: HashMap<&str, HashSet<String>> = HashMap::new();
+    let mut order: Vec<&(&String, Meta, Vec<Msg>)> = children.iter().collect();
+    order.sort_by_key(|(id, meta, _)| (meta.time_created, id.as_str()));
+    for (id, meta, _) in order {
+        let id = id.as_str();
+        let mine = wrote_below.get(id).unwrap_or(&empty);
+        let beside: Vec<&str> = children
+            .iter()
+            .map(|(other, _, _)| other.as_str())
+            .filter(|other| *other != id && parent.get(other) == meta.parent.as_deref().as_ref())
+            .collect();
+        let taken = taken
+            .entry(meta.parent.as_deref().unwrap_or(""))
+            .or_default();
+        let mut keep = HashSet::new();
+        for file in named.get(id).unwrap_or(&empty) {
+            let theirs = beside
+                .iter()
+                .any(|other| wrote_below.get(other).is_some_and(|w| w.contains(file)));
+            if mine.contains(file) || (shell[id] && !theirs && taken.insert(file.clone())) {
+                keep.insert(file.clone());
+            }
+        }
+        kept.insert(id.to_string(), keep);
+    }
+    kept
 }
 
 /// The child sessions a turn's `task` calls started.
@@ -1488,10 +1706,22 @@ fn children_started(calls: &[Call]) -> impl Iterator<Item = &str> {
         .filter_map(|call| call.metadata["sessionId"].as_str())
 }
 
-/// Every line a session's turns changed, by file. A turn's diff has what the
-/// sessions it started changed too, so this is all of a child's work, its
-/// own children's with it.
-fn lines_by_file(messages: &[Msg], cwd: &str, root: &str) -> HashMap<String, Vec<String>> {
+/// A child session's recorded diffs without the files it did not change
+/// (see `files_of_children`). The session itself keeps all of its own.
+fn only_its_own(diffs: Vec<Diff>, child: Option<&str>, place: &Place) -> Vec<Diff> {
+    match child.and_then(|id| place.kept.get(id)) {
+        Some(kept) => diffs
+            .into_iter()
+            .filter(|diff| kept.contains(&diff.file))
+            .collect(),
+        None => diffs,
+    }
+}
+
+/// Every line a child session's turns changed, by file. A turn's diff has
+/// what the sessions it started changed too, so this is all of a child's
+/// work, its own children's with it.
+fn lines_by_file(messages: &[Msg], child: &str, place: &Place) -> HashMap<String, Vec<String>> {
     let (users, assistants) = turns(messages);
     let mut found: HashMap<String, Vec<String>> = HashMap::new();
     for user in users {
@@ -1501,7 +1731,9 @@ fn lines_by_file(messages: &[Msg], cwd: &str, root: &str) -> HashMap<String, Vec
             .flatten()
             .flat_map(|reply| calls_of(reply))
             .collect();
-        for diff in turn_diffs(user, &calls, cwd, root).0 {
+        let diffs = turn_diffs(user, &calls, place.cwd, place.root);
+        let recorded = only_its_own(diffs.recorded, Some(child), place);
+        for diff in recorded.into_iter().chain(diffs.from_tools) {
             found.entry(diff.file).or_default().extend(diff.lines);
         }
     }
@@ -1535,17 +1767,24 @@ pub(crate) fn session(db: &Path, id: &str) -> Result<(Vec<Value>, Option<Facts>)
         let child_messages = load_messages(&conn, child_id, &child)?;
         children.push((child_id, child, child_messages));
     }
+    let kept = files_of_children(&children, &cwd, &repo_root);
+    let no_lines = HashMap::new();
+    let first = Place {
+        cwd: &cwd,
+        root: &repo_root,
+        child_lines: &no_lines,
+        kept: &kept,
+    };
     let child_lines = children
         .iter()
         .map(|(child_id, _, messages)| {
-            let lines = lines_by_file(messages, &cwd, &repo_root);
+            let lines = lines_by_file(messages, child_id, &first);
             ((*child_id).clone(), lines)
         })
         .collect();
     let place = Place {
-        cwd: &cwd,
-        root: &repo_root,
         child_lines: &child_lines,
+        ..first
     };
     note_compactions(&mut out, &messages);
     let descriptions = child_descriptions(&messages);
@@ -2128,6 +2367,282 @@ mod tests {
         assert_eq!((s.counts.lines_added, s.counts.lines_removed), (3, 2));
     }
 
+    /// A child session of `parent`, started at `at`, whose recorded diff
+    /// has `diffs` and whose one reply ran `calls`.
+    fn child(conn: &Connection, id: &str, parent: &str, at: i64, diffs: Value, calls: &[Value]) {
+        add_session(conn, id, Some(parent), "general", id, at, json!({}));
+        let user = format!("{id}_u");
+        let reply = format!("{id}_a");
+        add_message(
+            conn,
+            &user,
+            id,
+            at,
+            json!({ "role": "user", "summary": { "diffs": diffs } }),
+        );
+        add_part(conn, &format!("{id}_t"), &user, id, at, text_part("task"));
+        add_message(
+            conn,
+            &reply,
+            id,
+            at + 1,
+            assistant(&user, "ollama/qwen2.5:7b", 0.0, 1, 1),
+        );
+        for (n, call) in calls.iter().enumerate() {
+            add_part(
+                conn,
+                &format!("{id}_p{n}"),
+                &reply,
+                id,
+                at + 2,
+                call.clone(),
+            );
+        }
+    }
+
+    #[test]
+    fn children_beside_each_other_count_only_their_own_changes() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        let x = diff("x.rs", "@@ -1 +1 @@\n-a\n+b\n");
+        let y = diff("y.rs", "@@ -1 +1 @@\n-c\n+d\n");
+        let z = diff("z.txt", "@@ -0,0 +1 @@\n+z\n");
+        add_session(&conn, "ses_p", None, "build", "p", 10, json!({}));
+        add_message(
+            &conn,
+            "u",
+            "ses_p",
+            10,
+            json!({ "role": "user", "summary": { "diffs": [x, y, z] } }),
+        );
+        add_part(&conn, "t", "u", "ses_p", 10, text_part("go"));
+        add_message(
+            &conn,
+            "a",
+            "ses_p",
+            20,
+            assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1),
+        );
+        for (n, kid) in ["ses_a", "ses_b"].iter().enumerate() {
+            let mut task = tool("task", kid, json!({ "description": kid }), "completed", 20);
+            task["state"]["metadata"] = json!({ "sessionId": kid });
+            add_part(&conn, &format!("task{n}"), "a", "ses_p", 20, task);
+        }
+        let edit = |file: &str| {
+            tool(
+                "edit",
+                file,
+                json!({ "filePath": format!("/work/repo/{file}") }),
+                "completed",
+                30,
+            )
+        };
+        // Both ran at once, so each one's snapshot has both their changes,
+        // and z.txt, which B's shell command made.
+        let shell = tool(
+            "bash",
+            "sh",
+            json!({ "command": "make z" }),
+            "completed",
+            30,
+        );
+        child(
+            &conn,
+            "ses_a",
+            "ses_p",
+            21,
+            json!([x, y, z]),
+            &[edit("x.rs")],
+        );
+        child(
+            &conn,
+            "ses_b",
+            "ses_p",
+            22,
+            json!([x, y, z]),
+            &[edit("y.rs"), shell],
+        );
+        drop(conn);
+        let s = normalized(&path, "ses_p");
+        let mut files: Vec<_> = s
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.lines_added, f.lines_removed))
+            .collect();
+        files.sort_unstable();
+        assert_eq!(
+            files,
+            [
+                ("/work/repo/x.rs", 1, 1),
+                ("/work/repo/y.rs", 1, 1),
+                ("/work/repo/z.txt", 1, 0)
+            ]
+        );
+        assert_eq!((s.counts.lines_added, s.counts.lines_removed), (3, 2));
+    }
+
+    #[test]
+    fn a_file_the_snapshot_leaves_out_keeps_its_tools_lines() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_env", None, "build", "env", 10, json!({}));
+        add_message(
+            &conn,
+            "u",
+            "ses_env",
+            10,
+            json!({ "role": "user", "summary": { "diffs": [diff("a.rs", "@@ -1 +1 @@\n-a\n+b\n")] } }),
+        );
+        add_part(&conn, "t", "u", "ses_env", 10, text_part("go"));
+        add_message(
+            &conn,
+            "a",
+            "ses_env",
+            20,
+            assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1),
+        );
+        add_part(
+            &conn,
+            "e1",
+            "a",
+            "ses_env",
+            20,
+            tool(
+                "edit",
+                "e1",
+                json!({ "filePath": "/work/repo/a.rs" }),
+                "completed",
+                20,
+            ),
+        );
+        // Git ignores .env, so the snapshot does not have it.
+        let mut env = tool(
+            "edit",
+            "e2",
+            json!({ "filePath": "/work/repo/.env" }),
+            "completed",
+            30,
+        );
+        env["state"]["metadata"] = json!({ "filediff": {
+            "file": "/work/repo/.env", "patch": "@@ -1 +1,2 @@\n-K=1\n+K=2\n+L=3\n"
+        } });
+        add_part(&conn, "e2", "a", "ses_env", 30, env);
+        drop(conn);
+        let s = normalized(&path, "ses_env");
+        assert_eq!((s.counts.lines_added, s.counts.lines_removed), (3, 2));
+        assert_eq!(s.tool_calls.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_turn_is_an_api_error_and_a_stopped_one_has_no_end() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_err", None, "build", "err", 10, json!({}));
+        for (n, error) in [
+            json!({ "name": "APIError", "data": { "message": "secret prompt text", "statusCode": 529 } }),
+            json!({ "name": "MessageAbortedError", "data": { "message": "aborted" } }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (user, at) = (format!("u{n}"), 10 + n as i64 * 100);
+            add_message(&conn, &user, "ses_err", at, json!({ "role": "user" }));
+            add_part(&conn, &format!("t{n}"), &user, "ses_err", at, text_part("go"));
+            let mut reply = assistant(&user, "ollama/qwen2.5:7b", 0.0, 1, 1);
+            reply["error"] = error;
+            add_message(&conn, &format!("a{n}"), "ses_err", at + 10, reply);
+        }
+        drop(conn);
+        let (events, facts) = session(&path, "ses_err").unwrap();
+        let raw = serde_json::to_string(&events).unwrap();
+        assert!(!raw.contains("secret prompt text"));
+        let s = crate::normalize::from_events(&events, facts.as_ref(), OPENCODE).unwrap();
+        assert_eq!(s.counts.api_errors, 1);
+        assert_eq!(
+            s.prompts[0].outcome,
+            Some(crate::session::Outcome::ApiError)
+        );
+        assert_eq!(s.prompts[0].error.as_deref(), Some("APIError 529"));
+        assert_eq!(s.prompts[1].outcome, None);
+    }
+
+    #[test]
+    fn a_row_that_is_not_json_is_left_out_and_a_placeholder_title_is_no_title() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(
+            &conn,
+            "ses_bad",
+            None,
+            "build",
+            "New session - 2026-10-23T06:50:34.692Z",
+            10,
+            json!({}),
+        );
+        add_message(&conn, "u", "ses_bad", 10, json!({ "role": "user" }));
+        add_part(&conn, "t", "u", "ses_bad", 10, text_part("still here"));
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, data)
+             VALUES ('broken', 'u', 'ses_bad', 11, '{not json')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let s = normalized(&path, "ses_bad");
+        assert_eq!(s.prompts[0].text.preview, "still here");
+        assert_ne!(
+            s.title.as_deref(),
+            Some("New session - 2026-10-23T06:50:34.692Z")
+        );
+        assert!(default_title("Child session - 2026-10-23T06:50:34.692Z"));
+        assert!(!default_title("New session - about the parser"));
+    }
+
+    #[test]
+    fn windows_paths_match_the_diffs_git_wrote() {
+        let (_dir, path) = fresh();
+        let conn = write(&path);
+        add_session(&conn, "ses_win", None, "build", "win", 10, json!({}));
+        conn.execute("UPDATE session SET directory = 'C:\\work\\repo'", [])
+            .unwrap();
+        add_message(
+            &conn,
+            "u",
+            "ses_win",
+            10,
+            json!({ "role": "user", "summary": { "diffs": [diff("src/a.rs", "@@ -1 +1 @@\n-a\n+b\n")] } }),
+        );
+        add_part(&conn, "t", "u", "ses_win", 10, text_part("go"));
+        add_message(
+            &conn,
+            "a",
+            "ses_win",
+            20,
+            assistant("u", "ollama/qwen2.5:7b", 0.0, 1, 1),
+        );
+        add_part(
+            &conn,
+            "e",
+            "a",
+            "ses_win",
+            20,
+            tool(
+                "edit",
+                "e",
+                json!({ "filePath": "C:\\work\\repo\\src\\a.rs" }),
+                "completed",
+                20,
+            ),
+        );
+        drop(conn);
+        let s = normalized(&path, "ses_win");
+        let files: Vec<_> = s.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(files, ["C:\\work\\repo\\src\\a.rs"]);
+        assert_eq!(s.counts.lines_added, 1);
+        assert_eq!(absolute("src/a.rs", "C:\\work"), "C:\\work\\src\\a.rs");
+        assert_eq!(absolute("src/a.rs", "/work"), "/work/src/a.rs");
+    }
+
     #[test]
     fn a_fork_leaves_out_what_it_copied() {
         let (_dir, path) = fresh();
@@ -2341,9 +2856,10 @@ mod tests {
             20,
             assistant("u", "anthropic/claude-sonnet-4-5", 1.0, 10, 1),
         );
-        // OpenRouter puts the maker in the model's id.
+        // OpenRouter puts the maker in the model's id, and writes its
+        // version with a dot.
         let mut routed = assistant("u", "openrouter/x", 1.0, 10, 1);
-        routed["modelID"] = json!("anthropic/claude-sonnet-4-5");
+        routed["modelID"] = json!("anthropic/claude-sonnet-4.5");
         add_message(&conn, "a2", "ses_two", 30, routed);
         drop(conn);
         let s = normalized(&path, "ses_two");

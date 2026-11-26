@@ -35,14 +35,29 @@ does not run the `opencode` command to find it: that command can migrate the dat
   command OpenCode runs as a subtask, such as `/review`, is kept as its name (`/review`), not
   its template, so a review is counted; the arguments typed after it are not kept. Another
   command is kept as the template it expanded to.
+- **The end of a turn.** A reply OpenCode wrote an `error` on (the provider failed, the key
+  was refused) ends its turn as an API error, with the error's name and status, not its
+  message. A turn the person stopped (`MessageAbortedError`) has no end, as one interrupted
+  in Claude Code.
+- **Titles.** OpenCode's placeholder (`New session - <time>`, `Child session - <time>`), which
+  it keeps until its title agent names the session, is not taken for a title.
 - **Files and lines.** OpenCode records a turn's diff on the user message, with paths from the
   root of the repository (the project's worktree), which is not the session's directory when
   OpenCode was started below it. Those lines are put on the file tool that wrote them, or on
   the shell command when that is what changed the file, or on a Write or Edit of their own
-  when neither is there. A turn that started a child session leaves out what the child
-  changed, which the child's own diff counts. OpenCode records no diff outside a git
-  repository, or with `snapshot` off: there the lines are what `edit` and `apply_patch`
-  returned, and a new file `write` made. A file `write` wrote over has no lines.
+  when neither is there. On Windows the paths are written with `\`, as OpenCode's tools write
+  theirs.
+  - The diff is a snapshot of the repository before and after the turn. A turn that started a
+    child session leaves out what the child changed, which the child's own diff counts.
+    Children that ran at the same time each have the others' changes in their snapshot: a
+    child keeps the files its tools, or its children's, wrote, and a file none of them wrote
+    goes to the first that ran a shell command.
+  - The snapshot has only what git sees in the session's folder: not a file git ignores
+    (`.env`), and not one outside the folder. For those, the lines are what the tools
+    returned: `edit` and `apply_patch` their patch, and `write` a new file's content. A file
+    `write` wrote over has no lines. OpenCode records no diff at all outside a git repository,
+    or with `snapshot` off, and there every file is read that way.
+- **A row that is not JSON** is left out, and the rest of its session is read.
 - **A child session** (`parent_id` set, including one a `task` tool started) is folded into the
   session that started it, with its tool calls and tokens. A child whose parent is gone, or
   whose parent is one of OpenCode's own agents (`title`, `summary`, `compaction`), stands
@@ -59,7 +74,11 @@ does not run the `opencode` command to find it: that command can migrate the dat
 - **Models** are kept as their maker names them (`claude-sonnet-4-5`), as the other agents
   record them, and who served each one (`anthropic`, `openrouter`, `ollama`) as its
   `provider` in the session's usage. OpenRouter's ids name the maker too
-  (`anthropic/claude-sonnet-4.5`); the model is the part after it.
+  (`anthropic/claude-sonnet-4.5`); the model is the part after it. Anthropic's models are
+  written with dashes, as Anthropic writes them, where OpenRouter and Copilot write a dot:
+  `claude-sonnet-4.5` is `claude-sonnet-4-5`.
+- **What going back undid costs nothing.** OpenCode deletes it at the next prompt and takes
+  its tokens and cost off the session's own totals, so they cannot be read afterwards.
 - **Times** come from the messages. The session's own update time is not its end: going back
   and other changes that are not work move it.
 - **Cost.** A non-zero cost on an assistant message is OpenCode's figure. A message that
