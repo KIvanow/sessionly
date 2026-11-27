@@ -133,6 +133,9 @@ test("what later commits did: of the sessions counted at an age, and per session
   assert.equal(f.fixedAt(none), "–");
   assert.equal(f.revertedAt(undefined), "–");
 
+  // what a server from before outcomes kept may be anything: nothing counted, and no failure
+  for (const odd of ["none", {}, [null, 5]]) assert.deepEqual(f.laterAges(odd as any).map((a) => a.counted), [false, false, false]);
+
   const day = 86_400;
   const ages = f.laterAges([
     { checkpoint: "7d", fix_commits: 2, rework_commits: 1, age_seconds: 9 * day, by_agent: [{ source: "cursor", fix_commits: 1 }] },

@@ -204,13 +204,20 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
       });
   counting();
 
-  // Sessions whose outcome counts a server from before them kept in the payload alone: kept now, beside the requests.
-  const keepingOutcomes = () =>
-    void keepOutcomesFromPayloads(db).catch((err) => {
-      console.error("keeping outcome counts from payloads failed:", err);
-      setTimeout(keepingOutcomes, 10 * 60_000).unref();
-    });
+  // Sessions whose outcome counts a server from before them kept in the payload alone: kept now, beside the
+  // requests, and every hour after, for what one still running stores meanwhile (a rolling upgrade). One at a time.
+  let keeping = false;
+  const keepingOutcomes = () => {
+    if (keeping) return;
+    keeping = true;
+    void keepOutcomesFromPayloads(db)
+      .catch((err) => console.error("keeping outcome counts from payloads failed:", err))
+      .finally(() => {
+        keeping = false;
+      });
+  };
   keepingOutcomes();
+  setInterval(keepingOutcomes, 60 * 60_000).unref();
 
   // Pull requests' sessions kept before what their opening lines still there
   // count as was, or before what each contributed and is charged was: weighed

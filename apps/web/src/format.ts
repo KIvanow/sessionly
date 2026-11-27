@@ -165,7 +165,8 @@ export function laterWords(o: OutcomeCheckpoint): string {
  */
 export function laterAges(outcomes: readonly OutcomeCheckpoint[] | null | undefined): { name: string; words: string; later: string; late: number | null; counted: boolean }[] {
   return KEPT_AGES.map(({ name, days, words }) => {
-    const o = (outcomes ?? []).find((one) => one.checkpoint === name);
+    // Of what a server sends, the counts only: a server from before them may have kept anything.
+    const o = (Array.isArray(outcomes) ? outcomes : []).find((one) => one && typeof one === "object" && one.checkpoint === name);
     if (!o) return { name, words, later: "–", late: null, counted: false };
     return { name, words, later: laterWords(o), late: takenLate(o.age_seconds ?? 0, days), counted: true };
   });

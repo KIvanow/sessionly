@@ -101,12 +101,23 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   back, in that file or another, was moved, not changed. A line three sessions or more wrote
   in the same file does not count on its own. A commit too big to read whole (more than
   100,000 lines added and removed: a vendored, generated or moved tree) does not count.
+- **A session's lines count from when a commit puts them in the history.** Before that, a
+  line like them that a commit removes (an `if err != nil {` that was there already) was
+  someone else's. A commit that puts them back after a revert gives the session those lines
+  again, so a later change to them counts. Lines a commit moves to another file (a rename)
+  are followed there.
 - **A session's own commits don't count:** those after it began that add its lines (and not
-  only move or re-indent them). One that adds them back after a revert gives the session
-  those lines again, so a later change to them counts.
-- **A repository whose history can't be read** (gone, too slow, too large) is tried again an
+  only move or re-indent them). A revert, or a revert of one, is not a session's own work,
+  so it is never taken for the commit a later revert undoes, nor credited to an agent.
+- **Worktrees of one repository are read as one**, with what each has checked out.
+- **A repository whose history can't be read** (gone, unmounted, too slow) is tried again an
   hour later, then after longer and longer, up to about five days; no count is kept from
-  part of a session's history, for a session in two repositories either.
+  part of a session's history, for a session in two repositories either. One too large to
+  read for every session due at once is read for fewer, the newest first; for a session alone,
+  only its first 2,000 commits that change its lines are read. A partial clone fetches what
+  it needs to show a commit; other repositories fetch nothing.
+- **How long it reads:** up to a minute in all on `sessionly sync` and the automatic sync, and
+  10 seconds on other commands; what is left is read on a later sync.
 - **The counts are kept at 1, 7 and 30 days, as the rewrite checkpoints are**, and age counts
   from the session's end the same way. Unlike those, an age reached before Sessionly looked can
   be counted later from the history; it then says it was late.
@@ -134,12 +145,16 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
 - **Uploaded:** only the counts at each age (`outcomes`), with when each was counted, which
   branches were read, and the names of the agents in `by_agent`; never a commit's SHA, subject
   or files, nor which session made it. `sessionly settings --outcomes off` stops reading
-  history and sending them; what a server already has stays until the session is deleted.
+  history and sending them from then on (unless `SESSIONLY_OUTCOMES=on` is set, which wins).
+  What a server already has stays, until the session is deleted or goes on: a session that is
+  resumed later has a new end, and the counts from its old one are dropped.
 
 On the dashboard, **By tool** and **By model** have **Changed by a fix @7d** and
 **Reverted @30d**, each of the sessions counted at that age, once any is; under the first, which
-agents made the fixes ("2 by Cursor, 1 by no agent known"). A session's page has **Later
-commits** with `1d / 7d / 30d`.
+agents made the fixes ("2 by Cursor, 1 by no agent known"). Each says how many sessions it is
+out of, as **Kept** does; that number also counts sessions with later commits counted and no
+rewrite measurement, so it can be larger than Kept's. A session's page has **Later commits**
+with `1d / 7d / 30d`.
 
 ## What it does and doesn't mean
 

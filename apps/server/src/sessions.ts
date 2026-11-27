@@ -133,15 +133,17 @@ function byAgentOf(o: Partial<OutcomeAt>, age: Omit<OutcomesBy, "source">): Outc
   const left = { ...age };
   for (const b of Array.isArray(o.by_agent) ? o.by_agent : []) {
     if (out.length === MOST_AGENTS) break;
+    if (!b || typeof b !== "object") continue;
     const source = String(b?.source ?? "");
     if (!AGENT_NAME.test(source) || seen.has(source)) continue;
     seen.add(source);
     const entry = { source } as OutcomesBy;
+    // Likely fixes after fixes, and no more of them than its fixes: what it is not left takes nothing from the next.
     for (const field of BY_AGENT_FIELDS) {
-      entry[field] = Math.min(count(b[field]), left[field]);
+      const asked = field === "likely_fix_commits" ? Math.min(count(b[field]), entry.fix_commits) : count(b[field]);
+      entry[field] = Math.min(asked, left[field]);
       left[field] -= entry[field];
     }
-    entry.likely_fix_commits = Math.min(entry.likely_fix_commits, entry.fix_commits);
     out.push(entry);
   }
   return out.sort((a, b) => a.source.localeCompare(b.source));
@@ -186,7 +188,10 @@ export function mergeOutcomes(kept: unknown, upload: Upload): Record<string, Out
   };
   const before = typeof kept === "string" ? JSON.parse(kept) : kept;
   for (const [name, o] of Object.entries((before ?? {}) as Record<string, OutcomeAt>)) take(name, o);
-  for (const o of upload.outcomes ?? []) take(o.checkpoint, o);
+  // As an upload, or a payload a server from before outcomes kept, has them: an entry that is not one is none.
+  for (const o of Array.isArray(upload.outcomes) ? upload.outcomes : []) {
+    if (o && typeof o === "object") take(o.checkpoint, o);
+  }
   return out;
 }
 

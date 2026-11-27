@@ -14,7 +14,8 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
   const rewrite = found.data.upload.rewrite ?? null;
   // What was there 1, 7 and 30 days after it ended, beside what is there now.
   const ages = keptAges(found.data.upload.checkpoints);
-  const outcomes = found.data.upload.outcomes ?? [];
+  // A server from before outcomes may have kept anything there.
+  const outcomes = Array.isArray(found.data.upload.outcomes) ? found.data.upload.outcomes : [];
   const later = laterAges(outcomes);
   const measuredAt = ages.filter((age) => age.lines != null);
   const counts = s.counts ?? {};

@@ -183,7 +183,11 @@ export interface KeptAt {
 export interface OutcomesAt {
   /** Sessions counted at that age. */
   sessions_reached: number;
-  /** Sessions with measured lines at all: what `sessions_reached` is out of. */
+  /**
+   * What `sessions_reached` is out of: sessions with measured lines, as
+   * `KeptAt.sessions_total`, and those with outcomes counted without (a
+   * rewrite measurement not sent); so it may be the larger of the two.
+   */
   sessions_total: number;
   /** Tracked lines those sessions added. */
   lines_tracked: number;

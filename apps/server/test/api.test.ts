@@ -633,15 +633,17 @@ test("outcomes a server from before them kept in the payload are kept from there
     `INSERT INTO sessions (org_id, machine_id, source, session_id, owner_email, content, rw_lines_added, payload) VALUES
        ('default', 'm1', 'claude-code', 'with', 'ann@example.com', 'metadata', 20, $1::jsonb),
        ('default', 'm1', 'claude-code', 'early', 'ann@example.com', 'metadata', 20, $2::jsonb),
-       ('default', 'm1', 'claude-code', 'odd', 'ann@example.com', 'metadata', 20, '{"session":{},"outcomes":"none"}')`,
-    [payload([at("7d", { sha: "SECRET" }), at("1d"), at("90d")]), payload([at("30d")])],
+       ('default', 'm1', 'claude-code', 'odd', 'ann@example.com', 'metadata', 20, '{"session":{},"outcomes":"none"}'),
+       ('default', 'm1', 'claude-code', 'nulls', 'ann@example.com', 'metadata', 20, $3::jsonb)`,
+    [payload([at("7d", { sha: "SECRET" }), at("1d"), at("90d")]), payload([at("30d")]), payload([null, 5, at("7d", { by_agent: [null, { source: "cursor", fix_commits: 1 }] })])],
   );
   await old.close();
   const now = await openDb(url);
   t.after(() => now.close());
-  assert.equal(await keepOutcomesFromPayloads(now, 1), 2);
+  // An entry that is no count, or a list that is none, is none: and the rest are kept.
+  assert.deepEqual(await keepOutcomesFromPayloads(now, 1), { kept: 4, failed: 0 });
   // Once kept, not looked at again.
-  assert.equal(await keepOutcomesFromPayloads(now), 0);
+  assert.deepEqual(await keepOutcomesFromPayloads(now), { kept: 0, failed: 0 });
   const rows = await now.query<{ session_id: string; outcomes: any; payload: any }>(`SELECT session_id, outcomes, payload FROM sessions ORDER BY session_id`);
   const of = (id: string) => rows.find((r) => r.session_id === id)!;
   const json = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
@@ -650,10 +652,27 @@ test("outcomes a server from before them kept in the payload are kept from there
   assert.doesNotMatch(JSON.stringify(json(of("with").payload)), /SECRET/);
   // Counted before the session was 30 days old: not taken, and not looked at again.
   assert.deepEqual([json(of("early").outcomes), json(of("early").payload).outcomes], [{}, []]);
+  assert.deepEqual([json(of("odd").outcomes), json(of("odd").payload).outcomes], [{}, []]);
+  assert.deepEqual(Object.keys(json(of("nulls").outcomes)), ["7d"]);
+  assert.deepEqual(json(of("nulls").outcomes)["7d"].by_agent.map((b: any) => b.source), ["cursor"]);
   const upgraded = createApp(now, {});
   const token = await tokenFor(now, { email: "boss@example.com", role: "admin" });
   const total = ((await (await upgraded.request("/api/v1/summary?by=tool", { headers: auth(token) })).json()) as any).total;
-  assert.deepEqual([total.outcomes_7d.sessions_reached, total.outcomes_7d.fix_commits], [1, 1]);
+  assert.deepEqual([total.outcomes_7d.sessions_reached, total.outcomes_7d.fix_commits], [2, 2]);
+});
+
+test("an agent's likely fixes are no more than its fixes, and what it is not left takes nothing from the next", async () => {
+  const { mergeOutcomes } = await import("../src/sessions.ts");
+  const ended = "2026-11-10T10:30:00Z";
+  const by = [
+    { source: "aaa", fix_commits: 0, likely_fix_commits: 1 },
+    { source: "bbb", fix_commits: 2, likely_fix_commits: 1 },
+  ];
+  const kept = mergeOutcomes({}, {
+    session: { ended_at: ended },
+    outcomes: [{ checkpoint: "7d", fix_commits: 2, likely_fix_commits: 1, computed_at: "2026-11-18T10:30:00Z", ended_at: ended, by_agent: by }],
+  } as Upload);
+  assert.deepEqual(kept["7d"]!.by_agent.map((b) => [b.source, b.fix_commits, b.likely_fix_commits]), [["aaa", 0, 0], ["bbb", 2, 1]]);
 });
 
 test("checkpoints a server from before them kept in the payload are summed after the upgrade", async (t) => {
