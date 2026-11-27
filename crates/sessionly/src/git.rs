@@ -112,11 +112,29 @@ pub fn bounded(
         }
     };
     let (out, fits) = reader.join().map_err(|_| Stop::Failed)?;
+    // Stopped for printing too much, whichever came first: so it did.
+    if !fits {
+        return Ok((out, false));
+    }
     if status.success() {
         Ok((out, fits))
     } else {
         Err(Stop::Failed)
     }
+}
+
+/// The repository a worktree at `root` is of: its common git directory,
+/// the same for each of its worktrees.
+pub fn common_dir(root: &Path) -> Option<PathBuf> {
+    let mut command = command(root);
+    command.args(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (out, fits) = bounded(command, None, 4096, deadline).ok()?;
+    let dir = String::from_utf8_lossy(&out).trim().to_string();
+    (fits && !dir.is_empty()).then(|| {
+        let dir = PathBuf::from(dir);
+        dir.canonicalize().unwrap_or(dir)
+    })
 }
 
 /// Walk up from `dir` to the directory containing `.git` (a directory, or a

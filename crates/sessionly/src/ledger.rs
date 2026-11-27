@@ -225,6 +225,8 @@ pub struct OutcomeTarget {
     pub ended_at: DateTime<Utc>,
     /// Repository root, or the session's working directory.
     pub base: Option<String>,
+    /// The repository root it recorded, if any.
+    pub repo: Option<String>,
     /// Its changed files with the lines added, as hashes.
     pub files: Vec<(String, Vec<u64>)>,
     pub scanned_until: Option<DateTime<Utc>>,
@@ -1151,14 +1153,17 @@ impl Ledger {
     /// was read and which ages are counted; with its files' lines when
     /// `files`, else none (see `outcome_files`).
     pub fn outcome_targets(&self, files: bool) -> Result<Vec<OutcomeTarget>> {
-        type Scan = (Option<String>, String, String, u32);
+        type Scan = (Option<String>, String, String, u32, String);
         let mut scans: std::collections::HashMap<String, Scan> = self
             .conn
             .prepare(
-                "SELECT session_id, scanned_until, tried_at, scope, failures FROM outcome_scans",
+                "SELECT session_id, scanned_until, tried_at, scope, failures, ended_at FROM outcome_scans",
             )?
             .query_map([], |r| {
-                Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+                Ok((
+                    r.get(0)?,
+                    (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?),
+                ))
             })?
             .collect::<rusqlite::Result<_>>()?;
         let mut kept: std::collections::HashMap<String, Vec<String>> = Default::default();
@@ -1171,7 +1176,8 @@ impl Ledger {
             kept.entry(id).or_default().push(checkpoint);
         }
         let mut query = self.conn.prepare(
-            "SELECT s.session_id, s.started_at, s.ended_at, coalesce(s.repo_root, s.cwd), s.source
+            "SELECT s.session_id, s.started_at, s.ended_at, coalesce(s.repo_root, s.cwd), s.source,
+                    s.repo_root
              FROM sessions s
              WHERE s.started_at IS NOT NULL AND s.ended_at IS NOT NULL
                AND EXISTS (SELECT 1 FROM session_files f WHERE f.session_id = s.session_id
@@ -1186,16 +1192,21 @@ impl Ledger {
                     r.get::<_, String>(2)?,
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, Option<String>>(5)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut targets = Vec::new();
-        for (id, started, ended, base, source) in rows {
+        for (id, started, ended, base, source, repo) in rows {
             let (Some(started_at), Some(ended_at)) = (time(Some(started)), time(Some(ended)))
             else {
                 continue;
             };
-            let scan = scans.remove(&id);
+            // What was read for the end it has now: one read for another
+            // (a session resumed since these were read) is none.
+            let scan = scans
+                .remove(&id)
+                .filter(|s| time(Some(s.4.clone())) == Some(ended_at));
             targets.push(OutcomeTarget {
                 kept: kept.remove(&id).unwrap_or_default(),
                 scanned_until: scan.as_ref().and_then(|s| time(s.0.clone())),
@@ -1207,6 +1218,7 @@ impl Ledger {
                 started_at,
                 ended_at,
                 base,
+                repo,
                 files: Vec::new(),
             });
         }

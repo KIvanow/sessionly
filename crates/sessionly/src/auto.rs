@@ -271,7 +271,8 @@ fn once() -> (String, Option<Config>) {
     };
     let outcome = (|| -> Result<String> {
         let mut ledger = Ledger::open(&crate::paths::ledger_path()?)?;
-        let (synced, _) = crate::sync::sync_all(&mut ledger, &config, false)?;
+        let (synced, _) =
+            crate::sync::sync_all(&mut ledger, &config, false, crate::outcomes::PATIENT)?;
         let mut outcome = format!(
             "synced {} ({} unchanged, {} failed)",
             synced.synced,

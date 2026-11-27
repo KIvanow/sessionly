@@ -883,11 +883,11 @@ pub fn outcomes(s: &Session, events: &[OutcomeEvent], kept: &[OutcomeCheckpoint]
     let _ = writeln!(out, "Later      {}", later_at(kept));
     if events.is_empty() {
         match kept.last() {
-            Some(last) => {
+            Some(_) => {
                 let _ = writeln!(
                     out,
-                    "\nNo later commit changed two or more of its lines by {}.",
-                    last.checkpoint
+                    "\nIn the latest reading of the history, no later commit changed two or more \
+                     of its lines. The counts above are as each age was counted."
                 );
             }
             None => {

@@ -525,7 +525,7 @@ fn run(command: Command) -> Result<()> {
         Command::Watch => watch::run(&paths::raw_root()?)?,
         Command::Sync { force } => {
             let mut ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
-            let (report, rewrite) = sync_ledger(&mut ledger, force)?;
+            let (report, rewrite) = sync_ledger_for(&mut ledger, force, outcomes::PATIENT)?;
             println!(
                 "Synced: {} updated, {} unchanged, {} without usable events",
                 report.synced, report.unchanged, report.empty
@@ -819,7 +819,7 @@ fn run(command: Command) -> Result<()> {
             if let Some(words) = &fix_words {
                 let words: Vec<String> = words
                     .split(',')
-                    .map(|w| w.trim().to_lowercase())
+                    .map(|w| w.trim().to_string())
                     .filter(|w| !w.is_empty())
                     .collect();
                 if words.is_empty() {
@@ -832,7 +832,9 @@ fn run(command: Command) -> Result<()> {
                          that is not a letter or digit"
                     );
                 }
-                config.outcomes_fix_words = (words != ["default"]).then_some(words);
+                let default = words.len() == 1 && words[0].eq_ignore_ascii_case("default");
+                config.outcomes_fix_words =
+                    (!default).then(|| words.iter().map(|w| w.to_lowercase()).collect());
             }
             if content.is_some()
                 || shell_edits.is_some()
@@ -885,8 +887,17 @@ fn sync_ledger(
     ledger: &mut ledger::Ledger,
     force: bool,
 ) -> Result<(sync::Report, rewrite::Report)> {
+    sync_ledger_for(ledger, force, outcomes::WAITED_FOR)
+}
+
+/// The same, reading history for outcomes for no longer than `outcomes_for`.
+fn sync_ledger_for(
+    ledger: &mut ledger::Ledger,
+    force: bool,
+    outcomes_for: std::time::Duration,
+) -> Result<(sync::Report, rewrite::Report)> {
     let config = config::Config::load(&paths::config_path()?)?.with_environment();
-    let (report, rewrite) = sync::sync_all(ledger, &config, force)?;
+    let (report, rewrite) = sync::sync_all(ledger, &config, force, outcomes_for)?;
     for (path, err) in &report.failed {
         eprintln!("warning: could not sync {}: {err}", path.display());
     }

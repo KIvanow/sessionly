@@ -27,8 +27,9 @@
   { "message": "fix: revert, \"fix: escape ids with null bytes\"\n\nThis reverts commit abc1234.", "signals": ["fix_message", "fix_conventional", "revert_subject"], "reverts": ["abc1234"] },
   { "message": "revert: narrow the pull request triggers", "signals": ["revert_subject"] },
   { "message": "Reverting to the old layout was considered", "signals": [] },
-  { "message": "Explain why this reverts commit abc is wrong", "signals": [], "reverts": [], "note": "only 'This reverts commit' followed by 7 to 40 hex digits counts" },
+  { "message": "Explain why this reverts commit abc is wrong", "signals": [], "reverts": [], "note": "only 'This reverts commit' followed by 7 to 64 hex digits counts" },
   { "message": "Undo\n\nthis  reverts   commit DEADBEEF1", "signals": [], "reverts": ["deadbeef1"] },
-  { "message": "Revert part of it\n\nThis reverts commit abc12.", "signals": ["revert_subject"], "reverts": [], "note": "fewer than 7 hex digits is not a SHA" }
+  { "message": "Revert part of it\n\nThis reverts commit abc12.", "signals": ["revert_subject"], "reverts": [], "note": "fewer than 7 hex digits is not a SHA" },
+  { "message": "Revert \"x\"\n\nThis reverts commit 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.", "signals": ["revert_subject"], "reverts": ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"], "note": "a SHA-256 repository's commit: 64 hex digits" }
  ]
 }
