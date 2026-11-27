@@ -52,6 +52,12 @@ pub struct Config {
     /// Ask once a day, during a background upload, whether a newer release
     /// is out, and say so in `status`. The capture hooks never ask.
     pub update_check: bool,
+    /// Read the repositories' history for what later commits did to the
+    /// agents' lines (see `outcomes`), and upload the counts.
+    pub outcomes: bool,
+    /// The words that make a commit subject a fix, in place of the defaults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcomes_fix_words: Option<Vec<String>>,
 }
 
 /// How much of what changes in a repository while an agent's shell command
@@ -100,6 +106,8 @@ impl Default for Config {
             upload_line_hashes: false,
             shell_edits: ShellEdits::default(),
             update_check: true,
+            outcomes: true,
+            outcomes_fix_words: None,
         }
     }
 }
@@ -133,7 +141,8 @@ impl Config {
     /// - `SESSIONLY_URL` and `SESSIONLY_TOKEN` name the server, unless one is
     ///   already saved;
     /// - `SESSIONLY_CONTENT` (`metadata` or `previews`) and
-    ///   `SESSIONLY_LINE_HASHES` (`on` or `off`) override what is saved.
+    ///   `SESSIONLY_LINE_HASHES` and `SESSIONLY_OUTCOMES` (`on` or `off`)
+    ///   override what is saved.
     ///
     /// The result is for use, not for saving: a token from the environment
     /// is never written to disk.
@@ -163,6 +172,11 @@ impl Config {
         match var("SESSIONLY_LINE_HASHES").as_deref() {
             Some("on" | "true" | "1") => self.upload_line_hashes = true,
             Some("off" | "false" | "0") => self.upload_line_hashes = false,
+            _ => {}
+        }
+        match var("SESSIONLY_OUTCOMES").as_deref() {
+            Some("on" | "true" | "1") => self.outcomes = true,
+            Some("off" | "false" | "0") => self.outcomes = false,
             _ => {}
         }
         self

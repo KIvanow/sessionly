@@ -73,7 +73,14 @@ pub fn sync_all(
         .map(|source| SourceDirs::in_data_dir(&data_dir, source))
         .collect();
     let report = run(&sources, ledger, &config.machine_id, force)?;
-    let rewrite = crate::rewrite::measure(ledger, chrono::Utc::now())?;
+    let now = chrono::Utc::now();
+    let rewrite = crate::rewrite::measure(ledger, now)?;
+    if config.outcomes {
+        let words = crate::outcomes::Words::new(config.outcomes_fix_words.as_deref());
+        crate::outcomes::measure(ledger, &words, now)?;
+    } else {
+        ledger.forget_outcomes()?;
+    }
     Ok((report, rewrite))
 }
 

@@ -576,6 +576,54 @@ pub struct Upload {
     /// Left out while there is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub checkpoints: Vec<RewriteCheckpoint>,
+    /// What later commits did to the agent's lines, at 1, 7 and 30 days after
+    /// the session ended, read from the repository's history on this machine.
+    /// Counts only. Left out while there is none, and when it is switched off
+    /// (`sessionly settings --outcomes off`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outcomes: Vec<OutcomeCheckpoint>,
+}
+
+/// What commits after a session did to the lines its agent added, up to a
+/// fixed age after it ended. A commit touches the session when it removes or
+/// changes at least two of those lines and is not one that brought them in.
+/// Counts and times only; once taken it is kept as it is.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct OutcomeCheckpoint {
+    /// The age it is for: `1d`, `7d` or `30d` after the session ended.
+    pub checkpoint: String,
+    /// Lines the agent added that are tracked.
+    pub lines_tracked: u64,
+    /// Commits whose subject says they fix something and that changed the
+    /// agent's lines: "changed by a fix". Most such fixes are of something
+    /// else; this does not say the agent's lines were wrong.
+    pub fix_commits: u64,
+    /// Of those, the ones where at least half of the lines the commit removed
+    /// were the agent's.
+    pub likely_fix_commits: u64,
+    /// The agent's lines those commits removed or changed. A line several
+    /// sessions wrote is shared among them, so this may be fractional.
+    pub lines_fixed: f64,
+    /// Commits that changed the agent's lines and say neither.
+    pub rework_commits: u64,
+    pub lines_reworked: f64,
+    /// Commits that reverted the session's own commits, or took out most of
+    /// its lines with a subject that says revert.
+    pub revert_commits: u64,
+    pub lines_reverted: f64,
+    /// Every revert in this age was itself reverted in it.
+    pub relanded: bool,
+    pub computed_at: Option<DateTime<Utc>>,
+    /// How long after the session ended it was counted: the age, or more.
+    pub age_seconds: u64,
+    /// When the session had ended, as the age was counted.
+    pub ended_at: Option<DateTime<Utc>>,
+    /// Counted a day or more after the age was reached.
+    pub late: bool,
+    /// Which branches were read: `head_and_default` (the one checked out and
+    /// the remote's default branch) or `head_only`.
+    pub scope: String,
 }
 
 /// Lines an agent added to one file with one model. A line is hashed without

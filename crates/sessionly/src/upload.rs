@@ -170,6 +170,7 @@ pub fn build(
             Vec::new()
         },
         checkpoints: ledger.checkpoints_of(&session.session_id)?,
+        outcomes: ledger.outcome_checkpoints_of(&session.session_id)?,
     })
 }
 
@@ -1175,6 +1176,7 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
             }),
             lines: Vec::new(),
             checkpoints: Vec::new(),
+            outcomes: Vec::new(),
         };
         let before = payload_hash(&upload);
         upload.rewrite.as_mut().unwrap().measured_at = Some(Utc::now());
@@ -1196,6 +1198,7 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
             rewrite: None,
             lines: Vec::new(),
             checkpoints: Vec::new(),
+            outcomes: Vec::new(),
         };
         // As every agent but Claude Code sends it, and as it was sent before.
         let before = payload_hash(&upload);

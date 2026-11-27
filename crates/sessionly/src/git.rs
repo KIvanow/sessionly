@@ -1,7 +1,92 @@
-//! Minimal git helpers: repository root, credential-free remote, and user identity.
+//! Minimal git helpers: repository root, credential-free remote, user
+//! identity, and running git with a deadline and a cap on what it prints.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// Why git gave no usable answer.
+#[derive(Debug, PartialEq)]
+pub enum Stop {
+    Failed,
+    TimedOut,
+    TooLarge,
+}
+
+/// `git -C <root>` for reading: no file system monitor is started and no
+/// optional lock is taken, so it never gets in the way of the person's own git.
+pub fn command(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "core.fsmonitor=false"])
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    command
+}
+
+/// Run `command` and return what it printed, as far as `max_bytes`, and
+/// whether it all fit. Past `deadline` it is killed.
+pub fn bounded(
+    mut command: Command,
+    input: Option<&[u8]>,
+    max_bytes: usize,
+    deadline: Instant,
+) -> Result<(Vec<u8>, bool), Stop> {
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|_| Stop::Failed)?;
+    let mut stdout = child.stdout.take().ok_or(Stop::Failed)?;
+    // Read while it runs, so a long answer cannot block it.
+    let reader = std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut chunk = [0u8; 64 * 1024];
+        let mut fits = true;
+        while let Ok(n) = stdout.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            let room = max_bytes.saturating_sub(kept.len());
+            kept.extend_from_slice(&chunk[..n.min(room)]);
+            fits &= n <= room;
+        }
+        (kept, fits)
+    });
+    if let Some(input) = input {
+        let mut stdin = child.stdin.take().ok_or(Stop::Failed)?;
+        let _ = stdin.write_all(input);
+    }
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            gone => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(match gone {
+                    Ok(_) => Stop::TimedOut,
+                    Err(_) => Stop::Failed,
+                });
+            }
+        }
+    };
+    let (out, fits) = reader.join().map_err(|_| Stop::Failed)?;
+    if status.success() {
+        Ok((out, fits))
+    } else {
+        Err(Stop::Failed)
+    }
+}
 
 /// Walk up from `dir` to the directory containing `.git` (a directory, or a
 /// file for worktrees and submodules).

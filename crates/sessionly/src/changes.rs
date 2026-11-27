@@ -44,13 +44,13 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use crate::git::Stop;
 
 /// The shell tool as Claude Code and as Cursor name it.
 const SHELL_TOOLS: &[&str] = &["Bash", "Shell"];
@@ -145,13 +145,6 @@ enum Event<'a> {
     },
     /// A file tool began, or ended, its work on a file.
     Edit { path: PathBuf, ended: bool },
-}
-
-#[derive(Debug, PartialEq)]
-enum Stop {
-    Failed,
-    TimedOut,
-    TooLarge,
 }
 
 /// Called with each captured tool event. For a shell command's start it
@@ -615,70 +608,15 @@ impl Git<'_> {
         input: Option<&[u8]>,
         private: Option<&Path>,
     ) -> Result<(Vec<u8>, bool), Stop> {
-        let mut command = Command::new("git");
-        command
-            .arg("-C")
-            .arg(self.root)
-            .args(["-c", "core.fsmonitor=false"])
-            .args(args)
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+        let mut command = crate::git::command(self.root);
+        command.args(args);
         if let Some(objects) = private {
             command
                 .env("GIT_INDEX_FILE", self.index())
                 .env("GIT_OBJECT_DIRECTORY", self.dir.join("objects"))
                 .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", objects);
         }
-        let mut child = command.spawn().map_err(|_| Stop::Failed)?;
-        let mut stdout = child.stdout.take().ok_or(Stop::Failed)?;
-        // Read while it runs, so a long answer cannot block it.
-        let reader = std::thread::spawn(move || {
-            let mut kept = Vec::new();
-            let mut chunk = [0u8; 64 * 1024];
-            let mut fits = true;
-            while let Ok(n) = stdout.read(&mut chunk) {
-                if n == 0 {
-                    break;
-                }
-                let room = MAX_PATCH_BYTES.saturating_sub(kept.len());
-                kept.extend_from_slice(&chunk[..n.min(room)]);
-                fits &= n <= room;
-            }
-            (kept, fits)
-        });
-        if let Some(input) = input {
-            let mut stdin = child.stdin.take().ok_or(Stop::Failed)?;
-            let _ = stdin.write_all(input);
-        }
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() < self.deadline => {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                gone => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = reader.join();
-                    return Err(match gone {
-                        Ok(_) => Stop::TimedOut,
-                        Err(_) => Stop::Failed,
-                    });
-                }
-            }
-        };
-        let (out, fits) = reader.join().map_err(|_| Stop::Failed)?;
-        if status.success() {
-            Ok((out, fits))
-        } else {
-            Err(Stop::Failed)
-        }
+        crate::git::bounded(command, input, MAX_PATCH_BYTES, self.deadline)
     }
 
     /// Our index for this repository. A session that works in two (a
@@ -943,6 +881,7 @@ pub fn of(record: &Value) -> impl Iterator<Item = (&str, bool, impl Iterator<Ite
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     /// One event at `now`, looked at in no time.
     fn step(dir: &Path, event: Event, now: u64) -> Option<Value> {

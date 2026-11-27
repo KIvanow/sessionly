@@ -2,9 +2,12 @@
 
 use std::fmt::Write;
 
+use crate::ledger::OutcomeEvent;
 use crate::ledger::{Group, GroupBy, Listed, Rewrite, RewriteRow};
 use crate::rewrite::{CHECKPOINTS, REWRITTEN_BELOW};
-use crate::session::{Outcome, ReviewRan, ReviewVia, RewriteCheckpoint, Session, ToolStatus};
+use crate::session::{
+    Outcome, OutcomeCheckpoint, ReviewRan, ReviewVia, RewriteCheckpoint, Session, ToolStatus,
+};
 use crate::transcript::{CostSource, TranscriptSummary, Usage, UsageByModel};
 
 pub fn transcript(s: &TranscriptSummary) -> String {
@@ -208,13 +211,63 @@ fn kept_at(checkpoints: &[RewriteCheckpoint]) -> String {
         .join(", ")
 }
 
+/// What later commits did to the session's lines at each fixed age:
+/// `1d nothing, 7d changed by 2 fixes (1 likely), 30d -`. An age not reached,
+/// or not counted yet, is a dash; one counted a day or more late says when.
+fn later_at(outcomes: &[OutcomeCheckpoint]) -> String {
+    CHECKPOINTS
+        .iter()
+        .map(|(name, _)| {
+            let Some(o) = outcomes.iter().find(|o| o.checkpoint == *name) else {
+                return format!("{name} -");
+            };
+            let mut parts: Vec<String> = Vec::new();
+            if o.revert_commits > 0 {
+                parts.push(if o.relanded {
+                    "reverted and relanded".into()
+                } else {
+                    "reverted".into()
+                });
+            }
+            if o.fix_commits > 0 {
+                let likely = if o.likely_fix_commits > 0 {
+                    format!(" ({} likely)", o.likely_fix_commits)
+                } else {
+                    String::new()
+                };
+                parts.push(format!(
+                    "changed by {} fix{}{likely}",
+                    o.fix_commits,
+                    if o.fix_commits == 1 { "" } else { "es" }
+                ));
+            }
+            if o.rework_commits > 0 {
+                parts.push(format!("reworked {}x", o.rework_commits));
+            }
+            let what = if parts.is_empty() {
+                "nothing".to_string()
+            } else {
+                parts.join(", ")
+            };
+            if o.late {
+                format!("{name} {what} (taken on day {})", o.age_seconds / 86_400)
+            } else {
+                format!("{name} {what}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// `sessionly show`: one normalized session, with the latest rewrite
-/// measurement of its changed files, and what it was at fixed ages.
+/// measurement of its changed files, what it was at fixed ages, and what
+/// later commits did to it.
 pub fn session(
     s: &Session,
     rewrite: &[RewriteRow],
     measured_at: Option<&str>,
     checkpoints: &[RewriteCheckpoint],
+    outcomes: &[OutcomeCheckpoint],
 ) -> String {
     let mut out = String::new();
     let field = |out: &mut String, name: &str, value: String| {
@@ -398,6 +451,17 @@ pub fn session(
             &mut out,
             if rewrite.is_empty() { "Rewrite" } else { "" },
             format!("still there after it ended: {}", kept_at(checkpoints)),
+        );
+    }
+    if !outcomes.is_empty() {
+        field(
+            &mut out,
+            "Later",
+            format!(
+                "{} (sessionly outcomes {})",
+                later_at(outcomes),
+                short(&s.session_id)
+            ),
         );
     }
 
@@ -714,10 +778,26 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
             String::new()
         }
     };
+    // Shown only where a session in the filter has an age counted.
+    let outcomes = groups.iter().any(|g| g.outcomes.reached_7d > 0);
+    let of = |n: u64, total: u64| {
+        if total == 0 {
+            "-".to_string()
+        } else {
+            format!("{n}/{total}")
+        }
+    };
+    let outcomes_columns = |fixed: String, reverted: String| {
+        if outcomes {
+            format!("  {fixed:>9}  {reverted:>12}")
+        } else {
+            String::new()
+        }
+    };
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{:<width$}  {:>8}  {:>9}  {:>8}  {:>7}  {:>14}  {:>5}  {:>14}  {:>13}  {:>10}{}",
+        "{:<width$}  {:>8}  {:>9}  {:>8}  {:>7}  {:>14}  {:>5}  {:>14}  {:>13}  {:>10}{}{}",
         heading,
         "SESSIONS",
         "COST",
@@ -728,7 +808,8 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
         "LINES",
         "REWRITTEN",
         "LINES KEPT",
-        reviews_column("REVIEWS".into())
+        reviews_column("REVIEWS".into()),
+        outcomes_columns("FIX@7D".into(), "REVERTED@30D".into())
     );
     let mut without_cost = 0;
     for g in groups {
@@ -736,7 +817,9 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
             let _ = writeln!(
                 out,
                 "{}",
-                "-".repeat(width + 106 + if reviews { 9 } else { 0 })
+                "-".repeat(
+                    width + 106 + if reviews { 9 } else { 0 } + if outcomes { 25 } else { 0 }
+                )
             );
             without_cost = g.sessions_without_cost;
         }
@@ -751,7 +834,7 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
         };
         let _ = writeln!(
             out,
-            "{:<width$}  {:>8}  {:>9}  {:>8}  {:>7}  {:>14}  {:>5}  {:>14}  {:>13}  {:>10}{}",
+            "{:<width$}  {:>8}  {:>9}  {:>8}  {:>7}  {:>14}  {:>5}  {:>14}  {:>13}  {:>10}{}{}",
             fit(&label(g), width),
             g.sessions,
             if g.sessions_without_cost == g.sessions && g.sessions > 0 {
@@ -766,7 +849,11 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
             format!("+{} -{}", g.lines_added, g.lines_removed),
             rewritten,
             percent(g.rewrite.line_survival()),
-            reviews_column(g.reviews.to_string())
+            reviews_column(g.reviews.to_string()),
+            outcomes_columns(
+                of(g.outcomes.fixed_7d, g.outcomes.reached_7d),
+                of(g.outcomes.reverted_30d, g.outcomes.reached_30d)
+            )
         );
     }
     if without_cost > 0 {
@@ -775,6 +862,68 @@ pub fn summary(groups: &[Group], by: GroupBy) -> String {
             "({without_cost} sessions have no cost figure and add nothing to COST)"
         );
     }
+    if outcomes {
+        let _ = writeln!(
+            out,
+            "(FIX@7D: sessions whose lines a later fix commit changed within 7 days, of those 7 days old; \
+             mostly the fix was of something else. REVERTED@30D: reverted within 30 days and not relanded.)"
+        );
+    }
+    out
+}
+
+/// `sessionly outcomes`: the later commits that touched a session's lines,
+/// and the counts at fixed ages.
+pub fn outcomes(s: &Session, events: &[OutcomeEvent], kept: &[OutcomeCheckpoint]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Session    {}", s.session_id);
+    if let Some(ended) = s.ended_at {
+        let _ = writeln!(out, "Ended      {}", minute(&ended.to_rfc3339()));
+    }
+    let _ = writeln!(out, "Later      {}", later_at(kept));
+    if events.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nNo later commit has changed two or more of its lines{}.",
+            if kept.is_empty() { " yet" } else { "" }
+        );
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "\n{:<9}  {:<16}  {:<6}  {:>7}  {:<26}  SUBJECT",
+        "COMMIT", "DATE", "KIND", "LINES", "SIGNALS"
+    );
+    for e in events {
+        let kind = match e.kind.as_str() {
+            "fix" if e.strength >= crate::outcomes::LIKELY_FIX => "fix*",
+            kind => kind,
+        };
+        let lines = if e.lines.fract() == 0.0 {
+            format!("{}", e.lines)
+        } else {
+            format!("{:.1}", e.lines)
+        };
+        let mut subject = e.subject.clone();
+        if let Some(at) = e.relanded_at {
+            let _ = write!(subject, " (relanded {})", at.format("%Y-%m-%d"));
+        }
+        let _ = writeln!(
+            out,
+            "{:<9}  {:<16}  {:<6}  {:>7}  {:<26}  {}",
+            e.sha.chars().take(9).collect::<String>(),
+            e.at.format("%Y-%m-%d %H:%M"),
+            kind,
+            lines,
+            fit(&e.signals.join(","), 26),
+            fit(&subject, 72)
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\nA fix here changed the session's lines; mostly it fixed something else. \
+         fix* is a likely fix: at least half of what it removed was the session's."
+    );
     out
 }
 
@@ -861,9 +1010,9 @@ mod tests {
         let kept = [at("1d", 14, day + 60), at("7d", 5, 9 * day)];
         let line = "still there after it ended: 1d 88%, 7d 31% (taken on day 9), 30d -";
         // The ledger was rebuilt and the files are gone: the checkpoints are what is left.
-        let alone = session(&Session::default(), &[], None, &kept);
+        let alone = session(&Session::default(), &[], None, &kept, &[]);
         assert!(alone.contains(&format!("Rewrite    {line}")), "{alone}");
-        assert!(!session(&Session::default(), &[], None, &[]).contains("still there"));
+        assert!(!session(&Session::default(), &[], None, &[], &[]).contains("still there"));
         let row = RewriteRow {
             session_id: "s".into(),
             path: "a.rs".into(),
@@ -873,7 +1022,7 @@ mod tests {
             branch: None,
             head: None,
         };
-        let both = session(&Session::default(), &[row], None, &kept);
+        let both = session(&Session::default(), &[row], None, &kept, &[]);
         assert!(both.contains("added lines still there"), "{both}");
         assert!(both.contains(&format!("           {line}")), "{both}");
     }

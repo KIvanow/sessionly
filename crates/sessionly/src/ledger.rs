@@ -14,7 +14,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row as S
 use serde::Serialize;
 
 use crate::rewrite::{FileLines, CHECKPOINTS, REWRITTEN_BELOW};
-use crate::session::{RewriteCheckpoint, Session};
+use crate::session::{OutcomeCheckpoint, RewriteCheckpoint, Session};
 
 /// Bump to change the table layout; older ledgers are rebuilt on open.
 const DB_VERSION: i64 = 6;
@@ -152,6 +152,101 @@ CREATE TABLE IF NOT EXISTS checkpoints_since (
 );
 ";
 
+/// What later commits did to each session's lines (see `outcomes`). Kept
+/// apart from the tables above, like the checkpoints: history is read again
+/// only when an age needs it. `outcome_events` are the commits that touched a
+/// session, for this machine only (their SHAs and subjects are never
+/// uploaded); `outcome_checkpoints` the counts at fixed ages, written once;
+/// `outcome_scans` how far each session's history has been read, counted
+/// from the end it had then.
+const OUTCOME_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS outcome_events (
+    session_id  TEXT NOT NULL,
+    sha         TEXT NOT NULL,
+    -- committer date
+    at          TEXT NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('fix', 'revert', 'rework')),
+    -- JSON array of signal ids
+    signals     TEXT NOT NULL,
+    -- the session's lines it removed, shared lines split among their sessions
+    lines       REAL NOT NULL,
+    -- the copies of them the session held
+    copies      REAL NOT NULL,
+    -- copies / all tracked lines the commit removed (fixes only)
+    strength    REAL NOT NULL,
+    -- when a later commit reverted this revert
+    relanded_at TEXT,
+    subject     TEXT NOT NULL,
+    PRIMARY KEY (session_id, sha)
+);
+CREATE TABLE IF NOT EXISTS outcome_checkpoints (
+    session_id         TEXT NOT NULL,
+    checkpoint         TEXT NOT NULL CHECK (checkpoint IN ('1d', '7d', '30d')),
+    lines_tracked      INTEGER NOT NULL,
+    fix_commits        INTEGER NOT NULL,
+    likely_fix_commits INTEGER NOT NULL,
+    lines_fixed        REAL NOT NULL,
+    rework_commits     INTEGER NOT NULL,
+    lines_reworked     REAL NOT NULL,
+    revert_commits     INTEGER NOT NULL,
+    lines_reverted     REAL NOT NULL,
+    relanded           INTEGER NOT NULL,
+    computed_at        TEXT NOT NULL,
+    age_seconds        INTEGER NOT NULL,
+    ended_at           TEXT NOT NULL,
+    late               INTEGER NOT NULL,
+    scope              TEXT NOT NULL,
+    PRIMARY KEY (session_id, checkpoint)
+);
+CREATE TABLE IF NOT EXISTS outcome_scans (
+    session_id    TEXT PRIMARY KEY,
+    ended_at      TEXT NOT NULL,
+    -- history was read up to here; null while it never could be
+    scanned_until TEXT,
+    tried_at      TEXT NOT NULL,
+    scope         TEXT NOT NULL
+);
+";
+
+/// A session whose lines later commits may have touched.
+#[derive(Debug, Clone)]
+pub struct OutcomeTarget {
+    pub session_id: String,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: DateTime<Utc>,
+    /// Repository root, or the session's working directory.
+    pub base: Option<String>,
+    /// Its changed files with the lines added, as hashes.
+    pub files: Vec<(String, Vec<u64>)>,
+    pub scanned_until: Option<DateTime<Utc>>,
+    pub tried_at: Option<DateTime<Utc>>,
+    pub scope: Option<String>,
+    /// The ages already counted.
+    pub kept: Vec<String>,
+}
+
+/// A commit that touched a session's lines.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OutcomeEvent {
+    pub session_id: String,
+    pub sha: String,
+    pub at: DateTime<Utc>,
+    /// `fix`, `revert` or `rework`.
+    pub kind: String,
+    pub signals: Vec<String>,
+    pub lines: f64,
+    pub copies: f64,
+    pub strength: f64,
+    pub relanded_at: Option<DateTime<Utc>>,
+    pub subject: String,
+}
+
+fn time(text: Option<String>) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&text?)
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
+}
+
 /// A session a server has that is a session no more.
 #[derive(Debug, PartialEq)]
 pub struct Withdrawal {
@@ -171,6 +266,17 @@ const REWRITE_TOTALS: &str = "
             sum(surviving) AS rw_surviving,
             max(measured_at) AS rw_measured_at
      FROM rewrite WHERE added > 0 GROUP BY session_id) r";
+
+/// Per-session outcome flags, joined into the summary: whether its 7- and
+/// 30-day counts are kept, it was changed by a fix by day 7, reverted (and
+/// not relanded) by day 30.
+const OUTCOME_TOTALS: &str = "
+    (SELECT session_id,
+            max(checkpoint = '7d') AS o_7d,
+            max(checkpoint = '7d' AND fix_commits > 0) AS o_fixed_7d,
+            max(checkpoint = '30d') AS o_30d,
+            max(checkpoint = '30d' AND revert_commits > 0 AND NOT relanded) AS o_reverted_30d
+     FROM outcome_checkpoints GROUP BY session_id) o";
 
 /// What a stored session was built from, used to skip unchanged sessions.
 #[derive(Debug, Clone, PartialEq)]
@@ -302,6 +408,20 @@ pub struct Group {
     pub lines_removed: u64,
     pub reviews: u64,
     pub rewrite: Rewrite,
+    pub outcomes: Outcomes,
+}
+
+/// What later commits did, over a group of sessions (see `outcomes`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Outcomes {
+    /// Sessions whose 7-day count is kept.
+    pub reached_7d: u64,
+    /// Of those, the ones changed by a fix by then.
+    pub fixed_7d: u64,
+    /// Sessions whose 30-day count is kept.
+    pub reached_30d: u64,
+    /// Of those, the ones reverted by then and not relanded.
+    pub reverted_30d: u64,
 }
 
 fn rewrite_from(row: &SqlRow, first: usize) -> rusqlite::Result<Rewrite> {
@@ -447,6 +567,7 @@ impl Ledger {
             )?;
         }
         tx.execute_batch(CHECKPOINT_TABLES)?;
+        tx.execute_batch(OUTCOME_TABLES)?;
         tx.execute(
             "INSERT OR IGNORE INTO checkpoints_since VALUES (1, ?1)",
             [Utc::now().to_rfc3339()],
@@ -582,6 +703,22 @@ impl Ledger {
         tx.execute(
             "DELETE FROM rewrite_checkpoints
              WHERE session_id = ?1 AND ended_at IS NOT ?2",
+            params![s.session_id, s.ended_at.map(|t| t.to_rfc3339())],
+        )?;
+        // So do its outcomes, and what was read of its history: the commits
+        // after its end are others now.
+        tx.execute(
+            "DELETE FROM outcome_checkpoints
+             WHERE session_id = ?1 AND ended_at IS NOT ?2",
+            params![s.session_id, s.ended_at.map(|t| t.to_rfc3339())],
+        )?;
+        tx.execute(
+            "DELETE FROM outcome_events WHERE session_id IN
+             (SELECT session_id FROM outcome_scans WHERE session_id = ?1 AND ended_at IS NOT ?2)",
+            params![s.session_id, s.ended_at.map(|t| t.to_rfc3339())],
+        )?;
+        tx.execute(
+            "DELETE FROM outcome_scans WHERE session_id = ?1 AND ended_at IS NOT ?2",
             params![s.session_id, s.ended_at.map(|t| t.to_rfc3339())],
         )?;
         tx.commit()?;
@@ -721,6 +858,9 @@ impl Ledger {
         let gone = "session_id NOT IN (SELECT session_id FROM keep)";
         tx.execute(&format!("DELETE FROM rewrite WHERE {gone}"), [])?;
         tx.execute(&format!("DELETE FROM rewrite_checkpoints WHERE {gone}"), [])?;
+        for table in ["outcome_events", "outcome_checkpoints", "outcome_scans"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE {gone}"), [])?;
+        }
         tx.execute(&format!("DELETE FROM uploads WHERE {gone}"), [])?;
         let removed = tx.execute(&format!("DELETE FROM sessions WHERE {gone}"), [])?;
         tx.execute_batch("DROP TABLE keep")?;
@@ -746,6 +886,12 @@ impl Ledger {
             "DELETE FROM rewrite_checkpoints WHERE session_id = ?1",
             [session_id],
         )?;
+        for table in ["outcome_events", "outcome_checkpoints", "outcome_scans"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE session_id = ?1"),
+                [session_id],
+            )?;
+        }
         tx.execute("DELETE FROM uploads WHERE session_id = ?1", [session_id])?;
         let removed = tx.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
         tx.commit()?;
@@ -956,6 +1102,244 @@ impl Ledger {
         Ok(rows)
     }
 
+    /// Every session with an end and tracked lines, with how far its history
+    /// was read and which ages are counted.
+    pub fn outcome_targets(&self) -> Result<Vec<OutcomeTarget>> {
+        let mut scans: std::collections::HashMap<String, (Option<String>, String, String)> = self
+            .conn
+            .prepare("SELECT session_id, scanned_until, tried_at, scope FROM outcome_scans")?
+            .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?))))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut kept: std::collections::HashMap<String, Vec<String>> = Default::default();
+        for row in self
+            .conn
+            .prepare("SELECT session_id, checkpoint FROM outcome_checkpoints")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        {
+            let (id, checkpoint) = row?;
+            kept.entry(id).or_default().push(checkpoint);
+        }
+        let mut query = self.conn.prepare(
+            "SELECT s.session_id, s.started_at, s.ended_at, coalesce(s.repo_root, s.cwd),
+                    f.path, f.added_hashes
+             FROM session_files f JOIN sessions s ON s.session_id = f.session_id
+             WHERE f.added_hashes IS NOT NULL AND s.started_at IS NOT NULL
+               AND s.ended_at IS NOT NULL
+             ORDER BY s.session_id, f.path",
+        )?;
+        let rows = query
+            .query_map([], |r| {
+                let blob: Vec<u8> = r.get(5)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    blob.as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|c| u64::from_le_bytes(*c))
+                        .collect::<Vec<u64>>(),
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut targets: Vec<OutcomeTarget> = Vec::new();
+        for (id, started, ended, base, path, hashes) in rows {
+            if hashes.is_empty() {
+                continue;
+            }
+            if targets.last().is_none_or(|t| t.session_id != id) {
+                let (Some(started_at), Some(ended_at)) = (time(Some(started)), time(Some(ended)))
+                else {
+                    continue;
+                };
+                let scan = scans.remove(&id);
+                targets.push(OutcomeTarget {
+                    kept: kept.remove(&id).unwrap_or_default(),
+                    scanned_until: scan.as_ref().and_then(|s| time(s.0.clone())),
+                    tried_at: scan.as_ref().and_then(|s| time(Some(s.1.clone()))),
+                    scope: scan.map(|s| s.2),
+                    session_id: id.clone(),
+                    started_at,
+                    ended_at,
+                    base,
+                    files: Vec::new(),
+                });
+            }
+            if let Some(target) = targets.last_mut().filter(|t| t.session_id == id) {
+                target.files.push((path, hashes));
+            }
+        }
+        Ok(targets)
+    }
+
+    /// Note that the history of `sessions` was read now. With `scanned_until`
+    /// it was read up to then and `events` is all that touched them, in place
+    /// of what was stored; without, it could not be read and is tried later.
+    pub fn store_outcome_scan(
+        &mut self,
+        sessions: &[&str],
+        events: &[OutcomeEvent],
+        scanned_until: Option<DateTime<Utc>>,
+        scope: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut ended = tx.prepare("SELECT ended_at FROM sessions WHERE session_id = ?1")?;
+            let mut forget = tx.prepare("DELETE FROM outcome_events WHERE session_id = ?1")?;
+            let mut scanned = tx.prepare(
+                "INSERT INTO outcome_scans VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (session_id) DO UPDATE SET ended_at = ?2,
+                   scanned_until = coalesce(?3, scanned_until), tried_at = ?4,
+                   scope = CASE WHEN ?3 IS NULL THEN scope ELSE ?5 END",
+            )?;
+            for id in sessions {
+                let Some(ended_at): Option<String> =
+                    ended.query_row([id], |r| r.get(0)).optional()?.flatten()
+                else {
+                    continue;
+                };
+                if scanned_until.is_some() {
+                    forget.execute([id])?;
+                }
+                scanned.execute(params![
+                    id,
+                    ended_at,
+                    scanned_until.map(|t| t.to_rfc3339()),
+                    now.to_rfc3339(),
+                    scope
+                ])?;
+            }
+            let mut insert = tx.prepare(
+                "INSERT OR REPLACE INTO outcome_events
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?;
+            for e in events {
+                insert.execute(params![
+                    e.session_id,
+                    e.sha,
+                    e.at.to_rfc3339(),
+                    e.kind,
+                    serde_json::to_string(&e.signals)?,
+                    e.lines,
+                    e.copies,
+                    e.strength,
+                    e.relanded_at.map(|t| t.to_rfc3339()),
+                    e.subject
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The commits that touched a session, oldest first.
+    pub fn outcome_events_of(&self, session_id: &str) -> Result<Vec<OutcomeEvent>> {
+        let mut query = self.conn.prepare(
+            "SELECT session_id, sha, at, kind, signals, lines, copies, strength, relanded_at, subject
+             FROM outcome_events WHERE session_id = ?1 ORDER BY at, sha",
+        )?;
+        let rows = query
+            .query_map([session_id], |r| {
+                Ok(OutcomeEvent {
+                    session_id: r.get(0)?,
+                    sha: r.get(1)?,
+                    at: time(r.get(2)?).unwrap_or_default(),
+                    kind: r.get(3)?,
+                    signals: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+                    lines: r.get(5)?,
+                    copies: r.get(6)?,
+                    strength: r.get(7)?,
+                    relanded_at: time(r.get(8)?),
+                    subject: r.get(9)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Keep each count of an age, unless one is kept already. Returns how many were kept.
+    pub fn keep_outcome_windows(&mut self, windows: &[(String, OutcomeCheckpoint)]) -> Result<u64> {
+        let tx = self.conn.transaction()?;
+        let mut kept = 0;
+        {
+            let mut insert = tx.prepare(
+                "INSERT OR IGNORE INTO outcome_checkpoints
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            )?;
+            for (id, o) in windows {
+                kept += insert.execute(params![
+                    id,
+                    o.checkpoint,
+                    o.lines_tracked,
+                    o.fix_commits,
+                    o.likely_fix_commits,
+                    o.lines_fixed,
+                    o.rework_commits,
+                    o.lines_reworked,
+                    o.revert_commits,
+                    o.lines_reverted,
+                    o.relanded,
+                    o.computed_at.unwrap_or_default().to_rfc3339(),
+                    o.age_seconds,
+                    o.ended_at.unwrap_or_default().to_rfc3339(),
+                    o.late,
+                    o.scope
+                ])? as u64;
+            }
+        }
+        tx.commit()?;
+        Ok(kept)
+    }
+
+    /// The outcome counts kept of a session, the earliest age first.
+    pub fn outcome_checkpoints_of(&self, session_id: &str) -> Result<Vec<OutcomeCheckpoint>> {
+        let mut query = self.conn.prepare(
+            "SELECT checkpoint, lines_tracked, fix_commits, likely_fix_commits, lines_fixed,
+                    rework_commits, lines_reworked, revert_commits, lines_reverted, relanded,
+                    computed_at, age_seconds, ended_at, late, scope
+             FROM outcome_checkpoints WHERE session_id = ?1",
+        )?;
+        let mut rows: Vec<OutcomeCheckpoint> = query
+            .query_map([session_id], |r| {
+                Ok(OutcomeCheckpoint {
+                    checkpoint: r.get(0)?,
+                    lines_tracked: r.get(1)?,
+                    fix_commits: r.get(2)?,
+                    likely_fix_commits: r.get(3)?,
+                    lines_fixed: r.get(4)?,
+                    rework_commits: r.get(5)?,
+                    lines_reworked: r.get(6)?,
+                    revert_commits: r.get(7)?,
+                    lines_reverted: r.get(8)?,
+                    relanded: r.get(9)?,
+                    computed_at: time(r.get(10)?),
+                    age_seconds: r.get(11)?,
+                    ended_at: time(r.get(12)?),
+                    late: r.get(13)?,
+                    scope: r.get(14)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        rows.sort_by_key(|c| {
+            CHECKPOINTS
+                .iter()
+                .position(|(name, _)| *name == c.checkpoint)
+        });
+        Ok(rows)
+    }
+
+    /// Forget every outcome: they are switched off. Switched on again, they
+    /// are counted again from the history.
+    pub fn forget_outcomes(&mut self) -> Result<()> {
+        self.conn.execute_batch(
+            "DELETE FROM outcome_events; DELETE FROM outcome_checkpoints; DELETE FROM outcome_scans;",
+        )?;
+        Ok(())
+    }
+
     /// Sessions matching `filter`, newest first.
     pub fn list(&self, filter: &Filter, limit: Option<u64>) -> Result<Vec<Listed>> {
         let (clause, mut values) = filter.sql();
@@ -1031,8 +1415,10 @@ impl Ledger {
                         sum(s.tool_calls), sum(s.tool_failures), sum(s.files_changed),
                         sum(s.lines_added), sum(s.lines_removed),
                         sum(r.rw_files), sum(r.rw_rewritten), sum(r.rw_added), sum(r.rw_surviving),
-                        sum(s.reviews)
+                        sum(s.reviews),
+                        sum(o.o_7d), sum(o.o_fixed_7d), sum(o.o_30d), sum(o.o_reverted_30d)
                  FROM sessions s LEFT JOIN {REWRITE_TOTALS} ON r.session_id = s.session_id
+                 LEFT JOIN {OUTCOME_TOTALS} ON o.session_id = s.session_id
                  {clause} {tail}"
             )
         };
@@ -1051,6 +1437,12 @@ impl Ledger {
                 lines_removed: r.get::<_, Option<u64>>(10)?.unwrap_or(0),
                 reviews: r.get::<_, Option<u64>>(15)?.unwrap_or(0),
                 rewrite: rewrite_from(r, 11)?,
+                outcomes: Outcomes {
+                    reached_7d: r.get::<_, Option<u64>>(16)?.unwrap_or(0),
+                    fixed_7d: r.get::<_, Option<u64>>(17)?.unwrap_or(0),
+                    reached_30d: r.get::<_, Option<u64>>(18)?.unwrap_or(0),
+                    reverted_30d: r.get::<_, Option<u64>>(19)?.unwrap_or(0),
+                },
             })
         };
         let mut groups: Vec<Group> = self
@@ -1144,7 +1536,7 @@ mod tests {
             "{table}"
         );
 
-        let shown = crate::report::session(&s, &[], None, &[]);
+        let shown = crate::report::session(&s, &[], None, &[], &[]);
         assert!(shown.contains("/code-review xhigh #621"), "{shown}");
         assert!(
             shown.contains("$1.50")
