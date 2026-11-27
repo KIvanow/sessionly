@@ -5,6 +5,8 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import pg from "pg";
+import type { Upload } from "@sessionly/schema";
+import { mergeOutcomes } from "./sessions.ts";
 
 /** Anything a statement can be sent to. */
 export interface Queryable {
@@ -924,6 +926,48 @@ const MIGRATIONS: string[] = [
   // times. Beside the payload, like `checkpoints`, and kept by the same rule.
   `ALTER TABLE sessions ADD COLUMN outcomes jsonb NOT NULL DEFAULT '{}'`,
 ];
+
+/**
+ * The outcome counts of sessions a server from before them stored: in the
+ * payload alone, where a machine updated ahead of it sent them. Taken from
+ * there by the rule an upload is stored by (`mergeOutcomes`), and the
+ * payload's copy made what that keeps, as an upload's is. Run after the
+ * server has started, some at a time; a session uploaded meanwhile is left
+ * to what that upload stored. Returns how many were looked at.
+ */
+export async function keepOutcomesFromPayloads(db: Db, atOnce = 100): Promise<number> {
+  type Row = { org_id: string; machine_id: string; source: string; session_id: string; payload: unknown };
+  let looked = 0;
+  let last: Omit<Row, "payload"> | undefined;
+  for (;;) {
+    const rows = await db.query<Row>(
+      `SELECT org_id, machine_id, source, session_id, payload FROM sessions
+       WHERE outcomes = '{}'::jsonb AND jsonb_typeof(payload->'outcomes') = 'array'
+         AND payload->'outcomes' <> '[]'::jsonb
+         AND ($1::jsonb IS NULL OR (org_id, machine_id, source, session_id) >
+               ($1::jsonb->>'org_id', $1::jsonb->>'machine_id', $1::jsonb->>'source', $1::jsonb->>'session_id'))
+       ORDER BY org_id, machine_id, source, session_id LIMIT $2`,
+      [last ? JSON.stringify(last) : null, atOnce],
+    );
+    if (rows.length === 0) return looked;
+    for (const row of rows) {
+      const payload = (typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload) as Upload;
+      const kept = mergeOutcomes({}, payload);
+      const shown = OUTCOME_AGES.filter((age) => kept[age]).map((age) => ({ checkpoint: age, ...kept[age] }));
+      await db.query(
+        `UPDATE sessions SET outcomes = $5::jsonb, payload = jsonb_set(payload, '{outcomes}', $6::jsonb)
+         WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4
+           AND outcomes = '{}'::jsonb AND payload->'outcomes' = $7::jsonb`,
+        [row.org_id, row.machine_id, row.source, row.session_id, JSON.stringify(kept), JSON.stringify(shown), JSON.stringify(payload.outcomes)],
+      );
+      looked += 1;
+    }
+    const { payload: _, ...key } = rows[rows.length - 1]!;
+    last = key;
+  }
+}
+
+const OUTCOME_AGES = ["1d", "7d", "30d"] as const;
 
 /**
  * Count the line hashes of the sessions stored before the count was kept,

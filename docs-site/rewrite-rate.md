@@ -99,8 +99,14 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
 - **A commit touches a session when it removes or changes at least two of its lines.** One line
   is too often a generic one (`if (`, an import) that matched by chance. A line the commit adds
   back, in that file or another, was moved, not changed. A line three sessions or more wrote
-  in the same file does not count on its own.
-- **A session's own commits don't count:** those after it began that add its lines.
+  in the same file does not count on its own. A commit too big to read whole (more than
+  100,000 lines added and removed: a vendored, generated or moved tree) does not count.
+- **A session's own commits don't count:** those after it began that add its lines (and not
+  only move or re-indent them). One that adds them back after a revert gives the session
+  those lines again, so a later change to them counts.
+- **A repository whose history can't be read** (gone, too slow, too large) is tried again an
+  hour later, then after longer and longer, up to about five days; no count is kept from
+  part of a session's history, for a session in two repositories either.
 - **The counts are kept at 1, 7 and 30 days, as the rewrite checkpoints are**, and age counts
   from the session's end the same way. Unlike those, an age reached before Sessionly looked can
   be counted later from the history; it then says it was late.
@@ -115,7 +121,8 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   anything not a letter or digit) is one of `fix fixes fixed fixing bug bugs bugfix hotfix
   regression broken crash crashes crashed typo`, or its conventional type is `fix`, `hotfix`
   or `bugfix`. The body is not read for them. `sessionly settings --fix-words a,b,c` replaces
-  the words (not the types) on that machine, and `--fix-words default` restores them. It
+  the words (not the types) on that machine, and `--fix-words default` restores them; each
+  must be one word as a subject is read (`followup`, not `follow-up`). It
   changes only whether a commit counts as a fix or as rework, not reverts. A team's figures add
   every machine's counts, so a machine with its own words counts fixes differently from the rest.
 - **By another agent:** a later commit that was another agent session's own (it added that
@@ -124,9 +131,10 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   sessions on the same machine are known, so a commit by a teammate's agent counts as by no
   agent known, and so does a fix that only removes lines. `sessionly outcomes` shows the
   session in `BY`.
-- **Uploaded:** only the counts at each age (`outcomes`), never a commit's SHA, subject or files,
-  nor which session made it.
-  `sessionly settings --outcomes off` stops reading history and sending them.
+- **Uploaded:** only the counts at each age (`outcomes`), with when each was counted, which
+  branches were read, and the names of the agents in `by_agent`; never a commit's SHA, subject
+  or files, nor which session made it. `sessionly settings --outcomes off` stops reading
+  history and sending them; what a server already has stays until the session is deleted.
 
 On the dashboard, **By tool** and **By model** have **Changed by a fix @7d** and
 **Reverted @30d**, each of the sessions counted at that age, once any is; under the first, which

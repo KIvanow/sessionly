@@ -125,6 +125,8 @@ test("what later commits did: of the sessions counted at an age, and per session
   assert.equal(f.fixesBy(at), "");
   assert.equal(f.fixesBy({ ...at, by_agent: [{ source: "cursor", fix_commits: 2 }, { source: "codex", fix_commits: 0 }] }), "2 by Cursor, 1 by no agent known");
   assert.equal(f.fixesBy({ fix_commits: 1, by_agent: [{ source: "claude-code", fix_commits: 1 }] }), "1 by Claude Code");
+  // an agent of any name is named as it is, whatever an object has of its own
+  assert.equal(f.fixesBy({ fix_commits: 1, by_agent: [{ source: "constructor", fix_commits: 1 }] }), "1 by constructor");
   assert.equal(f.revertedAt(at), "13%");
   assert.equal(f.keptOf(at), "8 of 20 sessions");
   const none = { ...at, sessions_reached: 0 };

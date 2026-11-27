@@ -534,7 +534,7 @@ test("what later commits did 1, 7 and 30 days after a session ended is kept as c
         fix_commits: 2,
         likely_fix_commits: 5,
         lines_fixed: 3.5,
-        // Another agent's commits: no more of them than of all, one entry for each agent, and an agent by a name only.
+        // Another agent's commits: no more of them between them than of all, one entry for each agent, and an agent by a name only.
         by_agent: [{ ...cursorFixed, fix_commits: 3, likely_fix_commits: 9 }, { ...cursorFixed, fix_commits: 2 }, { ...cursorFixed, source: "SECRET name/" }, { ...cursorFixed, source: "codex", fix_commits: 1, lines_fixed: 1 }],
       },
       8,
@@ -572,7 +572,7 @@ test("what later commits did 1, 7 and 30 days after a session ended is kept as c
     rework_commits: 0,
     lines_reworked: 0,
     by_agent: [
-      { ...cursorFixed, source: "codex", lines_fixed: 1 },
+      { ...cursorFixed, source: "codex", fix_commits: 0, likely_fix_commits: 0, lines_fixed: 1 },
       { ...cursorFixed, fix_commits: 2, likely_fix_commits: 2 },
     ],
   });
@@ -586,12 +586,74 @@ test("what later commits did 1, 7 and 30 days after a session ended is kept as c
   // Summed over the groups, of the same agent.
   assert.deepEqual(
     summary.total.outcomes_7d.by_agent.map((b: any) => [b.source, b.fix_commits, b.rework_commits]),
-    [["codex", 1, 0], ["cursor", 2, 1]],
+    [["codex", 0, 0], ["cursor", 2, 1]],
   );
+
+  // A count is a number, none below nothing, none past what can be summed; and no more agents than there are.
+  await send(tokens.ann, "o4", [
+    at("7d", { lines_tracked: 1.7e308, fix_commits: 2, lines_fixed: -5, by_agent: Array.from({ length: 40 }, (_, i) => ({ ...cursorFixed, source: `agent${i}` })) }, 8),
+  ]);
+  const [o4] = await db.query<{ outcomes: any }>(`SELECT outcomes FROM sessions WHERE session_id = 'o4'`);
+  const week = (typeof o4!.outcomes === "string" ? JSON.parse(o4!.outcomes) : o4!.outcomes)["7d"];
+  assert.deepEqual([week.lines_tracked, week.lines_fixed, week.by_agent.length], [1e12, 0, 16]);
+  assert.equal(week.by_agent.reduce((n: number, b: any) => n + b.fix_commits, 0), 2);
+  assert.ok(week.by_agent.every((b: any) => b.lines_fixed === 0));
+  assert.equal((await get(tokens.admin, `/summary?by=tool&repo_is=${encodeURIComponent(repo)}`)).status, 200);
+  // A session with outcomes and no rewrite measurement is of those they are out of.
+  const before = (await byTool()).total.outcomes_7d;
+  const bare = { ...upload("o5", { repo: { root: "~/src/later", remote: repo } }), rewrite: null, outcomes: [at("7d", {}, 8)] } as Upload;
+  assert.equal((await put(tokens.ann, bare)).status, 200);
+  const after = (await byTool()).total.outcomes_7d;
+  assert.deepEqual([after.sessions_reached - before.sessions_reached, after.sessions_total - before.sessions_total], [1, 1]);
 
   // The session went on: what was counted from its first end goes.
   await send(tokens.ann, "o1", [at("1d", {}, 2, 10)], { ended_at: days(10) });
   assert.deepEqual(await kept("o1"), [["1d", 0, 2]]);
+});
+
+test("outcomes a server from before them kept in the payload are kept from there after the upgrade", async (t) => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { migrationAt, keepOutcomesFromPayloads } = await import("../src/db.ts");
+  const { testDbUrl } = await import("./helpers.ts");
+  const fresh = await testDbUrl();
+  const folder = fresh === "memory://" ? mkdtempSync(join(tmpdir(), "sessionly-outcomes-")) : undefined;
+  t.after(() => folder && rmSync(folder, { recursive: true, force: true }));
+  const url = folder ? `file:${join(folder, "db")}` : fresh;
+  const old = await openDb(url, { migrations: migrationAt("ALTER TABLE sessions ADD COLUMN outcomes") });
+  const ended = "2026-11-10T10:30:00Z";
+  const at = (checkpoint: string, extra: Record<string, unknown> = {}) => ({
+    checkpoint, lines_tracked: 40, fix_commits: 1, likely_fix_commits: 1, lines_fixed: 2, rework_commits: 0, lines_reworked: 0,
+    revert_commits: 0, lines_reverted: 0, relanded: false, computed_at: "2026-11-18T10:30:00Z", age_seconds: 8 * 86_400,
+    ended_at: ended, late: false, scope: "head_and_default", ...extra,
+  });
+  const payload = (outcomes: unknown) => JSON.stringify({ session: { ended_at: ended }, outcomes });
+  await old.query(
+    `INSERT INTO sessions (org_id, machine_id, source, session_id, owner_email, content, rw_lines_added, payload) VALUES
+       ('default', 'm1', 'claude-code', 'with', 'ann@example.com', 'metadata', 20, $1::jsonb),
+       ('default', 'm1', 'claude-code', 'early', 'ann@example.com', 'metadata', 20, $2::jsonb),
+       ('default', 'm1', 'claude-code', 'odd', 'ann@example.com', 'metadata', 20, '{"session":{},"outcomes":"none"}')`,
+    [payload([at("7d", { sha: "SECRET" }), at("1d"), at("90d")]), payload([at("30d")])],
+  );
+  await old.close();
+  const now = await openDb(url);
+  t.after(() => now.close());
+  assert.equal(await keepOutcomesFromPayloads(now, 1), 2);
+  // Once kept, not looked at again.
+  assert.equal(await keepOutcomesFromPayloads(now), 0);
+  const rows = await now.query<{ session_id: string; outcomes: any; payload: any }>(`SELECT session_id, outcomes, payload FROM sessions ORDER BY session_id`);
+  const of = (id: string) => rows.find((r) => r.session_id === id)!;
+  const json = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
+  assert.deepEqual(Object.keys(json(of("with").outcomes)).sort(), ["1d", "7d"]);
+  assert.deepEqual(json(of("with").payload).outcomes.map((o: any) => o.checkpoint), ["1d", "7d"]);
+  assert.doesNotMatch(JSON.stringify(json(of("with").payload)), /SECRET/);
+  // Counted before the session was 30 days old: not taken, and not looked at again.
+  assert.deepEqual([json(of("early").outcomes), json(of("early").payload).outcomes], [{}, []]);
+  const upgraded = createApp(now, {});
+  const token = await tokenFor(now, { email: "boss@example.com", role: "admin" });
+  const total = ((await (await upgraded.request("/api/v1/summary?by=tool", { headers: auth(token) })).json()) as any).total;
+  assert.deepEqual([total.outcomes_7d.sessions_reached, total.outcomes_7d.fix_commits], [1, 1]);
 });
 
 test("checkpoints a server from before them kept in the payload are summed after the upgrade", async (t) => {

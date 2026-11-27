@@ -26,7 +26,7 @@ and what later commits did to the agent's lines by those ages (`outcomes`: count
 fixes and rework, and times, and of those how many another agent's session made, by agent
 (`by_agent`); no commit SHA, subject, path or session id, see
 [Later commits](rewrite-rate.md#later-commits-reverts-and-fixes)). `sessionly settings --outcomes off`
-leaves `outcomes` out.
+leaves `outcomes` out of uploads from then on.
 Before a record leaves the machine:
 
 - **Paths are made relative:** to the repository for files inside it, otherwise to the home

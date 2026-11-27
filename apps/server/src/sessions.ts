@@ -38,6 +38,12 @@ export class RemovedPerson extends Error {
 }
 
 const num = (value: unknown): number => (value == null ? 0 : Number(value));
+/**
+ * A count an upload brings: a number, none below nothing, and none so large
+ * that summing an organisation's would leave what a database can add up.
+ */
+const count = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value) ? Math.min(Math.max(value, 0), 1e12) : 0;
 const numOrNull = (value: unknown): number | null => (value == null ? null : Number(value));
 /** A jsonb array of strings, which a driver may hand over parsed or as text. */
 const strings = (value: unknown): string[] => {
@@ -87,10 +93,10 @@ export function mergeCheckpoints(kept: unknown, upload: Upload): Record<string, 
     const at = Date.parse(c.measured_at ?? "");
     if (Number.isNaN(at) || at - ended < AGE_SECONDS[name as string]! * 1000) return;
     out[name as string] = {
-      added: num(c.added),
-      surviving: Math.min(num(c.surviving), num(c.added)),
+      added: count(c.added),
+      surviving: Math.min(count(c.surviving), count(c.added)),
       measured_at: new Date(at).toISOString(),
-      age_seconds: num(c.age_seconds),
+      age_seconds: count(c.age_seconds),
       ended_at: new Date(ended).toISOString(),
     };
   };
@@ -103,6 +109,44 @@ export function mergeCheckpoints(kept: unknown, upload: Upload): Record<string, 
 /** An age's outcome count as it is kept: counts and times, and nothing else an upload may carry with one. */
 type OutcomeAt = Required<Omit<OutcomeCheckpoint, "checkpoint">>;
 
+/** The counts of an age's commits another agent's sessions made. */
+const BY_AGENT_FIELDS = [
+  "fix_commits",
+  "likely_fix_commits",
+  "lines_fixed",
+  "revert_commits",
+  "lines_reverted",
+  "rework_commits",
+  "lines_reworked",
+] as const satisfies readonly (keyof OutcomesBy)[];
+
+/** An agent is named as an upload names one: a short word, no more. */
+const AGENT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/** No more agents than there are: the binary sends one entry for each agent. */
+const MOST_AGENTS = 16;
+
+/** Of an age's commits, the other agents' share: one entry for each agent, and between them no more than the age's own counts. */
+function byAgentOf(o: Partial<OutcomeAt>, age: Omit<OutcomesBy, "source">): OutcomesBy[] {
+  const out: OutcomesBy[] = [];
+  const seen = new Set<string>();
+  const left = { ...age };
+  for (const b of Array.isArray(o.by_agent) ? o.by_agent : []) {
+    if (out.length === MOST_AGENTS) break;
+    const source = String(b?.source ?? "");
+    if (!AGENT_NAME.test(source) || seen.has(source)) continue;
+    seen.add(source);
+    const entry = { source } as OutcomesBy;
+    for (const field of BY_AGENT_FIELDS) {
+      entry[field] = Math.min(count(b[field]), left[field]);
+      left[field] -= entry[field];
+    }
+    entry.likely_fix_commits = Math.min(entry.likely_fix_commits, entry.fix_commits);
+    out.push(entry);
+  }
+  return out.sort((a, b) => a.source.localeCompare(b.source));
+}
+
 /**
  * The outcome counts a session has once an upload is stored, by age. The
  * rule is `mergeCheckpoints`', as the ledger's is for both: one kept is never
@@ -111,31 +155,6 @@ type OutcomeAt = Required<Omit<OutcomeCheckpoint, "checkpoint">>;
  * taken. A count is of the history up to that age, so a later one would be
  * the same; keeping the first keeps it so when the history is rewritten.
  */
-/** An agent is named as an upload names one: a short word, no more. */
-const AGENT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-
-/** Of an age's commits, the other agents' share: counts no more than the age's own, one entry each. */
-function byAgentOf(o: Partial<OutcomeAt>): OutcomesBy[] {
-  const out: OutcomesBy[] = [];
-  for (const b of Array.isArray(o.by_agent) ? o.by_agent : []) {
-    const source = String(b?.source ?? "");
-    if (!AGENT_NAME.test(source) || out.some((x) => x.source === source)) continue;
-    const at = (n: unknown, most: unknown) => Math.min(num(n), num(most));
-    const fix = at(b.fix_commits, o.fix_commits);
-    out.push({
-      source,
-      fix_commits: fix,
-      likely_fix_commits: Math.min(at(b.likely_fix_commits, o.likely_fix_commits), fix),
-      lines_fixed: at(b.lines_fixed, o.lines_fixed),
-      revert_commits: at(b.revert_commits, o.revert_commits),
-      lines_reverted: at(b.lines_reverted, o.lines_reverted),
-      rework_commits: at(b.rework_commits, o.rework_commits),
-      lines_reworked: at(b.lines_reworked, o.lines_reworked),
-    });
-  }
-  return out.sort((a, b) => a.source.localeCompare(b.source));
-}
-
 export function mergeOutcomes(kept: unknown, upload: Upload): Record<string, OutcomeAt> {
   const ended = Date.parse(upload.session?.ended_at ?? "");
   const out: Record<string, OutcomeAt> = {};
@@ -144,22 +163,25 @@ export function mergeOutcomes(kept: unknown, upload: Upload): Record<string, Out
     if (Date.parse(o.ended_at ?? "") !== ended) return;
     const at = Date.parse(o.computed_at ?? "");
     if (Number.isNaN(at) || at - ended < AGE_SECONDS[name as string]! * 1000) return;
+    const counts = {
+      fix_commits: count(o.fix_commits),
+      likely_fix_commits: Math.min(count(o.likely_fix_commits), count(o.fix_commits)),
+      lines_fixed: count(o.lines_fixed),
+      rework_commits: count(o.rework_commits),
+      lines_reworked: count(o.lines_reworked),
+      revert_commits: count(o.revert_commits),
+      lines_reverted: count(o.lines_reverted),
+    };
     out[name as string] = {
-      lines_tracked: num(o.lines_tracked),
-      fix_commits: num(o.fix_commits),
-      likely_fix_commits: Math.min(num(o.likely_fix_commits), num(o.fix_commits)),
-      lines_fixed: num(o.lines_fixed),
-      rework_commits: num(o.rework_commits),
-      lines_reworked: num(o.lines_reworked),
-      revert_commits: num(o.revert_commits),
-      lines_reverted: num(o.lines_reverted),
+      lines_tracked: count(o.lines_tracked),
+      ...counts,
       relanded: o.relanded === true,
       computed_at: new Date(at).toISOString(),
-      age_seconds: num(o.age_seconds),
+      age_seconds: count(o.age_seconds),
       ended_at: new Date(ended).toISOString(),
       late: o.late === true,
       scope: o.scope === "head_and_default" ? "head_and_default" : "head_only",
-      by_agent: byAgentOf(o),
+      by_agent: byAgentOf(o, counts),
     };
   };
   const before = typeof kept === "string" ? JSON.parse(kept) : kept;
@@ -638,6 +660,7 @@ const TOTAL_COLUMNS = `
   sum(rw_files_measured) AS rw_files_measured, sum(rw_files_rewritten) AS rw_files_rewritten,
   sum(rw_lines_added) AS rw_lines_added, sum(rw_lines_surviving) AS rw_lines_surviving,
   count(*) FILTER (WHERE rw_lines_added > 0 OR checkpoints <> '{}'::jsonb) AS ck_sessions,
+  count(*) FILTER (WHERE rw_lines_added > 0 OR checkpoints <> '{}'::jsonb OR outcomes <> '{}'::jsonb) AS oc_sessions_total,
   ${CHECKPOINTS.map(
     (age) => `count(*) FILTER (WHERE checkpoints ? '${age}') AS ck_${age}_sessions,
   sum((checkpoints #>> '{${age},added}')::double precision) AS ck_${age}_added,
@@ -671,7 +694,8 @@ function totals(row: Record<string, unknown>): Totals {
   });
   const later = (age: (typeof CHECKPOINTS)[number]): OutcomesAt => ({
     sessions_reached: num(row[`oc_${age}_sessions`]),
-    sessions_total: num(row.ck_sessions),
+    // Out of the sessions with measured lines, as `kept` is, and those with outcomes counted without.
+    sessions_total: num(row.oc_sessions_total),
     lines_tracked: num(row[`oc_${age}_lines`]),
     sessions_with_fix: num(row[`oc_${age}_fixed`]),
     fix_commits: num(row[`oc_${age}_fix_commits`]),
@@ -747,30 +771,30 @@ export async function summarize(
      ${sql} GROUP BY 1, 2, 3 ORDER BY 3`,
     params,
   );
+  const byKey = new Map(out.groups.map((g) => [g.key, g]));
+  const found = new Map<Totals, Map<string, OutcomesBy>>();
   const add = (into: Totals, row: Record<string, unknown>) => {
-    const at = into[`outcomes_${row.age}` as `outcomes_${(typeof CHECKPOINTS)[number]}`];
-    if (!at) return;
-    let b = at.by_agent.find((x) => x.source === row.source);
-    if (!b) at.by_agent.push((b = { source: String(row.source), ...Object.fromEntries(BY_AGENT_FIELDS.map((f) => [f, 0])) } as OutcomesBy));
+    if (!CHECKPOINTS.includes(row.age as never)) return;
+    const at = into[`outcomes_${row.age as (typeof CHECKPOINTS)[number]}`];
+    const key = `${row.age} ${row.source}`;
+    const agents = found.get(into) ?? found.set(into, new Map()).get(into)!;
+    let b = agents.get(key);
+    if (!b) {
+      b = { source: String(row.source), ...Object.fromEntries(BY_AGENT_FIELDS.map((f) => [f, 0])) } as OutcomesBy;
+      agents.set(key, b);
+      at.by_agent.push(b);
+    }
     for (const f of BY_AGENT_FIELDS) b[f] += num(row[f]);
   };
   for (const row of agents) {
-    const group = out.groups.find((g) => g.key === String(row.key));
+    const group = byKey.get(String(row.key));
     if (group) add(group, row);
     add(out.total, row);
   }
   return out;
 }
 
-const BY_AGENT_FIELDS = [
-  "fix_commits",
-  "likely_fix_commits",
-  "lines_fixed",
-  "revert_commits",
-  "lines_reverted",
-  "rework_commits",
-  "lines_reworked",
-] as const satisfies readonly (keyof OutcomesBy)[];
+
 
 const iso = (value: unknown): string | null =>
   value == null ? null : value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString();

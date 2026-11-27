@@ -67,7 +67,7 @@ const TOOL_NAMES: Record<string, string> = { "claude-code": "Claude Code", curso
 
 /** "claude-code" -> "Claude Code"; an agent this dashboard doesn't know keeps its id. */
 export function toolName(source: string): string {
-  return TOOL_NAMES[source] ?? source;
+  return Object.hasOwn(TOOL_NAMES, source) ? TOOL_NAMES[source]! : source;
 }
 
 /** "claude-opus-5-5" -> "opus-5-5" */
