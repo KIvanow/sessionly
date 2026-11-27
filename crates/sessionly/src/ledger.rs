@@ -209,7 +209,9 @@ CREATE TABLE IF NOT EXISTS outcome_scans (
     -- history was read up to here; null while it never could be
     scanned_until TEXT,
     tried_at      TEXT NOT NULL,
-    scope         TEXT NOT NULL
+    scope         TEXT NOT NULL,
+    -- readings that failed since the last that did
+    failures      INTEGER NOT NULL DEFAULT 0
 );
 ";
 
@@ -228,8 +230,20 @@ pub struct OutcomeTarget {
     pub scanned_until: Option<DateTime<Utc>>,
     pub tried_at: Option<DateTime<Utc>>,
     pub scope: Option<String>,
+    /// Readings that failed since the last that did.
+    pub failures: u32,
     /// The ages already counted.
     pub kept: Vec<String>,
+}
+
+/// What reading a session's history found, to be stored: its events and
+/// which refs were read, or none when it could not be read. Kept only while
+/// the session still has the end it was read for.
+#[derive(Debug)]
+pub struct OutcomeScan {
+    pub session_id: String,
+    pub ended_at: DateTime<Utc>,
+    pub read: Option<(Vec<OutcomeEvent>, String)>,
 }
 
 /// A commit that touched a session's lines.
@@ -588,6 +602,7 @@ impl Ledger {
                 "by_agent",
                 "TEXT NOT NULL DEFAULT '[]'",
             ),
+            ("outcome_scans", "failures", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             let knows = tx
                 .prepare(&format!(
@@ -1133,12 +1148,18 @@ impl Ledger {
     }
 
     /// Every session with an end and tracked lines, with how far its history
-    /// was read and which ages are counted.
-    pub fn outcome_targets(&self) -> Result<Vec<OutcomeTarget>> {
-        let mut scans: std::collections::HashMap<String, (Option<String>, String, String)> = self
+    /// was read and which ages are counted; with its files' lines when
+    /// `files`, else none (see `outcome_files`).
+    pub fn outcome_targets(&self, files: bool) -> Result<Vec<OutcomeTarget>> {
+        type Scan = (Option<String>, String, String, u32);
+        let mut scans: std::collections::HashMap<String, Scan> = self
             .conn
-            .prepare("SELECT session_id, scanned_until, tried_at, scope FROM outcome_scans")?
-            .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?))))?
+            .prepare(
+                "SELECT session_id, scanned_until, tried_at, scope, failures FROM outcome_scans",
+            )?
+            .query_map([], |r| {
+                Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         let mut kept: std::collections::HashMap<String, Vec<String>> = Default::default();
         for row in self
@@ -1150,119 +1171,147 @@ impl Ledger {
             kept.entry(id).or_default().push(checkpoint);
         }
         let mut query = self.conn.prepare(
-            "SELECT s.session_id, s.started_at, s.ended_at, coalesce(s.repo_root, s.cwd),
-                    f.path, f.added_hashes, s.source
-             FROM session_files f JOIN sessions s ON s.session_id = f.session_id
-             WHERE f.added_hashes IS NOT NULL AND s.started_at IS NOT NULL
-               AND s.ended_at IS NOT NULL
-             ORDER BY s.session_id, f.path",
+            "SELECT s.session_id, s.started_at, s.ended_at, coalesce(s.repo_root, s.cwd), s.source
+             FROM sessions s
+             WHERE s.started_at IS NOT NULL AND s.ended_at IS NOT NULL
+               AND EXISTS (SELECT 1 FROM session_files f WHERE f.session_id = s.session_id
+                             AND length(f.added_hashes) >= 8)
+             ORDER BY s.session_id",
         )?;
         let rows = query
             .query_map([], |r| {
-                let blob: Vec<u8> = r.get(5)?;
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, String>(4)?,
-                    blob.as_chunks::<8>()
-                        .0
-                        .iter()
-                        .map(|c| u64::from_le_bytes(*c))
-                        .collect::<Vec<u64>>(),
-                    r.get::<_, String>(6)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut targets: Vec<OutcomeTarget> = Vec::new();
-        for (id, started, ended, base, path, hashes, source) in rows {
-            if hashes.is_empty() {
+        let mut targets = Vec::new();
+        for (id, started, ended, base, source) in rows {
+            let (Some(started_at), Some(ended_at)) = (time(Some(started)), time(Some(ended)))
+            else {
                 continue;
-            }
-            if targets.last().is_none_or(|t| t.session_id != id) {
-                let (Some(started_at), Some(ended_at)) = (time(Some(started)), time(Some(ended)))
-                else {
-                    continue;
-                };
-                let scan = scans.remove(&id);
-                targets.push(OutcomeTarget {
-                    kept: kept.remove(&id).unwrap_or_default(),
-                    scanned_until: scan.as_ref().and_then(|s| time(s.0.clone())),
-                    tried_at: scan.as_ref().and_then(|s| time(Some(s.1.clone()))),
-                    scope: scan.map(|s| s.2),
-                    session_id: id.clone(),
-                    source,
-                    started_at,
-                    ended_at,
-                    base,
-                    files: Vec::new(),
-                });
-            }
-            if let Some(target) = targets.last_mut().filter(|t| t.session_id == id) {
-                target.files.push((path, hashes));
-            }
+            };
+            let scan = scans.remove(&id);
+            targets.push(OutcomeTarget {
+                kept: kept.remove(&id).unwrap_or_default(),
+                scanned_until: scan.as_ref().and_then(|s| time(s.0.clone())),
+                tried_at: scan.as_ref().and_then(|s| time(Some(s.1.clone()))),
+                failures: scan.as_ref().map_or(0, |s| s.3),
+                scope: scan.map(|s| s.2),
+                session_id: id,
+                source,
+                started_at,
+                ended_at,
+                base,
+                files: Vec::new(),
+            });
+        }
+        if files {
+            self.outcome_files(&mut targets)?;
         }
         Ok(targets)
     }
 
-    /// Note that the history of `sessions` was read now. With `scanned_until`
-    /// it was read up to then and `events` is all that touched them, in place
-    /// of what was stored; without, it could not be read and is tried later.
-    pub fn store_outcome_scan(
-        &mut self,
-        sessions: &[&str],
-        events: &[OutcomeEvent],
-        scanned_until: Option<DateTime<Utc>>,
-        scope: &str,
-        now: DateTime<Utc>,
-    ) -> Result<()> {
-        let tx = self.conn.transaction()?;
+    /// Fill in each target's files with the lines added, as hashes.
+    pub fn outcome_files(&self, targets: &mut [OutcomeTarget]) -> Result<()> {
+        let index: std::collections::HashMap<String, usize> = targets
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.session_id.clone(), i))
+            .collect();
+        for target in targets.iter_mut() {
+            target.files.clear();
+        }
+        let mut query = self.conn.prepare(
+            "SELECT session_id, path, added_hashes FROM session_files
+             WHERE length(added_hashes) >= 8 ORDER BY session_id, path",
+        )?;
+        let mut rows = query.query([])?;
+        while let Some(r) = rows.next()? {
+            let id: String = r.get(0)?;
+            let Some(i) = index.get(&id) else { continue };
+            let blob: Vec<u8> = r.get(2)?;
+            let hashes = blob
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| u64::from_le_bytes(*c))
+                .collect();
+            targets[*i].files.push((r.get(1)?, hashes));
+        }
+        Ok(())
+    }
+
+    /// Store what reading sessions' history found. A session read gets its
+    /// events in place of what was stored, and is read up to `now`; one that
+    /// could not be read is tried again later. A session whose end is no
+    /// longer the one it was read for is left as it is.
+    pub fn store_outcome_scans(&mut self, scans: &[OutcomeScan], now: DateTime<Utc>) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         {
             let mut ended = tx.prepare("SELECT ended_at FROM sessions WHERE session_id = ?1")?;
             let mut forget = tx.prepare("DELETE FROM outcome_events WHERE session_id = ?1")?;
-            let mut scanned = tx.prepare(
-                "INSERT INTO outcome_scans VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT (session_id) DO UPDATE SET ended_at = ?2,
-                   scanned_until = coalesce(?3, scanned_until), tried_at = ?4,
-                   scope = CASE WHEN ?3 IS NULL THEN scope ELSE ?5 END",
+            let mut read = tx.prepare(
+                "INSERT INTO outcome_scans
+                   (session_id, ended_at, scanned_until, tried_at, scope, failures)
+                 VALUES (?1, ?2, ?3, ?3, ?4, 0)
+                 ON CONFLICT (session_id) DO UPDATE SET ended_at = ?2, scanned_until = ?3,
+                   tried_at = ?3, scope = ?4, failures = 0",
             )?;
-            for id in sessions {
-                let Some(ended_at): Option<String> =
-                    ended.query_row([id], |r| r.get(0)).optional()?.flatten()
-                else {
-                    continue;
-                };
-                if scanned_until.is_some() {
-                    forget.execute([id])?;
-                }
-                scanned.execute(params![
-                    id,
-                    ended_at,
-                    scanned_until.map(|t| t.to_rfc3339()),
-                    now.to_rfc3339(),
-                    scope
-                ])?;
-            }
+            let mut failed = tx.prepare(
+                "INSERT INTO outcome_scans
+                   (session_id, ended_at, scanned_until, tried_at, scope, failures)
+                 VALUES (?1, ?2, NULL, ?3, ?4, 1)
+                 ON CONFLICT (session_id) DO UPDATE SET ended_at = ?2, tried_at = ?3,
+                   failures = failures + 1",
+            )?;
             let mut insert = tx.prepare(
-                "INSERT OR REPLACE INTO outcome_events
+                "INSERT OR REPLACE INTO outcome_events (session_id, sha, at, kind, signals, lines,
+                   copies, strength, relanded_at, subject, by_session, by_source)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?;
-            for e in events {
-                insert.execute(params![
-                    e.session_id,
-                    e.sha,
-                    e.at.to_rfc3339(),
-                    e.kind,
-                    serde_json::to_string(&e.signals)?,
-                    e.lines,
-                    e.copies,
-                    e.strength,
-                    e.relanded_at.map(|t| t.to_rfc3339()),
-                    e.subject,
-                    e.by_session,
-                    e.by_source
-                ])?;
+            for scan in scans {
+                let now_ended: Option<String> = ended
+                    .query_row([&scan.session_id], |r| r.get(0))
+                    .optional()?
+                    .flatten();
+                if time(now_ended) != Some(scan.ended_at) {
+                    continue;
+                }
+                let ended_at = scan.ended_at.to_rfc3339();
+                let Some((events, scope)) = &scan.read else {
+                    failed.execute(params![
+                        scan.session_id,
+                        ended_at,
+                        now.to_rfc3339(),
+                        crate::outcomes::HEAD_ONLY
+                    ])?;
+                    continue;
+                };
+                forget.execute([&scan.session_id])?;
+                read.execute(params![scan.session_id, ended_at, now.to_rfc3339(), scope])?;
+                for e in events.iter().filter(|e| e.session_id == scan.session_id) {
+                    insert.execute(params![
+                        e.session_id,
+                        e.sha,
+                        e.at.to_rfc3339(),
+                        e.kind,
+                        serde_json::to_string(&e.signals)?,
+                        e.lines,
+                        e.copies,
+                        e.strength,
+                        e.relanded_at.map(|t| t.to_rfc3339()),
+                        e.subject,
+                        e.by_session,
+                        e.by_source
+                    ])?;
+                }
             }
         }
         tx.commit()?;
@@ -1298,15 +1347,27 @@ impl Ledger {
     }
 
     /// Keep each count of an age, unless one is kept already. Returns how many were kept.
+    /// A count is kept only while the session still has the end it was counted from.
     pub fn keep_outcome_windows(&mut self, windows: &[(String, OutcomeCheckpoint)]) -> Result<u64> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut kept = 0;
         {
+            let mut ended = tx.prepare("SELECT ended_at FROM sessions WHERE session_id = ?1")?;
             let mut insert = tx.prepare(
-                "INSERT OR IGNORE INTO outcome_checkpoints
+                "INSERT OR IGNORE INTO outcome_checkpoints (session_id, checkpoint, lines_tracked,
+                   fix_commits, likely_fix_commits, lines_fixed, rework_commits, lines_reworked,
+                   revert_commits, lines_reverted, relanded, computed_at, age_seconds, ended_at,
+                   late, scope, by_agent)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             )?;
             for (id, o) in windows {
+                let now_ended: Option<String> =
+                    ended.query_row([id], |r| r.get(0)).optional()?.flatten();
+                if o.ended_at.is_none() || time(now_ended) != o.ended_at {
+                    continue;
+                }
                 kept += insert.execute(params![
                     id,
                     o.checkpoint,

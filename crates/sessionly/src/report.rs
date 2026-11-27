@@ -882,11 +882,21 @@ pub fn outcomes(s: &Session, events: &[OutcomeEvent], kept: &[OutcomeCheckpoint]
     }
     let _ = writeln!(out, "Later      {}", later_at(kept));
     if events.is_empty() {
-        let _ = writeln!(
-            out,
-            "\nNo later commit has changed two or more of its lines{}.",
-            if kept.is_empty() { " yet" } else { "" }
-        );
+        match kept.last() {
+            Some(last) => {
+                let _ = writeln!(
+                    out,
+                    "\nNo later commit changed two or more of its lines by {}.",
+                    last.checkpoint
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "\nNot counted yet: no age of it has been read from the history."
+                );
+            }
+        }
         return out;
     }
     let _ = writeln!(
@@ -904,7 +914,8 @@ pub fn outcomes(s: &Session, events: &[OutcomeEvent], kept: &[OutcomeCheckpoint]
         } else {
             format!("{:.1}", e.lines)
         };
-        let mut subject = e.subject.clone();
+        // A subject is anyone's text: none of it may move the cursor or change colours.
+        let mut subject: String = e.subject.chars().filter(|c| !c.is_control()).collect();
         if let Some(at) = e.relanded_at {
             let _ = write!(subject, " (relanded {})", at.format("%Y-%m-%d"));
         }

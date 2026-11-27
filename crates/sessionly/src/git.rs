@@ -15,7 +15,9 @@ pub enum Stop {
 }
 
 /// `git -C <root>` for reading: no file system monitor is started and no
-/// optional lock is taken, so it never gets in the way of the person's own git.
+/// optional lock is taken, so it never gets in the way of the person's own
+/// git; and it is the repository at `root`, whatever git's variables in the
+/// environment name (a hook that runs this is given them).
 pub fn command(root: &Path) -> Command {
     let mut command = Command::new("git");
     command
@@ -23,11 +25,23 @@ pub fn command(root: &Path) -> Command {
         .arg(root)
         .args(["-c", "core.fsmonitor=false"])
         .env("GIT_OPTIONAL_LOCKS", "0");
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+    ] {
+        command.env_remove(name);
+    }
     command
 }
 
 /// Run `command` and return what it printed, as far as `max_bytes`, and
-/// whether it all fit. Past `deadline` it is killed.
+/// whether it all fit. Past `deadline` it is killed, and as soon as it has
+/// printed more than `max_bytes`.
 pub fn bounded(
     mut command: Command,
     input: Option<&[u8]>,
@@ -44,6 +58,8 @@ pub fn bounded(
         .stderr(Stdio::null());
     let mut child = command.spawn().map_err(|_| Stop::Failed)?;
     let mut stdout = child.stdout.take().ok_or(Stop::Failed)?;
+    let over = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = over.clone();
     // Read while it runs, so a long answer cannot block it.
     let reader = std::thread::spawn(move || {
         let mut kept = Vec::new();
@@ -55,15 +71,30 @@ pub fn bounded(
             }
             let room = max_bytes.saturating_sub(kept.len());
             kept.extend_from_slice(&chunk[..n.min(room)]);
-            fits &= n <= room;
+            if n > room {
+                fits = false;
+                seen.store(true, std::sync::atomic::Ordering::Relaxed);
+                break;
+            }
         }
         (kept, fits)
     });
+    // Written while it runs too: one that stops reading (killed, or with
+    // more to print than is read) cannot block this.
     if let Some(input) = input {
         let mut stdin = child.stdin.take().ok_or(Stop::Failed)?;
-        let _ = stdin.write_all(input);
+        let input = input.to_vec();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
     }
     let status = loop {
+        if over.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let (out, _) = reader.join().map_err(|_| Stop::Failed)?;
+            return Ok((out, false));
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => {

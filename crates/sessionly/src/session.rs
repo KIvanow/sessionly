@@ -627,6 +627,7 @@ pub struct OutcomeCheckpoint {
     /// Of the commits above, those that were another agent session's own
     /// (it added lines in them), by that session's agent. Only sessions on
     /// the same machine are known; the rest are not by any agent known here.
+    /// One entry for each agent.
     pub by_agent: Vec<OutcomeBy>,
 }
 

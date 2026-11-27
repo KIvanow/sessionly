@@ -825,6 +825,13 @@ fn run(command: Command) -> Result<()> {
                 if words.is_empty() {
                     bail!("--fix-words needs at least one word, or `default`");
                 }
+                // A subject is read word by word, so each must be one word as it is read.
+                if let Some(bad) = words.iter().find(|w| !crate::outcomes::is_word(w)) {
+                    bail!(
+                        "--fix-words: `{bad}` is not one word; subjects are split on everything \
+                         that is not a letter or digit"
+                    );
+                }
                 config.outcomes_fix_words = (words != ["default"]).then_some(words);
             }
             if content.is_some()

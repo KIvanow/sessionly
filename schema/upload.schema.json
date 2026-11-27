@@ -1502,7 +1502,7 @@
           "default": ""
         },
         "by_agent": {
-          "description": "Of the commits above, those that were another agent session's own\n(it added lines in them), by that session's agent. Only sessions on\nthe same machine are known; the rest are not by any agent known here.",
+          "description": "Of the commits above, those that were another agent session's own\n(it added lines in them), by that session's agent. Only sessions on\nthe same machine are known; the rest are not by any agent known here.\nOne entry for each agent.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/OutcomeBy"
