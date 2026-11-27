@@ -624,6 +624,25 @@ pub struct OutcomeCheckpoint {
     /// Which branches were read: `head_and_default` (the one checked out and
     /// the remote's default branch) or `head_only`.
     pub scope: String,
+    /// Of the commits above, those that were another agent session's own
+    /// (it added lines in them), by that session's agent. Only sessions on
+    /// the same machine are known; the rest are not by any agent known here.
+    pub by_agent: Vec<OutcomeBy>,
+}
+
+/// Of a session's later commits, those another agent's sessions made.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct OutcomeBy {
+    /// The agent: `claude-code`, `cursor`, ….
+    pub source: String,
+    pub fix_commits: u64,
+    pub likely_fix_commits: u64,
+    pub lines_fixed: f64,
+    pub rework_commits: u64,
+    pub lines_reworked: f64,
+    pub revert_commits: u64,
+    pub lines_reverted: f64,
 }
 
 /// Lines an agent added to one file with one model. A line is hashed without

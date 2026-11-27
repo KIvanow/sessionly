@@ -9,6 +9,7 @@ import {
   type KeptAt,
   type OutcomeCheckpoint,
   type OutcomesAt,
+  type OutcomesBy,
   type RewriteCheckpoint,
   type Session,
   type SessionPlace,
@@ -110,6 +111,31 @@ type OutcomeAt = Required<Omit<OutcomeCheckpoint, "checkpoint">>;
  * taken. A count is of the history up to that age, so a later one would be
  * the same; keeping the first keeps it so when the history is rewritten.
  */
+/** An agent is named as an upload names one: a short word, no more. */
+const AGENT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/** Of an age's commits, the other agents' share: counts no more than the age's own, one entry each. */
+function byAgentOf(o: Partial<OutcomeAt>): OutcomesBy[] {
+  const out: OutcomesBy[] = [];
+  for (const b of Array.isArray(o.by_agent) ? o.by_agent : []) {
+    const source = String(b?.source ?? "");
+    if (!AGENT_NAME.test(source) || out.some((x) => x.source === source)) continue;
+    const at = (n: unknown, most: unknown) => Math.min(num(n), num(most));
+    const fix = at(b.fix_commits, o.fix_commits);
+    out.push({
+      source,
+      fix_commits: fix,
+      likely_fix_commits: Math.min(at(b.likely_fix_commits, o.likely_fix_commits), fix),
+      lines_fixed: at(b.lines_fixed, o.lines_fixed),
+      revert_commits: at(b.revert_commits, o.revert_commits),
+      lines_reverted: at(b.lines_reverted, o.lines_reverted),
+      rework_commits: at(b.rework_commits, o.rework_commits),
+      lines_reworked: at(b.lines_reworked, o.lines_reworked),
+    });
+  }
+  return out.sort((a, b) => a.source.localeCompare(b.source));
+}
+
 export function mergeOutcomes(kept: unknown, upload: Upload): Record<string, OutcomeAt> {
   const ended = Date.parse(upload.session?.ended_at ?? "");
   const out: Record<string, OutcomeAt> = {};
@@ -133,6 +159,7 @@ export function mergeOutcomes(kept: unknown, upload: Upload): Record<string, Out
       ended_at: new Date(ended).toISOString(),
       late: o.late === true,
       scope: o.scope === "head_and_default" ? "head_and_default" : "head_only",
+      by_agent: byAgentOf(o),
     };
   };
   const before = typeof kept === "string" ? JSON.parse(kept) : kept;
@@ -655,6 +682,7 @@ function totals(row: Record<string, unknown>): Totals {
     lines_reverted: num(row[`oc_${age}_lines_reverted`]),
     rework_commits: num(row[`oc_${age}_rework_commits`]),
     lines_reworked: num(row[`oc_${age}_lines_reworked`]),
+    by_agent: [],
   });
   return {
     key: String(row.key),
@@ -708,8 +736,41 @@ export async function summarize(
     params,
   );
   const [total] = await db.query(`SELECT 'total' AS key, ${TOTAL_COLUMNS} FROM sessions ${CHARGED} ${sql}`, params);
-  return { groups: groups.map(totals), total: totals(total ?? { key: "total" }) };
+  const out = { groups: groups.map(totals), total: totals(total ?? { key: "total" }) };
+  // What other agents' sessions did to each group's: the groups are of the same sessions as the total, apart.
+  const agents = await db.query<Record<string, unknown>>(
+    `SELECT ${GROUP_KEY[by]} AS key, oc_age AS age, oc_by->>'source' AS source,
+       ${BY_AGENT_FIELDS.map((f) => `sum((oc_by->>'${f}')::double precision) AS ${f}`).join(", ")}
+     FROM sessions
+       CROSS JOIN LATERAL jsonb_each(outcomes) AS oc_ages(oc_age, oc_at)
+       CROSS JOIN LATERAL jsonb_array_elements(coalesce(oc_at->'by_agent', '[]'::jsonb)) AS oc_bys(oc_by)
+     ${sql} GROUP BY 1, 2, 3 ORDER BY 3`,
+    params,
+  );
+  const add = (into: Totals, row: Record<string, unknown>) => {
+    const at = into[`outcomes_${row.age}` as `outcomes_${(typeof CHECKPOINTS)[number]}`];
+    if (!at) return;
+    let b = at.by_agent.find((x) => x.source === row.source);
+    if (!b) at.by_agent.push((b = { source: String(row.source), ...Object.fromEntries(BY_AGENT_FIELDS.map((f) => [f, 0])) } as OutcomesBy));
+    for (const f of BY_AGENT_FIELDS) b[f] += num(row[f]);
+  };
+  for (const row of agents) {
+    const group = out.groups.find((g) => g.key === String(row.key));
+    if (group) add(group, row);
+    add(out.total, row);
+  }
+  return out;
 }
+
+const BY_AGENT_FIELDS = [
+  "fix_commits",
+  "likely_fix_commits",
+  "lines_fixed",
+  "revert_commits",
+  "lines_reverted",
+  "rework_commits",
+  "lines_reworked",
+] as const satisfies readonly (keyof OutcomesBy)[];
 
 const iso = (value: unknown): string | null =>
   value == null ? null : value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString();

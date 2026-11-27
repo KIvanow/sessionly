@@ -46,7 +46,7 @@ use chrono::{DateTime, Utc};
 
 use crate::ledger::{Ledger, OutcomeEvent, OutcomeTarget};
 use crate::rewrite::{line_hash, CHECKPOINTS};
-use crate::session::OutcomeCheckpoint;
+use crate::session::{OutcomeBy, OutcomeCheckpoint};
 
 /// A commit must remove at least this many of a session's lines to touch it:
 /// one line is too often a generic one (`if (`, an import) that matched by chance.
@@ -488,7 +488,44 @@ fn window(
         ended_at: Some(ended),
         late: age as i64 >= seconds + 86_400,
         scope: target.scope.clone().unwrap_or_else(|| HEAD_ONLY.into()),
+        by_agent: by_agent(&inside),
     }
+}
+
+/// The events of an age that were other agent sessions' own commits, by agent.
+fn by_agent(inside: &[&OutcomeEvent]) -> Vec<OutcomeBy> {
+    let mut by: Vec<OutcomeBy> = Vec::new();
+    for e in inside {
+        let Some(source) = &e.by_source else { continue };
+        let i = match by.iter().position(|b| &b.source == source) {
+            Some(i) => i,
+            None => {
+                by.push(OutcomeBy {
+                    source: source.clone(),
+                    ..Default::default()
+                });
+                by.len() - 1
+            }
+        };
+        let b = &mut by[i];
+        match e.kind.as_str() {
+            "fix" => {
+                b.fix_commits += 1;
+                b.likely_fix_commits += u64::from(e.strength >= LIKELY_FIX);
+                b.lines_fixed += e.lines;
+            }
+            "revert" => {
+                b.revert_commits += 1;
+                b.lines_reverted += e.lines;
+            }
+            _ => {
+                b.rework_commits += 1;
+                b.lines_reworked += e.lines;
+            }
+        }
+    }
+    by.sort_by(|a, b| a.source.cmp(&b.source));
+    by
 }
 
 /// Read one repository's history and find what touched each session in
@@ -780,6 +817,14 @@ fn attribute(
         }
         let says = signals(&commit.message, words_of);
         let reverted = reverts(&commit.message);
+        // The agent session this commit was the own commit of: the latest to
+        // have begun, if several.
+        let made_by = |i: usize| {
+            (0..sessions.len())
+                .filter(|j| *j != i && own[*j].contains(commit.sha.as_str()))
+                .max_by_key(|j| (targets[sessions[*j].target].started_at, *j))
+                .map(|j| &targets[sessions[j].target])
+        };
         for (i, (lines, copies, not_common)) in lost {
             if not_common < MIN_TOUCH_LINES || !scanned.contains(&sessions[i].target) {
                 continue;
@@ -827,6 +872,8 @@ fn attribute(
                         .next()
                         .unwrap_or_default()
                         .to_string(),
+                    by_session: made_by(i).map(|t| t.session_id.clone()),
+                    by_source: made_by(i).map(|t| t.source.clone()),
                 },
             ));
         }
@@ -991,11 +1038,23 @@ mod tests {
 
         /// A session that began at `started`, ended at `ended`, and added `lines` to `file`.
         fn session(&mut self, id: &str, started: i64, ended: i64, files: &[(&str, &[&str])]) {
+            self.session_of("claude-code", id, started, ended, files);
+        }
+
+        /// The same, of the agent `source`.
+        fn session_of(
+            &mut self,
+            source: &str,
+            id: &str,
+            started: i64,
+            ended: i64,
+            files: &[(&str, &[&str])],
+        ) {
             let at = |t: i64| DateTime::from_timestamp(t, 0);
             let path = |file: &str| self.root().join(file).to_string_lossy().into_owned();
             let session = Session {
                 session_id: id.into(),
-                source: "claude-code".into(),
+                source: source.into(),
                 started_at: at(started),
                 ended_at: at(ended),
                 repo: Some(Repo {
@@ -1074,6 +1133,74 @@ mod tests {
         );
         world.session("s1", T0, T0 + 2 * HOUR, &[("f.js", AGENT)]);
         (world, landing)
+    }
+
+    #[test]
+    fn a_later_commit_another_agent_session_made_is_by_it() {
+        let (mut world, _) = written();
+        // A Cursor session the next day fixes two of the lines, in its own commit.
+        let cursor: &[&str] = &[
+            "let alpha = checked(compute(1));",
+            "let beta = checked(compute(2));",
+            "let delta = compute(4);",
+        ];
+        world.commit(
+            "f.js",
+            &format!(
+                "// base line one\n{}\n{}\n{}\n{}\n{}\n",
+                cursor[0], cursor[1], cursor[2], AGENT[2], AGENT[3]
+            ),
+            "fix: check what compute returns",
+            T0 + DAY,
+        );
+        world.session_of(
+            "cursor",
+            "s2",
+            T0 + DAY - HOUR,
+            T0 + DAY + HOUR,
+            &[("f.js", cursor)],
+        );
+        // and a person the day after changes the other two.
+        world.commit(
+            "f.js",
+            &format!(
+                "// base line one\n{}\n{}\n{}\n",
+                cursor[0], cursor[1], cursor[2]
+            ),
+            "Tidy up",
+            T0 + 2 * DAY,
+        );
+        world.measure(T0 + 8 * DAY);
+
+        let events = world.ledger.outcome_events_of("s1").unwrap();
+        let by: Vec<_> = events
+            .iter()
+            .map(|e| {
+                (
+                    e.kind.as_str(),
+                    e.by_source.as_deref(),
+                    e.by_session.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            by,
+            [("fix", Some("cursor"), Some("s2")), ("rework", None, None)]
+        );
+        let week = world.at("s1", "7d").unwrap();
+        assert_eq!((week.fix_commits, week.rework_commits), (1, 1));
+        assert_eq!(
+            week.by_agent,
+            [OutcomeBy {
+                source: "cursor".into(),
+                fix_commits: 1,
+                likely_fix_commits: 1,
+                lines_fixed: 2.0,
+                ..Default::default()
+            }]
+        );
+        // Its own commit is not a later commit of its own.
+        assert!(world.ledger.outcome_events_of("s2").unwrap().is_empty());
     }
 
     #[test]

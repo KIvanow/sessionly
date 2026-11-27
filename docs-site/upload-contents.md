@@ -23,7 +23,8 @@ The payload ([schema/upload.schema.json](https://github.com/KIvanow/sessionly/bl
 the latest rewrite measurement, and that measurement as it was 1, 7 and 30 days after the
 session ended (`checkpoints`: counts and times, see [Rewrite rate](rewrite-rate.md#at-1-7-and-30-days)),
 and what later commits did to the agent's lines by those ages (`outcomes`: counts of reverts,
-fixes and rework, and times; no commit SHA, subject or path, see
+fixes and rework, and times, and of those how many another agent's session made, by agent
+(`by_agent`); no commit SHA, subject, path or session id, see
 [Later commits](rewrite-rate.md#later-commits-reverts-and-fixes)). `sessionly settings --outcomes off`
 leaves `outcomes` out.
 Before a record leaves the machine:

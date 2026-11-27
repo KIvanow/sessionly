@@ -1500,6 +1500,64 @@
           "description": "Which branches were read: `head_and_default` (the one checked out and\nthe remote's default branch) or `head_only`.",
           "type": "string",
           "default": ""
+        },
+        "by_agent": {
+          "description": "Of the commits above, those that were another agent session's own\n(it added lines in them), by that session's agent. Only sessions on\nthe same machine are known; the rest are not by any agent known here.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OutcomeBy"
+          },
+          "default": []
+        }
+      }
+    },
+    "OutcomeBy": {
+      "description": "Of a session's later commits, those another agent's sessions made.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "description": "The agent: `claude-code`, `cursor`, ….",
+          "type": "string",
+          "default": ""
+        },
+        "fix_commits": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "likely_fix_commits": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_fixed": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "rework_commits": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_reworked": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "revert_commits": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_reverted": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
         }
       }
     }

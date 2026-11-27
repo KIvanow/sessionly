@@ -133,12 +133,27 @@ export function revertedAt(o: OutcomesAt | null | undefined): string {
   return o && o.sessions_reached > 0 ? percent(share(o.sessions_reverted, o.sessions_reached)) : "–";
 }
 
+/**
+ * Of an age's fix commits, the ones other agents' sessions made, by agent, and
+ * the rest; empty when no agent's session made any. Only sessions on the same
+ * machine are known, so the rest may be a teammate's agent as well as a person.
+ */
+export function fixesBy(o: { fix_commits?: number; by_agent?: readonly { source?: string; fix_commits?: number }[] | null }): string {
+  const by = (o.by_agent ?? []).filter((b) => (b.fix_commits ?? 0) > 0);
+  if (by.length === 0) return "";
+  const rest = Math.max(0, (o.fix_commits ?? 0) - by.reduce((n, b) => n + (b.fix_commits ?? 0), 0));
+  const parts = by.map((b) => `${count(b.fix_commits ?? 0)} by ${toolName(b.source ?? "")}`);
+  if (rest > 0) parts.push(`${count(rest)} by no agent known`);
+  return parts.join(", ");
+}
+
 /** What later commits did to a session's lines by one age, in a few words. */
 export function laterWords(o: OutcomeCheckpoint): string {
   const parts: string[] = [];
   if ((o.revert_commits ?? 0) > 0) parts.push(o.relanded ? "reverted, relanded" : "reverted");
   const fixes = o.fix_commits ?? 0;
-  if (fixes > 0) parts.push(`${count(fixes)} ${fixes === 1 ? "fix" : "fixes"}`);
+  const by = fixesBy(o);
+  if (fixes > 0) parts.push(`${count(fixes)} ${fixes === 1 ? "fix" : "fixes"}${by ? ` (${by})` : ""}`);
   const rework = o.rework_commits ?? 0;
   if (rework > 0) parts.push(`${count(rework)} rework`);
   return parts.length ? parts.join(", ") : "nothing";

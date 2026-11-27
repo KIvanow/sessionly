@@ -96,7 +96,7 @@ function session(id: string, remote: string, lines: number[] = [1, 2, 3]) {
       { path: "notes/SECRET-plan.md", model: null, hashes: [h(900)] },
     ],
     checkpoints: [{ checkpoint: "7d", added: 3, surviving: 2, measured_at: "2026-11-17T10:00:00.000Z", age_seconds: 604_800, ended_at: "2026-11-10T10:00:00.000Z" }],
-    outcomes: [{ checkpoint: "7d", lines_tracked: 3, fix_commits: 1, likely_fix_commits: 1, lines_fixed: 2, rework_commits: 0, lines_reworked: 0, revert_commits: 0, lines_reverted: 0, relanded: false, computed_at: "2026-11-17T10:00:00.000Z", age_seconds: 604_800, ended_at: "2026-11-10T10:00:00.000Z", late: false, scope: "head_and_default" }],
+    outcomes: [{ checkpoint: "7d", lines_tracked: 3, fix_commits: 1, likely_fix_commits: 1, lines_fixed: 2, rework_commits: 0, lines_reworked: 0, revert_commits: 0, lines_reverted: 0, relanded: false, computed_at: "2026-11-17T10:00:00.000Z", age_seconds: 604_800, ended_at: "2026-11-10T10:00:00.000Z", late: false, scope: "head_and_default", by_agent: [{ source: "cursor", fix_commits: 1, likely_fix_commits: 1, lines_fixed: 2, rework_commits: 0, lines_reworked: 0, revert_commits: 0, lines_reverted: 0 }] }],
   };
 }
 

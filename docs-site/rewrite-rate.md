@@ -118,12 +118,20 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   the words (not the types) on that machine, and `--fix-words default` restores them. It
   changes only whether a commit counts as a fix or as rework, not reverts. A team's figures add
   every machine's counts, so a machine with its own words counts fixes differently from the rest.
-- **Uploaded:** only the counts at each age (`outcomes`), never a commit's SHA, subject or files.
+- **By another agent:** a later commit that was another agent session's own (it added that
+  session's lines, as above) is noted as by that session, and the counts say how many were
+  by each agent (`by_agent`): "Cursor's lines, changed by a fix Claude Code made". Only the
+  sessions on the same machine are known, so a commit by a teammate's agent counts as by no
+  agent known, and so does a fix that only removes lines. `sessionly outcomes` shows the
+  session in `BY`.
+- **Uploaded:** only the counts at each age (`outcomes`), never a commit's SHA, subject or files,
+  nor which session made it.
   `sessionly settings --outcomes off` stops reading history and sending them.
 
 On the dashboard, **By tool** and **By model** have **Changed by a fix @7d** and
-**Reverted @30d**, each of the sessions counted at that age, once any is. A session's page has
-**Later commits** with `1d / 7d / 30d`.
+**Reverted @30d**, each of the sessions counted at that age, once any is; under the first, which
+agents made the fixes ("2 by Cursor, 1 by no agent known"). A session's page has **Later
+commits** with `1d / 7d / 30d`.
 
 ## What it does and doesn't mean
 

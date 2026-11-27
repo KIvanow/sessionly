@@ -177,6 +177,9 @@ CREATE TABLE IF NOT EXISTS outcome_events (
     -- when a later commit reverted this revert
     relanded_at TEXT,
     subject     TEXT NOT NULL,
+    -- the agent session whose own commit it was, and its agent
+    by_session  TEXT,
+    by_source   TEXT,
     PRIMARY KEY (session_id, sha)
 );
 CREATE TABLE IF NOT EXISTS outcome_checkpoints (
@@ -196,6 +199,8 @@ CREATE TABLE IF NOT EXISTS outcome_checkpoints (
     ended_at           TEXT NOT NULL,
     late               INTEGER NOT NULL,
     scope              TEXT NOT NULL,
+    -- JSON array of OutcomeBy
+    by_agent           TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (session_id, checkpoint)
 );
 CREATE TABLE IF NOT EXISTS outcome_scans (
@@ -212,6 +217,8 @@ CREATE TABLE IF NOT EXISTS outcome_scans (
 #[derive(Debug, Clone)]
 pub struct OutcomeTarget {
     pub session_id: String,
+    /// Its agent.
+    pub source: String,
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
     /// Repository root, or the session's working directory.
@@ -239,6 +246,10 @@ pub struct OutcomeEvent {
     pub strength: f64,
     pub relanded_at: Option<DateTime<Utc>>,
     pub subject: String,
+    /// The agent session it was the own commit of, if one on this machine,
+    /// and that session's agent.
+    pub by_session: Option<String>,
+    pub by_source: Option<String>,
 }
 
 fn time(text: Option<String>) -> Option<DateTime<Utc>> {
@@ -568,6 +579,25 @@ impl Ledger {
         }
         tx.execute_batch(CHECKPOINT_TABLES)?;
         tx.execute_batch(OUTCOME_TABLES)?;
+        // A build from before the agent of a later commit was noted.
+        for (table, column, kind) in [
+            ("outcome_events", "by_session", "TEXT"),
+            ("outcome_events", "by_source", "TEXT"),
+            (
+                "outcome_checkpoints",
+                "by_agent",
+                "TEXT NOT NULL DEFAULT '[]'",
+            ),
+        ] {
+            let knows = tx
+                .prepare(&format!(
+                    "SELECT 1 FROM pragma_table_info('{table}') WHERE name = '{column}'"
+                ))?
+                .exists([])?;
+            if !knows {
+                tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
+            }
+        }
         tx.execute(
             "INSERT OR IGNORE INTO checkpoints_since VALUES (1, ?1)",
             [Utc::now().to_rfc3339()],
@@ -1121,7 +1151,7 @@ impl Ledger {
         }
         let mut query = self.conn.prepare(
             "SELECT s.session_id, s.started_at, s.ended_at, coalesce(s.repo_root, s.cwd),
-                    f.path, f.added_hashes
+                    f.path, f.added_hashes, s.source
              FROM session_files f JOIN sessions s ON s.session_id = f.session_id
              WHERE f.added_hashes IS NOT NULL AND s.started_at IS NOT NULL
                AND s.ended_at IS NOT NULL
@@ -1141,11 +1171,12 @@ impl Ledger {
                         .iter()
                         .map(|c| u64::from_le_bytes(*c))
                         .collect::<Vec<u64>>(),
+                    r.get::<_, String>(6)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut targets: Vec<OutcomeTarget> = Vec::new();
-        for (id, started, ended, base, path, hashes) in rows {
+        for (id, started, ended, base, path, hashes, source) in rows {
             if hashes.is_empty() {
                 continue;
             }
@@ -1161,6 +1192,7 @@ impl Ledger {
                     tried_at: scan.as_ref().and_then(|s| time(Some(s.1.clone()))),
                     scope: scan.map(|s| s.2),
                     session_id: id.clone(),
+                    source,
                     started_at,
                     ended_at,
                     base,
@@ -1214,7 +1246,7 @@ impl Ledger {
             }
             let mut insert = tx.prepare(
                 "INSERT OR REPLACE INTO outcome_events
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?;
             for e in events {
                 insert.execute(params![
@@ -1227,7 +1259,9 @@ impl Ledger {
                     e.copies,
                     e.strength,
                     e.relanded_at.map(|t| t.to_rfc3339()),
-                    e.subject
+                    e.subject,
+                    e.by_session,
+                    e.by_source
                 ])?;
             }
         }
@@ -1238,7 +1272,8 @@ impl Ledger {
     /// The commits that touched a session, oldest first.
     pub fn outcome_events_of(&self, session_id: &str) -> Result<Vec<OutcomeEvent>> {
         let mut query = self.conn.prepare(
-            "SELECT session_id, sha, at, kind, signals, lines, copies, strength, relanded_at, subject
+            "SELECT session_id, sha, at, kind, signals, lines, copies, strength, relanded_at, subject,
+                    by_session, by_source
              FROM outcome_events WHERE session_id = ?1 ORDER BY at, sha",
         )?;
         let rows = query
@@ -1254,6 +1289,8 @@ impl Ledger {
                     strength: r.get(7)?,
                     relanded_at: time(r.get(8)?),
                     subject: r.get(9)?,
+                    by_session: r.get(10)?,
+                    by_source: r.get(11)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -1267,7 +1304,7 @@ impl Ledger {
         {
             let mut insert = tx.prepare(
                 "INSERT OR IGNORE INTO outcome_checkpoints
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             )?;
             for (id, o) in windows {
                 kept += insert.execute(params![
@@ -1286,7 +1323,8 @@ impl Ledger {
                     o.age_seconds,
                     o.ended_at.unwrap_or_default().to_rfc3339(),
                     o.late,
-                    o.scope
+                    o.scope,
+                    serde_json::to_string(&o.by_agent)?
                 ])? as u64;
             }
         }
@@ -1299,7 +1337,7 @@ impl Ledger {
         let mut query = self.conn.prepare(
             "SELECT checkpoint, lines_tracked, fix_commits, likely_fix_commits, lines_fixed,
                     rework_commits, lines_reworked, revert_commits, lines_reverted, relanded,
-                    computed_at, age_seconds, ended_at, late, scope
+                    computed_at, age_seconds, ended_at, late, scope, by_agent
              FROM outcome_checkpoints WHERE session_id = ?1",
         )?;
         let mut rows: Vec<OutcomeCheckpoint> = query
@@ -1320,6 +1358,7 @@ impl Ledger {
                     ended_at: time(r.get(12)?),
                     late: r.get(13)?,
                     scope: r.get(14)?,
+                    by_agent: serde_json::from_str(&r.get::<_, String>(15)?).unwrap_or_default(),
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;

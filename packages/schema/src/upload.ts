@@ -631,4 +631,26 @@ export interface OutcomeCheckpoint {
    * the remote's default branch) or `head_only`.
    */
   scope?: string;
+  /**
+   * Of the commits above, those that were another agent session's own
+   * (it added lines in them), by that session's agent. Only sessions on
+   * the same machine are known; the rest are not by any agent known here.
+   */
+  by_agent?: OutcomeBy[];
+}
+/**
+ * Of a session's later commits, those another agent's sessions made.
+ */
+export interface OutcomeBy {
+  /**
+   * The agent: `claude-code`, `cursor`, ….
+   */
+  source?: string;
+  fix_commits?: number;
+  likely_fix_commits?: number;
+  lines_fixed?: number;
+  rework_commits?: number;
+  lines_reworked?: number;
+  revert_commits?: number;
+  lines_reverted?: number;
 }

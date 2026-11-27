@@ -204,6 +204,24 @@ export interface OutcomesAt {
   /** Commits that changed the agents' lines and say neither. */
   rework_commits: number;
   lines_reworked: number;
+  /**
+   * Of the commits above, those that were another agent session's own, by
+   * that session's agent, as each machine saw them: only sessions on the
+   * machine a session was on are known. The rest were by no agent known.
+   */
+  by_agent: OutcomesBy[];
+}
+
+/** Of later commits, those another agent's sessions made. */
+export interface OutcomesBy {
+  source: string;
+  fix_commits: number;
+  likely_fix_commits: number;
+  lines_fixed: number;
+  revert_commits: number;
+  lines_reverted: number;
+  rework_commits: number;
+  lines_reworked: number;
 }
 
 export interface Totals {

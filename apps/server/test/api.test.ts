@@ -525,7 +525,21 @@ test("what later commits did 1, 7 and 30 days after a session ended is kept as c
   assert.deepEqual(await kept("o1"), []);
   assert.equal((await byTool()).total.outcomes_7d.sessions_reached, 0);
 
-  await send(tokens.ann, "o1", [at("1d", {}, 1), at("7d", { fix_commits: 2, likely_fix_commits: 5, lines_fixed: 3.5 }, 8)]);
+  const cursorFixed = { source: "cursor", fix_commits: 1, likely_fix_commits: 1, lines_fixed: 2, revert_commits: 0, lines_reverted: 0, rework_commits: 0, lines_reworked: 0 };
+  await send(tokens.ann, "o1", [
+    at("1d", {}, 1),
+    at(
+      "7d",
+      {
+        fix_commits: 2,
+        likely_fix_commits: 5,
+        lines_fixed: 3.5,
+        // Another agent's commits: no more of them than of all, one entry for each agent, and an agent by a name only.
+        by_agent: [{ ...cursorFixed, fix_commits: 3, likely_fix_commits: 9 }, { ...cursorFixed, fix_commits: 2 }, { ...cursorFixed, source: "SECRET name/" }, { ...cursorFixed, source: "codex", fix_commits: 1, lines_fixed: 1 }],
+      },
+      8,
+    ),
+  ]);
   assert.deepEqual(await kept("o1"), [["1d", 0, 1], ["7d", 2, 8]]);
   // One kept is not replaced; a lost ledger sends none and takes none away; one counted too early is not taken.
   await send(tokens.ann, "o1", [at("7d", { fix_commits: 9 }, 9), at("30d", {}, 29)]);
@@ -537,7 +551,7 @@ test("what later commits did 1, 7 and 30 days after a session ended is kept as c
   assert.doesNotMatch(JSON.stringify(stored), /SECRET/);
 
   // Another agent's session, reverted and relanded by day 30; and one not yet a week old.
-  await send(tokens.bob, "o2", [at("7d", { rework_commits: 1, lines_reworked: 2 }, 7), at("30d", { revert_commits: 1, relanded: true }, 30)], {
+  await send(tokens.bob, "o2", [at("7d", { rework_commits: 1, lines_reworked: 2, by_agent: [{ ...cursorFixed, fix_commits: 0, likely_fix_commits: 0, lines_fixed: 0, rework_commits: 1, lines_reworked: 2 }] }, 7), at("30d", { revert_commits: 1, relanded: true }, 30)], {
     source: "cursor",
   });
   await send(tokens.ann, "o3", [at("1d", {}, 1)]);
@@ -557,6 +571,10 @@ test("what later commits did 1, 7 and 30 days after a session ended is kept as c
     lines_reverted: 0,
     rework_commits: 0,
     lines_reworked: 0,
+    by_agent: [
+      { ...cursorFixed, source: "codex", lines_fixed: 1 },
+      { ...cursorFixed, fix_commits: 2, likely_fix_commits: 2 },
+    ],
   });
   assert.equal(tool("claude-code").outcomes_30d.sessions_reverted, 1);
   // Relanded within the age: reverted, and not counted as a reverted session.
@@ -564,6 +582,11 @@ test("what later commits did 1, 7 and 30 days after a session ended is kept as c
   assert.deepEqual(
     [summary.total.outcomes_7d.sessions_reached, summary.total.outcomes_7d.sessions_total, summary.total.outcomes_7d.rework_commits],
     [2, 3, 1],
+  );
+  // Summed over the groups, of the same agent.
+  assert.deepEqual(
+    summary.total.outcomes_7d.by_agent.map((b: any) => [b.source, b.fix_commits, b.rework_commits]),
+    [["codex", 1, 0], ["cursor", 2, 1]],
   );
 
   // The session went on: what was counted from its first end goes.

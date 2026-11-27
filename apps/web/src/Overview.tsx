@@ -3,7 +3,7 @@ import { Fragment, useId, useState, type ReactNode } from "react";
 import { query } from "./api.ts";
 import { scopeParams, type Pick, type Scope } from "./App.tsx";
 import { CostChart } from "./CostChart.tsx";
-import { activeTime, compact, count, dateTime, duration, fixedAt, groupCost, keptAt, keptOf, linesKept, modelName, percent, repoName, revertedAt, rewriteRate, share, toolName, usd, usdCompact } from "./format.ts";
+import { activeTime, compact, count, dateTime, duration, fixedAt, fixesBy, groupCost, keptAt, keptOf, linesKept, modelName, percent, repoName, revertedAt, rewriteRate, share, toolName, usd, usdCompact } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { useApi } from "./useApi.ts";
 
@@ -424,9 +424,16 @@ function LaterHeads() {
 function LaterCells({ group }: { group: Totals }) {
   return (
     <>
-      <td className="num" title={`${count(group.outcomes_7d.fix_commits)} fix commits, ${count(group.outcomes_7d.likely_fix_commits)} of them likely fixes of the agent's lines`}>
+      <td
+        className="num"
+        title={
+          `${count(group.outcomes_7d.fix_commits)} fix commits, ${count(group.outcomes_7d.likely_fix_commits)} of them likely fixes of the agent's lines` +
+          (fixesBy(group.outcomes_7d) ? `; ${fixesBy(group.outcomes_7d)} (agents' sessions on the same machine)` : "")
+        }
+      >
         {fixedAt(group.outcomes_7d)}
         <span className="under">{keptOf(group.outcomes_7d)}</span>
+        {fixesBy(group.outcomes_7d) && <span className="under">{fixesBy(group.outcomes_7d)}</span>}
       </td>
       <td className="num">
         {revertedAt(group.outcomes_30d)}

@@ -374,6 +374,16 @@ export function shown(upload: Upload, rules: Rules): Upload {
       ended_at: o.ended_at,
       late: o.late,
       scope: o.scope,
+      by_agent: o.by_agent?.map((b) => ({
+        source: b.source,
+        fix_commits: b.fix_commits,
+        likely_fix_commits: b.likely_fix_commits,
+        lines_fixed: b.lines_fixed,
+        rework_commits: b.rework_commits,
+        lines_reworked: b.lines_reworked,
+        revert_commits: b.revert_commits,
+        lines_reverted: b.lines_reverted,
+      })),
     })),
   };
 }

@@ -891,8 +891,8 @@ pub fn outcomes(s: &Session, events: &[OutcomeEvent], kept: &[OutcomeCheckpoint]
     }
     let _ = writeln!(
         out,
-        "\n{:<9}  {:<16}  {:<6}  {:>7}  {:<26}  SUBJECT",
-        "COMMIT", "DATE", "KIND", "LINES", "SIGNALS"
+        "\n{:<9}  {:<16}  {:<6}  {:>7}  {:<26}  {:<20}  SUBJECT",
+        "COMMIT", "DATE", "KIND", "LINES", "SIGNALS", "BY"
     );
     for e in events {
         let kind = match e.kind.as_str() {
@@ -908,21 +908,30 @@ pub fn outcomes(s: &Session, events: &[OutcomeEvent], kept: &[OutcomeCheckpoint]
         if let Some(at) = e.relanded_at {
             let _ = write!(subject, " (relanded {})", at.format("%Y-%m-%d"));
         }
+        // Another agent session's own commit: its agent, and which session.
+        let by = match (&e.by_source, &e.by_session) {
+            (Some(source), Some(id)) => {
+                format!("{source} {}", id.chars().take(8).collect::<String>())
+            }
+            _ => "-".to_string(),
+        };
         let _ = writeln!(
             out,
-            "{:<9}  {:<16}  {:<6}  {:>7}  {:<26}  {}",
+            "{:<9}  {:<16}  {:<6}  {:>7}  {:<26}  {:<20}  {}",
             e.sha.chars().take(9).collect::<String>(),
             e.at.format("%Y-%m-%d %H:%M"),
             kind,
             lines,
             fit(&e.signals.join(","), 26),
+            fit(&by, 20),
             fit(&subject, 72)
         );
     }
     let _ = writeln!(
         out,
         "\nA fix here changed the session's lines; mostly it fixed something else. \
-         fix* is a likely fix: at least half of what it removed was the session's."
+         fix* is a likely fix: at least half of what it removed was the session's. \
+         BY is the agent session on this machine whose own commit it was."
     );
     out
 }
