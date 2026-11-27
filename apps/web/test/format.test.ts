@@ -118,6 +118,32 @@ test("what was kept at a fixed age, and of how many sessions", () => {
   assert.equal(f.keptOf(null), "");
 });
 
+test("what later commits did: of the sessions counted at an age, and per session in a few words", () => {
+  const at = { sessions_reached: 8, sessions_total: 20, lines_tracked: 400, sessions_with_fix: 2, fix_commits: 3, likely_fix_commits: 1, lines_fixed: 6, sessions_reverted: 1, revert_commits: 1, lines_reverted: 40, rework_commits: 4, lines_reworked: 9 };
+  assert.equal(f.fixedAt(at), "25%");
+  assert.equal(f.revertedAt(at), "13%");
+  assert.equal(f.keptOf(at), "8 of 20 sessions");
+  const none = { ...at, sessions_reached: 0 };
+  assert.equal(f.fixedAt(none), "–");
+  assert.equal(f.revertedAt(undefined), "–");
+
+  const day = 86_400;
+  const ages = f.laterAges([
+    { checkpoint: "7d", fix_commits: 2, rework_commits: 1, age_seconds: 9 * day },
+    { checkpoint: "1d", age_seconds: day },
+    { checkpoint: "30d", revert_commits: 1, relanded: true, age_seconds: 30 * day },
+  ]);
+  assert.deepEqual(
+    ages.map((a) => [a.name, a.later, a.late]),
+    [
+      ["1d", "nothing", null],
+      ["7d", "2 fixes, 1 rework", 9],
+      ["30d", "reverted, relanded", null],
+    ],
+  );
+  assert.deepEqual(f.laterAges(undefined).map((a) => a.later), ["–", "–", "–"]);
+});
+
 test("a session's lines at each age: a dash where it was not measured, and the day where that was late", () => {
   const day = 86_400;
   const ages = f.keptAges([

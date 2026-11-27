@@ -1,5 +1,5 @@
 // How numbers, times and names are shown. Pure functions, tested in test/.
-import type { KeptAt, RewriteCheckpoint, RewriteTotals } from "@sessionly/schema";
+import type { KeptAt, OutcomeCheckpoint, OutcomesAt, RewriteCheckpoint, RewriteTotals } from "@sessionly/schema";
 
 const whole = new Intl.NumberFormat("en-US");
 
@@ -115,9 +115,45 @@ export function keptAt(k: KeptAt | null | undefined): string {
 }
 
 /** How many sessions that figure is of: "12 of 40 sessions". */
-export function keptOf(k: KeptAt | null | undefined): string {
+export function keptOf(k: Pick<KeptAt, "sessions_reached" | "sessions_total"> | null | undefined): string {
   if (!k) return "";
   return `${count(k.sessions_reached)} of ${count(k.sessions_total)} ${k.sessions_total === 1 ? "session" : "sessions"}`;
+}
+
+/**
+ * Of the sessions counted at an age, the share a later fix commit changed
+ * lines of by then ("changed by a fix"), or a dash when none was counted.
+ */
+export function fixedAt(o: OutcomesAt | null | undefined): string {
+  return o && o.sessions_reached > 0 ? percent(share(o.sessions_with_fix, o.sessions_reached)) : "–";
+}
+
+/** Of the sessions counted at an age, the share reverted by then and not relanded, or a dash. */
+export function revertedAt(o: OutcomesAt | null | undefined): string {
+  return o && o.sessions_reached > 0 ? percent(share(o.sessions_reverted, o.sessions_reached)) : "–";
+}
+
+/** What later commits did to a session's lines by one age, in a few words. */
+export function laterWords(o: OutcomeCheckpoint): string {
+  const parts: string[] = [];
+  if ((o.revert_commits ?? 0) > 0) parts.push(o.relanded ? "reverted, relanded" : "reverted");
+  const fixes = o.fix_commits ?? 0;
+  if (fixes > 0) parts.push(`${count(fixes)} ${fixes === 1 ? "fix" : "fixes"}`);
+  const rework = o.rework_commits ?? 0;
+  if (rework > 0) parts.push(`${count(rework)} rework`);
+  return parts.length ? parts.join(", ") : "nothing";
+}
+
+/**
+ * What later commits did to a session's lines at each fixed age: a dash for
+ * an age not counted, and the day it was counted on when that was late.
+ */
+export function laterAges(outcomes: readonly OutcomeCheckpoint[] | null | undefined): { name: string; words: string; later: string; late: number | null; counted: boolean }[] {
+  return KEPT_AGES.map(({ name, days, words }) => {
+    const o = (outcomes ?? []).find((one) => one.checkpoint === name);
+    if (!o) return { name, words, later: "–", late: null, counted: false };
+    return { name, words, later: laterWords(o), late: takenLate(o.age_seconds ?? 0, days), counted: true };
+  });
 }
 
 /** The ages a measurement is kept at, with each in days and in words. */

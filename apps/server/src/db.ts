@@ -918,6 +918,11 @@ const MIGRATIONS: string[] = [
      ADD COLUMN review_split jsonb,
      ADD COLUMN review_split_rule integer,
      ADD COLUMN review_split_at timestamptz`,
+  // What later commits did to a session's lines 1, 7 and 30 days after it
+  // ended (an upload's `outcomes`, read from the repository's history on the
+  // machine), by age: {"7d": {lines_tracked, fix_commits, ...}}. Counts and
+  // times. Beside the payload, like `checkpoints`, and kept by the same rule.
+  `ALTER TABLE sessions ADD COLUMN outcomes jsonb NOT NULL DEFAULT '{}'`,
 ];
 
 /**

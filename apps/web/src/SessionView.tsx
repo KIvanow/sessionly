@@ -1,5 +1,5 @@
 import type { SessionDetail } from "@sessionly/schema";
-import { compact, cost, count, dateTime, duration, keptAges, percent, repoName, share, toolName, usd } from "./format.ts";
+import { compact, cost, count, dateTime, duration, keptAges, laterAges, percent, repoName, share, toolName, usd } from "./format.ts";
 import { reviewTarget } from "./pull.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -14,6 +14,8 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
   const rewrite = found.data.upload.rewrite ?? null;
   // What was there 1, 7 and 30 days after it ended, beside what is there now.
   const ages = keptAges(found.data.upload.checkpoints);
+  const outcomes = found.data.upload.outcomes ?? [];
+  const later = laterAges(outcomes);
   const measuredAt = ages.filter((age) => age.lines != null);
   const counts = s.counts ?? {};
   const hasText = s.content === "previews";
@@ -90,6 +92,22 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
             value={`+${compact(counts.lines_added ?? 0)}`}
             note={`−${count(counts.lines_removed ?? 0)}, in ${count(counts.files_changed ?? 0)} ${counts.files_changed === 1 ? "file" : "files"}`}
           />
+        )}
+        {outcomes.length > 0 && (
+          <Tile
+            label="Later commits"
+            value={later.findLast((age) => age.counted)?.later ?? "–"}
+            note="that changed the agent's lines, from the repository's history; a fix there was mostly of something else"
+          >
+            <dl className="ages" aria-label="What later commits did after the session ended">
+              {later.map((age) => (
+                <div key={age.name} title={!age.counted ? `Not counted ${age.words} after it ended` : age.late ? `Counted on day ${age.late}` : undefined}>
+                  <dt>{age.name}</dt>
+                  <dd>{age.later}</dd>
+                </div>
+              ))}
+            </dl>
+          </Tile>
         )}
       </section>
       <section className="card">

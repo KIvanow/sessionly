@@ -27,6 +27,7 @@ binary itself, and `sessionly --version` the version.
 | `sessionly list` | Sessions, newest first. Filters, and `--limit N` (`-n`, default 30); `--json`. See [List, search and summary](sessions.md). |
 | `sessionly summary` | Totals. The same filters, and `--by user` (default), `repo`, `model`, `tool` or `day`; `--json`. |
 | `sessionly show <session>` | One session; `--json`. |
+| `sessionly outcomes <session>` | The later commits that changed a session's lines: reverts, fixes and rework, and the counts at 1, 7 and 30 days; `--json`. See [Later commits](rewrite-rate.md#later-commits-reverts-and-fixes). |
 | `sessionly transcript <session>` | Tokens and cost per model, read from Claude Code's transcript. Takes a session or a path to a transcript file; `--json`. See [Cost and transcripts](cost.md). |
 | `sessionly watch` | Print hook events as they arrive. |
 | `sessionly sync` | Bring the ledger up to date. `--force` rebuilds every session, not only those that changed. See [The session record](session-record.md). |
@@ -59,6 +60,8 @@ The filters of `list` and `summary`: `--repo`, `--user`, `--model`, `--tool`, `-
 | `--content metadata\|previews` | `metadata` | What an upload contains. See [What an upload contains](upload-contents.md). |
 | `--line-hashes on\|off` | `off` | Whether an upload has a hash of each line the agent added, which [pull request](pull-requests.md) figures need. |
 | `--shell-edits sure\|all\|off` | `sure` | How much of what shell commands change is counted as the agent's. See [Shell edits](shell-edits.md). |
+| `--outcomes on\|off` | `on` | Whether the repositories' history is read for later reverts and fixes of agents' lines, and the counts uploaded. See [Later commits](rewrite-rate.md#later-commits-reverts-and-fixes). |
+| `--fix-words a,b,c` | | The words that make a commit subject a fix, in place of the defaults; `default` for those. |
 | `--update-check on\|off` | `on` | Whether a background upload asks once a day if a newer release is out. `status` says when one is, and so do `list` and `summary` in a terminal. See [Install](install.md#updating). |
 
 ## What the hooks run
@@ -80,6 +83,7 @@ These are run by the agents, not by you:
 | `SESSIONLY_URL` | With `SESSIONLY_TOKEN`, the server to upload to where none is saved. Not written to the settings. |
 | `SESSIONLY_CONTENT` | `metadata` or `previews`: what uploads contain, in place of the saved setting. |
 | `SESSIONLY_LINE_HASHES` | `on` or `off`: whether uploads have line hashes, in place of the saved setting. |
+| `SESSIONLY_OUTCOMES` | `on` or `off`: whether history is read for later reverts and fixes, and the counts uploaded, in place of the saved setting. |
 | `SESSIONLY_NO_AUTO` | Set to anything, the hooks start no automatic sync. |
 | `SESSIONLY_RELEASE_BASE` | Where `update` and `install --repo` download releases from, in place of this project's GitHub releases. |
 | `SESSIONLY_RELEASE_LATEST` | Where `update`, and the daily check, ask for the newest version. |
@@ -91,6 +95,6 @@ These are run by the agents, not by you:
 | `XDG_DATA_HOME` | Where OpenCode's database is looked for when `OPENCODE_DB` is not set. |
 | `XDG_CONFIG_HOME` | Where OpenCode's config is looked for (`opencode/` under it), in place of `~/.config`. The plugin is written there when that directory exists. |
 
-The four that name a server and what is sent to it are meant for a
+The five that name a server and what is sent to it are meant for a
 [cloud environment](cloud-sessions.md), and are followed by `upload`, `exclude`, `include` and
 the automatic sync. `export`, `status` and `settings` show the saved settings.

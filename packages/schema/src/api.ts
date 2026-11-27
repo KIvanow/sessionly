@@ -174,6 +174,38 @@ export interface KeptAt {
   sessions_total: number;
 }
 
+/**
+ * What later commits did to the agents' lines by a fixed age after each
+ * session ended, over the sessions counted at that age (an upload's
+ * `outcomes`). Read on each machine from the repository's history: the
+ * branch checked out and the remote's default branch.
+ */
+export interface OutcomesAt {
+  /** Sessions counted at that age. */
+  sessions_reached: number;
+  /** Sessions with measured lines at all: what `sessions_reached` is out of. */
+  sessions_total: number;
+  /** Tracked lines those sessions added. */
+  lines_tracked: number;
+  /**
+   * Sessions whose lines a commit with a fix subject changed, and those
+   * commits. "Changed by a fix": mostly the fix was of something else, so
+   * this does not say the agent's lines were wrong. `likely_fix_commits` are
+   * those where at least half of what the commit removed was the agent's.
+   */
+  sessions_with_fix: number;
+  fix_commits: number;
+  likely_fix_commits: number;
+  lines_fixed: number;
+  /** Sessions reverted by then, and not relanded; and the revert commits. */
+  sessions_reverted: number;
+  revert_commits: number;
+  lines_reverted: number;
+  /** Commits that changed the agents' lines and say neither. */
+  rework_commits: number;
+  lines_reworked: number;
+}
+
 export interface Totals {
   key: string;
   sessions: number;
@@ -220,6 +252,10 @@ export interface Totals {
   kept_1d: KeptAt;
   kept_7d: KeptAt;
   kept_30d: KeptAt;
+  /** What later commits did, by 1, 7 and 30 days after each session ended. */
+  outcomes_1d: OutcomesAt;
+  outcomes_7d: OutcomesAt;
+  outcomes_30d: OutcomesAt;
 }
 
 /** `runtime` groups by where sessions ran: `local` or `cloud`. */

@@ -15,13 +15,17 @@ sessionly export <session> --content previews  # the same, with previews kept
 sessionly schema upload                        # its JSON Schema
 ```
 
-`export` goes by the saved settings. Where `SESSIONLY_CONTENT` or `SESSIONLY_LINE_HASHES` is
-set in the environment, as in a [cloud sandbox](cloud-sessions.md), an upload follows those
+`export` goes by the saved settings. Where `SESSIONLY_CONTENT`, `SESSIONLY_LINE_HASHES` or
+`SESSIONLY_OUTCOMES` is set in the environment, as in a [cloud sandbox](cloud-sessions.md), an upload follows those
 instead, and `export --content` shows that level.
 
 The payload ([schema/upload.schema.json](https://github.com/KIvanow/sessionly/blob/main/schema/upload.schema.json)) is the session record plus
 the latest rewrite measurement, and that measurement as it was 1, 7 and 30 days after the
-session ended (`checkpoints`: counts and times, see [Rewrite rate](rewrite-rate.md#at-1-7-and-30-days)).
+session ended (`checkpoints`: counts and times, see [Rewrite rate](rewrite-rate.md#at-1-7-and-30-days)),
+and what later commits did to the agent's lines by those ages (`outcomes`: counts of reverts,
+fixes and rework, and times; no commit SHA, subject or path, see
+[Later commits](rewrite-rate.md#later-commits-reverts-and-fixes)). `sessionly settings --outcomes off`
+leaves `outcomes` out.
 Before a record leaves the machine:
 
 - **Paths are made relative:** to the repository for files inside it, otherwise to the home
@@ -32,7 +36,7 @@ Before a record leaves the machine:
 
 | Level | What is sent |
 |---|---|
-| `metadata` (default) | Counts, sizes, timings, tool names and skill names, statuses, review runs (command, effort, pull request number, where it ran, subagents, cost, findings count), relative file paths, models, tokens, cost (for Claude Code also by branch), rewrite figures, git user, remote and branch, the working directory and repository folder (as `~/…` under the home directory), the agent's version and how it was started, its permission modes, and the paths of the instruction files it loaded (`CLAUDE.md`, rules). **No text** from prompts, commands, search patterns, URLs, errors or titles, and no content hashes. |
+| `metadata` (default) | Counts, sizes, timings, tool names and skill names, statuses, review runs (command, effort, pull request number, where it ran, subagents, cost, findings count), relative file paths, models, tokens, cost (for Claude Code also by branch), rewrite figures, later-commit counts (reverts, fixes, rework), git user, remote and branch, the working directory and repository folder (as `~/…` under the home directory), the agent's version and how it was started, its permission modes, and the paths of the instruction files it loaded (`CLAUDE.md`, rules). **No text** from prompts, commands, search patterns, URLs, errors or titles, and no content hashes. |
 | `previews` | The above, plus the 200-character previews and the hashes. A preview can contain anything you typed or ran, including secrets. |
 
 **Line hashes are a separate switch, off by default.** `sessionly settings --line-hashes on`
@@ -59,6 +63,7 @@ know to `unknown`, and ignores fields it doesn't know.
 | `cost.source` | `recorded`, `recorded_and_estimated`, `estimated`, `partial_estimate`, `unknown` |
 | `content` | `metadata`, `previews`; `local` is the record on your machine, which a server refuses |
 | `captured_by` | `hooks`, `transcript` |
+| an outcome's `scope` | `head_and_default` (the branch checked out and the remote's default branch), `head_only` |
 | `runtime.kind` | `cloud`, `unknown` |
 | a review run's `via` | `skill`, `slash_command`, `codex_review`, `unknown` |
 | a review run's `ran` | `local`, `cloud`, `unknown` |

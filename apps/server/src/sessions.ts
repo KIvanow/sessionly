@@ -7,6 +7,8 @@ import {
   type GroupBy,
   type HeldSessions,
   type KeptAt,
+  type OutcomeCheckpoint,
+  type OutcomesAt,
   type RewriteCheckpoint,
   type Session,
   type SessionPlace,
@@ -97,6 +99,48 @@ export function mergeCheckpoints(kept: unknown, upload: Upload): Record<string, 
   return out;
 }
 
+/** An age's outcome count as it is kept: counts and times, and nothing else an upload may carry with one. */
+type OutcomeAt = Required<Omit<OutcomeCheckpoint, "checkpoint">>;
+
+/**
+ * The outcome counts a session has once an upload is stored, by age. The
+ * rule is `mergeCheckpoints`', as the ledger's is for both: one kept is never
+ * replaced, one of another end than the session has now is none, and of
+ * what an upload brings, one counted before the session was that old is not
+ * taken. A count is of the history up to that age, so a later one would be
+ * the same; keeping the first keeps it so when the history is rewritten.
+ */
+export function mergeOutcomes(kept: unknown, upload: Upload): Record<string, OutcomeAt> {
+  const ended = Date.parse(upload.session?.ended_at ?? "");
+  const out: Record<string, OutcomeAt> = {};
+  const take = (name: unknown, o: Partial<OutcomeAt> | null | undefined) => {
+    if (!CHECKPOINTS.includes(name as never) || !o || out[name as string]) return;
+    if (Date.parse(o.ended_at ?? "") !== ended) return;
+    const at = Date.parse(o.computed_at ?? "");
+    if (Number.isNaN(at) || at - ended < AGE_SECONDS[name as string]! * 1000) return;
+    out[name as string] = {
+      lines_tracked: num(o.lines_tracked),
+      fix_commits: num(o.fix_commits),
+      likely_fix_commits: Math.min(num(o.likely_fix_commits), num(o.fix_commits)),
+      lines_fixed: num(o.lines_fixed),
+      rework_commits: num(o.rework_commits),
+      lines_reworked: num(o.lines_reworked),
+      revert_commits: num(o.revert_commits),
+      lines_reverted: num(o.lines_reverted),
+      relanded: o.relanded === true,
+      computed_at: new Date(at).toISOString(),
+      age_seconds: num(o.age_seconds),
+      ended_at: new Date(ended).toISOString(),
+      late: o.late === true,
+      scope: o.scope === "head_and_default" ? "head_and_default" : "head_only",
+    };
+  };
+  const before = typeof kept === "string" ? JSON.parse(kept) : kept;
+  for (const [name, o] of Object.entries((before ?? {}) as Record<string, OutcomeAt>)) take(name, o);
+  for (const o of upload.outcomes ?? []) take(o.checkpoint, o);
+  return out;
+}
+
 /**
  * What storing an upload did. `excluded` means the repository is stopped, so
  * nothing was stored. An address that belongs to someone who was removed
@@ -149,8 +193,8 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   // this one, and compares with what it left. (Uploads of other sessions do not wait.)
   const before = await matchedBy(db, { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! }, { hold: true });
   const spentBefore = await spentBy(db, { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! });
-  const [existing] = await db.query<{ owner_email: string; runtime: string | null; prompts: number; checkpoints: unknown }>(
-    `SELECT owner_email, runtime, prompts, checkpoints FROM sessions
+  const [existing] = await db.query<{ owner_email: string; runtime: string | null; prompts: number; checkpoints: unknown; outcomes: unknown }>(
+    `SELECT owner_email, runtime, prompts, checkpoints, outcomes FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
     key,
   );
@@ -169,9 +213,15 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   const rewrite = upload.rewrite ?? null;
   // Kept in the payload too, which is what the session's page reads and what a copy is made from (demo.ts).
   const checkpoints = mergeCheckpoints(existing?.checkpoints, upload);
-  const { checkpoints: _sent, ...rest } = upload;
+  const outcomes = mergeOutcomes(existing?.outcomes, upload);
+  const { checkpoints: _sent, outcomes: _sentOutcomes, ...rest } = upload;
   const kept = CHECKPOINTS.filter((name) => checkpoints[name]).map((name) => ({ checkpoint: name, ...checkpoints[name]! }));
-  const payload: Upload = kept.length ? { ...rest, checkpoints: kept } : rest;
+  const keptOutcomes = CHECKPOINTS.filter((name) => outcomes[name]).map((name) => ({ checkpoint: name, ...outcomes[name]! }));
+  const payload: Upload = {
+    ...rest,
+    ...(kept.length ? { checkpoints: kept } : {}),
+    ...(keptOutcomes.length ? { outcomes: keptOutcomes } : {}),
+  };
   const columns: Record<string, unknown> = {
     org_id: db.orgId,
     machine_id: s.machine_id,
@@ -222,12 +272,20 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     rw_lines_surviving: rewrite?.lines_surviving ?? null,
     rw_measured_at: rewrite?.measured_at ?? null,
     checkpoints: JSON.stringify(checkpoints),
+    outcomes: JSON.stringify(outcomes),
     payload: JSON.stringify(payload),
     // A copy made by `importDemo` (demo.ts). Any other upload of the session makes it its uploader's.
     copied: copy,
   };
   const names = Object.keys(columns);
-  const casts: Record<string, string> = { models: "::jsonb", payload: "::jsonb", checkpoints: "::jsonb", review_pulls: "::jsonb", reviews: "::jsonb" };
+  const casts: Record<string, string> = {
+    models: "::jsonb",
+    payload: "::jsonb",
+    checkpoints: "::jsonb",
+    outcomes: "::jsonb",
+    review_pulls: "::jsonb",
+    reviews: "::jsonb",
+  };
   const placeholders = names.map((name, i) => `$${i + 1}${casts[name] ?? ""}`);
   const updates = names
     .filter((name) => !["org_id", "machine_id", "source", "session_id"].includes(name))
@@ -557,7 +615,21 @@ const TOTAL_COLUMNS = `
     (age) => `count(*) FILTER (WHERE checkpoints ? '${age}') AS ck_${age}_sessions,
   sum((checkpoints #>> '{${age},added}')::double precision) AS ck_${age}_added,
   sum((checkpoints #>> '{${age},surviving}')::double precision) AS ck_${age}_surviving`,
-  ).join(",\n  ")}`;
+  ).join(",\n  ")},
+  ${CHECKPOINTS.map((age) => {
+    const n = (field: string) => `(outcomes #>> '{${age},${field}}')::double precision`;
+    return `count(*) FILTER (WHERE outcomes ? '${age}') AS oc_${age}_sessions,
+  sum(${n("lines_tracked")}) AS oc_${age}_lines,
+  count(*) FILTER (WHERE ${n("fix_commits")} > 0) AS oc_${age}_fixed,
+  sum(${n("fix_commits")}) AS oc_${age}_fix_commits,
+  sum(${n("likely_fix_commits")}) AS oc_${age}_likely,
+  sum(${n("lines_fixed")}) AS oc_${age}_lines_fixed,
+  count(*) FILTER (WHERE ${n("revert_commits")} > 0 AND (outcomes #>> '{${age},relanded}') IS DISTINCT FROM 'true') AS oc_${age}_reverted,
+  sum(${n("revert_commits")}) AS oc_${age}_revert_commits,
+  sum(${n("lines_reverted")}) AS oc_${age}_lines_reverted,
+  sum(${n("rework_commits")}) AS oc_${age}_rework_commits,
+  sum(${n("lines_reworked")}) AS oc_${age}_lines_reworked`;
+  }).join(",\n  ")}`;
 
 /** To a millionth of a dollar, as a pull request's cost is. */
 const money = (usd: number): number => Math.round(usd * 1e6) / 1e6;
@@ -569,6 +641,20 @@ function totals(row: Record<string, unknown>): Totals {
     lines_surviving: num(row[`ck_${age}_surviving`]),
     sessions_reached: num(row[`ck_${age}_sessions`]),
     sessions_total: num(row.ck_sessions),
+  });
+  const later = (age: (typeof CHECKPOINTS)[number]): OutcomesAt => ({
+    sessions_reached: num(row[`oc_${age}_sessions`]),
+    sessions_total: num(row.ck_sessions),
+    lines_tracked: num(row[`oc_${age}_lines`]),
+    sessions_with_fix: num(row[`oc_${age}_fixed`]),
+    fix_commits: num(row[`oc_${age}_fix_commits`]),
+    likely_fix_commits: num(row[`oc_${age}_likely`]),
+    lines_fixed: num(row[`oc_${age}_lines_fixed`]),
+    sessions_reverted: num(row[`oc_${age}_reverted`]),
+    revert_commits: num(row[`oc_${age}_revert_commits`]),
+    lines_reverted: num(row[`oc_${age}_lines_reverted`]),
+    rework_commits: num(row[`oc_${age}_rework_commits`]),
+    lines_reworked: num(row[`oc_${age}_lines_reworked`]),
   });
   return {
     key: String(row.key),
@@ -602,6 +688,9 @@ function totals(row: Record<string, unknown>): Totals {
     kept_1d: kept("1d"),
     kept_7d: kept("7d"),
     kept_30d: kept("30d"),
+    outcomes_1d: later("1d"),
+    outcomes_7d: later("7d"),
+    outcomes_30d: later("30d"),
   };
 }
 

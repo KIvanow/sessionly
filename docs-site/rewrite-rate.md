@@ -64,6 +64,61 @@ as `12 of 40 sessions`: 12 were measured at 7 days, of the 40 with measured line
 none has been yet. The overview's own figure is the one at 7 days once any session has one. A
 session's page has the row `1d / 7d / 30d / now`.
 
+## Later commits: reverts and fixes
+
+The rewrite rate says how much went, not why. So Sessionly also reads the repository's history
+(`git log`, on your machine) for the commits after a session ended that changed its agent's
+lines, and says what each was:
+
+- **Reverted:** the commit says `This reverts commit …` of a commit that brought the session's
+  lines in, or its subject begins with "revert" and it takes out at least half of the session's
+  lines still there. A revert reverted in turn (git names that one `Reapply "…"`) is
+  **relanded**.
+- **Changed by a fix:** its subject line has a fix word (`fix`, `fixes`, `bug`, `hotfix`,
+  `regression`, `broken`, `crash`, `typo`, …) or is a conventional `fix:`. Most such fixes are
+  of something else and change the agent's lines along the way; this does not say the agent's
+  lines were wrong. A fix where at least half of the lines the commit removed were the
+  session's is a **likely fix** (`fix*` below). About half of those are fixes of the agent's
+  own lines.
+- **Rework:** neither.
+
+```
+$ sessionly outcomes 7c2e
+Session    7c2e91d0-…
+Ended      2026-11-13 18:30
+Later      1d nothing, 7d changed by 1 fix (1 likely), reworked 1x, 30d -
+
+COMMIT     DATE              KIND      LINES  SIGNALS                     SUBJECT
+a41f0c9e2  2026-11-16 09:12  fix*          4  fix_message,fix_conventi…   fix: totals skip the last row
+e09b3d771  2026-11-18 14:40  rework        2                              Name the columns
+```
+
+`show` has the same as a line, `Later`, and `summary` has **FIX@7D** (sessions changed by a fix
+within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has those ages.
+
+- **A commit touches a session when it removes or changes at least two of its lines.** One line
+  is too often a generic one (`if (`, an import) that matched by chance. A line the commit adds
+  back, in that file or another, was moved, not changed. A line three sessions or more wrote
+  in the same file does not count on its own.
+- **A session's own commits don't count:** those after it began that add its lines.
+- **The counts are kept at 1, 7 and 30 days, as the rewrite checkpoints are**, and age counts
+  from the session's end the same way. Unlike those, an age reached before Sessionly looked can
+  be counted later from the history; it then says it was late.
+- **History is read only when an age needs it**, so most syncs read none.
+- **Read:** the branch checked out and the remote's default branch (`origin/HEAD`), so a fix on
+  `main` is found while you are on a feature branch. Nothing else: not other branches, not merge
+  commits (a reverted merge counts when the revert takes out most of the lines).
+- **Not counted:** a fix that only adds lines next to the agent's (a missing check), and a fix
+  whose subject has none of the words. A repository whose subjects describe what changed ("Stop
+  the sweep from deleting history") has fixes that count as rework. `sessionly settings
+  --fix-words` sets the words.
+- **Uploaded:** only the counts at each age (`outcomes`), never a commit's SHA, subject or files.
+  `sessionly settings --outcomes off` stops reading history and sending them.
+
+On the dashboard, **By tool** and **By model** have **Changed by a fix @7d** and
+**Reverted @30d**, each of the sessions counted at that age, once any is. A session's page has
+**Later commits** with `1d / 7d / 30d`.
+
 ## What it does and doesn't mean
 
 - A line matches by content anywhere in the file, ignoring leading and trailing whitespace, so
@@ -76,7 +131,8 @@ session's page has the row `1d / 7d / 30d / now`.
 - A session that just ended scores 100%. The latest figure only becomes meaningful with time,
   so read it together with the session's age, or read the figure at a fixed age instead.
 - It measures survival, not quality or cause: code can be rewritten for reasons that have
-  nothing to do with how it was written.
+  nothing to do with how it was written. So do the later commits: a fix that touches an agent's
+  lines is linked to them, not caused by them.
 - Changes made through the agent's file tools are tracked, and of those made by shell
   commands the ones that are sure to be the agent's (see [Shell edits](shell-edits.md)). In a
   [session in the cloud](cloud-sessions.md) all of them are.
