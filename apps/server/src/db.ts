@@ -943,6 +943,60 @@ const MIGRATIONS: string[] = [
   // or was gone back to, before or after this one kept some. Found without
   // reading every payload, and none once they are all kept.
   `CREATE INDEX sessions_outcomes_to_keep ON sessions (org_id, machine_id, source, session_id) WHERE ${OUTCOMES_TO_KEEP}`,
+  // Which commits a pull request is at: its head as last reported, and once
+  // merged the commit it was merged as. Null from an Action before 0.5.0.
+  // And what later commits on its base branch did to its lines (outcomes.ts):
+  // how far that branch has been read for it, and which of its lines it
+  // still has there as of then, by file (`outcomes_held`: the pull request's
+  // own line hashes, which `last_files` holds already, and where commits
+  // moved them). Null while it was never read.
+  `ALTER TABLE pull_requests
+     ADD COLUMN head_sha text,
+     ADD COLUMN merge_commit_sha text,
+     ADD COLUMN outcomes_scanned_until timestamptz,
+     ADD COLUMN outcomes_held jsonb`,
+  // From when an organisation's merged pull requests have their later
+  // commits read. Those are history, so the Action can be asked to read
+  // earlier ones too (its `outcomes-since` input).
+  `ALTER TABLE orgs ADD COLUMN outcomes_since timestamptz NOT NULL DEFAULT now()`,
+  // Later commits on a merged pull request's base branch that removed or
+  // changed its lines: what kind each is, and which of the pull request's
+  // own lines it removed (`removed`, {path: [hashes]}, no other hash). Who
+  // they count against is worked out as they are read, from the sessions'
+  // lines as matched then. Written once, but for `relands`: the later
+  // commit that reverted a revert.
+  `CREATE TABLE pull_outcome_commits (
+     org_id        text NOT NULL REFERENCES orgs ON DELETE CASCADE,
+     repo          text NOT NULL,
+     number        integer NOT NULL,
+     sha           text NOT NULL,
+     kind          text NOT NULL CHECK (kind IN ('revert', 'fix', 'rework')),
+     signals       jsonb NOT NULL,
+     landed_at     timestamptz NOT NULL,
+     url           text,
+     by_pull       integer,
+     removed       jsonb NOT NULL,
+     removed_total double precision,
+     relands       text,
+     relanded_at   timestamptz,
+     stored_at     timestamptz NOT NULL DEFAULT clock_timestamp(),
+     PRIMARY KEY (org_id, repo, number, sha),
+     FOREIGN KEY (org_id, repo, number) REFERENCES pull_requests (org_id, repo, number) ON DELETE CASCADE
+   )`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON pull_outcome_commits`),
+  ...rowLevelSecurity("pull_outcome_commits"),
+  // How far each base branch has been read, and the commit it was at.
+  `CREATE TABLE repo_outcome_scans (
+     org_id        text NOT NULL REFERENCES orgs ON DELETE CASCADE,
+     repo          text NOT NULL,
+     branch        text NOT NULL,
+     scanned_until timestamptz NOT NULL,
+     tip           text,
+     updated_at    timestamptz NOT NULL DEFAULT clock_timestamp(),
+     PRIMARY KEY (org_id, repo, branch)
+   )`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON repo_outcome_scans`),
+  ...rowLevelSecurity("repo_outcome_scans"),
 ];
 
 /**

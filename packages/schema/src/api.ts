@@ -464,6 +464,10 @@ export interface PullReport {
   draft?: boolean;
   head_ref?: string | null;
   base_ref?: string | null;
+  /** The head commit as reported. Left out by an Action before 0.5.0. */
+  head_sha?: string | null;
+  /** Once merged, the commit it was merged as (the squash, rebase or merge commit). Left out by an Action before 0.5.0. */
+  merge_commit_sha?: string | null;
   created_at: string;
   merged_at?: string | null;
   closed_at?: string | null;
@@ -1146,6 +1150,191 @@ export interface PullDetail extends PullRow {
   history: PullHistory[];
   /** Its agent lines 7 and 30 days after merging, the earlier first: those counted so far. */
   after_merge: PullAfterMerge[];
+  /**
+   * What later commits on the base branch did to its lines, on the merge
+   * clock. Null for one not merged; left out by a server from before this.
+   */
+  outcomes?: PullOutcomes | null;
+}
+
+/** The ages outcomes are counted at, after merging (or, for a session, after it ended). */
+export type OutcomeAge = "1d" | "7d" | "30d";
+
+/** What a later commit is to a pull request's lines. */
+export type OutcomeKind = "revert" | "fix" | "rework";
+
+/**
+ * A later commit on the base branch that removed or changed a merged pull
+ * request's lines. The pull request's lines it removed are split over its
+ * sessions as their lines are matched now, so the split follows matching.
+ */
+export interface PullOutcomeCommit {
+  sha: string;
+  url: string | null;
+  kind: OutcomeKind;
+  /**
+   * Why it is that kind: `revert_sha` (its message names the commit the
+   * pull request was merged as, or one of its own), `revert_pull` (its pull
+   * request says it reverts this one), `revert_bulk` (a revert subject, and
+   * at least half the lines still there went), and the fix signals
+   * `fix_message`, `fix_conventional`, `fix_branch`, `fix_pr_title`, `bug_issue`.
+   */
+  signals: string[];
+  /** When it landed on the branch: when its pull request was merged, else its committer date. */
+  landed_at: string;
+  /** The pull request it was merged with, if any. */
+  by_pull: number | null;
+  /** Lines of the pull request it removed, the agents' or not. */
+  lines: number;
+  /** Of those, the agents' (shared copies split). */
+  agent_lines: number;
+  /**
+   * It removed at least 2 of the agents' lines that are not common: what
+   * makes it count. One that does not is listed and counted nowhere.
+   */
+  counted: boolean;
+  /** A fix where at least half of what it removed was the agents'. */
+  likely: boolean;
+  /** A revert that a later commit reverted in turn (`Reapply "…"`): when. */
+  relanded_at: string | null;
+  /** Its agent lines by session. */
+  sessions: { machine_id: string; source: string; session_id: string; lines: number }[];
+}
+
+/** One age of a merged pull request's outcomes. */
+export interface PullOutcomeWindow {
+  /** The age has passed and the branch was read up to it. */
+  reached: boolean;
+  /** Reverted by then, and not relanded by then. */
+  reverted: boolean;
+  revert_commits: number;
+  agent_lines_reverted: number;
+  /** "Changed by a fix": mostly the fix was of something else. */
+  fix_commits: number;
+  likely_fix_commits: number;
+  agent_lines_fixed: number;
+  rework_commits: number;
+  agent_lines_reworked: number;
+}
+
+/** What later commits did to a merged pull request's lines (`PullDetail.outcomes`). */
+export interface PullOutcomes {
+  /** How far the base branch has been read for it; null while it never was. */
+  scanned_until: string | null;
+  windows: Record<OutcomeAge, PullOutcomeWindow>;
+  /** Oldest first. */
+  commits: PullOutcomeCommit[];
+}
+
+/** A merged pull request whose later commits are to be read (`GET /prs/outcomes/due`). */
+export interface OutcomesDuePull {
+  number: number;
+  merged_at: string;
+  /** The commit it was merged as, when a report said: later commits are those after it. */
+  merge_commit_sha: string | null;
+  /** Read already up to here: commits that landed after this are wanted. */
+  since: string;
+  /** The files its lines are in. */
+  paths: string[];
+}
+
+/** One base branch's due pull requests: read its history from `since` to `until`. */
+export interface OutcomesDueBranch {
+  base_ref: string;
+  since: string;
+  until: string;
+  pulls: OutcomesDuePull[];
+}
+
+/** `GET /prs/outcomes/due`. No line hashes: the Action sends the commits' own, and the server compares. */
+export interface OutcomesDue {
+  branches: OutcomesDueBranch[];
+}
+
+/** One later commit as the Action read it, in the files the server named (and where they moved). */
+export interface OutcomeCommitReport {
+  sha: string;
+  url?: string | null;
+  landed_at: string;
+  /** The pull requests it belongs to (`/commits/{sha}/pulls`). */
+  pulls: number[];
+  /**
+   * The due pull requests whose merge commit it comes after in the history
+   * (`git merge-base --is-ancestor`). Only for those named `found` in
+   * `PullOutcomesReport.pulls`; a commit not after one of those is not
+   * counted against it.
+   */
+  after?: number[];
+  /** What its message and pull request say: ids only, never their text. */
+  signals: string[];
+  /** The commits its message says it reverts, and the pull requests its pull request says it does. */
+  reverts: { shas: string[]; pulls: number[] };
+  /** It reverts a revert: lines it adds are put back, and it reverts nothing. */
+  reapply?: boolean;
+  /** Tracked lines it removed in all its files, less those it moved; null when it was not read whole. */
+  removed_total?: number | null;
+  /** Its removed and added lines, as hashes, as often as they are there; lines it moved are in neither. */
+  files: { path: string; removed: string[]; added: string[] }[];
+  /** Lines it moved out of one of those files into another. */
+  moves?: { from: string; to: string; hashes: string[] }[];
+}
+
+/** `PUT /prs/outcomes`: one base branch's later commits, oldest first, as git walks them. */
+export interface PullOutcomesReport {
+  repo: string;
+  base_ref: string;
+  /** The commit the branch was read at. */
+  tip?: string | null;
+  /** Read up to here: commits that landed by then are all in `commits` (of these and earlier reports). */
+  scanned_until: string;
+  /** The due pull requests read for, and whether their merge commit was in the history. */
+  pulls: { number: number; merge_commit_sha?: string | null; found: boolean }[];
+  commits: OutcomeCommitReport[];
+}
+
+/** What `PUT /prs/outcomes` answers: the later commits kept, by pull request. */
+export interface PullOutcomesStored {
+  stored: { number: number; sha: string; kind: OutcomeKind }[];
+  scanned_until: string;
+}
+
+/**
+ * Merged pull requests' outcomes at one age, summed (merge clock). Commit
+ * and pull request counts count once in each group whose lines they
+ * changed, and once in the total; lines are split, so they add up.
+ */
+export interface PullOutcomesAt {
+  /** Merged pull requests with agent lines in the group that have reached the age, and of how many. */
+  pulls_reached: number;
+  pulls_total: number;
+  /** The group's agent lines in the pull requests reached. */
+  agent_lines: number;
+  pulls_reverted: number;
+  revert_commits: number;
+  agent_lines_reverted: number;
+  fix_commits: number;
+  likely_fix_commits: number;
+  agent_lines_fixed: number;
+  /** Sessions whose lines a fix changed. */
+  sessions_fixed: number;
+  rework_commits: number;
+  agent_lines_reworked: number;
+}
+
+export type PullOutcomesBy = "tool" | "model" | "user" | "repo" | "day";
+
+export interface PullOutcomesGroup {
+  key: string;
+  outcomes_1d: PullOutcomesAt;
+  outcomes_7d: PullOutcomesAt;
+  outcomes_30d: PullOutcomesAt;
+}
+
+/** `GET /prs/outcomes/summary?by=`. */
+export interface PullOutcomesSummary {
+  /** Most agent lines first; days oldest first. */
+  groups: PullOutcomesGroup[];
+  total: Omit<PullOutcomesGroup, "key">;
 }
 
 export interface PullList {

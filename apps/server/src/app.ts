@@ -36,7 +36,7 @@ import {
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
-import type { AuthOptions, PullAfterMergeReport, PullDetail, PullReport, Telemetry } from "@sessionly/schema";
+import type { AuthOptions, PullAfterMergeReport, PullDetail, PullOutcomesBy, PullReport, Telemetry } from "@sessionly/schema";
 import {
   BadReport,
   checkReport,
@@ -51,6 +51,7 @@ import {
   type PullFilters,
 } from "./pulls.ts";
 import { afterMergeOf, checkAfterMerge, pullsDue, storeAfterMerge } from "./after-merge.ts";
+import { checkOutcomes, outcomesDue, outcomesOf, storeOutcomes, summarizeOutcomes } from "./outcomes.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
 /** A record lists every tool call, so a long session is several megabytes. */
@@ -329,7 +330,7 @@ export function dashboardPolicy(telemetry?: Telemetry | null): string {
  * sessions have to be of one moment: a report stored between two of them
  * would otherwise leave lines of before beside costs of after.
  */
-const readsPulls = (method: string, path: string): boolean => method === "GET" && /\/prs(?:\/[a-z]+)?$/.test(path);
+const readsPulls = (method: string, path: string): boolean => method === "GET" && /\/prs(?:\/[a-z]+){0,2}$/.test(path);
 
 export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
@@ -345,11 +346,12 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       if (!within) return c.json({ error: "too many requests; try again in a minute", code: "rate_limited" }, 429);
     }
     // A ci token reports pull requests and does nothing else: as they are,
-    // and counted again after merging, which it first asks which are due for.
+    // counted again after merging, and the later commits of merged ones,
+    // which it first asks which are due for.
     if (principal.role === "ci") {
       const reporting =
-        (c.req.method === "PUT" && /\/prs(?:\/after-merge)?$/.test(c.req.path)) ||
-        (c.req.method === "GET" && c.req.path.endsWith("/prs/due"));
+        (c.req.method === "PUT" && /\/prs(?:\/after-merge|\/outcomes)?$/.test(c.req.path)) ||
+        (c.req.method === "GET" && /\/prs(?:\/outcomes)?\/due$/.test(c.req.path));
       if (!reporting && !c.req.path.endsWith("/ping")) {
         return c.json({ error: "this token only reports pull requests" }, 403);
       }
@@ -438,6 +440,25 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     }
     c.set("afterMerge", checkAfterMerge(body));
     await next();
+  });
+
+  // A base branch's later commits, for the pull requests merged into it that
+  // are due: parsed here, and kept with one transaction for each of those
+  // pull requests, so none is held while the others are walked.
+  api.put("/prs/outcomes", async (c) => {
+    const role = c.get("principal").role;
+    if (role !== "admin" && role !== "ci") {
+      return c.json({ error: "reporting pull requests needs a ci or admin token" }, 403);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "the body is not JSON" }, 400);
+    }
+    const report = checkOutcomes(body);
+    const each = <T>(fn: (db: OrgDb) => Promise<T>) => ownerDb.asOrg(c.get("principal").orgId, fn);
+    return c.json(await storeOutcomes(each, report));
   });
 
   // Matching again the pull requests the list's filters choose. Each has a
@@ -779,6 +800,25 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const stored = await storeAfterMerge(c.get("db"), report);
     return stored ? c.json({ stored }) : c.json({ error: "no such pull request" }, 404);
   });
+  // Merged pull requests whose later commits are to be read; and `since`,
+  // from the Action's `outcomes-since`, to read those of earlier ones too.
+  api.get("/prs/outcomes/due", async (c) => {
+    reportersOnly(c.get("principal"));
+    const repo = c.req.query("repo");
+    if (!repo) throw new BadRequest("repo is required");
+    return c.json(await outcomesDue(c.get("db"), repo.replace(/\/+$/, ""), time(c.req.query("since"), "since") ?? null));
+  });
+  // What later commits did to merged pull requests' lines, summed by group (merge clock).
+  api.get("/prs/outcomes/summary", async (c) => {
+    readersOnly(c.get("principal"));
+    const query = c.req.query();
+    const by = (query.by || "tool") as PullOutcomesBy;
+    if (!["tool", "model", "user", "repo", "day"].includes(by)) throw new BadRequest("by must be tool, model, user, repo or day");
+    const filters = pullFilters({ repo: query.repo ?? "", state: "", since: query.since ?? "" });
+    return c.json(
+      await summarizeOutcomes(c.get("db"), by, { ...filters, tool: query.tool || undefined, model: query.model || undefined, user: query.user || undefined }),
+    );
+  });
   api.get("/prs/summary", async (c) => {
     readersOnly(c.get("principal"));
     return c.json(await summarizePulls(c.get("db"), pullFilters(c.req.query())));
@@ -791,7 +831,11 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const number = wholeNumber(query.number, 0, 2 ** 31 - 1, "number");
     const pull = await getPull(c.get("db"), query.repo, number);
     if (!pull) return c.json({ error: "no such pull request" }, 404);
-    return c.json({ ...pull, after_merge: await afterMergeOf(c.get("db"), query.repo, number) } satisfies PullDetail);
+    return c.json({
+      ...pull,
+      after_merge: await afterMergeOf(c.get("db"), query.repo, number),
+      outcomes: await outcomesOf(c.get("db"), query.repo, number),
+    } satisfies PullDetail);
   });
   // Match one pull request's lines again against the sessions held now.
   // (Several, which the list's filters choose, are matched further up.)

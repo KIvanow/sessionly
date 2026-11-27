@@ -40,13 +40,15 @@ export class BadReport extends Error {}
  * string as `version` in `action/package.json`: a test fails when the two
  * differ. Bump both with every change to what a report contains.
  */
-export const CURRENT_ACTION = "0.4.0";
+export const CURRENT_ACTION = "0.5.0";
 
 /** Sessions that started longer than this before a pull request was opened are not looked at. */
 const LOOK_BACK_DAYS = 90;
 export const MAX_FILES = 5000;
 const MAX_FEEDBACK = 2000;
 export const HASH = /^[0-9a-f]{16}$/;
+/** A full commit SHA: SHA-1 or SHA-256, lowercase hex. */
+export const COMMIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 const num = (value: unknown): number => (value == null ? 0 : Number(value));
 const iso = (value: unknown): string | null =>
@@ -792,6 +794,9 @@ export function checkReport(body: unknown): PullReport {
     draft: r.draft === true,
     head_ref: optional("head_ref"),
     base_ref: optional("base_ref"),
+    // Left out by an Action before 0.5.0, and one that is not a SHA is too.
+    head_sha: COMMIT_SHA.test(optional("head_sha") ?? "") ? optional("head_sha") : null,
+    merge_commit_sha: state === "merged" && COMMIT_SHA.test(optional("merge_commit_sha") ?? "") ? optional("merge_commit_sha") : null,
     created_at: when("created_at", true)!,
     merged_at: when("merged_at", false),
     closed_at: when("closed_at", false),
@@ -1394,6 +1399,8 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     draft: report.draft,
     head_ref: report.head_ref,
     base_ref: report.base_ref,
+    head_sha: report.head_sha ?? null,
+    merge_commit_sha: report.merge_commit_sha ?? null,
     created_at: report.created_at,
     merged_at: report.merged_at,
     closed_at: report.closed_at,
@@ -1442,7 +1449,12 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   const set = (name: string) =>
     name === "feedback" || name === "feedback_total"
       ? `CASE WHEN EXCLUDED.feedback IS NULL THEN pull_requests.${name} ELSE EXCLUDED.${name} END`
-      : `EXCLUDED.${name}`;
+      : // An Action before 0.5.0 names neither: what a later one said stays. A merged one stays merged as it was.
+        name === "head_sha"
+        ? `coalesce(EXCLUDED.head_sha, pull_requests.head_sha)`
+        : name === "merge_commit_sha"
+          ? `CASE WHEN EXCLUDED.state = 'merged' THEN coalesce(EXCLUDED.merge_commit_sha, pull_requests.merge_commit_sha) END`
+          : `EXCLUDED.${name}`;
   await db.query(
     `INSERT INTO pull_requests (${names.join(", ")})
      VALUES (${names.map((name, i) => `$${i + 1}${casts[name] ?? ""}`).join(", ")})
@@ -2063,7 +2075,7 @@ export interface PullFilters {
   sessions_repo?: string;
 }
 
-function where(orgId: string, filters: PullFilters): { sql: string; params: unknown[] } {
+export function where(orgId: string, filters: PullFilters): { sql: string; params: unknown[] } {
   const params: unknown[] = [];
   const bind = (value: unknown) => `$${params.push(value)}`;
   const conditions: string[] = [`org_id = ${bind(orgId)}`];
