@@ -12,6 +12,9 @@ const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.u
 /** Whose a review or comment is. An account deleted since has no user, and is "unknown" wherever it is named. */
 const loginOf = (user) => user?.login ?? "unknown";
 
+/** A full commit SHA: SHA-1 or SHA-256, in lowercase hex. */
+export const isSha = (text) => typeof text === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(text);
+
 const isBot = (user) => user?.type === "Bot" || /\[bot\]$/.test(user?.login ?? "");
 
 /** The server takes no more rounds than this for one pull request, no more names for one round, and no more names in all. */
@@ -150,6 +153,10 @@ export function buildReport({ pull, files, reviews, comments, conversation = [],
     draft: pull.draft === true,
     head_ref: pull.head?.ref ?? null,
     base_ref: pull.base?.ref ?? null,
+    // Which commits: the head as reported, and once merged the one it was
+    // merged as, from which later commits on the base branch are read.
+    ...(isSha(pull.head?.sha) ? { head_sha: pull.head.sha } : {}),
+    ...(isSha(pull.merge_commit_sha) && (pull.merged || pull.merged_at) ? { merge_commit_sha: pull.merge_commit_sha } : {}),
     created_at: pull.created_at,
     merged_at: pull.merged_at ?? null,
     closed_at: pull.closed_at ?? null,
@@ -173,7 +180,7 @@ export function buildReport({ pull, files, reviews, comments, conversation = [],
   };
 }
 
-const TOOLS = { "claude-code": "Claude Code", cursor: "Cursor", grok: "Grok", codex: "Codex" };
+const TOOLS = { "claude-code": "Claude Code", cursor: "Cursor", grok: "Grok", codex: "Codex", opencode: "OpenCode" };
 const count = (n) => n.toLocaleString("en-US");
 /** A share as a whole percentage: 100% only for all of it, 0% only for none. */
 function percent(part, whole) {

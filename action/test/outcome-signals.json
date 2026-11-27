@@ -40,5 +40,17 @@
   { "message": "Revert to polling for compute", "signals": ["revert_subject"], "depth": 0, "note": "the word alone says nothing of a chain: a git revert of this one is a revert, not a reapply" },
   { "message": "Revert revert-button styling", "signals": ["revert_subject"], "depth": 0 },
   { "message": "Revert \"Revert to polling for compute\"\n\nThis reverts commit 5b6dee9f3ff17ed0a4f03cdfa903bbec9130e63a.", "signals": ["revert_subject"], "reverts": ["5b6dee9f3ff17ed0a4f03cdfa903bbec9130e63a"], "depth": 1 }
+ ],
+ "pull_about": "What the pull request a later commit was merged with says of it, read by the Action only (the binary sees no pull requests). The repository is owner/name.",
+ "pull_cases": [
+  { "pull": { "title": "Fix the login redirect", "head_ref": "ann/login" }, "signals": ["fix_pr_title"], "reverts": [] },
+  { "pull": { "title": "Login redirect", "head_ref": "fix/login" }, "signals": ["fix_branch"], "reverts": [] },
+  { "pull": { "title": "Login redirect", "head_ref": "Hotfix/login" }, "signals": ["fix_branch"], "reverts": [] },
+  { "pull": { "title": "Login redirect", "head_ref": "ann/fix-login" }, "signals": [], "reverts": [], "note": "only the branch's first part is read" },
+  { "pull": { "title": "Login redirect", "head_ref": "main", "labels": ["type: Bug"] }, "signals": ["bug_issue"], "reverts": [] },
+  { "pull": { "title": "Login redirect", "head_ref": "main", "labels": ["debugging", "docs"] }, "signals": [], "reverts": [] },
+  { "pull": { "title": "Revert \"Add compute\"", "head_ref": "revert-12-compute", "body": "Reverts owner/name#12" }, "signals": ["revert_pr_title"], "reverts": [12] },
+  { "pull": { "title": "Undo compute", "head_ref": "undo", "body": "reverts Owner/Name#12. Also reverts other/repo#9" }, "signals": [], "reverts": [12], "note": "another repository's pull request is not this one's" },
+  { "pull": { "title": "Reverting was considered", "head_ref": "x", "body": "This reverts nothing" }, "signals": [], "reverts": [] }
  ]
 }
