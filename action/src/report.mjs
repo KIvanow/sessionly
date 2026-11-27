@@ -309,6 +309,26 @@ export function renderMany(reported, server, failed = []) {
  * What a run that counted merged pull requests again found, as Markdown for
  * the run summary: one row for each count.
  */
+/**
+ * The later commits a scheduled run found changing merged pull requests'
+ * lines, for the run's summary page: which pull request, which commit, and
+ * what kind. Linked, not caused: a fix that changed an agent's lines was
+ * mostly a fix of something else.
+ */
+export function renderOutcomes(stored, server) {
+  const home = server ? `${String(server).replace(/\/+$/, "")}/#/pulls` : null;
+  const kinds = { revert: "Revert", fix: "Fix (changed by a fix)", rework: "Rework" };
+  return [
+    `### ${home ? `[Sessionly](${home})` : "Sessionly"}`,
+    "",
+    "Later commits that changed merged pull requests' lines.",
+    "",
+    "| Pull request | Commit | Kind |",
+    "|---|---|---|",
+    ...stored.map((row) => `| #${row.number} | \`${row.sha.slice(0, 12)}\` | ${kinds[row.kind] ?? row.kind} |`),
+  ].join("\n");
+}
+
 export function renderAfterMerge(counted, server, failed = []) {
   const home = server ? `${String(server).replace(/\/+$/, "")}/#/pulls` : null;
   const out = [`### ${home ? `[Sessionly](${home})` : "Sessionly"}`, ""];

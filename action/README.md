@@ -59,6 +59,10 @@ shows a warning that the token is missing.
 | `pr-number` | | The pull request to report, when the workflow was not started by one. Also `all` for the repository's latest, or `20-60` for those numbered from one to the other (see below). |
 | `since` | 90 days ago | With `pr-number: all`, the date from which pull requests are reported, by when they were created. |
 | `after-merge` | `false` | Count merged pull requests' agent lines again on the branch they were merged into, 7 and 30 days after. A run started by a schedule, with no `pr-number`, does this without it (see below). |
+| `outcomes` | `true` | On a scheduled run, also read the later commits on the branches merged pull requests went into, for 30 days after each merge (see below). |
+| `outcomes-since` | | With `outcomes`: also read those of pull requests merged on or after this date, from before the server began to. |
+| `fix-words` | | Words that make a later commit a fix, separated by commas, in place of the default list. |
+| `bug-labels` | | Words that make a linked issue's label a bug label, separated by commas, in place of the default list. |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 Outputs: `lines` (tracked lines the pull request adds) and `agent-lines` (how many a coding
@@ -133,7 +137,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read   # which pull request a later commit came with
+      issues: read          # the labels of the issues it closes
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # later commits are read from the history
       - uses: KIvanow/sessionly/action@main
         with:
           url: https://sessionly.example.com
@@ -146,6 +155,20 @@ next. A pull request whose files hold more lines than fit in one request to the 
 about 1.7 million tracked lines) cannot be counted yet: the run warns of it each time. See
 [After merge](../docs-site/pull-requests.md#after-merge) for what is counted and how a missed
 day is handled.
+
+The same run then reads later commits (the `outcomes` input, on by default). The server says
+which merged pull requests have days of their first 30 not read yet, on which branch, and which
+files. The run reads that branch's history with git, in the runner, and for each commit that
+came after the merge and changed those files, sends the lines it removed and added there as
+hashes, where it moved lines to, and what it is: its subject's fix words or `revert`, and for
+the pull request it came with (one request each to GitHub), the branch name, the title's fix
+words, the labels of the issues it closes, and which pull requests it says it reverts. The
+server keeps the commits that changed a pull request's own lines, and says of each whether it
+was a revert, a fix or rework. Without a checkout with history (`fetch-depth: 0`) the run says
+so. When GitHub allows the run fewer than 100 more requests, it stops, and the next run goes on
+from there. `outcomes-since` reads those of older pull requests too: later commits are history,
+so they can be counted late, unlike the lines still there after merge. See
+[Later commits](../docs-site/pull-requests.md#later-commits).
 
 ## What is sent
 
@@ -164,6 +187,15 @@ request has more than the 2,000 that are sent); nothing else is said of a round.
 
 For a count after merge: the repository, the pull request's number, and for each file the
 server asked about, its path and a hash of each of its lines as it is on the branch now.
+
+A report also names the pull request's head commit and, once merged, the commit it was merged
+as (their SHAs). For later commits: each commit's SHA, link and the time it landed, the numbers
+of the pull requests it belongs to and of those it says it reverts, the SHAs its message says it
+reverts, which of the due pull requests' merge commits it comes after, and for the files the
+server asked about (and where their lines moved), a hash of each line it removed or added.
+What it is (a fix, a revert) goes as ids such as `fix_message` or `bug_issue`: its message, the
+title, branch and body of its pull request, and the issues' labels are read in the runner and
+never sent.
 
 The report also says it came from this Action and which version (`reporter`, the version in
 `package.json`). Nothing else, and nothing to anyone else.

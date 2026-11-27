@@ -2,6 +2,12 @@
 
 /** `request(method, path, body)` against GitHub's API at `apiUrl`, and `graphql(query, variables)` against the one at `graphqlUrl`. */
 export function github(token, apiUrl = "https://api.github.com", graphqlUrl = `${apiUrl}/graphql`) {
+  // How many requests GitHub said the token has left this hour, at the last answer.
+  let remaining;
+  const counted = (response) => {
+    const left = Number(response.headers.get("x-ratelimit-remaining"));
+    if (response.headers.has("x-ratelimit-remaining") && Number.isFinite(left)) remaining = left;
+  };
   const request = async (method, path, body) => {
     const response = await fetch(`${apiUrl}${path}`, {
       method,
@@ -14,6 +20,7 @@ export function github(token, apiUrl = "https://api.github.com", graphqlUrl = `$
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
+    counted(response);
     if (!response.ok) {
       const text = (await response.text()).slice(0, 300);
       throw Object.assign(new Error(`GitHub answered ${response.status} to ${method} ${path}: ${text}`), { status: response.status });
@@ -51,7 +58,15 @@ export function github(token, apiUrl = "https://api.github.com", graphqlUrl = `$
     }
     return answer.data;
   };
-  return { request, text, graphql };
+  return {
+    request,
+    text,
+    graphql,
+    /** Undefined until GitHub has said. */
+    get remaining() {
+      return remaining;
+    },
+  };
 }
 
 /** Every item of a list GitHub serves in pages. */

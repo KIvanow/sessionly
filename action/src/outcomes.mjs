@@ -9,6 +9,7 @@
 // What a message says is read word by word, as the sessionly binary reads
 // it (`crates/sessionly/src/outcomes.rs`): test/outcome-signals.json holds
 // the words and the cases both must read the same way.
+import { commitOf, isAncestor, isSha, parseList, readHistory } from "./history.mjs";
 import { SPACE } from "./lines.mjs";
 
 /** The default word lists, from the fixture the binary is tested against too. */
@@ -126,4 +127,275 @@ export function pullSignals({ title, head_ref, body, labels = [] }, repo, of = w
     if (named && named[1].toLowerCase() === repo.toLowerCase()) pulls.push(Number(named[2]));
   }
   return { signals: found, reverts: [...new Set(pulls)] };
+}
+
+/** Commit times are the committer's clock: the history is read this much further either way, in seconds. */
+const SLACK = 86_400;
+/** No fewer GitHub requests than this are left for others: a run stops asking there. */
+export const RATE_FLOOR = 100;
+/** No more commits than this go in one request to the server, nor much more than this much JSON. */
+export const COMMITS_AT_ONCE = 500;
+const BYTES_AT_ONCE = 8 * 1024 * 1024;
+/** Pull requests whose linked issues are asked for in one GraphQL question. */
+const LABELS_AT_ONCE = 20;
+
+/** The lines of a map of hash counts, each as often as it is there, in order. */
+const spread = (counts) => [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).flatMap(([hash, n]) => Array(n).fill(hash));
+
+/** Of what git says of a commit, what the server is told: its lines in the files read, and those it moved out of them. */
+function toSend(commit, tracked) {
+  const files = [...commit.files]
+    .filter(([path, d]) => tracked.has(path) && (d.removed.size > 0 || d.added.size > 0))
+    .map(([path, d]) => ({ path, removed: spread(d.removed), added: spread(d.added) }));
+  const byMove = new Map();
+  for (const [from, to, hash, n] of commit.moves) {
+    if (!tracked.has(from)) continue;
+    const key = JSON.stringify([from, to]);
+    byMove.set(key, [...(byMove.get(key) ?? []), ...Array(n).fill(hash)]);
+  }
+  const moves = [...byMove].map(([key, hashes]) => {
+    const [from, to] = JSON.parse(key);
+    return { from, to, hashes: hashes.sort() };
+  });
+  return { files, moves };
+}
+
+/** The pull requests GitHub says a commit belongs to, and the one it landed on `base` with. */
+async function pullsOf(api, repo, sha, base) {
+  const found = await api.request("GET", `/repos/${repo}/commits/${sha}/pulls?per_page=100`);
+  const list = Array.isArray(found) ? found : [];
+  return { list, landed: list.find((p) => p.merged_at && p.base?.ref === base) };
+}
+
+/** The labels of the issues each pull request closes, by number. Not known (and said) where GitHub would not answer. */
+async function closedLabels(api, repo, numbers, log) {
+  const [owner, name] = repo.split("/");
+  const labels = new Map();
+  for (let from = 0; from < numbers.length; from += LABELS_AT_ONCE) {
+    const some = numbers.slice(from, from + LABELS_AT_ONCE);
+    const query =
+      "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { " +
+      some
+        .map((n, i) => `p${i}: pullRequest(number: ${Number(n)}) { closingIssuesReferences(first: 10) { nodes { labels(first: 20) { nodes { name } } } } }`)
+        .join(" ") +
+      " } }";
+    try {
+      const found = (await api.graphql(query, { owner, name })).repository ?? {};
+      some.forEach((n, i) => {
+        const issues = found[`p${i}`]?.closingIssuesReferences?.nodes ?? [];
+        labels.set(n, issues.flatMap((issue) => (issue?.labels?.nodes ?? []).map((label) => String(label?.name ?? ""))));
+      });
+    } catch (err) {
+      const why = String(err.message ?? err).replace(/\r?\n/g, " ");
+      log(`::warning title=Sessionly::The labels of the issues pull requests close could not be read (${why}), so bug_issue is not known for them. It needs issues: read.`);
+      break;
+    }
+  }
+  return labels;
+}
+
+/**
+ * Read one base branch's later commits for the pull requests due on it:
+ * what the server is told of them, oldest landed first. Each that removes a
+ * line in a file read is looked up on GitHub (the pull request it came with,
+ * when that was merged, what it says of it); when fewer than `RATE_FLOOR`
+ * requests are left, that commit and those after it are left for the next
+ * run, and `scanned_until` stops before them. Null when the branch is not
+ * in the checkout.
+ */
+export async function scanBranch({ git, api, repo, host, branch, words: of = wordsOf(), log = () => {}, now = Date.now() }) {
+  const tip = commitOf(git, `refs/remotes/origin/${branch.base_ref}`)?.sha;
+  if (!tip) {
+    log(`::warning title=Sessionly::origin/${branch.base_ref} is not in the checkout, so its later commits were not read. Check it out with fetch-depth: 0.`);
+    return null;
+  }
+  const readAt = Math.floor(now / 1000);
+  // Which commit each pull request was merged as, whether that is in this
+  // history, and so which commits come after it: only those saw its lines.
+  const pulls = [];
+  for (const pull of branch.pulls) {
+    let sha = pull.merge_commit_sha;
+    if (!sha) {
+      const read = await api.request("GET", `/repos/${repo}/pulls/${pull.number}`).catch(() => null);
+      sha = isSha(read?.merge_commit_sha ?? "") ? read.merge_commit_sha : null;
+    }
+    const found = Boolean(sha && commitOf(git, sha) && isAncestor(git, sha, tip));
+    const after = new Set(found ? parseList(git(["rev-list", "--ancestry-path", "--timestamp", `${sha}..${tip}`])).map((c) => c.sha) : []);
+    pulls.push({ number: pull.number, merge_commit_sha: sha, found, after });
+  }
+  // From a day before the earliest due, to a day past the latest end of 30 days.
+  const since = Math.max(0, Math.floor(Date.parse(branch.since) / 1000) - SLACK);
+  const until = Math.min(readAt, Math.floor(Date.parse(branch.until) / 1000) + SLACK);
+  const { commits, paths } = readHistory(git, tip, since, until, [...new Set(branch.pulls.flatMap((p) => p.paths))]);
+  const tracked = new Set(paths);
+  const kept = [];
+  let stoppedAt = null;
+  for (const commit of commits) {
+    // The one a pull request was merged as is its own, not later.
+    if (pulls.some((p) => p.merge_commit_sha === commit.sha)) continue;
+    const { files, moves } = toSend(commit, tracked);
+    if (files.length === 0 && moves.length === 0) continue;
+    const named = reverts(commit.message).slice(0, 20);
+    const sent = {
+      sha: commit.sha,
+      url: `https://${host}/${repo}/commit/${commit.sha}`,
+      landed_at: new Date(commit.at * 1000).toISOString(),
+      pulls: [],
+      after: pulls.filter((p) => p.after.has(commit.sha)).map((p) => p.number),
+      signals: signals(commit.message, of),
+      reverts: { shas: named, pulls: [] },
+      removed_total: commit.removedTotal,
+      files,
+      ...(moves.length > 0 ? { moves } : {}),
+    };
+    // A revert of a commit that is itself a revert (or a reapply) puts lines back, and reverts nothing.
+    const reverted = named.map((sha) => commitOf(git, sha)).filter(Boolean);
+    if (reverted.some((r) => putsBack(r.message))) sent.reapply = true;
+    if (files.some((f) => f.removed.length > 0)) {
+      if (api.remaining !== undefined && api.remaining < RATE_FLOOR) {
+        stoppedAt = commit.at;
+        break;
+      }
+      try {
+        const { list, landed } = await pullsOf(api, repo, commit.sha, branch.base_ref);
+        sent.pulls = list.map((p) => p.number).filter(Number.isInteger);
+        if (landed) {
+          sent.landed_at = new Date(landed.merged_at).toISOString();
+          sent.meta = landed;
+        }
+        // The pull requests of the commits it reverts (a rebase merge's, which no SHA of the pull request names).
+        if (!sent.reapply) {
+          for (const r of reverted) {
+            const theirs = await pullsOf(api, repo, r.sha, branch.base_ref);
+            if (theirs.landed) sent.reverts.pulls.push(theirs.landed.number);
+          }
+        }
+      } catch (err) {
+        if (err.status !== 403 && err.status !== 429) throw err;
+        stoppedAt = commit.at;
+        break;
+      }
+    }
+    kept.push(sent);
+  }
+  // What the pull requests the commits came with say: their title, branch, body and linked issues' labels.
+  const metas = kept.filter((c) => c.meta);
+  const labels = metas.length > 0 ? await closedLabels(api, repo, [...new Set(metas.map((c) => c.meta.number))], log) : new Map();
+  for (const commit of metas) {
+    const { title, head, body, number } = commit.meta;
+    const said = pullSignals({ title, head_ref: head?.ref, body, labels: labels.get(number) ?? [] }, repo, of);
+    commit.signals = [...new Set([...commit.signals, ...said.signals])];
+    if (!commit.reapply) commit.reverts.pulls = [...new Set([...commit.reverts.pulls, ...said.reverts])];
+    delete commit.meta;
+  }
+  // In the order they landed; those that landed together, as git walked them.
+  const ordered = kept
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => Date.parse(a.c.landed_at) - Date.parse(b.c.landed_at) || a.i - b.i)
+    .map(({ c }) => c);
+  return {
+    tip,
+    scanned_until: new Date((stoppedAt === null ? until : Math.min(until, stoppedAt - 1)) * 1000).toISOString(),
+    stopped: stoppedAt !== null,
+    pulls: pulls.map(({ number, merge_commit_sha, found }) => ({ number, merge_commit_sha, found })),
+    commits: ordered,
+  };
+}
+
+/**
+ * A branch's scan cut into requests the server takes: at most
+ * `COMMITS_AT_ONCE` commits each, and about `BYTES_AT_ONCE`, cut only
+ * between commits that landed at different times. Each but the last says it
+ * was read up to just before the next one's first commit landed, so that
+ * one that fails leaves those after it for the next run.
+ */
+export function chunks(scan) {
+  const out = [];
+  let current = [];
+  let bytes = 0;
+  for (const commit of scan.commits) {
+    const size = JSON.stringify(commit).length;
+    const full = current.length >= COMMITS_AT_ONCE || bytes + size > BYTES_AT_ONCE;
+    if (full && current.length > 0 && current.at(-1).landed_at !== commit.landed_at) {
+      out.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(commit);
+    bytes += size;
+  }
+  out.push(current);
+  return out.map((commits, i) => ({
+    commits,
+    scanned_until:
+      i + 1 < out.length ? new Date(Math.min(Date.parse(out[i + 1][0].landed_at) - 1, Date.parse(scan.scanned_until))).toISOString() : scan.scanned_until,
+  }));
+}
+
+/** How long a run waits when the server says it is asked too often, and how many times. */
+const WAIT_AT_MOST = 60_000;
+const TRIES = 3;
+
+/**
+ * Read the later commits of merged pull requests that are due, on the
+ * branches they were merged into, and tell the server: it says which are
+ * due and which files, and keeps what those commits did to the pull
+ * requests' lines. Needs the repository checked out with its history
+ * (`fetch-depth: 0`). A server from before this is said, and skipped.
+ */
+export async function runOutcomes(env, { api, server, repo, host, log, git, wait = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  const name = `${host}/${repo}`;
+  const since = (env.SESSIONLY_OUTCOMES_SINCE ?? "").trim();
+  if (since && Number.isNaN(Date.parse(since))) throw new Error(`the outcomes-since input is not a date: ${since}`);
+  let due;
+  try {
+    due = await server("GET", `/prs/outcomes/due?repo=${encodeURIComponent(name)}${since ? `&since=${encodeURIComponent(new Date(since).toISOString())}` : ""}`);
+  } catch (err) {
+    if (err.status === 403 || err.status === 404) {
+      log(`::warning title=Sessionly::The Sessionly server does not read later commits of merged pull requests (${err.message}): it is from before that. Nothing else is affected.`);
+      return { skipped: true, stored: [] };
+    }
+    throw err;
+  }
+  const branches = Array.isArray(due?.branches) ? due.branches : [];
+  if (branches.length === 0) {
+    log("No merged pull request was due for its later commits to be read.");
+    return { stored: [], left: false };
+  }
+  // A shallow checkout has no history to read.
+  let shallow;
+  try {
+    shallow = git(["rev-parse", "--is-shallow-repository"]).toString("utf8").trim();
+  } catch (err) {
+    throw new Error(`the repository is not checked out here (${err.message}): add actions/checkout with fetch-depth: 0 before this step`);
+  }
+  if (shallow !== "false") throw new Error("the checkout has only the latest commits: give actions/checkout fetch-depth: 0, so the base branch's history can be read");
+  const of = wordsOf(env.SESSIONLY_FIX_WORDS, env.SESSIONLY_BUG_LABELS);
+  const stored = [];
+  let left = false;
+  for (const branch of branches) {
+    const scan = await scanBranch({ git, api, repo, host, branch, words: of, log });
+    if (!scan) continue;
+    if (scan.stopped) {
+      left = true;
+      log(`::warning title=Sessionly::GitHub allows this run few more requests, so later commits of ${branch.base_ref} from ${scan.scanned_until} on are left for the next run.`);
+    }
+    for (const part of chunks(scan)) {
+      const body = { repo: name, base_ref: branch.base_ref, tip: scan.tip, scanned_until: part.scanned_until, pulls: scan.pulls, commits: part.commits };
+      for (let tries = 1; ; tries += 1) {
+        try {
+          const answer = await server("PUT", "/prs/outcomes", body);
+          stored.push(...(answer.stored ?? []));
+          break;
+        } catch (err) {
+          if (err.status !== 429 || tries >= TRIES) throw err;
+          await wait(Math.min(WAIT_AT_MOST, (Number(err.retryAfter) || 10) * 1000));
+        }
+      }
+    }
+  }
+  const said = { revert: "a revert", fix: "a fix", rework: "rework" };
+  for (const row of stored) log(`#${row.number}: ${row.sha.slice(0, 12)} changed its lines (${said[row.kind] ?? row.kind}).`);
+  log(`Read later commits for ${branches.reduce((n, b) => n + b.pulls.length, 0)} merged pull requests of ${repo}: ${stored.length === 0 ? "none" : stored.length} changed their lines.`);
+  return { stored, left };
 }

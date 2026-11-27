@@ -1,10 +1,13 @@
 // Entry point: read the pull request from GitHub, send the report to the
 // Sessionly server, and show what it answers.
+import { spawnSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { branchFor, filesAt, github, listPulls, readPull, upsertComment } from "./github.mjs";
 import { fileHashes, ignoring } from "./lines.mjs";
-import { buildReport, MARKER, render, renderAfterMerge, renderMany } from "./report.mjs";
+import { gitIn } from "./history.mjs";
+import { runOutcomes } from "./outcomes.mjs";
+import { buildReport, MARKER, render, renderAfterMerge, renderMany, renderOutcomes } from "./report.mjs";
 
 const on = (value) => /^(true|yes|on|1)$/i.test((value ?? "").trim());
 
@@ -81,7 +84,10 @@ export async function ask(url, token, method, path, body) {
   });
   const answer = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw Object.assign(new Error(`the Sessionly server answered ${response.status}: ${answer.error ?? "no reason given"}`), { status: response.status });
+    throw Object.assign(new Error(`the Sessionly server answered ${response.status}: ${answer.error ?? "no reason given"}`), {
+      status: response.status,
+      retryAfter: response.headers.get("retry-after"),
+    });
   }
   return answer;
 }
@@ -169,7 +175,7 @@ async function runAfterMerge(env, { api, server, repo, host, log, url }) {
  * One run. `env` is the process environment; `api`, `deliver` and `server`
  * can be replaced, which is how the tests run it without a network.
  */
-export async function run(env, { api, deliver = send, server, log = console.log } = {}) {
+export async function run(env, { api, deliver = send, server, log = console.log, git } = {}) {
   const need = (name, what) => {
     if (!env[name]) throw new Error(`${what} is missing`);
     return env[name];
@@ -187,7 +193,30 @@ export async function run(env, { api, deliver = send, server, log = console.log 
     api ??= github(need("SESSIONLY_GITHUB_TOKEN", "the github-token input"), env.GITHUB_API_URL || undefined, env.GITHUB_GRAPHQL_URL || undefined);
     server ??= (method, path, body) => ask(url, token, method, path, body);
     const host = new URL(env.GITHUB_SERVER_URL || "https://github.com").host;
-    return runAfterMerge(env, { api, server, repo, host, log, url });
+    // Both, each whatever the other does: a count that fails does not keep
+    // later commits from being read, nor the other way round. The first
+    // failure is the run's.
+    let counts = { counted: [], later: 0 };
+    let failure;
+    try {
+      counts = await runAfterMerge(env, { api, server, repo, host, log, url });
+    } catch (err) {
+      failure = err;
+    }
+    let outcomes;
+    if (on(env.SESSIONLY_OUTCOMES ?? "true")) {
+      try {
+        git ??= gitIn(env.GITHUB_WORKSPACE || process.cwd(), spawnSync);
+        outcomes = await runOutcomes(env, { api, server, repo, host, log, git });
+        if (on(env.SESSIONLY_SUMMARY ?? "true") && env.GITHUB_STEP_SUMMARY && outcomes.stored.length > 0) {
+          appendFileSync(env.GITHUB_STEP_SUMMARY, `${renderOutcomes(outcomes.stored, url)}\n`);
+        }
+      } catch (err) {
+        failure ??= Object.assign(new Error(`later commits were not read: ${err.message ?? err}`), { status: err.status });
+      }
+    }
+    if (failure) throw failure;
+    return { ...counts, outcomes };
   }
   const payload = env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")) : {};
   const which = wanted(env.SESSIONLY_PR_NUMBER || payload.pull_request?.number || payload.number);
