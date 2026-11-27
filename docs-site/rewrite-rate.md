@@ -227,6 +227,11 @@ out of, as **Kept** does; that number also counts sessions with later commits co
 rewrite measurement, so it can be larger than Kept's. A session's page has **Later commits**
 with `1d / 7d / 30d`.
 
+Where a repository has the GitHub Action, merged pull requests get the same counts from the
+branch they were merged into, from the day each was merged (the merge clock): see [Later
+commits](pull-requests.md#later-commits) on the pull requests page. The rules are these, read
+by the Action from the same word lists, and the two are shown apart, each saying which it is.
+
 ## What it does and doesn't mean
 
 - A line matches by content anywhere in the file, ignoring leading and trailing whitespace, so

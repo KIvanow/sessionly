@@ -229,7 +229,9 @@
             data subjects and the categories of personal data are set out in Annex I. In outline:
             the <code>sessionly</code> program on each engineer's machine builds a record of each
             coding agent session, applies the content level chosen on that machine, and uploads the
-            record; the GitHub Action reports pull requests as hashes of the lines they add; the
+            record; the GitHub Action reports pull requests as hashes of the lines they add, and on
+            a schedule counts merged ones' lines again and reads the later commits on the branch
+            they were merged into, as hashes and classifications; the
             Hosted Service stores both, matches them, and shows totals and individual sessions to
             the people in your org whose tokens allow it. Full prompts, file contents, command
             output and source code are never uploaded.
@@ -674,7 +676,21 @@
               followed and whether each is a bot. The email addresses on
               the pull request's commits are received with each report, used to select the
               sessions to compare with, and not stored; a hash of each is kept, so that the
-              comparison can be made again when sessions arrive later.
+              comparison can be made again when sessions arrive later. The SHAs of the pull
+              request's head commit and, once merged, of the commit it was merged as.
+            </li>
+            <li>
+              <strong>Scheduled runs of the GitHub Action</strong> (where the Customer sets one
+              up): for a merged pull request 7 and 30 days after merging, hashes of the lines of
+              the files its agent lines are in, as they are on the branch it was merged into; and
+              for 30 days after merging, the later commits on that branch that changed those
+              files: each commit's SHA and address on GitHub, when it landed, the numbers of the
+              pull requests it belongs to and of those it says it reverts, the SHAs it says it
+              reverts, hashes of the lines it removed and added in those files, and its
+              classification (fix, revert or neither, and why, as identifiers). Commit messages,
+              pull request titles, branch names and descriptions, and issue labels are read in the
+              Customer's GitHub runner and not received. Only the hashes of the pull request's own
+              lines are kept.
             </li>
             <li>
               <strong>Tokens:</strong> the email address (stored lower-case), optional name and
@@ -694,7 +710,7 @@
               <strong>Frequency:</strong> continuous: a connected machine uploads new and changed
               sessions when a turn ends (at most every five minutes) and when a session ends, and
               the GitHub Action reports when a pull request is opened, pushed to, reviewed or
-              closed.
+              closed, and, where the Customer schedules it, once a day for merged pull requests.
             </li>
             <li>
               <strong>Retention:</strong> sessions, pull request reports and tokens while the org
@@ -802,7 +818,8 @@
             <li>
               Each token has one role. A member reads only the sessions filed under their own
               email address. An admin reads the whole org and manages tokens. A ci token can
-              report pull requests and check that it is accepted, and is refused everything else.
+              report pull requests, ask which merged ones are due and send their counts and later
+              commits, and check that it is accepted, and is refused everything else.
             </li>
             <li>
               An upload is filed under the owner of the token that sent it, whatever name the
