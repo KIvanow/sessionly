@@ -1,4 +1,4 @@
-import type { LinesBy, PullList, PullMatches, PullRow, PullSummary, ReviewerSummary } from "@sessionly/schema";
+import type { LinesBy, PullList, PullMatches, PullOutcomesBy, PullOutcomesSummary, PullRow, PullSummary, ReviewerSummary } from "@sessionly/schema";
 import { useEffect, useState } from "react";
 import { api, ApiError, query, samePullFilters } from "./api.ts";
 import { scopeParams, type Scope } from "./App.tsx";
@@ -6,7 +6,7 @@ import { average, count, dateTime, modelName, percent, repoName, share, shareOf,
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { costIsFloor, costText, matchAll, nameSome, pullCost, pullHref, pullsCostNote, roundsTitle, survivingOnce, web } from "./pull.ts";
+import { costIsFloor, costText, matchAll, MIN_PULLS, nameSome, perThousand, pullCost, pullHref, pullsCostNote, reachedOf, revertedShare, roundsTitle, survivingOnce, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -136,6 +136,10 @@ export function Pulls({ token, scope, setScope, repos, readOnly = false, onSignO
             />
           </section>
           <ByModel summary={summary.data!} />
+          {/* Of merged ones only: the others have no later commits. */}
+          {state !== "open" && state !== "closed" && (
+            <Outcomes token={token} repo={params.repo} since={params.since} onSignOut={onSignOut} />
+          )}
           {/* A server from before this sends none. */}
           <ReviewBots rows={summary.data!.by_reviewer ?? []} pending={summary.data!.reviewers_pending ?? 0} />
         </>
@@ -217,6 +221,83 @@ export function Pulls({ token, scope, setScope, repos, readOnly = false, onSignO
         </section>
       )}
     </>
+  );
+}
+
+const OUTCOME_BY: Record<PullOutcomesBy, string> = { tool: "Tool", model: "Model", user: "Person", repo: "Repository", day: "Day merged" };
+const AGES = { "1d": "1 day", "7d": "7 days", "30d": "30 days" } as const;
+
+/**
+ * What later commits on the base branch did to merged pull requests' agent
+ * lines, by tool, model, person or repository, at 1, 7 or 30 days after
+ * merging: the merge clock, of pull requests the Action reads them for.
+ * Hidden on a server from before this.
+ */
+function Outcomes({ token, repo, since, onSignOut }: { token: string; repo?: string; since?: string; onSignOut: () => void }) {
+  const [by, setBy] = useState<PullOutcomesBy>("tool");
+  const [age, setAge] = useState<keyof typeof AGES>("7d");
+  const found = useApi<PullOutcomesSummary>(token, `/prs/outcomes/summary${query({ by, repo, since })}`, onSignOut);
+  if (found.errorStatus === 404 || (!found.data && !found.loading && !found.error)) return null;
+  const total = found.data?.total[`outcomes_${age}`];
+  const name = (key: string) => (by === "tool" ? toolName(key) : by === "model" ? modelName(key) : by === "repo" ? repoName(key) : key);
+  return (
+    <section className="card" aria-label="Later commits">
+      <div className="card-head">
+        <h2>Later commits: what happened to agent lines after merging</h2>
+      </div>
+      <p className="muted hint">
+        Merge clock: of merged pull requests with agent lines, those whose first {AGES[age]} after merging the Action has
+        read on the branch they went into. A pull request counts under each group whose sessions had lines in it, and so
+        does a commit that changed them; lines are split by session, so they add up. "Changed by a fix" is linked, not
+        caused: mostly the fix was of something else, and a careful team has more of them. Rates are per 1,000 agent lines,
+        shown from {MIN_PULLS} pull requests reached; below that a group is too few to compare. The model is a session's main one.
+      </p>
+      <div className="pick" role="group" aria-label="Group by">
+        {(Object.keys(OUTCOME_BY) as PullOutcomesBy[]).map((key) => (
+          <button key={key} aria-pressed={by === key} onClick={() => setBy(key)}>{OUTCOME_BY[key]}</button>
+        ))}
+      </div>
+      <div className="pick" role="group" aria-label="After merging">
+        {(Object.keys(AGES) as (keyof typeof AGES)[]).map((key) => (
+          <button key={key} aria-pressed={age === key} onClick={() => setAge(key)}>{AGES[key]}</button>
+        ))}
+      </div>
+      {found.error && <p role="alert">{found.error}</p>}
+      {!found.data && !found.error && <Loader label="Loading later commits" />}
+      {found.data && total && total.pulls_total === 0 && (
+        <p className="muted">None of these merged pull requests has agent lines whose later commits are read.</p>
+      )}
+      {found.data && total && total.pulls_total > 0 && (
+        <div className="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">{OUTCOME_BY[by]}</th>
+                <th scope="col" className="num" title="Pull requests that reached this age and were read up to it, of all of them">Reached</th>
+                <th scope="col" className="num">Agent lines</th>
+                <th scope="col" className="num" title="Reverted by then, and not relanded">Reverted</th>
+                <th scope="col" className="num" title="Fix commits that changed agent lines, per 1,000 agent lines">Changed by a fix /1k</th>
+                <th scope="col" className="num" title="Of those, at least half of what they removed was the agents'">Likely fixes</th>
+                <th scope="col" className="num" title="Commits that changed agent lines and say neither, per 1,000 agent lines">Rework /1k</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...found.data.groups.map((g) => ({ key: g.key, at: g[`outcomes_${age}`] })), { key: null, at: total }].map(({ key, at }) => (
+                <tr key={key ?? "total"} className={key === null ? "total" : undefined}>
+                  <th scope="row" className="name">{key === null ? "All" : name(key)}</th>
+                  <td className="num">{reachedOf(at)}</td>
+                  <td className="num">{count(at.agent_lines)}</td>
+                  <td className="num">{revertedShare(at)}</td>
+                  <td className="num">{perThousand(at.fix_commits, at)}</td>
+                  <td className="num">{at.pulls_reached > 0 ? count(at.likely_fix_commits) : "–"}</td>
+                  <td className="num">{perThousand(at.rework_commits, at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 

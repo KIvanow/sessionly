@@ -1,6 +1,6 @@
 // A pull request's page: where it is, how current its figures are, and its
 // reviews and comments counted by whose they are.
-import type { LocalReviewRun, LocalReviews, PullCost, PullDetail, PullFeedback, PullMatches, PullReviewer, PullRow, PullSession, ReviewSplit } from "@sessionly/schema";
+import type { LocalReviewRun, LocalReviews, PullCost, PullDetail, PullFeedback, PullMatches, PullOutcomeCommit, PullOutcomes, PullOutcomesAt, PullOutcomeWindow, PullReviewer, PullRow, PullSession, ReviewSplit } from "@sessionly/schema";
 import { count, dateTime, usd, usdEach } from "./format.ts";
 
 /** Whether a cost is a floor: a session of it has no cost figure, or one that leaves requests out. */
@@ -465,4 +465,73 @@ export function afterMergeTile(
   }
   if (age < 7) return { value: "–", part: null, note: "counted 7 and 30 days after it was merged" };
   return { value: "–", part: null, note: "not counted: a scheduled run of the Action does it, for lines whose sessions are kept" };
+}
+
+/** Below this many pull requests reached, no rate is shown beside another's: too few to compare. */
+export const MIN_PULLS = 10;
+
+const SIGNALS: Record<string, string> = {
+  revert_sha: "names the merge commit",
+  revert_pull: "its pull request reverts this one",
+  revert_bulk: "a revert, taking most of the lines",
+  fix_message: "fix word in the subject",
+  fix_conventional: "fix: type",
+  fix_branch: "fix/ branch",
+  fix_pr_title: "fix word in the pull request's title",
+  bug_issue: "closes an issue labelled a bug",
+};
+
+/** Why a later commit is the kind it is, in words. */
+export const signalName = (id: string): string => SIGNALS[id] ?? id;
+
+/** What a later commit is to the pull request, in a word or two. */
+export function laterKind(c: Pick<PullOutcomeCommit, "kind" | "likely" | "relanded_at">): string {
+  if (c.kind === "revert") return c.relanded_at ? "revert, relanded" : "revert";
+  if (c.kind === "fix") return c.likely ? "likely fix" : "changed by a fix";
+  return "rework";
+}
+
+/** What later commits did by one age, in a few words: "reverted", "2 fixes, 1 rework", "nothing". */
+export function laterWindow(w: PullOutcomeWindow): string {
+  const parts: string[] = [];
+  if (w.revert_commits > 0) parts.push(w.reverted ? "reverted" : "reverted, relanded");
+  if (w.fix_commits > 0) parts.push(`${count(w.fix_commits)} ${w.fix_commits === 1 ? "fix" : "fixes"}`);
+  if (w.rework_commits > 0) parts.push(`${count(w.rework_commits)} rework`);
+  return parts.length ? parts.join(", ") : "nothing";
+}
+
+/**
+ * The tile of what later commits did to a merged pull request's lines, by 7
+ * days after merging (the merge clock): a dash until that is read, and why.
+ */
+export function laterTile(outcomes: PullOutcomes | null | undefined, mergedAt: string | null, now: number = Date.now()): { value: string; note: string } {
+  const age = mergedAt ? (now - Date.parse(mergedAt)) / 86_400_000 : NaN;
+  if (!outcomes) return { value: "–", note: "not read: a scheduled run of the Action 0.5.0 or later reads them" };
+  const seven = outcomes.windows["7d"];
+  const thirty = outcomes.windows["30d"];
+  if (thirty.reached) return { value: laterWindow(thirty), note: `in the 30 days after merging; by day 7: ${laterWindow(seven)}` };
+  if (seven.reached) return { value: laterWindow(seven), note: "in the 7 days after merging; 30 days not read yet" };
+  if (age < 7) return { value: "–", note: "read 1, 7 and 30 days after it was merged" };
+  return { value: "–", note: outcomes.scanned_until ? `read up to ${dateTime(outcomes.scanned_until)}` : "not read yet: a scheduled run of the Action reads them" };
+}
+
+/** Of an age's pull requests, how many reached it: "4 of 9". */
+export const reachedOf = (at: Pick<PullOutcomesAt, "pulls_reached" | "pulls_total">): string => `${count(at.pulls_reached)} of ${count(at.pulls_total)}`;
+
+/**
+ * A count per 1,000 agent lines of the pull requests that reached an age,
+ * to one decimal; a dash with no lines, and "too few" below `MIN_PULLS`
+ * reached, where a rate says little and is not to be set beside another.
+ */
+export function perThousand(n: number, at: Pick<PullOutcomesAt, "pulls_reached" | "agent_lines">): string {
+  if (at.pulls_reached === 0 || at.agent_lines <= 0) return "–";
+  if (at.pulls_reached < MIN_PULLS) return "too few";
+  return ((n / at.agent_lines) * 1000).toFixed(1);
+}
+
+/** Of the pull requests that reached an age, the share reverted by then and not relanded. */
+export function revertedShare(at: Pick<PullOutcomesAt, "pulls_reached" | "pulls_reverted">): string {
+  if (at.pulls_reached === 0) return "–";
+  if (at.pulls_reached < MIN_PULLS) return `${count(at.pulls_reverted)} (too few)`;
+  return `${Math.round((at.pulls_reverted / at.pulls_reached) * 100)}% (${count(at.pulls_reverted)})`;
 }
