@@ -96,6 +96,7 @@ function session(id: string, remote: string, lines: number[] = [1, 2, 3]) {
       { path: "notes/SECRET-plan.md", model: null, hashes: [h(900)] },
     ],
     checkpoints: [{ checkpoint: "7d", added: 3, surviving: 2, measured_at: "2026-11-17T10:00:00.000Z", age_seconds: 604_800, ended_at: "2026-11-10T10:00:00.000Z" }],
+    outcomes: [{ checkpoint: "7d", lines_tracked: 3, fix_commits: 1, likely_fix_commits: 1, lines_fixed: 2, rework_commits: 0, lines_reworked: 0, revert_commits: 0, lines_reverted: 0, relanded: false, computed_at: "2026-11-17T10:00:00.000Z", age_seconds: 604_800, ended_at: "2026-11-10T10:00:00.000Z", late: false, scope: "head_and_default" }],
   };
 }
 
@@ -344,6 +345,8 @@ test("one repository's sessions are copied into another organisation, and copied
   assert.deepEqual(await keptAt(demo.admin), { lines_added: 6, lines_surviving: 4, sessions_reached: 2, sessions_total: 2 });
   assert.deepEqual(await keptAt(demo.admin), await keptAt(work.admin));
   assert.deepEqual((await call(demo.admin, "GET", "/sessions/m1/claude-code/s1")).body.upload.checkpoints, session("s1", REPO).checkpoints);
+  assert.deepEqual((await call(demo.admin, "GET", "/sessions/m1/claude-code/s1")).body.upload.outcomes, session("s1", REPO).outcomes);
+  assert.deepEqual((await call(demo.admin, "GET", `/summary?by=tool&repo_is=${encodeURIComponent(REPO)}`)).body.total.outcomes_7d, (await call(work.admin, "GET", `/summary?by=tool&repo_is=${encodeURIComponent(REPO)}`)).body.total.outcomes_7d);
   const pull = (await call(demo.admin, "GET", `/prs/detail?repo=${REPO}&number=1`)).body;
   assert.deepEqual([pull.attribution.now.agent_lines, pull.cost.usd, pull.sessions[0].session.owner_email], [3, 6, "ann@example.com"]);
   // nothing of what was typed or run is in anything the organisation it is shown in answers, or keeps

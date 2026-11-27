@@ -61,7 +61,7 @@ The filters of `list` and `summary`: `--repo`, `--user`, `--model`, `--tool`, `-
 | `--line-hashes on\|off` | `off` | Whether an upload has a hash of each line the agent added, which [pull request](pull-requests.md) figures need. |
 | `--shell-edits sure\|all\|off` | `sure` | How much of what shell commands change is counted as the agent's. See [Shell edits](shell-edits.md). |
 | `--outcomes on\|off` | `on` | Whether the repositories' history is read for later reverts and fixes of agents' lines, and the counts uploaded. See [Later commits](rewrite-rate.md#later-commits-reverts-and-fixes). |
-| `--fix-words a,b,c` | | The words that make a commit subject a fix, in place of the defaults; `default` for those. |
+| `--fix-words a,b,c` | | The words that make a commit subject a fix, in place of the defaults (see [Later commits](rewrite-rate.md#later-commits-reverts-and-fixes)); `default` for those. Only on this machine: a team's figures add every machine's. |
 | `--update-check on\|off` | `on` | Whether a background upload asks once a day if a newer release is out. `status` says when one is, and so do `list` and `summary` in a terminal. See [Install](install.md#updating). |
 
 ## What the hooks run

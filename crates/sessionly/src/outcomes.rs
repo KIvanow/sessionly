@@ -33,7 +33,9 @@
 //!   removes none of them and is not counted.
 //! - A line a commit removes and adds again, in that file or another, was
 //!   moved, not changed: as for the rewrite rate, moved code counts as there.
-//!   Past `MOST_SHOWN` commits in one reading this is not looked at.
+//!   So a commit that removes a session's lines counts only when it could be
+//!   read whole: not one over `MAX_SHOW_BYTES` (a vendored or moved tree), nor
+//!   one past `MOST_SHOWN` in one reading.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -579,7 +581,16 @@ fn scan(
                 .keys()
                 .any(|hash| held.contains(&(path.as_str(), *hash)))
         });
-        if !removes_held || shown >= MOST_SHOWN {
+        if !removes_held {
+            continue;
+        }
+        let unread = |commit: &mut Commit| {
+            for diff in commit.files.values_mut() {
+                diff.removed.clear();
+            }
+        };
+        if shown >= MOST_SHOWN {
+            unread(commit);
             continue;
         }
         shown += 1;
@@ -598,8 +609,14 @@ fn scan(
             "--dst-prefix=b/",
             &commit.sha,
         ]);
-        let Ok((out, true)) = crate::git::bounded(command, None, MAX_SHOW_BYTES, deadline) else {
-            continue;
+        let out = match crate::git::bounded(command, None, MAX_SHOW_BYTES, deadline) {
+            Ok((out, true)) => out,
+            // Out of time: the reading as a whole failed, and is tried again.
+            Err(crate::git::Stop::TimedOut) => return Err(crate::git::Stop::TimedOut),
+            _ => {
+                unread(commit);
+                continue;
+            }
         };
         let whole = parse_diff(&String::from_utf8_lossy(&out));
         let mut added: HashMap<u64, u64> = HashMap::new();

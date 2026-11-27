@@ -357,6 +357,24 @@ export function shown(upload: Upload, rules: Rules): Upload {
       age_seconds: c.age_seconds,
       ended_at: c.ended_at,
     })),
+    // What later commits did to its lines, in counts: not which commits, nor their files.
+    outcomes: upload.outcomes?.map((o) => ({
+      checkpoint: o.checkpoint,
+      lines_tracked: o.lines_tracked,
+      fix_commits: o.fix_commits,
+      likely_fix_commits: o.likely_fix_commits,
+      lines_fixed: o.lines_fixed,
+      rework_commits: o.rework_commits,
+      lines_reworked: o.lines_reworked,
+      revert_commits: o.revert_commits,
+      lines_reverted: o.lines_reverted,
+      relanded: o.relanded,
+      computed_at: o.computed_at,
+      age_seconds: o.age_seconds,
+      ended_at: o.ended_at,
+      late: o.late,
+      scope: o.scope,
+    })),
   };
 }
 

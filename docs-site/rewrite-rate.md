@@ -110,8 +110,14 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   commits (a reverted merge counts when the revert takes out most of the lines).
 - **Not counted:** a fix that only adds lines next to the agent's (a missing check), and a fix
   whose subject has none of the words. A repository whose subjects describe what changed ("Stop
-  the sweep from deleting history") has fixes that count as rework. `sessionly settings
-  --fix-words` sets the words.
+  the sweep from deleting history") has fixes that count as rework.
+- **Fix words:** a commit is a fix when a word of its subject line (lowercased, split on
+  anything not a letter or digit) is one of `fix fixes fixed fixing bug bugs bugfix hotfix
+  regression broken crash crashes crashed typo`, or its conventional type is `fix`, `hotfix`
+  or `bugfix`. The body is not read for them. `sessionly settings --fix-words a,b,c` replaces
+  the words (not the types) on that machine, and `--fix-words default` restores them. It
+  changes only whether a commit counts as a fix or as rework, not reverts. A team's figures add
+  every machine's counts, so a machine with its own words counts fixes differently from the rest.
 - **Uploaded:** only the counts at each age (`outcomes`), never a commit's SHA, subject or files.
   `sessionly settings --outcomes off` stops reading history and sending them.
 
