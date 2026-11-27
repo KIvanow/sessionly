@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
@@ -219,6 +223,62 @@ test("later commits on the base branch are walked against a merged pull request'
   // Read to its 30 days, it is not due again.
   await db.query(`UPDATE pull_requests SET outcomes_scanned_until = merged_at + interval '30 days' WHERE repo = $1 AND number = 1`, [repo]);
   assert.deepEqual((await call(tokens.ci, "GET", `/prs/outcomes/due?repo=${q}`)).body, { branches: [] });
+});
+
+test("what the Action reads of a real history is what the server walks", async () => {
+  type Action = {
+    scanBranch: (o: Record<string, unknown>) => Promise<Record<string, unknown> & { commits: unknown[] }>;
+    chunks: (scan: unknown) => { commits: unknown[]; scanned_until: string }[];
+  };
+  const action: Action = await import(new URL("../../../action/src/outcomes.mjs", import.meta.url).href);
+  const { gitIn }: { gitIn: (cwd: string, spawn: typeof spawnSync) => unknown } = await import(new URL("../../../action/src/history.mjs", import.meta.url).href);
+  const { lineHash }: { lineHash: (line: string) => string } = await import(new URL("../../../action/src/lines.mjs", import.meta.url).href);
+  const dir = mkdtempSync(join(tmpdir(), "sessionly-outcomes-"));
+  try {
+    const at = (days: number) => Math.floor((Date.now() - days * 86_400_000) / 1000);
+    const git = (args: string[], when = at(20)) => {
+      const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: dir, GIT_AUTHOR_DATE: `@${when} +0000`, GIT_COMMITTER_DATE: `@${when} +0000`, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };
+      const done = spawnSync("git", args, { cwd: dir, env, encoding: "utf8" });
+      assert.equal(done.status, 0, done.stderr);
+      return done.stdout.trim();
+    };
+    const lines = (...ns: number[]) => ns.map((n) => `compute_${n}(input, ${n});`);
+    git(["init", "-q", "--initial-branch", "main"]);
+    git(["config", "commit.gpgsign", "false"]);
+    writeFileSync(join(dir, "app.ts"), `${lines(1, 2, 3, 4).join("\n")}\n`);
+    git(["add", "-A"], at(12));
+    git(["commit", "-q", "-m", "Add compute (#1)"], at(12));
+    const merge = git(["rev-parse", "HEAD"]);
+    writeFileSync(join(dir, "app.ts"), `${lines(3, 4).join("\n")}\nfixed();\n`);
+    git(["commit", "-q", "-am", "Fix the crash in compute"], at(11));
+    const fix = git(["rev-parse", "HEAD"]);
+    git(["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+    const repo = "github.com/acme/real";
+    await db.query(`UPDATE orgs SET outcomes_since = now() - interval '20 days' WHERE id = 'default'`);
+    const hashes = lines(1, 2, 3, 4).map(lineHash);
+    assert.equal((await upload(repo, "real-1", "codex", [{ path: "app.ts", hashes }])).status, 200);
+    const merged_at = new Date(at(12) * 1000 + 60_000).toISOString();
+    await call(tokens.ci, "PUT", "/prs", {
+      repo, number: 1, author: "ann", state: "merged", created_at: ago(13), merged_at, base_ref: "main", event: "closed",
+      commits: 1, reviews: 0, changes_requested: 0, review_comments: 0, bot_review_comments: 0, review_rounds: 0,
+      files: [{ path: "app.ts", hashes }], merge_commit_sha: merge,
+    });
+    const { branches } = (await call(tokens.ci, "GET", `/prs/outcomes/due?repo=${encodeURIComponent(repo)}`)).body;
+    assert.equal(branches.length, 1);
+    const api = { request: async () => [], graphql: async () => ({ repository: {} }) };
+    const scan = await action.scanBranch({ git: gitIn(dir, spawnSync), api, repo: "acme/real", host: "github.com", branch: branches[0] });
+    for (const part of action.chunks(scan)) {
+      const sent = await call(tokens.ci, "PUT", "/prs/outcomes", { repo, base_ref: "main", tip: scan.tip, scanned_until: part.scanned_until, pulls: scan.pulls, commits: part.commits });
+      assert.equal(sent.status, 200, JSON.stringify(sent.body));
+      assert.deepEqual(sent.body.stored, [{ number: 1, sha: fix, kind: "fix" }]);
+    }
+    const outcomes = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(repo)}&number=1`)).body.outcomes;
+    assert.deepEqual(outcomes.commits.map((c: any) => [c.sha, c.kind, c.agent_lines, c.likely, c.signals]), [[fix, "fix", 2, true, ["fix_message"]]]);
+    assert.equal(outcomes.windows["1d"].reached, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a scan is checked before anything of it is kept", async () => {
