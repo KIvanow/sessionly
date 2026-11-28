@@ -1,8 +1,8 @@
-import type { LocalReviewRun, PullAfterMerge, PullDetail, PullHistory, PullHistoryNamedSession, PullSession } from "@sessionly/schema";
+import type { LocalReviewRun, PullAfterMerge, PullDetail, PullHistory, PullOutcomes, PullHistoryNamedSession, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { afterMergeLine, afterMergeName, afterMergeTile, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewNote, reviewTarget, roundsLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, laterKind, laterOf, laterTile, signalName, tenths, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewNote, reviewTarget, roundsLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
 import { cost, count, dateTime, duration, modelName, usd, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -52,6 +52,9 @@ export function PullView({
   const github = web(p.url);
   // What became of its agent lines on the branch it was merged into.
   const afterMerge = p.state === "merged" && a.now.agent_lines > 0 ? afterMergeTile(p.after_merge, p.merged_at, shareOf, count) : null;
+  // And what later commits there did to them (a server from before this says nothing).
+  const outcomes = laterOf(p.outcomes);
+  const later = afterMerge && p.outcomes !== undefined ? laterTile(outcomes, p.merged_at) : null;
   const state = p.state === "merged" ? `merged${p.merged_at ? ` ${dateTime(p.merged_at)}` : ""}` : p.state === "closed" ? `closed${p.closed_at ? ` ${dateTime(p.closed_at)}` : ""}` : p.draft ? "open, a draft" : "open";
   // Comments on the diff, per file: where review looked.
   const comments = new Map<string, number>();
@@ -88,7 +91,7 @@ export function PullView({
         repoOlder={p.repo_reporter_older}
         older={p.reporter_older}
       />
-      <section className={`tiles ${afterMerge ? "six" : "five"}`} aria-label="Totals">
+      <section className={`tiles ${later ? "seven" : afterMerge ? "six" : "five"}`} aria-label="Totals">
         <Tile label="Lines added" value={count(a.now.lines)} note={`in ${count(p.commits)} ${p.commits === 1 ? "commit" : "commits"}`} />
         <Tile
           label="Written by agents"
@@ -115,6 +118,7 @@ export function PullView({
         />
         <Tile label="Agent cost" value={pullCost(p.cost)} note={pullCostNote(p.cost)} />
         {afterMerge && <Tile label="Kept @30d after merge" value={afterMerge.value} part={afterMerge.part} note={afterMerge.note} />}
+        {later && <Tile label="Later commits" value={later.value} note={later.note} />}
       </section>
 
       <section className="card" aria-label="Reviews">
@@ -141,6 +145,8 @@ export function PullView({
       </section>
 
       <History history={p.history} counts={p.after_merge} />
+
+      {outcomes && <LaterCommits outcomes={outcomes} />}
 
       {a.now.by.length > 0 && (
         <section className="card" aria-label="By model">
@@ -357,6 +363,77 @@ export function PullView({
         )}
       </section>
     </>
+  );
+}
+
+/**
+ * Later commits on the base branch that changed the pull request's lines,
+ * oldest first: what each is, why, how many of its lines and of the
+ * agents', and whose sessions' those were.
+ */
+function LaterCommits({ outcomes }: { outcomes: PullOutcomes }) {
+  return (
+    <section className="card" aria-label="Later commits">
+      <h2>Later commits</h2>
+      <p className="muted hint">
+        Commits on the branch it was merged into, in the 30 days after, that removed or changed at least two of the agents'
+        lines. A revert names the commit it was merged as, or its pull request says so, or it says it is a revert and takes
+        most of what was left. "Changed by a fix" says a fix touched these lines: mostly it was a fix of something else, so
+        it is linked, not caused, and a careful team has more fix commits. A likely fix is one where at least half of what it
+        removed was the agents'.
+        {outcomes.scanned_until ? ` Read up to ${dateTime(outcomes.scanned_until)}.` : " Not read yet."}
+      </p>
+      {outcomes.commits.length === 0 ? (
+        <p className="muted">{outcomes.scanned_until ? "No later commit changed its lines." : "A scheduled run of the Action reads them."}</p>
+      ) : (
+        <div className="scroll">
+          <table className="rows">
+            <thead>
+              <tr>
+                <th scope="col">Landed</th>
+                <th scope="col">Commit</th>
+                <th scope="col">What</th>
+                <th scope="col">Why</th>
+                <th scope="col" className="num" title="Lines of this pull request it removed, the agents' or not">Its lines</th>
+                <th scope="col" className="num" title="Of those, the agents', shared copies split">Agents'</th>
+                <th scope="col">Sessions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {outcomes.commits.map((c) => (
+                <tr key={c.sha} className={c.counted ? undefined : "muted"}>
+                  <td className="nowrap">{dateTime(c.landed_at)}</td>
+                  <td className="nowrap">
+                    {web(c.url) ? (
+                      <a href={web(c.url)} target="_blank" rel="noreferrer"><code>{c.sha.slice(0, 10)}</code></a>
+                    ) : (
+                      <code>{c.sha.slice(0, 10)}</code>
+                    )}
+                    {c.by_pull != null && <span className="muted"> #{c.by_pull}</span>}
+                  </td>
+                  <td className="nowrap">{c.counted ? laterKind(c) : `${laterKind(c)} (not counted: fewer than 2 agent lines)`}</td>
+                  <td>
+                    <span className="chips">{c.signals.map((s) => <span key={s} className="chip">{signalName(s)}</span>)}</span>
+                  </td>
+                  <td className="num">{count(c.lines)}</td>
+                  <td className="num">{tenths(c.agent_lines)}</td>
+                  <td>
+                    {c.sessions.length === 0
+                      ? "–"
+                      : c.sessions.map((s, i) => (
+                          <span key={`${s.machine_id} ${s.source} ${s.session_id}`}>
+                            {i > 0 && ", "}
+                            <a href={sessionHref(s)}>{toolName(s.source)} {s.session_id.slice(0, 8)}</a>
+                          </span>
+                        ))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 

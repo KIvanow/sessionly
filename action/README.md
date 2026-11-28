@@ -38,7 +38,8 @@ jobs:
 3. On each machine whose sessions should count, run `sessionly settings --line-hashes on`.
 
 The job needs Node 20 or later on the runner, which GitHub's own runners have. It does not
-check the repository out. A problem (server down, token refused) is a warning on the run, not a
+check the repository out (only the scheduled job that reads later commits needs a checkout, see
+[After merge](#after-merge)). A problem (server down, token refused) is a warning on the run, not a
 failed check, unless you set `fail-on-error`.
 
 Pull requests from forks get no secrets from GitHub, so the Action cannot report them; the run
@@ -59,6 +60,10 @@ shows a warning that the token is missing.
 | `pr-number` | | The pull request to report, when the workflow was not started by one. Also `all` for the repository's latest, or `20-60` for those numbered from one to the other (see below). |
 | `since` | 90 days ago | With `pr-number: all`, the date from which pull requests are reported, by when they were created. |
 | `after-merge` | `false` | Count merged pull requests' agent lines again on the branch they were merged into, 7 and 30 days after. A run started by a schedule, with no `pr-number`, does this without it (see below). |
+| `outcomes` | `true` | On a scheduled run, or one with `after-merge` and no `pr-number` (started by hand, say), also read the later commits on the branches merged pull requests went into, for 30 days after each merge. Needs a checkout with the whole history; `false` to count only after merge (see below). |
+| `outcomes-since` | | With `outcomes`: also read those of pull requests merged on or after this date, though more than 30 days before the server began to. |
+| `fix-words` | | Words that make a later commit a fix, separated by commas, in place of the default list. |
+| `bug-labels` | | Words that make a linked issue's label a bug label, separated by commas, in place of the default list. |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 Outputs: `lines` (tracked lines the pull request adds) and `agent-lines` (how many a coding
@@ -133,19 +138,65 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read   # which pull request a later commit came with
+      issues: read          # the labels of the issues it closes
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # later commits are read from the history
       - uses: KIvanow/sessionly/action@main
         with:
           url: https://sessionly.example.com
           token: ${{ secrets.SESSIONLY_TOKEN }}
 ```
 
-It needs `contents: read` and writes on no pull request. The files are read fifty at a time,
+Counting after merge needs `contents: read`; reading later commits also needs the checkout
+and `pull-requests: read` (and `issues: read` for the labels of linked issues; without it,
+`bug_issue` is not known). It writes on no pull request. The files are read fifty at a time,
 all at the commit the branch is at; a run reads at most 20,000, and what is left is due at the
 next. A pull request whose files hold more lines than fit in one request to the server (32 MB,
 about 1.7 million tracked lines) cannot be counted yet: the run warns of it each time. See
 [After merge](../docs-site/pull-requests.md#after-merge) for what is counted and how a missed
 day is handled.
+
+The same run then reads later commits (the `outcomes` input, on by default). The server says
+which merged pull requests have days of their first 30 not read yet, on which branch, and which
+files. The run reads that branch's history with git, in the runner, and for each commit that
+came after the merge and changed those files, sends the lines it removed and added there as
+hashes, where it moved lines to, and what it is: its subject's fix words or `revert`, and for
+the pull request it came with (one request each to GitHub), the branch name, the title's fix
+words, the labels of the issues it closes, and which pull requests it says it reverts. The
+server keeps the commits that changed a pull request's own lines, and says of each whether it
+was a revert, a fix or rework.
+
+A pull request is read from where the last run left it: the server keeps the commits the
+branch was at, and the run reads what has come onto the branch since, whatever the commits'
+own dates (a branch merged with a merge commit brings commits made days before; so does a push
+of commits made earlier). A commit landed when the branch's own commit that brought it was
+made: for a merged branch's commits, the merge commit. After a force-push of the branch, the
+run reads by date once, and from where it is from then on.
+
+- Without a checkout (a scheduled job set up before version 0.5.0 has none), the run notes that
+  later commits were not read, asks the server for none, and does the rest: add the checkout
+  and the permissions above, or set `outcomes: false`. A checkout without the run's commit (one
+  an earlier job left on a self-hosted runner) is taken for none. With a checkout of only the
+  latest commits, later commits are not read and the run says to add `fetch-depth: 0` or set
+  `outcomes: false`: a warning, or a failed run with `fail-on-error`.
+- When GitHub allows the run fewer than 100 more requests, or more than 2,000 commits are to
+  be read whole, it stops there, and the next run goes on from there.
+- Without `pull-requests: read`, the run warns once and reads later commits without what their
+  pull requests say (no `fix_branch`, `fix_pr_title`, `revert_pr_title` or `bug_issue`).
+- A branch that is not on GitHub any more (one others were stacked on, deleted once merged) is
+  told to the server, which stops asking for the pull requests merged into it. One renamed
+  since is read by its new name, and is gone when that is not in the checkout. One that is on
+  GitHub but not in the checkout is warned of, and the server is told its pull requests were
+  not read: it asks for them after the others from then on.
+- A branch that cannot be read is warned of and told to the server the same way, the others
+  are read, and the run fails at the end only with `fail-on-error`.
+
+`outcomes-since` reads those of older pull requests too: later commits are history, so they can
+be counted late, unlike the lines still there after merge. See
+[Later commits](../docs-site/pull-requests.md#later-commits).
 
 ## What is sent
 
@@ -164,6 +215,18 @@ request has more than the 2,000 that are sent); nothing else is said of a round.
 
 For a count after merge: the repository, the pull request's number, and for each file the
 server asked about, its path and a hash of each of its lines as it is on the branch now.
+
+A report also names the pull request's head commit and, once merged, the commit it was merged
+as (their SHAs). For later commits: each commit's SHA and the time it landed, the numbers of
+the pull requests it belongs to and of those it says it reverts, the SHAs its message says it
+reverts, which of the due pull requests it is a later commit of, and for the files the server
+asked about (and where their lines moved: those paths too), a hash of each line it removed or
+added. For each branch read: the SHA of the commit it was read at, and for each pull request
+the SHAs of the commits it was read up to and the paths the server named for it; for a branch
+deleted since or that could not be read, the numbers of the pull requests merged into it (the
+server named them). What a commit is (a fix, a revert) goes as ids such as `fix_message` or
+`bug_issue`: its message, the title, branch and body of its pull request, and the issues'
+labels are read in the runner and never sent.
 
 The report also says it came from this Action and which version (`reporter`, the version in
 `package.json`). Nothing else, and nothing to anyone else.

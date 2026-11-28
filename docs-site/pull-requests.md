@@ -128,6 +128,125 @@ No source leaves GitHub, and the server sends no hashes out.
 On the pull request's page the counts are rows of **History** ("30 days after merge: 498 of
 520 agent lines still there"), and the tile **Kept @30d after merge** has the share.
 
+## Later commits
+
+Kept @30d says how much of the agents' work went after merging, not why. So the same scheduled
+run also reads the **later commits** on the branch each pull request was merged into, for 30
+days after the merge, and the server says what each did to its lines: a **revert**, a commit
+that **changed them as part of a fix**, or **rework** (neither). This is the merge clock; a
+session's own [Later commits](rewrite-rate.md#later-commits-reverts-and-fixes) are read on your
+machine from when the session ended, and the two are never added up.
+
+The run needs the repository's history, so the job checks it out whole:
+
+```yaml
+  after-merge:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read        # the files, and the history
+      pull-requests: read   # which pull request a later commit came with
+      issues: read          # the labels of the issues that one closes
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: KIvanow/sessionly/action@main
+        with:
+          url: https://sessionly.example.com
+          token: ${{ secrets.SESSIONLY_TOKEN }}
+```
+
+How it is read:
+
+- The server names the merged pull requests whose first 30 days are not all read yet, the
+  branch, and the files their agent lines are in and where later commits moved them. Only pull
+  requests with agent lines, merged since 30 days before the server began reading them, are
+  named. A session
+  matched to one later, with lines in a file that was not read, has that pull request read
+  again from the merge, and the later commits kept of it are worked out again; a run that was reading it meanwhile, without that file, leaves it as it
+  is.
+- The run reads that branch's history with git in the runner. A pull request is read from where
+  the last run left it: the server keeps the commits the branch was at, and the run reads what
+  has come onto the branch since, whatever the commits' own dates (a branch merged with a merge
+  commit brings commits made days before; so does a push of commits made earlier). The first
+  time, it is read from the commit it was merged as. With that commit not in the history, or
+  after a force-push of the branch, it is read by date once (from a day before the earliest due
+  to a day past the latest one's 30 days), and from where it is from then on.
+- A commit **landed** when the branch's own commit that brought it in was made (for a merged
+  branch's commits, the merge commit), and never before the pull request was last read; read
+  by date, when it was committed. Either way no later than 5 minutes before the run: one made
+  since, or by a clock ahead, lands then, and is read with the rest.
+- For each commit that changed those files the run sends the lines it removed and added there,
+  as hashes. A commit that removes any of them is read whole: a line it adds back anywhere was
+  moved, not changed, and is followed to its new file. A commit of more than 100,000 lines (a
+  vendored or generated tree) is not counted, nor is one of more than 5,000 files or 200,000
+  line hashes.
+- For a commit that removes lines, GitHub is asked which pull request it came with: its branch,
+  title, the issues it closes and what its description says it reverts are read for what it
+  is. Only what they are read as leaves the runner (`fix_branch`, `bug_issue` and the like),
+  never the text. Without `pull-requests: read` the run warns once and reads the commits without
+  them (no `fix_branch`, `fix_pr_title`, `revert_pr_title` or `bug_issue`).
+- A branch that is gone (a stacked pull request's, deleted after merging) cannot be read: the
+  server is told, its pull requests are not named again, and they are counted nowhere, not even
+  among those to reach. One renamed since is read by its new name, and is gone when that is
+  not in the checkout. One that is on GitHub but not in the checkout, or cannot be read for
+  another reason, is warned of, and the other branches are read; the server is told its pull
+  requests were not read, and asks for them after the others from then on, so they hold back
+  none. Without a checkout at all the run only notes that later commits were not read, and
+  asks the server for nothing.
+- The server walks the commits in the order they landed, against the lines each pull request
+  still has: a line moved goes with the move, a commit that puts lines back (a reland) is the
+  pull request's own, and a commit that came before the merge commit in the history (from a
+  branch that was merged later) did not see the lines and is not counted.
+- **A commit counts when it removes at least 2 of the agents' lines** that are not common ones
+  (written by 3 or more sessions in that file, as the pull request was last matched), as for a
+  session.
+- **A revert** names the commit the pull request was merged as (`This reverts commit …`), or
+  its pull request says `Reverts owner/name#12` of this one, or its subject or its pull
+  request's title says it is a revert and it takes at least half the agents' lines still
+  there. A revert of a revert (`Reapply "…"`) reverts nothing, unless its pull request says it
+  reverts this one: it puts the lines back, and the revert shows as relanded. Down a chain of
+  reverts, each named by the one after it, a commit at an odd depth reverts and one at an even
+  depth puts back. Only a `Revert "…"` or `Reapply "…"` subject, or git's own `This reverts
+  commit …` as the first paragraph, names a commit it reverts: a squash message that lists a
+  branch's `* Revert "wip"` does not.
+- **A fix** has a fix word in its subject (`fix`, `bug`, `crash`, `regression`, `typo` and a few
+  more; the `fix-words` input changes them), a `fix:` type, a `fix/` branch, a fix word in its
+  pull request's title, or closes an issue labelled a bug (`bug-labels`). A **likely fix** is one
+  where at least half of what it removed was the agents'.
+- The lines a commit removed are split over the sessions that had them, as they are matched
+  now: a session with `k` of the `n` copies of a line the pull request has gets `k/n` of each one
+  removed. Matching again, or a session deleted, moves the split; the commit stays.
+- Of what a commit removed, only the hashes of the pull request's own lines are kept, by the
+  file they were written in; the rest are dropped when the commit is read. Of where commits
+  moved its lines, the server keeps the paths, which it names to the next run to read, and the
+  commits the branch was read at for each pull request.
+- The server keeps one reading of each pull request's lines, walked in the order commits
+  landed, where the binary follows a session's lines along each history they are in. Mostly
+  the two agree. Where two branches change the same lines and are then merged (merge commits,
+  not squashes), the server may count a commit on one against lines the other one still has.
+  What a merge commit changes itself (a conflict resolved by hand) is not read, by either.
+- A request holds at most 500 commits, 500,000 line hashes and 100,000 files and moves.
+- When GitHub allows the run fewer than 100 more requests, or more than 2,000 commits are to be
+  read whole, it stops, and the next run goes on from the branch's own commit before the one it
+  stopped at. `outcomes-since: 2026-08-01` reads the later commits of pull requests merged
+  since then too: unlike the lines still there, later commits are history, so they can be read
+  late. `outcomes: false` switches this off.
+
+What it means: a revert is a strong sign. **"Changed by a fix" is linked, not caused**: a fix
+commit that touches an agent's lines is mostly a fix of something else that changed them
+along the way, and a careful team writes more fix commits. Rework is churn, not a defect.
+
+On the pull request's page, **Later commits** lists each with when it landed, why it is what
+it is, its lines and the agents', and whose sessions they were; a tile says what happened by
+7 and 30 days. The **Pull requests** page has a **Later commits** table by tool, model, person,
+repository or day, at 1, 7 or 30 days: of the pull requests that reached that age and were
+read up to it ("4 of 9"), how many were reverted, and fixes and rework per 1,000 agent lines.
+A pull request counts under each group whose sessions had lines in it, and so does a commit;
+lines are split, so they add up. Below 10 pull requests a group says **too few** rather than a
+rate. The model is the session's main one.
+
 ## Inputs
 
 | Input | Default | |
@@ -143,6 +262,10 @@ On the pull request's page the counts are rows of **History** ("30 days after me
 | `pr-number` | | The pull request to report, when the workflow was not started by one. Or several: `all` for the latest ones, `20-60` for a range. See [below](#pull-requests-from-before-the-action). |
 | `since` | 90 days ago | With `pr-number: all`, how far back to go: a date such as `2026-01-31`. |
 | `after-merge` | `false` | Count merged pull requests' agent lines again, 7 and 30 days after merging. A run started by a schedule, with no `pr-number`, does this without it. See [After merge](#after-merge). |
+| `outcomes` | `true` | On a scheduled run, or one with `after-merge` and no `pr-number` (started by hand, say), also read the later commits on the branches merged pull requests went into, for 30 days after each merge. Needs a checkout with the whole history; `false` to count only after merge. See [Later commits](#later-commits). |
+| `outcomes-since` | | With `outcomes`: also read those of pull requests merged on or after this date, though more than 30 days before the server began to. |
+| `fix-words` | | Words that make a later commit a fix, separated by commas, in place of the default list. |
+| `bug-labels` | | Words that make a linked issue's label a bug label, separated by commas, in place of the default list. |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 An input that is on or off takes `true`, `yes`, `on` or `1` for on, in any case; anything else
@@ -564,6 +687,23 @@ request has more than the 2,000 that are sent); nothing else is said of a round.
 For a count [after merge](#after-merge): the repository, the pull request's number, and for
 each file the server asked about, its path and a hash of each of its lines as it is on the
 branch now.
+
+A report also names the pull request's head commit and, once it is merged, the commit it was
+merged as (their SHAs, which anyone who can see the repository sees). For [later
+commits](#later-commits): the branch's name and the commit it was read at, and for each pull
+request read the commits it was read from and up to (SHAs); each commit's SHA and when it
+landed; the numbers of the pull requests it belongs to and of those it says it reverts; the
+SHAs its message says it reverts; which of the due pull requests it is a later commit of; for
+the files the
+server asked about, a hash of each line it removed or added; and where it moved lines, the
+path of each file they went to and their hashes. The numbers of pull requests merged into a
+branch that is gone. What it is goes as ids (`fix_message`, `fix_conventional`,
+`revert_subject`, `fix_branch`, `fix_pr_title`, `revert_pr_title`, `bug_issue`). Read in the
+runner and not sent: commit messages, the title, branch name and description of a commit's
+pull request, and the labels of the issues it closes. The server keeps the hashes of the pull
+request's own lines a commit removed, the paths of the files its lines were moved to (which it
+names to later runs), and those SHAs; the other hashes are dropped at once. The link to a
+commit is made by the server from the repository and the SHA.
 
 Limits: a report has at most 5000 files and 500 commit addresses. Of reviews and comments the
 latest 2000 are kept, and the pull request's page says when there were more. A changed file

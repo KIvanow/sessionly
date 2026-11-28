@@ -64,6 +64,41 @@ inputs:
       a schedule does this without being told, unless pr-number is set. Needs contents read
       permission. Reports no pull request and writes on none.
     default: "false"
+  outcomes:
+    description: >-
+      On a scheduled run, or one with after-merge and no pr-number, also read
+      the later commits on the branches merged pull requests went into, for
+      30 days after each merge: the server then says which of them reverted,
+      fixed or reworked the agents' lines. Needs the repository checked out
+      with its whole history (actions/checkout with fetch-depth: 0; without a
+      checkout the run only notes it, and with only the latest commits it
+      warns, or fails with fail-on-error), and contents and pull-requests read
+      permission; issues read for the labels of linked issues. Sent for each commit: its SHA and when it
+      landed, the paths it changed among those the server asked about and
+      hashes of the lines it removed and added there, the numbers of its pull
+      requests and of those it reverts, the SHAs it says it reverts, and what
+      it says it is (a fix, a revert) as ids; and the SHAs of the commits the
+      branch was read at. No message, title, body, branch name or label is
+      sent.
+    default: "true"
+  outcomes-since:
+    description: >-
+      With outcomes: also read the later commits of pull requests merged on
+      or after this date (2026-08-01), more than 30 days before the server
+      began to (it reads those of the 30 days before by itself).
+      History is still there, so these can be counted late.
+    default: ""
+  fix-words:
+    description: >-
+      Words that make a later commit a fix, in its subject line or its pull
+      request's title, separated by commas, in place of the default list
+      (fix, fixes, fixed, bug, hotfix, regression, crash, typo and a few more).
+    default: ""
+  bug-labels:
+    description: >-
+      Words that make a linked issue's label a bug label, separated by
+      commas, in place of the default list (bug, regression, defect, incident).
+    default: ""
   fail-on-error:
     description: Fail the job if the report cannot be made or sent. By default a problem is only a warning.
     default: "false"
@@ -94,4 +129,8 @@ runs:
         SESSIONLY_PR_NUMBER: ${{ inputs.pr-number }}
         SESSIONLY_SINCE: ${{ inputs.since }}
         SESSIONLY_AFTER_MERGE: ${{ inputs.after-merge }}
+        SESSIONLY_OUTCOMES: ${{ inputs.outcomes }}
+        SESSIONLY_OUTCOMES_SINCE: ${{ inputs.outcomes-since }}
+        SESSIONLY_FIX_WORDS: ${{ inputs.fix-words }}
+        SESSIONLY_BUG_LABELS: ${{ inputs.bug-labels }}
         SESSIONLY_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}

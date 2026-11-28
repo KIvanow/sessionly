@@ -1,10 +1,13 @@
 // Entry point: read the pull request from GitHub, send the report to the
 // Sessionly server, and show what it answers.
+import { spawnSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { branchFor, filesAt, github, listPulls, readPull, upsertComment } from "./github.mjs";
 import { fileHashes, ignoring } from "./lines.mjs";
-import { buildReport, MARKER, render, renderAfterMerge, renderMany } from "./report.mjs";
+import { gitIn } from "./history.mjs";
+import { runOutcomes } from "./outcomes.mjs";
+import { buildReport, MARKER, render, renderAfterMerge, renderMany, renderOutcomes } from "./report.mjs";
 
 const on = (value) => /^(true|yes|on|1)$/i.test((value ?? "").trim());
 
@@ -81,7 +84,10 @@ export async function ask(url, token, method, path, body) {
   });
   const answer = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw Object.assign(new Error(`the Sessionly server answered ${response.status}: ${answer.error ?? "no reason given"}`), { status: response.status });
+    throw Object.assign(new Error(`the Sessionly server answered ${response.status}: ${answer.error ?? "no reason given"}`), {
+      status: response.status,
+      retryAfter: response.headers.get("retry-after"),
+    });
   }
   return answer;
 }
@@ -109,9 +115,10 @@ async function runAfterMerge(env, { api, server, repo, host, log, url }) {
     due = (await server("GET", `/prs/due?repo=${encodeURIComponent(name)}`)).due;
   } catch (err) {
     // A server from before this has no such address, and tells a ci token so.
-    if (err.status === 403 || err.status === 404) {
+    if (err.status === 404 || (err.status === 403 && /only reports pull requests/.test(err.message ?? ""))) {
       throw new Error(`the Sessionly server does not count pull requests after merging (${err.message}): it is from before that, and needs updating`);
     }
+    if (err.status === 403) throw new Error(`the Sessionly server would not say which merged pull requests are due (${err.message}): the token needs the ci or admin role`);
     throw err;
   }
   if (!Array.isArray(due)) throw new Error("the Sessionly server did not say which pull requests are due");
@@ -169,7 +176,7 @@ async function runAfterMerge(env, { api, server, repo, host, log, url }) {
  * One run. `env` is the process environment; `api`, `deliver` and `server`
  * can be replaced, which is how the tests run it without a network.
  */
-export async function run(env, { api, deliver = send, server, log = console.log } = {}) {
+export async function run(env, { api, deliver = send, server, log = console.log, git } = {}) {
   const need = (name, what) => {
     if (!env[name]) throw new Error(`${what} is missing`);
     return env[name];
@@ -187,7 +194,41 @@ export async function run(env, { api, deliver = send, server, log = console.log 
     api ??= github(need("SESSIONLY_GITHUB_TOKEN", "the github-token input"), env.GITHUB_API_URL || undefined, env.GITHUB_GRAPHQL_URL || undefined);
     server ??= (method, path, body) => ask(url, token, method, path, body);
     const host = new URL(env.GITHUB_SERVER_URL || "https://github.com").host;
-    return runAfterMerge(env, { api, server, repo, host, log, url });
+    // Both, each whatever the other does: a count that fails does not keep
+    // later commits from being read, nor the other way round. The first
+    // failure is the run's; a second is said.
+    let counts = { counted: [], later: 0 };
+    let failure;
+    try {
+      counts = await runAfterMerge(env, { api, server, repo, host, log, url });
+    } catch (err) {
+      failure = err;
+    }
+    let outcomes;
+    if (on(env.SESSIONLY_OUTCOMES ?? "true")) {
+      try {
+        git ??= gitIn(env.GITHUB_WORKSPACE || process.cwd(), spawnSync);
+        const summary = (stored) => {
+          if (on(env.SESSIONLY_SUMMARY ?? "true") && env.GITHUB_STEP_SUMMARY && stored.length > 0) {
+            appendFileSync(env.GITHUB_STEP_SUMMARY, `${renderOutcomes(stored, url)}\n`);
+          }
+        };
+        try {
+          outcomes = await runOutcomes(env, { api, server, repo, host, log, git });
+        } catch (err) {
+          // Some branches were read before one could not be: what they changed is shown.
+          summary(err.stored ?? []);
+          throw err;
+        }
+        summary(outcomes.stored);
+      } catch (err) {
+        const why = err.stored ? String(err.message) : `later commits were not read: ${err.message ?? err}`;
+        if (failure) log(`::warning title=Sessionly::${why.replace(/\r?\n/g, " ")}`);
+        failure ??= Object.assign(new Error(why), { status: err.status });
+      }
+    }
+    if (failure) throw failure;
+    return { ...counts, outcomes };
   }
   const payload = env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")) : {};
   const which = wanted(env.SESSIONLY_PR_NUMBER || payload.pull_request?.number || payload.number);

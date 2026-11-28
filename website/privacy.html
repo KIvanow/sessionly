@@ -255,6 +255,27 @@
             sent with each report so that lines are matched only to sessions by the people who
             committed. The addresses are used for that comparison and are not stored; a hash of
             each is kept, so that the lines can be compared again when sessions arrive later.
+            A report also names the pull request's head commit and, once merged, the commit it
+            was merged as (their SHAs).
+          </p>
+          <p>
+            A <strong>scheduled run</strong> of the Action, once a day if the org sets one up,
+            counts a merged pull request's agent lines again on the branch it was merged into 7
+            and 30 days after merging: it sends, for each file the server names, hashes of the
+            file's lines as they are on that branch. The same run reads that branch's
+            <strong>later commits</strong> for 30 days after each merge, with git, on GitHub's
+            runner, and sends the SHA of the commit the branch was read at, and of those each
+            pull request was read from and up to; and for each commit that changed those files its
+            SHA, when it landed, the numbers of the pull requests it belongs to, of those it says
+            it reverts and of the due ones it is a later commit of, the SHAs it says it reverts,
+            hashes of the lines it removed and added in those files, how many lines it removed in
+            all (a count, in every file), the paths of the files it moved lines of theirs to, and what it is as a classification (a fix word in its
+            subject, a fix branch, a linked issue labelled a bug, a revert). It also names the pull requests merged into a branch that is gone.
+            Commit messages, the title, branch name and description of the pull request a commit
+            came with, and the labels of the issues it closes are read on the runner and are not
+            sent. Of the hashes, the server keeps only those of the pull request's own lines; the
+            rest are dropped at once. It keeps the SHAs, each commit's count of removed lines, and
+            the paths lines were moved to, which it names to the next run to read.
           </p>
           <p>
             <strong>What is never uploaded:</strong> full prompts, the agent's replies, file

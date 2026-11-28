@@ -286,7 +286,8 @@
               <strong>Roles.</strong> A <code>member</code> token uploads sessions and reads only
               the sessions filed under its owner. An <code>admin</code> token reads everyone's and
               manages tokens. A <code>ci</code> token, for the GitHub Action, can report pull
-              requests and check that it is accepted; every other request is refused. An
+              requests, ask which merged ones are due and send their counts and later commits, and
+              check that it is accepted; every other request is refused. An
               <code>env</code> token, for a cloud environment, can upload sessions and check
               that it is accepted; every other request is refused.
             </li>
@@ -413,8 +414,15 @@
           </p>
           <ul>
             <li>
-              The Action is plain JavaScript with no dependencies. It needs
-              <code>pull-requests: read</code> and nothing else unless you ask it to comment.
+              The Action is plain JavaScript with no dependencies. Reporting a pull request needs
+              <code>pull-requests: read</code> (and <code>write</code> if you ask it to comment).
+              Its scheduled run, which counts merged pull requests again and reads the later
+              commits on their branch with git, needs <code>contents: read</code>,
+              <code>pull-requests: read</code> and, for the labels of linked issues,
+              <code>issues: read</code>. Commit messages and pull request text are read in the
+              runner and not sent: only what they are read as (ids such as
+              <code>fix_message</code>), the commit SHAs a revert's message names, and the numbers
+              of the pull requests a description says it reverts.
             </li>
             <li>
               It authenticates with a <code>ci</code> token kept as a repository secret. If that

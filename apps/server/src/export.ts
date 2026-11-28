@@ -127,6 +127,26 @@ const EXPORTED: TableExport[] = [
     cursorOf: (row) => [text(row.repo), Number(row.number), text(row.checkpoint)],
   },
   {
+    // Later commits on a merged pull request's base branch that changed its lines.
+    type: "pull_outcome_commit",
+    table: "pull_outcome_commits",
+    columns: "*",
+    order: "repo, number, sha",
+    afterSql: "$2::text IS NULL OR (repo, number, sha) > ($2, $3::integer, $4)",
+    blank: [null, null, null],
+    cursorOf: (row) => [text(row.repo), Number(row.number), text(row.sha)],
+  },
+  {
+    // How far each base branch has been read for them.
+    type: "repo_outcome_scan",
+    table: "repo_outcome_scans",
+    columns: "*",
+    order: "repo, branch",
+    afterSql: "$2::text IS NULL OR (repo, branch) > ($2, $3)",
+    blank: [null, null],
+    cursorOf: (row) => [text(row.repo), text(row.branch)],
+  },
+  {
     type: "repo_exclusion",
     table: "repo_exclusions",
     columns: "org_id, owner_email, repo, created_at",

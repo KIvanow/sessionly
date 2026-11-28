@@ -20,6 +20,7 @@ import {
   type ModelUsage,
   type PullFeedback,
   type PullFile,
+  type PullOutcomesReport,
   type PullReport,
   type ReviewRun,
   type RewriteMeasurement,
@@ -416,6 +417,22 @@ export function shownReport(report: PullReport, hide: string[]): PullReport {
 
 const filesShown = <T extends { path: string }>(files: T[], hide: string[]): T[] => files.filter((f) => inRepo(f.path, hide));
 
+/**
+ * A scan of later commits as it is kept where the repository is shown:
+ * without what commits did in the files that are not shown, nor where they
+ * moved lines to one of them (those lines then stay where they were).
+ */
+export function shownOutcomes(report: PullOutcomesReport, hide: string[]): PullOutcomesReport {
+  return {
+    ...report,
+    commits: report.commits.map((c) => ({
+      ...c,
+      files: filesShown(c.files, hide),
+      moves: (c.moves ?? []).filter((m) => inRepo(m.from, hide) && inRepo(m.to, hide)),
+    })),
+  };
+}
+
 const feedbackShown = (feedback: PullFeedback[] | undefined, hide: string[]): PullFeedback[] | undefined =>
   feedback?.map((f) => (f.path == null || inRepo(f.path, hide) ? f : { ...f, path: null, line: null }));
 
@@ -429,15 +446,16 @@ const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.str
 /**
  * Take out of one pull request kept where the repository is shown what is
  * not shown now: its files as first and as last reported, the files of its
- * page, where its comments are, and which of its lines each session wrote.
- * One that had any is left to be matched again (no time it was matched).
- * Whether anything was taken out.
+ * page, where its comments are, which of its lines each session wrote and
+ * which are common, and of its later commits (outcomes.ts) where its lines
+ * are now and which of them each removed. One that had any is left to be
+ * matched again (no time it was matched). Whether anything was taken out.
  */
 async function hidePull(db: OrgDb, repo: string, number: number, hide: string[], rules: string): Promise<boolean> {
   // As a report holds it: one arriving meanwhile waits, and then keeps the first files as they are after this.
   await holdPull(db, repo, number);
-  const [r] = await db.query<{ first_files: unknown; last_files: unknown; detail: unknown; feedback: unknown }>(
-    `SELECT first_files, last_files, detail, feedback FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
+  const [r] = await db.query<{ first_files: unknown; last_files: unknown; detail: unknown; feedback: unknown; common_lines: unknown; outcomes_held: unknown }>(
+    `SELECT first_files, last_files, detail, feedback, common_lines, outcomes_held FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
     [db.orgId, repo, number],
   );
   if (!r) return false;
@@ -446,12 +464,17 @@ async function hidePull(db: OrgDb, repo: string, number: number, hide: string[],
     last: jsonOf<FileHashes[]>(r.last_files),
     detail: r.detail == null ? null : jsonOf<{ files?: PullFile[] }>(r.detail),
     feedback: r.feedback == null ? null : jsonOf<PullFeedback[]>(r.feedback),
+    common: r.common_lines == null ? null : jsonOf<Record<string, string[]>>(r.common_lines),
+    // Each line: the file it was written in, the one it is in now, its hash and two counts.
+    held: r.outcomes_held == null ? null : jsonOf<{ lines?: [string, string, ...unknown[]][] }>(r.outcomes_held),
   };
   const now = {
     first: filesShown(was.first, hide),
     last: filesShown(was.last, hide),
     detail: was.detail && { ...was.detail, files: was.detail.files && filesShown(was.detail.files, hide) },
     feedback: was.feedback && feedbackShown(was.feedback, hide)!,
+    common: matchedShown(was.common, hide),
+    held: was.held && { ...was.held, lines: (was.held.lines ?? []).filter(([origin, current]) => inRepo(origin, hide) && inRepo(current, hide)) },
   };
   const sessions = await db.query<{ machine_id: string; source: string; session_id: string; matched: unknown; opened_matched: unknown; contributed: unknown; gone: unknown; gone_opened: unknown }>(
     `SELECT machine_id, source, session_id, matched, opened_matched, contributed, gone, gone_opened FROM pull_sessions WHERE org_id = $1 AND repo = $2 AND number = $3`,
@@ -479,11 +502,27 @@ async function hidePull(db: OrgDb, repo: string, number: number, hide: string[],
       [db.orgId, repo, number, s.machine_id, s.source, s.session_id, jsonOrNull(matchedShown(matched, hide)), jsonOrNull(matchedShown(opened, hide)), jsonOrNull(matchedShown(contributed, hide)), jsonOrNull(matchedShown(gone, hide)), jsonOrNull(matchedShown(goneOpened, hide))],
     );
   }
+  const later = await db.query<{ sha: string; removed: unknown }>(
+    `SELECT sha, removed FROM pull_outcome_commits WHERE org_id = $1 AND repo = $2 AND number = $3`,
+    [db.orgId, repo, number],
+  );
+  for (const c of later) {
+    const removed = jsonOf<Record<string, string[]>>(c.removed);
+    if (same(removed, matchedShown(removed, hide))) continue;
+    changed = true;
+    await db.query(`UPDATE pull_outcome_commits SET removed = $5::jsonb WHERE org_id = $1 AND repo = $2 AND number = $3 AND sha = $4`, [
+      db.orgId, repo, number, c.sha, JSON.stringify(matchedShown(removed, hide)),
+    ]);
+  }
   await db.query(
     `UPDATE pull_requests SET first_files = $4::jsonb, last_files = $5::jsonb, detail = $6::jsonb, feedback = $7::jsonb,
+            common_lines = $10::jsonb, outcomes_held = $11::jsonb,
             shown_rules = $8, matched_at = CASE WHEN $9::boolean THEN NULL ELSE matched_at END
      WHERE org_id = $1 AND repo = $2 AND number = $3`,
-    [db.orgId, repo, number, JSON.stringify(now.first), JSON.stringify(now.last), jsonOrNull(now.detail), jsonOrNull(now.feedback), rules, changed],
+    [
+      db.orgId, repo, number, JSON.stringify(now.first), JSON.stringify(now.last), jsonOrNull(now.detail), jsonOrNull(now.feedback), rules, changed,
+      jsonOrNull(now.common), jsonOrNull(now.held),
+    ],
   );
   await chargeAgain(db, fewer);
   return changed;

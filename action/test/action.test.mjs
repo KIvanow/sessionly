@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { all, branchFor, fileOn, filesAt, FILES_AT_ONCE, github } from "../src/github.mjs";
+import { all, branchFor, fileOn, filesAt, FILES_AT_ONCE, github, rateLimited } from "../src/github.mjs";
 import { addedHashes, fileHashes, ignoring, lineHash } from "../src/lines.mjs";
 import { ask, eventName, MOST_AT_ONCE, MOST_FILES, run, send, wanted, whenOpened } from "../src/main.mjs";
 import { buildReport, feedbackOf, MARKER, render, roundAuthors } from "../src/report.mjs";
@@ -697,7 +697,8 @@ test("on a schedule, merged pull requests that are due are counted again on the 
     { number: 9, base_ref: "stack/base", checkpoints: ["7d", "30d"], paths: ["lib/c.ts"] },
   ];
   const world = afterMerge({ due, branches: { main: { "src/a b.ts": "one();\ntwo();\n}\n", "lib/c.ts": "three();\n" } } });
-  const env = environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_GITHUB_TOKEN: "gh" });
+  // later commits are read in tests of their own: not from the checkout these run in
+  const env = environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_GITHUB_TOKEN: "gh", SESSIONLY_OUTCOMES: "false" });
   writeFileSync(env.GITHUB_EVENT_PATH, JSON.stringify({ schedule: "17 5 * * *" }));
   const logged = [];
   const { counted } = await run(env, { api: world.api, server: world.server, log: (line) => logged.push(line), deliver: () => assert.fail("no pull request is reported") });
@@ -727,7 +728,7 @@ test("on a schedule, merged pull requests that are due are counted again on the 
 
   // with nothing due the run says so, and the input does the same without a schedule
   const none = afterMerge({ due: [] });
-  const quiet = environment({ SESSIONLY_AFTER_MERGE: "true", SESSIONLY_GITHUB_TOKEN: "gh" });
+  const quiet = environment({ SESSIONLY_AFTER_MERGE: "true", SESSIONLY_GITHUB_TOKEN: "gh", SESSIONLY_OUTCOMES: "false" });
   assert.deepEqual((await run(quiet, { ...none, log() {} })).counted, []);
   assert.match(readFileSync(quiet.GITHUB_STEP_SUMMARY, "utf8"), /No merged pull request was due/);
   assert.deepEqual(none.calls, []);
@@ -753,7 +754,7 @@ test("a scheduled run that names pull requests reports them, as it did before", 
 
 test("a count the server refuses does not stop the rest, and a server that cannot take any stops the run", async () => {
   const due = [1, 2, 3].map((number) => ({ number, base_ref: "main", checkpoints: ["7d"], paths: ["a.ts"] }));
-  const env = () => environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_GITHUB_TOKEN: "gh" });
+  const env = () => environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_GITHUB_TOKEN: "gh", SESSIONLY_OUTCOMES: "false" });
   const logged = [];
   const one = afterMerge({ due, refuse: { 2: 422 } });
   await assert.rejects(run(env(), { ...one, log: (line) => logged.push(line) }), /1 merged pull requests could not be counted: #2/);
@@ -812,7 +813,7 @@ test("over the network: pages from GitHub, and the server's answer or refusal", 
       };
       const page = Number(new URL(req.url, "http://x").searchParams.get("page"));
       if (req.url.startsWith("/list")) return reply(200, Array.from({ length: page === 1 ? 100 : 3 }, (_, i) => ({ i })));
-      if (req.url.startsWith("/repos/acme/web/contents/src/")) return res.writeHead(200, { "content-type": "application/vnd.github.raw+json" }).end("one();\n");
+      if (req.url.startsWith("/repos/acme/web/contents/src/")) return res.writeHead(200, { "content-type": "application/vnd.github.raw+json", "x-ratelimit-remaining": "42" }).end("one();\n");
       if (req.url === "/repos/acme/web/branches/main") return reply(200, { name: "main", commit: { sha: "abc123" } });
       if (req.url === "/repos/acme/web/branches/trunk") return reply(200, { name: "trunk", commit: { sha: "def456" } });
       if (req.url === "/graphql") return reply(200, { data: { repository: { f0: null } } });
@@ -837,6 +838,8 @@ test("over the network: pages from GitHub, and the server's answer or refusal", 
     assert.equal(await fileOn(api, "acme/web", "main", "src/a b.ts"), "one();\n");
     assert.equal(seen.at(-1).url, "/repos/acme/web/contents/src/a%20b.ts?ref=main");
     assert.equal(seen.at(-1).accept, "application/vnd.github.raw+json");
+    // and what GitHub says is left of the hour's requests, as any answer does
+    assert.equal(api.remaining, 42);
     assert.equal(await fileOn(api, "acme/web", "main", "gone.ts"), null);
     assert.deepEqual(await branchFor(api, "acme/web", "main"), { branch: "main", sha: "abc123" });
     assert.deepEqual(await branchFor(api, "acme/web", "deleted"), { branch: "trunk", sha: "def456" });
@@ -855,4 +858,15 @@ test("over the network: pages from GitHub, and the server's answer or refusal", 
   } finally {
     server.close();
   }
+});
+
+test("GitHub refusing for its rate limits is told from refusing what the token may not do", () => {
+  const answer = (status, headers = {}) => new Response(null, { status, headers });
+  assert.ok(rateLimited(answer(429), ""));
+  assert.ok(rateLimited(answer(403, { "x-ratelimit-remaining": "0" }), "API rate limit exceeded for installation"));
+  assert.ok(rateLimited(answer(403, { "x-ratelimit-remaining": "4000", "retry-after": "60" }), "You have exceeded a secondary rate limit"));
+  assert.ok(rateLimited(answer(403, { "x-ratelimit-remaining": "4000" }), "You have exceeded a secondary rate limit"));
+  // a job without pull-requests: read
+  assert.ok(!rateLimited(answer(403, { "x-ratelimit-remaining": "4000" }), '{"message":"Resource not accessible by integration"}'));
+  assert.ok(!rateLimited(answer(404, { "x-ratelimit-remaining": "0" }), ""));
 });

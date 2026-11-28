@@ -1,7 +1,24 @@
 // The few GitHub REST calls the Action needs, with the built-in fetch.
 
+/**
+ * Whether GitHub refused for its rate limits rather than for what the token
+ * may do: a 429, or a 403 with no requests left, a time to retry after, or
+ * its limit named (the secondary limits say so only in the message).
+ */
+export function rateLimited(response, text) {
+  if (response.status === 429) return true;
+  if (response.status !== 403) return false;
+  return response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after") || /rate limit/i.test(text);
+}
+
 /** `request(method, path, body)` against GitHub's API at `apiUrl`, and `graphql(query, variables)` against the one at `graphqlUrl`. */
 export function github(token, apiUrl = "https://api.github.com", graphqlUrl = `${apiUrl}/graphql`) {
+  // How many requests GitHub said the token has left this hour, at the last REST answer (GraphQL has its own).
+  let remaining;
+  const counted = (response) => {
+    const left = Number(response.headers.get("x-ratelimit-remaining"));
+    if (response.headers.has("x-ratelimit-remaining") && Number.isFinite(left)) remaining = left;
+  };
   const request = async (method, path, body) => {
     const response = await fetch(`${apiUrl}${path}`, {
       method,
@@ -14,9 +31,14 @@ export function github(token, apiUrl = "https://api.github.com", graphqlUrl = `$
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
+    counted(response);
     if (!response.ok) {
       const text = (await response.text()).slice(0, 300);
-      throw Object.assign(new Error(`GitHub answered ${response.status} to ${method} ${path}: ${text}`), { status: response.status });
+      throw Object.assign(new Error(`GitHub answered ${response.status} to ${method} ${path}: ${text}`), {
+        status: response.status,
+        rateLimited: rateLimited(response, text),
+        retryAfter: response.headers.get("retry-after"),
+      });
     }
     return response.status === 204 ? null : response.json();
   };
@@ -30,6 +52,7 @@ export function github(token, apiUrl = "https://api.github.com", graphqlUrl = `$
         "user-agent": "sessionly-action",
       },
     });
+    counted(response);
     if (response.status === 404) return null;
     if (!response.ok) {
       const said = (await response.text()).slice(0, 300);
@@ -51,7 +74,15 @@ export function github(token, apiUrl = "https://api.github.com", graphqlUrl = `$
     }
     return answer.data;
   };
-  return { request, text, graphql };
+  return {
+    request,
+    text,
+    graphql,
+    /** Undefined until GitHub has said. */
+    get remaining() {
+      return remaining;
+    },
+  };
 }
 
 /** Every item of a list GitHub serves in pages. */

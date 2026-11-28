@@ -40,13 +40,15 @@ export class BadReport extends Error {}
  * string as `version` in `action/package.json`: a test fails when the two
  * differ. Bump both with every change to what a report contains.
  */
-export const CURRENT_ACTION = "0.4.0";
+export const CURRENT_ACTION = "0.5.0";
 
 /** Sessions that started longer than this before a pull request was opened are not looked at. */
 const LOOK_BACK_DAYS = 90;
 export const MAX_FILES = 5000;
 const MAX_FEEDBACK = 2000;
 export const HASH = /^[0-9a-f]{16}$/;
+/** A full commit SHA: SHA-1 or SHA-256, lowercase hex. */
+export const COMMIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 const num = (value: unknown): number => (value == null ? 0 : Number(value));
 const iso = (value: unknown): string | null =>
@@ -100,6 +102,11 @@ export const COMMON_LINE = 3;
  * last added it, while the one that wrote it has not been uploaded.
  */
 export function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[][] {
+  return writersOf(files, claims).lines;
+}
+
+/** `writers`, and of each file the common lines: those `COMMON_LINE` sessions or more added to it. */
+function writersOf(files: FileHashes[], claims: Claim[]): { lines: (Writer | null)[][]; common: Set<string>[] } {
   // Looking only at claims on a file of the same name keeps this quick.
   // A claim that names no session is a session of its own.
   const byName = new Map<string, { claim: Claim; who: string }[]>();
@@ -136,7 +143,7 @@ export function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[]
   const shown = creditedWithCommon(files, pools);
   // Each line an agent added accounts for one line of the pull request, the
   // session that started last first; a common line only for a session shown.
-  return files.map((file, i) => {
+  const lines = files.map((file, i) => {
     const { pool, common } = pools[i]!;
     return file.hashes.map((hash) => {
       const list = pool.get(hash);
@@ -145,6 +152,19 @@ export function writers(files: FileHashes[], claims: Claim[]): (Writer | null)[]
       return at < 0 || at >= list.length ? null : list.splice(at, 1)[0]!.writer;
     });
   });
+  return { lines, common: pools.map(({ common }) => common) };
+}
+
+/** A pull request's common lines by file, as `pull_requests.common_lines` keeps them. By file in a map: one may be called `constructor`. */
+function commonLines(files: FileHashes[], common: Set<string>[]): Lines {
+  const byFile = new Map<string, Set<string>>();
+  files.forEach((file, i) => {
+    if (common[i]!.size === 0) return;
+    const set = byFile.get(file.path) ?? new Set<string>();
+    for (const hash of common[i]!) set.add(hash);
+    byFile.set(file.path, set);
+  });
+  return Object.fromEntries([...byFile].sort(([a], [b]) => a.localeCompare(b)).map(([path, hashes]) => [path, [...hashes].sort()]));
 }
 
 /**
@@ -792,6 +812,9 @@ export function checkReport(body: unknown): PullReport {
     draft: r.draft === true,
     head_ref: optional("head_ref"),
     base_ref: optional("base_ref"),
+    // Left out by an Action before 0.5.0, and one that is not a SHA is too.
+    head_sha: COMMIT_SHA.test(optional("head_sha") ?? "") ? optional("head_sha") : null,
+    merge_commit_sha: state === "merged" && COMMIT_SHA.test(optional("merge_commit_sha") ?? "") ? optional("merge_commit_sha") : null,
     created_at: when("created_at", true)!,
     merged_at: when("merged_at", false),
     closed_at: when("closed_at", false),
@@ -973,10 +996,10 @@ async function match(
   first: FileHashes[],
   now: FileHashes[],
   firstEvent: string,
-): Promise<{ attribution: PullAttribution; files: PullFile[]; sessions: Kept[]; copies: Copies }> {
+): Promise<{ attribution: PullAttribution; files: PullFile[]; sessions: Kept[]; copies: Copies; common: Lines }> {
   const claims = await claimsFor(db, about);
   // Worked out once, for the figures and for the page: the two then agree.
-  const lines = writers(now, claims);
+  const { lines, common } = writersOf(now, claims);
   const firstLines = writers(first, claims);
   const { files, sessions: wrote } = breakdown(now, lines);
   // The sessions it was opened with, beside the ones it has now: one whose lines all went in review is kept by them.
@@ -998,6 +1021,7 @@ async function match(
     files,
     sessions,
     copies: { first: copiesIn(first), seen: copiesIn(now) },
+    common: commonLines(now, common),
   };
 }
 
@@ -1381,7 +1405,7 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     [db.orgId, report.repo, report.number],
   );
   const first = existing ? json<FileHashes[]>(existing.first_files) : report.files;
-  const { attribution, files, sessions, copies } = await match(db, report, first, report.files, existing?.first_event ?? report.event);
+  const { attribution, files, sessions, copies, common } = await match(db, report, first, report.files, existing?.first_event ?? report.event);
   const columns: Record<string, unknown> = {
     org_id: db.orgId,
     repo: report.repo,
@@ -1394,6 +1418,8 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     draft: report.draft,
     head_ref: report.head_ref,
     base_ref: report.base_ref,
+    head_sha: report.head_sha ?? null,
+    merge_commit_sha: report.merge_commit_sha ?? null,
     created_at: report.created_at,
     merged_at: report.merged_at,
     closed_at: report.closed_at,
@@ -1410,6 +1436,8 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     last_files: JSON.stringify(report.files),
     attribution: JSON.stringify(attribution),
     detail: JSON.stringify({ files }),
+    // Which of its lines a later commit that removes only them does not count by (outcomes.ts).
+    common_lines: JSON.stringify(common),
     // Kept to match its lines again later, when more sessions are held.
     committers: JSON.stringify((report.commit_emails ?? []).map((email) => committer(db.orgId, email, key))),
     aliases: JSON.stringify(report.aliases ?? []),
@@ -1432,6 +1460,7 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     first_files: "::jsonb",
     attribution: "::jsonb",
     detail: "::jsonb",
+    common_lines: "::jsonb",
     feedback: "::jsonb",
     round_authors: "::jsonb",
     committers: "::jsonb",
@@ -1442,7 +1471,12 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   const set = (name: string) =>
     name === "feedback" || name === "feedback_total"
       ? `CASE WHEN EXCLUDED.feedback IS NULL THEN pull_requests.${name} ELSE EXCLUDED.${name} END`
-      : `EXCLUDED.${name}`;
+      : // An Action before 0.5.0 names neither: what a later one said stays. A merged one stays merged as it was.
+        name === "head_sha"
+        ? `coalesce(EXCLUDED.head_sha, pull_requests.head_sha)`
+        : name === "merge_commit_sha"
+          ? `CASE WHEN EXCLUDED.state = 'merged' THEN coalesce(EXCLUDED.merge_commit_sha, pull_requests.merge_commit_sha) END`
+          : `EXCLUDED.${name}`;
   await db.query(
     `INSERT INTO pull_requests (${names.join(", ")})
      VALUES (${names.map((name, i) => `$${i + 1}${casts[name] ?? ""}`).join(", ")})
@@ -1581,6 +1615,24 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
                                AND x.source = s.source AND x.session_id = s.session_id) AS is) here`,
       [db.orgId, repo, number, JSON.stringify([...next.values()].map((s) => ({ ...s, contributed_lines: countLines(s.contributed) })))],
     );
+  }
+  // A file none of its sessions had lines in was not asked for when its later commits were read
+  // (outcomes.ts): one that has some now is read again from the merge, no further than its 30 days.
+  // Not one merged before those of the organisation are read, nor one merged into a branch that is gone,
+  // which would then not be asked for again. The commits kept of it go too: one kept already is kept
+  // again with what it did in the new file.
+  const inFiles = new Set(had.flatMap((row) => Object.keys(kept(row.matched) ?? {})));
+  if ([...next.values()].some((s) => Object.keys(s.matched ?? {}).some((path) => !inFiles.has(path)))) {
+    const reset = await db.query(
+      `UPDATE pull_requests SET outcomes_scanned_until = NULL, outcomes_held = NULL, outcomes_tips = NULL
+       WHERE org_id = $1 AND repo = $2 AND number = $3 AND outcomes_scanned_until IS NOT NULL AND outcomes_gone_at IS NULL
+         AND merged_at >= (SELECT outcomes_since FROM orgs WHERE id = $1)
+       RETURNING number`,
+      [db.orgId, repo, number],
+    );
+    if (reset.length > 0) {
+      await db.query(`DELETE FROM pull_outcome_commits WHERE org_id = $1 AND repo = $2 AND number = $3`, [db.orgId, repo, number]);
+    }
   }
   const touched = new Map([...removed, ...next.values()].map((s) => [sessionKey(s as never), { machine_id: s.machine_id, source: s.source, session_id: s.session_id }]));
   await weighAgain(db, [...touched.values()]);
@@ -1812,7 +1864,7 @@ export async function rematchPull(
     // A pull request is not stored without it.
     created_at: iso(r.created_at) ?? new Date().toISOString(),
   };
-  const { attribution, files, sessions, copies } = await match(
+  const { attribution, files, sessions, copies, common } = await match(
     db,
     about,
     json<FileHashes[]>(r.first_files),
@@ -1820,9 +1872,9 @@ export async function rematchPull(
     String(r.first_event),
   );
   const [stored] = await db.query<{ matched_at: unknown }>(
-    `UPDATE pull_requests SET attribution = $4::jsonb, detail = $5::jsonb, matched_at = clock_timestamp()
+    `UPDATE pull_requests SET attribution = $4::jsonb, detail = $5::jsonb, common_lines = $6::jsonb, matched_at = clock_timestamp()
      WHERE org_id = $1 AND repo = $2 AND number = $3 RETURNING matched_at`,
-    [db.orgId, repo, number, JSON.stringify(attribution), JSON.stringify({ files })],
+    [db.orgId, repo, number, JSON.stringify(attribution), JSON.stringify({ files }), JSON.stringify(common)],
   );
   await keepSessions(db, repo, number, sessions, false, copies);
   await recordReport(db, {
@@ -1849,6 +1901,41 @@ export async function rematchPull(
  * session's claims), so one sharing more boilerplate with it can come first.
  */
 export const MATCH_ON_UPLOAD = 5;
+
+/**
+ * Work out the common lines (`common_lines`) of a pull request matched
+ * before they were kept: of its lines as last reported, against the
+ * sessions held now, as matching does. Nothing else about it changes. One
+ * that cannot be matched again here (see `rematchPull`) is kept as having
+ * none, as it was read before.
+ */
+export async function keepCommonLines(db: OrgDb, repo: string, number: number, key?: string): Promise<void> {
+  await holdPull(db, repo, number);
+  const [r] = await db.query(
+    `SELECT head_repo, head_ref, created_at, last_files, committers, aliases FROM pull_requests
+     WHERE org_id = $1 AND repo = $2 AND number = $3 AND common_lines IS NULL FOR UPDATE`,
+    [db.orgId, repo, number],
+  );
+  if (!r) return;
+  let common: Lines = {};
+  const kept = json<string[] | null>(r.committers);
+  if (kept && keptWith(kept, key)) {
+    const names = { repo, head_repo: (r.head_repo as string) ?? null, aliases: json<string[]>(r.aliases) ?? [] };
+    const { emails, nobody } = await committersAmong(db, repoNames(names), kept, key);
+    const now = json<FileHashes[] | null>(r.last_files) ?? [];
+    const claims = await claimsFor(db, {
+      ...names,
+      head_ref: (r.head_ref as string) ?? null,
+      commit_emails: emails,
+      nobody,
+      created_at: iso(r.created_at) ?? new Date().toISOString(),
+    });
+    common = commonLines(now, writersOf(now, claims).common);
+  }
+  await db.query(`UPDATE pull_requests SET common_lines = $4::jsonb WHERE org_id = $1 AND repo = $2 AND number = $3`, [
+    db.orgId, repo, number, JSON.stringify(common),
+  ]);
+}
 
 /**
  * The pull requests a session just stored can change the figures of: in its
@@ -2063,7 +2150,7 @@ export interface PullFilters {
   sessions_repo?: string;
 }
 
-function where(orgId: string, filters: PullFilters): { sql: string; params: unknown[] } {
+export function where(orgId: string, filters: PullFilters): { sql: string; params: unknown[] } {
   const params: unknown[] = [];
   const bind = (value: unknown) => `$${params.push(value)}`;
   const conditions: string[] = [`org_id = ${bind(orgId)}`];

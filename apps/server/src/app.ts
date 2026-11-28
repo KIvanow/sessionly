@@ -36,7 +36,7 @@ import {
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
-import type { AuthOptions, PullAfterMergeReport, PullDetail, PullReport, Telemetry } from "@sessionly/schema";
+import type { AuthOptions, PullAfterMergeReport, PullDetail, PullOutcomesBy, PullOutcomesReport, PullReport, Telemetry } from "@sessionly/schema";
 import {
   BadReport,
   checkReport,
@@ -51,6 +51,7 @@ import {
   type PullFilters,
 } from "./pulls.ts";
 import { afterMergeOf, checkAfterMerge, pullsDue, storeAfterMerge } from "./after-merge.ts";
+import { checkOutcomes, outcomesDue, outcomesOf, storeOutcomes, summarizeOutcomes } from "./outcomes.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
 /** A record lists every tool call, so a long session is several megabytes. */
@@ -64,6 +65,7 @@ export type Env = {
     upload?: Upload;
     report?: PullReport;
     afterMerge?: PullAfterMergeReport;
+    outcomes?: PullOutcomesReport;
     /** The session an upload stored: the pull requests it adds lines to are matched again once it is committed. */
     stored?: { machine_id: string; source: string; session_id: string };
     /** And one it stored with another cost, or other branches: its pull requests are charged again then too. */
@@ -329,7 +331,11 @@ export function dashboardPolicy(telemetry?: Telemetry | null): string {
  * sessions have to be of one moment: a report stored between two of them
  * would otherwise leave lines of before beside costs of after.
  */
-const readsPulls = (method: string, path: string): boolean => method === "GET" && /\/prs(?:\/[a-z]+)?$/.test(path);
+const readsPulls = (method: string, path: string): boolean => method === "GET" && /\/prs(?:\/[a-z]+){0,2}$/.test(path);
+
+/** What a ci token may ask for: pull request reports, and what is due after merging. The whole path, so no other route ending so is one. */
+const REPORTING = { PUT: /^\/api\/v1\/prs(?:\/after-merge|\/outcomes)?$/, GET: /^\/api\/v1\/prs(?:\/outcomes)?\/due$/ };
+const PING = "/api/v1/ping";
 
 export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
@@ -345,12 +351,12 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       if (!within) return c.json({ error: "too many requests; try again in a minute", code: "rate_limited" }, 429);
     }
     // A ci token reports pull requests and does nothing else: as they are,
-    // and counted again after merging, which it first asks which are due for.
+    // counted again after merging, and the later commits of merged ones,
+    // which it first asks which are due for.
     if (principal.role === "ci") {
       const reporting =
-        (c.req.method === "PUT" && /\/prs(?:\/after-merge)?$/.test(c.req.path)) ||
-        (c.req.method === "GET" && c.req.path.endsWith("/prs/due"));
-      if (!reporting && !c.req.path.endsWith("/ping")) {
+        (c.req.method === "PUT" && REPORTING.PUT.test(c.req.path)) || (c.req.method === "GET" && REPORTING.GET.test(c.req.path));
+      if (!reporting && c.req.path !== PING) {
         return c.json({ error: "this token only reports pull requests" }, 403);
       }
     }
@@ -359,14 +365,14 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     // token's own address, never one filed under a person the platform named.
     if (principal.role === "env") {
       const uploading =
-        (c.req.method === "PUT" || c.req.method === "DELETE") && /\/sessions\/[^/]+\/[^/]+\/[^/]+$/.test(c.req.path);
-      if (!uploading && !c.req.path.endsWith("/ping")) {
+        (c.req.method === "PUT" || c.req.method === "DELETE") && /^\/api\/v1\/sessions\/[^/]+\/[^/]+\/[^/]+$/.test(c.req.path);
+      if (!uploading && c.req.path !== PING) {
         return c.json({ error: "this token only uploads sessions" }, 403);
       }
     }
     // A viewer, of the organisation a repository is shown in, reads and does nothing else, but for signing out.
     if (principal.role === "viewer") {
-      const signingOut = c.req.method === "DELETE" && c.req.path.endsWith("/auth/session");
+      const signingOut = c.req.method === "DELETE" && c.req.path === "/api/v1/auth/session";
       if (c.req.method !== "GET" && !signingOut) {
         return c.json({ error: "a viewer can only look", code: "viewer" }, 403);
       }
@@ -437,6 +443,23 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       return c.json({ error: "the body is not JSON" }, 400);
     }
     c.set("afterMerge", checkAfterMerge(body));
+    await next();
+  });
+
+  // A base branch's later commits, for the pull requests merged into it that
+  // are due: parsed here too. Kept further down (after a hosting's hooks).
+  api.put("/prs/outcomes", async (c, next) => {
+    const role = c.get("principal").role;
+    if (role !== "admin" && role !== "ci") {
+      return c.json({ error: "reporting pull requests needs a ci or admin token" }, 403);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "the body is not JSON" }, 400);
+    }
+    c.set("outcomes", checkOutcomes(body));
     await next();
   });
 
@@ -541,6 +564,14 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   });
 
   options.hosting?.early(api);
+
+  // The later commits parsed above, kept with one transaction for each pull
+  // request they are read for, before the one the rest of a request runs in:
+  // none is held while the others are walked.
+  api.put("/prs/outcomes", async (c) => {
+    const each = <T>(fn: (db: OrgDb) => Promise<T>) => ownerDb.asOrg(c.get("principal").orgId, fn);
+    return c.json(await storeOutcomes(each, c.get("outcomes")!, options.hashKey));
+  });
 
   // The rest of the request runs in one transaction, as the organisation of
   // its token: `c.get("db")` sees that organisation's rows and no others.
@@ -779,6 +810,25 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const stored = await storeAfterMerge(c.get("db"), report);
     return stored ? c.json({ stored }) : c.json({ error: "no such pull request" }, 404);
   });
+  // Merged pull requests whose later commits are to be read; and `since`,
+  // from the Action's `outcomes-since`, to read those of earlier ones too.
+  api.get("/prs/outcomes/due", async (c) => {
+    reportersOnly(c.get("principal"));
+    const repo = c.req.query("repo");
+    if (!repo) throw new BadRequest("repo is required");
+    return c.json(await outcomesDue(c.get("db"), repo.replace(/\/+$/, ""), time(c.req.query("since"), "since") ?? null));
+  });
+  // What later commits did to merged pull requests' lines, summed by group (merge clock).
+  api.get("/prs/outcomes/summary", async (c) => {
+    readersOnly(c.get("principal"));
+    const query = c.req.query();
+    const by = (query.by || "tool") as PullOutcomesBy;
+    if (!["tool", "model", "user", "repo", "day"].includes(by)) throw new BadRequest("by must be tool, model, user, repo or day");
+    const filters = pullFilters({ repo: query.repo ?? "", state: "", since: query.since ?? "" });
+    return c.json(
+      await summarizeOutcomes(c.get("db"), by, { ...filters, tool: query.tool || undefined, model: query.model || undefined, user: query.user || undefined }),
+    );
+  });
   api.get("/prs/summary", async (c) => {
     readersOnly(c.get("principal"));
     return c.json(await summarizePulls(c.get("db"), pullFilters(c.req.query())));
@@ -791,7 +841,11 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const number = wholeNumber(query.number, 0, 2 ** 31 - 1, "number");
     const pull = await getPull(c.get("db"), query.repo, number);
     if (!pull) return c.json({ error: "no such pull request" }, 404);
-    return c.json({ ...pull, after_merge: await afterMergeOf(c.get("db"), query.repo, number) } satisfies PullDetail);
+    return c.json({
+      ...pull,
+      after_merge: await afterMergeOf(c.get("db"), query.repo, number),
+      outcomes: await outcomesOf(c.get("db"), query.repo, number),
+    } satisfies PullDetail);
   });
   // Match one pull request's lines again against the sessions held now.
   // (Several, which the list's filters choose, are matched further up.)

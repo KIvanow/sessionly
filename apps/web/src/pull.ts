@@ -1,6 +1,6 @@
 // A pull request's page: where it is, how current its figures are, and its
 // reviews and comments counted by whose they are.
-import type { LocalReviewRun, LocalReviews, PullCost, PullDetail, PullFeedback, PullMatches, PullReviewer, PullRow, PullSession, ReviewSplit } from "@sessionly/schema";
+import type { LocalReviewRun, LocalReviews, OutcomeAge, OutcomeKind, PullCost, PullDetail, PullFeedback, PullMatches, PullOutcomeCommit, PullOutcomes, PullOutcomesAt, PullOutcomeWindow, PullReviewer, PullRow, PullSession, ReviewSplit } from "@sessionly/schema";
 import { count, dateTime, usd, usdEach } from "./format.ts";
 
 /** Whether a cost is a floor: a session of it has no cost figure, or one that leaves requests out. */
@@ -465,4 +465,149 @@ export function afterMergeTile(
   }
   if (age < 7) return { value: "–", part: null, note: "counted 7 and 30 days after it was merged" };
   return { value: "–", part: null, note: "not counted: a scheduled run of the Action does it, for lines whose sessions are kept" };
+}
+
+/** Below this many pull requests reached, no rate is shown beside another's: too few to compare. */
+export const MIN_PULLS = 10;
+
+const SIGNALS: Record<string, string> = {
+  revert_sha: "names the merge commit",
+  revert_pull: "its pull request reverts this one",
+  revert_bulk: "a revert, taking most of the lines",
+  fix_message: "fix word in the subject",
+  fix_conventional: "fix: type",
+  fix_branch: "fix/ branch",
+  fix_pr_title: "fix word in the pull request's title",
+  bug_issue: "closes an issue labelled a bug",
+};
+
+/** Why a later commit is the kind it is, in words. */
+export const signalName = (id: string): string => SIGNALS[id] ?? id;
+
+/** What a later commit is to the pull request, in a word or two. */
+export function laterKind(c: Pick<PullOutcomeCommit, "kind" | "likely" | "relanded_at">): string {
+  if (c.kind === "revert") return c.relanded_at ? "revert, relanded" : "revert";
+  if (c.kind === "fix") return c.likely ? "likely fix" : "changed by a fix";
+  return "rework";
+}
+
+/** What later commits did by one age, in a few words: "reverted", "2 fixes, 1 rework", "nothing". */
+export function laterWindow(w: PullOutcomeWindow): string {
+  const parts: string[] = [];
+  if (w.revert_commits > 0) parts.push(w.reverted ? "reverted" : "reverted, relanded");
+  if (w.fix_commits > 0) parts.push(`${count(w.fix_commits)} ${w.fix_commits === 1 ? "fix" : "fixes"}`);
+  if (w.rework_commits > 0) parts.push(`${count(w.rework_commits)} rework`);
+  return parts.length ? parts.join(", ") : "nothing";
+}
+
+/**
+ * The tile of what later commits did to a merged pull request's lines, by 7
+ * days after merging (the merge clock): a dash until that is read, and why.
+ */
+export function laterTile(outcomes: PullOutcomes | null | undefined, mergedAt: string | null, now: number = Date.now()): { value: string; note: string } {
+  const age = mergedAt ? (now - Date.parse(mergedAt)) / 86_400_000 : NaN;
+  if (!outcomes) return { value: "–", note: "not read: a scheduled run of the Action 0.5.0 or later reads them" };
+  const seven = outcomes.windows["7d"];
+  const thirty = outcomes.windows["30d"];
+  if (thirty.reached) return { value: laterWindow(thirty), note: `in the 30 days after merging; by day 7: ${laterWindow(seven)}` };
+  if (seven.reached) return { value: laterWindow(seven), note: "in the 7 days after merging; 30 days not read yet" };
+  if (age < 7) return { value: "–", note: "read 1, 7 and 30 days after it was merged" };
+  return { value: "–", note: outcomes.scanned_until ? `read up to ${dateTime(outcomes.scanned_until)}` : "not read yet: a scheduled run of the Action reads them" };
+}
+
+/** A count as a server sent it, or 0 for one that is no number. */
+const sent = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) ? n : 0);
+const thing = (value: unknown): value is Record<string, unknown> => value != null && typeof value === "object";
+const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
+
+const WINDOW_COUNTS = ["revert_commits", "agent_lines_reverted", "fix_commits", "likely_fix_commits", "agent_lines_fixed", "rework_commits", "agent_lines_reworked"] as const;
+const AT_COUNTS = ["pulls_reached", "pulls_total", "agent_lines", "pulls_reverted", "sessions_fixed", ...WINDOW_COUNTS] as const;
+const KINDS: readonly OutcomeKind[] = ["revert", "fix", "rework"];
+
+/**
+ * A pull request's later commits as the page reads them: null when what a
+ * server sent has not all three ages, and of its commits only those that are
+ * ones. Whatever is sent, the page does not break on it.
+ */
+export function laterOf(outcomes: unknown): PullOutcomes | null {
+  if (!thing(outcomes) || !thing(outcomes.windows)) return null;
+  const windows = outcomes.windows;
+  const ages = (["1d", "7d", "30d"] as const).map((age) => windows[age]);
+  if (!ages.every(thing)) return null;
+  const window = (w: Record<string, unknown>): PullOutcomeWindow => ({
+    reached: w.reached === true,
+    reverted: w.reverted === true,
+    ...(Object.fromEntries(WINDOW_COUNTS.map((name) => [name, sent(w[name])])) as Record<(typeof WINDOW_COUNTS)[number], number>),
+  });
+  const commits = (Array.isArray(outcomes.commits) ? outcomes.commits : []).filter(
+    (c): c is Record<string, unknown> => thing(c) && typeof c.sha === "string" && typeof c.landed_at === "string",
+  );
+  return {
+    scanned_until: text(outcomes.scanned_until),
+    windows: { "1d": window(ages[0]!), "7d": window(ages[1]!), "30d": window(ages[2]!) },
+    commits: commits.map((c): PullOutcomeCommit => ({
+      sha: c.sha as string,
+      url: text(c.url),
+      kind: KINDS.includes(c.kind as OutcomeKind) ? (c.kind as OutcomeKind) : "rework",
+      signals: (Array.isArray(c.signals) ? c.signals : []).filter((s): s is string => typeof s === "string"),
+      landed_at: c.landed_at as string,
+      by_pull: typeof c.by_pull === "number" ? c.by_pull : null,
+      lines: sent(c.lines),
+      agent_lines: sent(c.agent_lines),
+      counted: c.counted === true,
+      likely: c.likely === true,
+      relanded_at: text(c.relanded_at),
+      sessions: (Array.isArray(c.sessions) ? c.sessions : [])
+        .filter((s): s is Record<string, unknown> => thing(s) && [s.machine_id, s.source, s.session_id].every((v) => typeof v === "string"))
+        .map((s) => ({ machine_id: s.machine_id as string, source: s.source as string, session_id: s.session_id as string, lines: sent(s.lines) })),
+    })),
+  };
+}
+
+/** One age's counts of a summary as a server sent it, or null for none. */
+function atOf(value: unknown): PullOutcomesAt | null {
+  if (!thing(value)) return null;
+  return Object.fromEntries(AT_COUNTS.map((name) => [name, sent(value[name])])) as unknown as PullOutcomesAt;
+}
+
+/**
+ * Of `/prs/outcomes/summary` as a server sent it, one age's rows: each
+ * group's and the total, as counts. Null when there is no total; a group
+ * with nothing for that age is left out.
+ */
+export function outcomeRows(summary: unknown, age: OutcomeAge): { groups: { key: string; at: PullOutcomesAt }[]; total: PullOutcomesAt } | null {
+  if (!thing(summary) || !thing(summary.total)) return null;
+  const total = atOf(summary.total[`outcomes_${age}`]);
+  if (!total) return null;
+  const groups = (Array.isArray(summary.groups) ? summary.groups : []).flatMap((g) => {
+    const at = thing(g) && typeof g.key === "string" ? atOf(g[`outcomes_${age}`]) : null;
+    return at ? [{ key: (g as { key: string }).key, at }] : [];
+  });
+  return { groups, total };
+}
+
+const tenth = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
+
+/** Lines that are shares of lines, split over sessions: to a tenth, a whole number as one. "2", "1.5". */
+export const tenths = (n: number): string => tenth.format(n);
+
+/** Of an age's pull requests, how many reached it: "4 of 9". */
+export const reachedOf = (at: Pick<PullOutcomesAt, "pulls_reached" | "pulls_total">): string => `${count(at.pulls_reached)} of ${count(at.pulls_total)}`;
+
+/**
+ * A count per 1,000 agent lines of the pull requests that reached an age,
+ * to one decimal; a dash with no lines, and "too few" below `MIN_PULLS`
+ * reached, where a rate says little and is not to be set beside another.
+ */
+export function perThousand(n: number, at: Pick<PullOutcomesAt, "pulls_reached" | "agent_lines">): string {
+  if (at.pulls_reached === 0 || at.agent_lines <= 0) return "–";
+  if (at.pulls_reached < MIN_PULLS) return "too few";
+  return ((n / at.agent_lines) * 1000).toFixed(1);
+}
+
+/** Of the pull requests that reached an age, the share reverted by then and not relanded. */
+export function revertedShare(at: Pick<PullOutcomesAt, "pulls_reached" | "pulls_reverted">): string {
+  if (at.pulls_reached === 0) return "–";
+  if (at.pulls_reached < MIN_PULLS) return `${count(at.pulls_reverted)} (too few)`;
+  return `${Math.round((at.pulls_reverted / at.pulls_reached) * 100)}% (${count(at.pulls_reverted)})`;
 }

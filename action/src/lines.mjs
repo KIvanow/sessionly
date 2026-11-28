@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 
 // What Rust's `str::trim` removes (Unicode White_Space). JavaScript's own
 // trim differs: it also removes a byte order mark and leaves U+0085.
-const SPACE = "\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000";
+export const SPACE = "\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000";
 const ENDS = new RegExp(`^[${SPACE}]+|[${SPACE}]+$`, "g");
 // What Rust's `char::is_alphanumeric` accepts.
 const LETTER_OR_DIGIT = /[\p{Alphabetic}\p{N}]/u;
@@ -27,6 +27,20 @@ export function addedHashes(patch) {
   for (const line of patch.split("\n")) {
     // Hunks start with @@; the file headers (+++) are not part of the patch.
     if (!line.startsWith("+")) continue;
+    const hash = lineHash(line.slice(1));
+    if (hash) hashes.push(hash);
+  }
+  return hashes;
+}
+
+/**
+ * Hashes of the tracked lines a patch removes, as `addedHashes` has those it
+ * adds. A line `---x` is a removed `--x`: GitHub's patch has no file headers.
+ */
+export function removedHashes(patch) {
+  const hashes = [];
+  for (const line of patch.split("\n")) {
+    if (!line.startsWith("-")) continue;
     const hash = lineHash(line.slice(1));
     if (hash) hashes.push(hash);
   }
