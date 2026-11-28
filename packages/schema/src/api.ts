@@ -1175,6 +1175,8 @@ export interface PullDetail extends PullRow {
   heads?: PullHead[];
   /** What CI said of the commit it was merged as; null while not known, or not merged. Left out by a server from before this. */
   merge_ci?: PullCi | null;
+  /** The commit it was merged as, as reported; null until an Action of 0.5.0 or later reports it merged, and its CI is then not known. Left out by a server from before this. */
+  merge_commit_sha?: string | null;
 }
 
 /**
@@ -1182,10 +1184,12 @@ export interface PullDetail extends PullRow {
  * `failure` when any failed (timed out too), `success` when all that ran
  * came out well (neutral and skipped count as well), `pending` while any is
  * still running or waiting, `none` when there is nothing to go by (no
- * checks and no statuses, or every one cancelled). The Action's own check
- * run and the ones its `ci-ignore` names are left out first.
+ * checks and no statuses, or every one cancelled). Sessionly's own check
+ * runs and the ones its `ci-ignore` names are left out first. `unknown` is
+ * only served, never sent or kept: a head no run has read yet (the Action
+ * reads no CI, or may not), which is not running and not aged into `none`.
  */
-export type CiState = "pending" | "success" | "failure" | "none";
+export type CiState = "pending" | "success" | "failure" | "none" | "unknown";
 
 /** What the Action read of one commit's CI (`PullReport.ci`, `PullCiReport`). No check names unless asked for. */
 export interface CiReport {
@@ -1204,7 +1208,7 @@ export interface CiReport {
   failed_checks?: string[];
 }
 
-/** What CI said of a commit, as kept: the counts are null while nothing was said of it. */
+/** What CI said of a commit, as kept: the counts are null while nothing was said of it (`unknown`). */
 export interface PullCi {
   state: CiState;
   failed: number | null;

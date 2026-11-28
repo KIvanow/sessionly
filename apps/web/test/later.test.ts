@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { arrivalWords, ciOf, ciWords, commitHref, headsOf, laterKind, laterOf, laterTile, laterWindow, MIN_PULLS, ofKnown, outcomeCiRows, outcomeRows, perThousand, reachedOf, revertedShare, signalName, tenths } from "../src/pull.ts";
+import { arrivalWords, ciOf, ciWords, commitHref, headsOf, laterKind, mergeCiWords, laterOf, laterTile, laterWindow, MIN_PULLS, ofKnown, outcomeCiRows, outcomeRows, perThousand, reachedOf, revertedShare, signalName, tenths } from "../src/pull.ts";
 
 const window = (more: Record<string, unknown> = {}) => ({
   reached: true,
@@ -93,13 +93,25 @@ test("what CI said of a commit is read as sent, said in a few words, and not kno
   assert.equal(ciWords(ciOf({ state: "none", cancelled: 2 })), "none to go by, 2 checks cancelled");
   assert.equal(ciWords(ciOf({ state: "none", cancelled: 0 })), "none to go by");
   assert.equal(ciWords(null), "not known");
+  assert.equal(ciWords(ciOf({ state: "unknown" })), "not read");
+  // the merge, as a sentence
+  assert.equal(mergeCiWords(ciOf({ state: "failure", failed: 1, total: 3, failed_checks: ["tests"] }), true), "The base branch was red: 1 of 3 checks failed (tests).");
+  assert.equal(mergeCiWords(ciOf({ state: "failure" }), true), "The base branch was red: checks failed.");
+  assert.equal(mergeCiWords(ciOf({ state: "success", total: 1 }), true), "The base branch was green (1 check).");
+  assert.equal(mergeCiWords(ciOf({ state: "pending" }), true), "Its checks were still running when last read.");
+  assert.equal(mergeCiWords(ciOf({ state: "none", cancelled: 2 }), true), "No checks to go by on the commit it was merged as: 2 checks cancelled.");
+  assert.equal(mergeCiWords(ciOf({ state: "none" }), true), "No checks to go by on the commit it was merged as.");
+  assert.match(mergeCiWords(null, true), /^Not read yet/);
+  assert.match(mergeCiWords(ciOf({ state: "unknown" }), true), /^Not read yet/);
+  assert.match(mergeCiWords(null, false), /^Not known: .*before 0\.5\.0/);
+  assert.match(mergeCiWords(ciOf({ state: "failure" }), false), /^Not known/);
   assert.deepEqual([arrivalWords(true), arrivalWords(false), arrivalWords(null), arrivalWords(undefined)], ["red", "green", "–", "–"]);
   // heads: a server from before them sends none, which is not an empty list
   assert.equal(headsOf(undefined), undefined);
   assert.deepEqual(headsOf([{ sha: "a".repeat(40), first_reported_at: "2026-11-01T00:00:00Z", ci: { state: "success", total: 2 } }, { ci: {} }, null]), [
     { sha: "a".repeat(40), first_reported_at: "2026-11-01T00:00:00Z", ci: { state: "success", failed: null, total: 2, cancelled: null, checked_at: null } },
   ]);
-  assert.equal(headsOf([{ sha: "b" }])![0]!.ci.state, "pending");
+  assert.equal(headsOf([{ sha: "b" }])![0]!.ci.state, "unknown");
   assert.equal(commitHref("https://github.com/acme/web/pull/7", "abc"), "https://github.com/acme/web/commit/abc");
   assert.equal(commitHref("https://git.example.com/acme/web/pull/7#x", "abc"), "https://git.example.com/acme/web/commit/abc");
   assert.equal(commitHref("https://github.com/acme/web", "abc"), null);

@@ -33,8 +33,13 @@ const KEPT = `(jsonb_typeof(s.matched) = 'object' AND s.matched <> '{}'::jsonb)`
 /** Whether CI came out one way or the other: what is in a denominator. */
 export const known = (state: CiState | null | undefined): boolean => state === "success" || state === "failure";
 
-/** A head's state as it is now: one pending for `PENDING_DAYS` since it was reported has none. */
-export function stateNow(state: CiState, firstReportedAt: number, now: number): CiState {
+/**
+ * A head's state as it is now: one no run has said anything of (`checkedAt`
+ * null) is not known, which is not running; one read as pending
+ * `PENDING_DAYS` ago or more, since it was reported, has none.
+ */
+export function stateNow(state: CiState, firstReportedAt: number, now: number, checkedAt: number | null): CiState {
+  if (checkedAt == null) return "unknown";
   return state === "pending" && now >= firstReportedAt + PENDING_DAYS * DAY ? "none" : state;
 }
 
@@ -68,14 +73,16 @@ export function checkCiReport(body: unknown): PullCiReport {
 }
 
 /**
- * Pending heads of a repository that are `PENDING_DAYS` old are taken to
- * have no CI (a check that never finished, a run nobody told the server
- * of), so they are not asked for again; a merge commit pending that long
- * after merging likewise.
+ * Heads of a repository read as pending `PENDING_DAYS` ago or more are taken
+ * to have no CI (a check that never finished), so they are not asked for
+ * again; a merge commit pending that long after merging likewise. One no
+ * run has read stays as it is, not known: it is asked for while it is that
+ * young, and not after.
  */
 async function agePending(db: OrgDb, repo: string): Promise<void> {
   await db.query(
-    `UPDATE pull_heads SET ci_state = 'none' WHERE org_id = $1 AND repo = $2 AND ci_state = 'pending' AND first_reported_at < now() - make_interval(days => ${PENDING_DAYS})`,
+    `UPDATE pull_heads SET ci_state = 'none'
+     WHERE org_id = $1 AND repo = $2 AND ci_state = 'pending' AND ci_checked_at IS NOT NULL AND first_reported_at < now() - make_interval(days => ${PENDING_DAYS})`,
     [db.orgId, repo],
   );
   await db.query(
@@ -95,7 +102,8 @@ async function agePending(db: OrgDb, repo: string): Promise<void> {
 export async function ciDue(db: OrgDb, repo: string): Promise<PullCiDue> {
   await agePending(db, repo);
   const heads = await db.query(
-    `SELECT number, sha FROM pull_heads WHERE org_id = $1 AND repo = $2 AND ci_state = 'pending'
+    `SELECT number, sha FROM pull_heads
+     WHERE org_id = $1 AND repo = $2 AND ci_state = 'pending' AND first_reported_at >= now() - make_interval(days => ${PENDING_DAYS})
      ORDER BY first_reported_at, number, sha LIMIT ${DUE_AT_ONCE}`,
     [db.orgId, repo],
   );
@@ -131,7 +139,7 @@ export async function ciPending(db: OrgDb, repo: string, number: number, now = D
      ORDER BY first_reported_at, sha LIMIT ${PENDING_AT_ONCE}`,
     [db.orgId, repo, number],
   );
-  return rows.filter((row) => stateNow("pending", time(row.first_reported_at), now) === "pending").map((row) => ({ number, sha: String(row.sha) }));
+  return rows.filter((row) => now < time(row.first_reported_at) + PENDING_DAYS * DAY).map((row) => ({ number, sha: String(row.sha) }));
 }
 
 /** A head as read: its state as it is now, and which of the pull request's lines were new at it (null where not read). */
@@ -143,16 +151,21 @@ export interface HeadRead {
 }
 
 /**
- * For each line of a pull request, by file and hash, the head it arrived
- * with: the first (as reported) whose new lines have it. Heads are in the
- * order reported.
+ * For each line of a pull request, by file and hash, the heads its copies
+ * arrived with, one for each copy in the order reported: a head's new lines
+ * are the copies beyond those the head before had, so the k-th copy arrived
+ * with the head where there were first k.
  */
-export function arrivals(heads: HeadRead[]): Map<string, number> {
-  const at = new Map<string, number>();
+export function arrivals(heads: HeadRead[]): Map<string, number[]> {
+  const at = new Map<string, number[]>();
   heads.forEach((head, i) => {
     for (const [path, hashes] of Object.entries(head.hashes ?? {})) {
       if (!Array.isArray(hashes)) continue;
-      for (const hash of hashes) if (!at.has(lineKey(path, hash))) at.set(lineKey(path, hash), i);
+      for (const hash of hashes) {
+        const list = at.get(lineKey(path, hash));
+        if (list) list.push(i);
+        else at.set(lineKey(path, hash), [i]);
+      }
     }
   });
   return at;
@@ -160,16 +173,24 @@ export function arrivals(heads: HeadRead[]): Map<string, number> {
 
 /**
  * Whether CI was red where a session's lines (`matched`, as now) arrived:
- * at the first head that has one of them. Null when it has no lines in a
- * head read, or that head's CI is not known (pending, or none to go by).
+ * at the first head that brought one of them. Of a line the pull request
+ * has several copies of, the session's `k` are taken for the last `k` to
+ * arrive: the earlier ones may be another session's, or a person's (as
+ * copies are shared out when a commit removes them). Null when it has no
+ * lines in a head read, or that head's CI is not known (not read, pending,
+ * or none to go by).
  */
-export function redOnArrival(heads: HeadRead[], at: Map<string, number>, matched: Lines | null): boolean | null {
+export function redOnArrival(heads: HeadRead[], at: Map<string, number[]>, matched: Lines | null): boolean | null {
   let first: number | null = null;
   for (const [path, hashes] of Object.entries(matched ?? {})) {
     if (!Array.isArray(hashes)) continue;
-    for (const hash of hashes) {
-      const i = at.get(lineKey(path, hash));
-      if (i !== undefined && (first === null || i < first)) first = i;
+    const copies = new Map<string, number>();
+    for (const hash of hashes) copies.set(hash, (copies.get(hash) ?? 0) + 1);
+    for (const [hash, k] of copies) {
+      const came = at.get(lineKey(path, hash));
+      if (!came) continue;
+      const i = came[Math.max(0, came.length - k)]!;
+      if (first === null || i < first) first = i;
     }
   }
   if (first === null) return null;
@@ -181,7 +202,7 @@ export function redOnArrival(heads: HeadRead[], at: Map<string, number>, matched
 export function ciOfRow(row: Record<string, unknown>, now: number): PullCi {
   const names = row.failed_checks == null ? null : json<string[]>(row.failed_checks);
   return {
-    state: stateNow(row.ci_state as CiState, time(row.first_reported_at), now),
+    state: stateNow(row.ci_state as CiState, time(row.first_reported_at), now, row.ci_checked_at == null ? null : time(row.ci_checked_at)),
     failed: num(row.ci_failed),
     total: num(row.ci_total),
     cancelled: num(row.ci_cancelled),
@@ -190,11 +211,16 @@ export function ciOfRow(row: Record<string, unknown>, now: number): PullCi {
   };
 }
 
-/** The merge commit's CI as kept (`merge_ci`), checked field by field: null where none was. */
-export function mergeCiOf(value: unknown): PullCi | null {
+/**
+ * The merge commit's CI as kept (`merge_ci`), checked field by field: null
+ * where none was. One read as pending `PENDING_DAYS` after merging or more
+ * has none, as a head would (the schedule writes that; this reads it so).
+ */
+export function mergeCiOf(value: unknown, mergedAt: number | null = null, now = Date.now()): PullCi | null {
   const kept = json<Record<string, unknown> | null>(value);
   if (!kept || typeof kept !== "object" || typeof kept.state !== "string") return null;
-  const state = (["pending", "success", "failure", "none"] as CiState[]).includes(kept.state as CiState) ? (kept.state as CiState) : "none";
+  let state = (["pending", "success", "failure", "none"] as CiState[]).includes(kept.state as CiState) ? (kept.state as CiState) : "none";
+  if (state === "pending" && mergedAt != null && now >= mergedAt + PENDING_DAYS * DAY) state = "none";
   const count = (n: unknown): number | null => (typeof n === "number" && Number.isFinite(n) ? n : null);
   const names = Array.isArray(kept.failed_checks) ? kept.failed_checks.filter((n): n is string => typeof n === "string") : [];
   return {
@@ -218,17 +244,17 @@ export async function ciOf(
   repo: string,
   number: number,
   now = Date.now(),
-): Promise<{ heads: PullHead[]; merge_ci: PullCi | null; red_on_arrival: Map<string, boolean | null> }> {
+): Promise<{ heads: PullHead[]; merge_ci: PullCi | null; merge_commit_sha: string | null; red_on_arrival: Map<string, boolean | null> }> {
   const rows = await db.query(
     `SELECT sha, first_reported_at, ci_state, ci_failed, ci_total, ci_cancelled, ci_checked_at, failed_checks, hashes
      FROM pull_heads WHERE org_id = $1 AND repo = $2 AND number = $3 ORDER BY first_reported_at, sha`,
     [db.orgId, repo, number],
   );
-  const [pull] = await db.query(`SELECT merge_ci FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`, [db.orgId, repo, number]);
+  const [pull] = await db.query(`SELECT merge_ci, merge_commit_sha, merged_at FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3`, [db.orgId, repo, number]);
   const read: HeadRead[] = rows.map((row) => ({
     sha: String(row.sha),
     first_reported_at: time(row.first_reported_at),
-    state: stateNow(row.ci_state as CiState, time(row.first_reported_at), now),
+    state: stateNow(row.ci_state as CiState, time(row.first_reported_at), now, row.ci_checked_at == null ? null : time(row.ci_checked_at)),
     hashes: json<Lines>(row.hashes),
   }));
   const at = arrivals(read);
@@ -238,7 +264,8 @@ export async function ciOf(
   );
   return {
     heads: rows.map((row) => ({ sha: String(row.sha), first_reported_at: iso(row.first_reported_at)!, ci: ciOfRow(row, now) })),
-    merge_ci: pull ? mergeCiOf(pull.merge_ci) : null,
+    merge_ci: pull ? mergeCiOf(pull.merge_ci, pull.merged_at == null ? null : time(pull.merged_at), now) : null,
+    merge_commit_sha: (pull?.merge_commit_sha as string) ?? null,
     red_on_arrival: new Map(sessions.map((s) => [`${s.machine_id}\n${s.source}\n${s.session_id}`, redOnArrival(read, at, json<Lines | null>(s.matched))])),
   };
 }

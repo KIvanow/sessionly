@@ -795,7 +795,7 @@ async function readOutcomes(db: OrgDb, chosen: { sql: string; params: unknown[] 
     chosen.params,
   );
   const heads = await db.query(
-    `SELECT h.repo, h.number, h.sha, h.ci_state, h.first_reported_at, CASE WHEN p.judged THEN h.hashes END AS hashes
+    `SELECT h.repo, h.number, h.sha, h.ci_state, h.first_reported_at, h.ci_checked_at, CASE WHEN p.judged THEN h.hashes END AS hashes
      FROM pull_heads h JOIN (SELECT r.repo, r.number, ${judged} AS judged FROM pull_requests r ${chosen.sql}) p USING (repo, number)
      WHERE h.org_id = $1
      ORDER BY h.first_reported_at, h.sha`,
@@ -827,7 +827,7 @@ async function readOutcomes(db: OrgDb, chosen: { sql: string; params: unknown[] 
     push(headsOf, `${row.repo}\n${row.number}`, {
       sha: String(row.sha),
       first_reported_at: time(row.first_reported_at),
-      state: stateNow(row.ci_state as CiState, time(row.first_reported_at), now),
+      state: stateNow(row.ci_state as CiState, time(row.first_reported_at), now, row.ci_checked_at == null ? null : time(row.ci_checked_at)),
       hashes: row.hashes == null ? null : json<Lines>(row.hashes),
     });
   }
@@ -847,7 +847,7 @@ async function readOutcomes(db: OrgDb, chosen: { sql: string; params: unknown[] 
       commits: kept.map((row) => split(row, its, copies!)),
       // What CI said of its heads and its merge commit, and where each session's lines arrived.
       heads: pushed.map((h) => h.state),
-      merge_ci: mergeCiOf(p.merge_ci)?.state ?? null,
+      merge_ci: mergeCiOf(p.merge_ci, time(p.merged_at), now)?.state ?? null,
       arrived: new Map(its.map((h) => [holderKey(h), redOnArrival(pushed, at, h.matched)])),
     };
   });

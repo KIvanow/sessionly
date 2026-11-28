@@ -883,6 +883,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       outcomes: await outcomesOf(c.get("db"), query.repo, number),
       heads: ci.heads,
       merge_ci: ci.merge_ci,
+      merge_commit_sha: ci.merge_commit_sha,
     } satisfies PullDetail);
   });
   // Match one pull request's lines again against the sessions held now.

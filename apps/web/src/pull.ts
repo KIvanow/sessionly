@@ -612,7 +612,7 @@ export function revertedShare(at: Pick<PullOutcomesAt, "pulls_reached" | "pulls_
   return `${Math.round((at.pulls_reverted / at.pulls_reached) * 100)}% (${count(at.pulls_reverted)})`;
 }
 
-const CI_STATES: readonly CiState[] = ["pending", "success", "failure", "none"];
+const CI_STATES: readonly CiState[] = ["pending", "success", "failure", "none", "unknown"];
 
 /** What CI said of a commit, as a server sent it: null for none, or for one that is no answer. */
 export function ciOf(value: unknown): PullCi | null {
@@ -634,18 +634,35 @@ export function headsOf(value: unknown): PullHead[] | undefined {
   if (!Array.isArray(value)) return undefined;
   return value.flatMap((head): PullHead[] => {
     if (!thing(head) || typeof head.sha !== "string") return [];
-    return [{ sha: head.sha, first_reported_at: text(head.first_reported_at) ?? "", ci: ciOf(head.ci) ?? { state: "pending", failed: null, total: null, cancelled: null, checked_at: null } }];
+    return [{ sha: head.sha, first_reported_at: text(head.first_reported_at) ?? "", ci: ciOf(head.ci) ?? { state: "unknown", failed: null, total: null, cancelled: null, checked_at: null } }];
   });
 }
 
-/** What CI said of a commit, in a few words: "red, 1 of 3 checks failed", "green, 3 checks", "still running", "none to go by", "not known". */
+const checksOf = (n: number | null) => (n == null ? "" : `${count(n)} ${n === 1 ? "check" : "checks"}`);
+
+/** What CI said of a commit, in a few words: "red, 1 of 3 checks failed", "green, 3 checks", "still running", "none to go by", "not read", "not known". */
 export function ciWords(ci: PullCi | null | undefined): string {
   if (!ci) return "not known";
-  const checks = (n: number | null) => (n == null ? "" : `${count(n)} ${n === 1 ? "check" : "checks"}`);
-  if (ci.state === "failure") return ci.failed != null && ci.total != null ? `red, ${count(ci.failed)} of ${checks(ci.total)} failed` : "red";
-  if (ci.state === "success") return ci.total != null ? `green, ${checks(ci.total)}` : "green";
+  if (ci.state === "failure") return ci.failed != null && ci.total != null ? `red, ${count(ci.failed)} of ${checksOf(ci.total)} failed` : "red";
+  if (ci.state === "success") return ci.total != null ? `green, ${checksOf(ci.total)}` : "green";
   if (ci.state === "pending") return "still running";
-  return ci.cancelled ? `none to go by, ${checks(ci.cancelled)} cancelled` : "none to go by";
+  if (ci.state === "unknown") return "not read";
+  return ci.cancelled ? `none to go by, ${checksOf(ci.cancelled)} cancelled` : "none to go by";
+}
+
+/**
+ * What CI said of the commit a pull request was merged as, as a sentence
+ * for its page. With no merge commit known (reported merged by an Action
+ * from before 0.5.0) it is not known, and nothing reads it.
+ */
+export function mergeCiWords(ci: PullCi | null, mergeCommitKnown: boolean): string {
+  if (!mergeCommitKnown) return "Not known: it was reported merged by an Action from before 0.5.0, which named no merge commit.";
+  if (!ci || ci.state === "unknown") return "Not read yet: the Action reads the checks the push of the commit it was merged as started.";
+  const names = ci.failed_checks ? ` (${ci.failed_checks.join(", ")})` : "";
+  if (ci.state === "failure") return `The base branch was red: ${ci.failed != null && ci.total != null ? `${count(ci.failed)} of ${checksOf(ci.total)} failed` : "checks failed"}${names}.`;
+  if (ci.state === "success") return `The base branch was green${ci.total != null ? ` (${checksOf(ci.total)})` : ""}.`;
+  if (ci.state === "pending") return "Its checks were still running when last read.";
+  return ci.cancelled ? `No checks to go by on the commit it was merged as: ${checksOf(ci.cancelled)} cancelled.` : "No checks to go by on the commit it was merged as.";
 }
 
 /** Whether CI was red where a session's lines arrived, in a word; a dash while not known. */

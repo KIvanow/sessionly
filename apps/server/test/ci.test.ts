@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
-import { arrivals, checkCiReport, PENDING_DAYS, redOnArrival, stateNow, type HeadRead } from "../src/ci.ts";
+import { arrivals, checkCiReport, mergeCiOf, PENDING_DAYS, redOnArrival, stateNow, type HeadRead } from "../src/ci.ts";
 import type { Db } from "../src/db.ts";
 import { BadReport, checkCi, MOST_HEADS } from "../src/pulls.ts";
 import { newOrg, testDb, tokenFor } from "./helpers.ts";
@@ -110,27 +110,42 @@ test("what CI says of a commit is checked: its state, counts and at most 20 name
   assert.throws(() => checkCiReport({ heads: [] }), /repo is required/);
 });
 
-test("where a session's lines arrived is the first head that has one of them, and red only where that head's CI is known red", () => {
+test("where a session's lines arrived is the first head that brought one of them, copies as the last to come, and red only where that head's CI is known red", () => {
   const heads: HeadRead[] = [
-    { sha: sha(1), first_reported_at: 0, state: "failure" as const, hashes: { "a.ts": [h(1), h(2)] } },
-    { sha: sha(2), first_reported_at: 1, state: "success" as const, hashes: { "a.ts": [h(3)], "b.ts": [h(1)] } },
+    { sha: sha(1), first_reported_at: 0, state: "failure" as const, hashes: { "a.ts": [h(1), h(2), h(50)] } },
+    { sha: sha(2), first_reported_at: 1, state: "success" as const, hashes: { "a.ts": [h(3), h(50)], "b.ts": [h(1)] } },
     { sha: sha(3), first_reported_at: 2, state: "pending" as const, hashes: { "a.ts": [h(4)] } },
     { sha: sha(4), first_reported_at: 3, state: "none" as const, hashes: { "a.ts": [h(5)] } },
+    { sha: sha(5), first_reported_at: 4, state: "unknown" as const, hashes: { "a.ts": [h(6)] } },
   ];
   const at = arrivals(heads);
+  assert.deepEqual(at.get(`a.ts\n${h(50)}`), [0, 1]);
   assert.equal(redOnArrival(heads, at, { "a.ts": [h(3), h(1)] }), true);
   assert.equal(redOnArrival(heads, at, { "a.ts": [h(3)] }), false);
   // the same hash in another file arrived with the second head
   assert.equal(redOnArrival(heads, at, { "b.ts": [h(1)] }), false);
+  // a line the pull request has two copies of, one red, one green: a session with one copy has the later one;
+  // with both, the earlier too
+  assert.equal(redOnArrival(heads, at, { "a.ts": [h(3), h(50)] }), false);
+  assert.equal(redOnArrival(heads, at, { "a.ts": [h(50), h(50)] }), true);
+  assert.equal(redOnArrival(heads, at, { "a.ts": [h(50), h(50), h(50)] }), true);
   assert.equal(redOnArrival(heads, at, { "a.ts": [h(4)] }), null);
   assert.equal(redOnArrival(heads, at, { "a.ts": [h(5)] }), null);
+  assert.equal(redOnArrival(heads, at, { "a.ts": [h(6)] }), null);
   assert.equal(redOnArrival(heads, at, { "a.ts": [h(9)] }), null);
   assert.equal(redOnArrival(heads, at, null), null);
-  // a head pending for 7 days has none
+  // a head no run has read is not known, whatever its age; one read as pending has none after 7 days
   const day = 86_400_000;
-  assert.equal(stateNow("pending", 0, PENDING_DAYS * day - 1), "pending");
-  assert.equal(stateNow("pending", 0, PENDING_DAYS * day), "none");
-  assert.equal(stateNow("failure", 0, PENDING_DAYS * day), "failure");
+  assert.equal(stateNow("pending", 0, PENDING_DAYS * day - 1, 10), "pending");
+  assert.equal(stateNow("pending", 0, PENDING_DAYS * day, 10), "none");
+  assert.equal(stateNow("pending", 0, PENDING_DAYS * day, null), "unknown");
+  assert.equal(stateNow("pending", 0, 0, null), "unknown");
+  assert.equal(stateNow("failure", 0, PENDING_DAYS * day, 10), "failure");
+  // a merge read as pending likewise, read as the page reads it
+  assert.equal(mergeCiOf({ state: "pending" }, 0, PENDING_DAYS * day - 1)!.state, "pending");
+  assert.equal(mergeCiOf({ state: "pending" }, 0, PENDING_DAYS * day)!.state, "none");
+  assert.equal(mergeCiOf({ state: "pending" }, null, PENDING_DAYS * day)!.state, "pending");
+  assert.equal(mergeCiOf(null, 0, 0), null);
 });
 
 test("a report keeps the head it is at with the lines new there, answers which heads are pending, and takes what CI said", async () => {
@@ -139,13 +154,19 @@ test("a report keeps the head it is at with the lines new there, answers which h
   const first = await report(repo, 1, 1, [file("a.ts", 1, 2, 2)]);
   assert.equal(first.status, 200);
   assert.deepEqual(first.body.ci_pending, [{ number: 1, sha: sha(1) }]);
-  assert.equal((await report(repo, 1, 2, [file("a.ts", 1, 2, 2, 3), file("b.ts", 1)], { event: "synchronize" })).status, 200);
-  const again = await report(repo, 1, 2, [file("a.ts", 1, 2, 2, 3), file("b.ts", 1)], { event: "review" });
+  assert.equal((await report(repo, 1, 2, [file("a.ts", 1, 2, 2, 3, 50), file("b.ts", 1)], { event: "synchronize" })).status, 200);
+  const again = await report(repo, 1, 2, [file("a.ts", 1, 2, 2, 3, 50), file("b.ts", 1)], { event: "review" });
   assert.deepEqual(again.body.ci_pending, [{ number: 1, sha: sha(1) }, { number: 1, sha: sha(2) }]);
   assert.deepEqual(await headsOf(repo, 1), [
     { sha: sha(1), state: "pending", failed: null, names: null, hashes: { "a.ts": [h(1), h(2), h(2)] } },
-    { sha: sha(2), state: "pending", failed: null, names: null, hashes: { "a.ts": [h(3)], "b.ts": [h(1)] } },
+    { sha: sha(2), state: "pending", failed: null, names: null, hashes: { "a.ts": [h(3), h(50)], "b.ts": [h(1)] } },
   ]);
+  // Not read yet, which is not running: the page is told so, however old the head.
+  const page = await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(repo)}&number=1`);
+  assert.deepEqual(page.body.heads.map((x: any) => [x.sha, x.ci.state, x.ci.checked_at]), [[sha(1), "unknown", null], [sha(2), "unknown", null]]);
+  await db.query(`UPDATE pull_heads SET first_reported_at = now() - interval '9 days' WHERE repo = $1 AND number = 1 AND sha = $2`, [repo, sha(1)]);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(repo)}&number=1`)).body.heads[0].ci.state, "unknown");
+  await db.query(`UPDATE pull_heads SET first_reported_at = now() - interval '1 hour' WHERE repo = $1 AND number = 1 AND sha = $2`, [repo, sha(1)]);
   // What CI said comes with a report, and is applied to its heads; a commit that is no head of it is passed over.
   const told = await report(repo, 1, 2, [file("a.ts", 1, 2, 2, 3), file("b.ts", 1)], {
     event: "review",
@@ -219,16 +240,27 @@ test("the Action is told which heads and merge commits to read CI for, and what 
   const left = await call(tokens.ci, "GET", `/prs/ci/due?repo=${q}`);
   assert.deepEqual(left.body.merges, []);
   assert.ok(left.body.heads.some((x: any) => x.sha === sha(2)) && !left.body.heads.some((x: any) => x.sha === sha(1)));
-  // A state that came out one way is not put back to pending; success over failure is (a re-run).
-  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "pending") }], merges: [{ number: 2, ...ci(30, "pending") }] })).body, { heads: 0, merges: 0 });
+  // A head's state that came out one way is not put back to pending; success over failure is (a re-run). A merge
+  // commit's stays once it came out either way: a later run on the branch's tip says nothing of the merge.
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "pending") }], merges: [{ number: 2, ...ci(30, "pending") }, { number: 2, ...ci(30, "success") }] })).body, { heads: 0, merges: 0 });
   assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "success") }] })).body, { heads: 1, merges: 0 });
   assert.deepEqual((await headsOf(repo, 1)).map((x) => [x.state, x.names]), [["success", null], ["pending", null]]);
-  // A merge commit with nothing to go by is known as such, and not due again; a head pending for 7 days likewise.
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=2`)).body.merge_ci.state, "failure");
+  // Read as pending, a merge is replaced by what comes out, and read as none to go by too (workflows that started late).
+  await db.query(`UPDATE pull_requests SET merge_ci = NULL WHERE repo = $1 AND number = 2`, [repo]);
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, merges: [{ number: 2, ...ci(30, "pending") }] })).body, { heads: 0, merges: 1 });
   assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, merges: [{ number: 2, ...ci(30, "none", { total: 0 }) }] })).body, { heads: 0, merges: 1 });
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, merges: [{ number: 2, ...ci(30, "failure") }] })).body, { heads: 0, merges: 1 });
+  // A merge commit with nothing to go by is known as such, and not due again; a head read as pending 7 days ago likewise.
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, merges: [{ number: 2, ...ci(30, "none", { total: 0 }) }] })).body, { heads: 0, merges: 0 });
   await db.query(`UPDATE pull_heads SET first_reported_at = now() - interval '8 days' WHERE repo = $1 AND number = 1 AND sha = $2`, [repo, sha(2)]);
+  // One that old no run has read is not due either, and stays as it is: not known, rather than none to go by.
+  await db.query(`UPDATE pull_heads SET first_reported_at = now() - interval '8 days' WHERE repo = $1 AND number = 3`, [repo]);
   const aged = await call(tokens.ci, "GET", `/prs/ci/due?repo=${q}`);
-  assert.deepEqual(aged.body.heads.map((x: any) => x.number), [2, 3, 4]);
+  assert.deepEqual(aged.body.heads.map((x: any) => x.number), [2, 4]);
   assert.deepEqual((await headsOf(repo, 1)).map((x) => [x.sha, x.state]), [[sha(2), "none"], [sha(1), "success"]]);
+  assert.deepEqual((await headsOf(repo, 3)).map((x) => x.state), ["pending"]);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=3`)).body.heads[0].ci.state, "unknown");
   // Refused as a whole when any of it is wrong, and by a member.
   assert.equal((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "red") }] })).status, 422);
   assert.equal((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "failure", { failed_checks: Array(21).fill("x") }) }] })).status, 422);
@@ -249,7 +281,7 @@ test("a pull request's page says what CI said of each head and of the merge, and
   assert.equal((await upload(repo, "a-cursor", "cursor", [file("b.ts", 10, 11)])).status, 200);
   const before = await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=1`);
   assert.equal(before.status, 200);
-  assert.deepEqual(before.body.heads.map((x: any) => [x.sha, x.ci.state, x.ci.failed, x.ci.failed_checks ?? null]), [[sha(1), "failure", 1, ["tests"]], [sha(2), "pending", null, null]]);
+  assert.deepEqual(before.body.heads.map((x: any) => [x.sha, x.ci.state, x.ci.failed, x.ci.failed_checks ?? null]), [[sha(1), "failure", 1, ["tests"]], [sha(2), "unknown", null, null]]);
   assert.equal(before.body.merge_ci, null);
   const arrived = (page: any) => Object.fromEntries(page.sessions.map((s: any) => [s.session_id, s.red_on_arrival]));
   assert.deepEqual(arrived(before.body), { "a-claude": true, "a-cursor": null });
@@ -259,6 +291,11 @@ test("a pull request's page says what CI said of each head and of the merge, and
   assert.equal((await report(repo, 1, 2, [file("a.ts", 1, 2, 9), file("b.ts", 10, 11)], { state: "merged", merged_at: ago(0), merge_commit_sha: sha(20), event: "closed", ci: [ci(20, "failure")] })).status, 200);
   const merged = await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=1`);
   assert.deepEqual({ ...merged.body.merge_ci, checked_at: typeof merged.body.merge_ci.checked_at }, { state: "failure", failed: 1, total: 3, cancelled: 0, checked_at: "string" });
+  assert.equal(merged.body.merge_commit_sha, sha(20));
+  // One read as pending 7 days after merging has none, on the page as on the schedule.
+  await db.query(`UPDATE pull_requests SET merge_ci = '{"state": "pending"}', merged_at = now() - interval '8 days' WHERE repo = $1 AND number = 1`, [repo]);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=1`)).body.merge_ci.state, "none");
+  await db.query(`UPDATE pull_requests SET merge_ci = '{"state": "failure", "failed": 1, "total": 3, "cancelled": 0}', merged_at = now() WHERE repo = $1 AND number = 1`, [repo]);
   assert.ok(!JSON.stringify(merged.body.heads).includes("hashes"), "no hashes on the page");
   // A session deleted takes its arrival with it; the heads stay.
   assert.equal((await call(tokens.ann, "DELETE", "/sessions/m1/cursor/a-cursor")).status, 200);
@@ -274,10 +311,12 @@ test("the summary counts red pushes, sessions red on arrival and base branches r
   assert.equal((await upload(repo, "s-claude", "claude-code", [file("a.ts", 1, 2, 3)])).status, 200);
   assert.equal((await upload(repo, "s-cursor", "cursor", [file("b.ts", 10, 11)])).status, 200);
   assert.equal((await upload(repo, "s-codex", "codex", [file("c.ts", 20, 21)])).status, 200);
-  // #1: Claude Code's lines at a red head, Cursor's at a green one; merged red.
-  assert.equal((await report(repo, 1, 1, [file("a.ts", 1, 2, 3)], { event: "opened" })).status, 200);
-  assert.equal((await report(repo, 1, 2, [file("a.ts", 1, 2, 3), file("b.ts", 10, 11)], { ci: [ci(1, "failure")] })).status, 200);
-  assert.equal((await report(repo, 1, 2, [file("a.ts", 1, 2, 3), file("b.ts", 10, 11)], { state: "merged", merged_at: ago(3), merge_commit_sha: sha(100), event: "closed", ci: [ci(2, "success"), ci(100, "failure")] })).status, 200);
+  // #1: Claude Code's lines at a red head, Cursor's at a green one (a copy of one of its lines came red, a person's); merged red.
+  assert.equal((await report(repo, 1, 1, [file("a.ts", 1, 2, 3), file("b.ts", 11)], { event: "opened" })).status, 200);
+  assert.equal((await report(repo, 1, 2, [file("a.ts", 1, 2, 3), file("b.ts", 10, 11, 11)], { ci: [ci(1, "failure")] })).status, 200);
+  assert.equal((await report(repo, 1, 2, [file("a.ts", 1, 2, 3), file("b.ts", 10, 11, 11)], { state: "merged", merged_at: ago(3), merge_commit_sha: sha(100), event: "closed", ci: [ci(2, "success"), ci(100, "failure")] })).status, 200);
+  // A head pushed again and never read is not known, and in no figure.
+  assert.equal((await report(repo, 1, 5, [file("a.ts", 1, 2, 3), file("b.ts", 10, 11, 11, 12)], { state: "merged", merged_at: ago(3), merge_commit_sha: sha(100), event: "closed" })).status, 200);
   // #2: Codex's lines, a head with nothing to go by, merged with CI not read. #3: no agent lines, which is in no figure.
   assert.equal((await report(repo, 2, 3, [file("c.ts", 20, 21)], { state: "merged", merged_at: ago(2), merge_commit_sha: sha(200), event: "closed", ci: [ci(3, "none", { total: 0 })] })).status, 200);
   assert.equal((await report(repo, 3, 4, [file("docs.md", 70)], { state: "merged", merged_at: ago(2), merge_commit_sha: sha(300), event: "closed", ci: [ci(4, "failure"), ci(300, "failure")] })).status, 200);

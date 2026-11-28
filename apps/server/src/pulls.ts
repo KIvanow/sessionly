@@ -1607,10 +1607,12 @@ function linesOfFiles(files: FileHashes[]): Lines {
 /**
  * Keep what CI said of commits of a pull request, where the commit is one
  * of its heads or the one it was merged as; a commit that is neither is
- * passed over. A state that came out one way or the other is not put back
- * to pending (a run that read an earlier attempt), and the names of failed
- * checks are kept only with a failure. How many heads, and whether the merge
- * commit, were changed.
+ * passed over. A head's state that came out one way or the other is not put
+ * back to pending (a run that read an earlier attempt); a merge commit's
+ * stays once it came out either way (what the push of it ran is one
+ * moment, and a later run on the branch's tip says nothing of it). The
+ * names of failed checks are kept only with a failure. How many heads, and
+ * whether the merge commit, were changed.
  */
 export async function applyCi(db: OrgDb, repo: string, number: number, ci: CiReport[]): Promise<{ heads: number; merges: number }> {
   let heads = 0;
@@ -1628,9 +1630,9 @@ export async function applyCi(db: OrgDb, repo: string, number: number, ci: CiRep
     const merged = await db.query(
       `UPDATE pull_requests SET merge_ci = $5::jsonb
        WHERE org_id = $1 AND repo = $2 AND number = $3 AND state = 'merged' AND merge_commit_sha = $4
-         AND NOT ($6 = 'pending' AND merge_ci->>'state' IN ('success', 'failure'))
+         AND (merge_ci IS NULL OR merge_ci->>'state' NOT IN ('success', 'failure'))
        RETURNING number`,
-      [db.orgId, repo, number, c.sha, JSON.stringify(kept), c.state],
+      [db.orgId, repo, number, c.sha, JSON.stringify(kept)],
     );
     merges += merged.length;
   }

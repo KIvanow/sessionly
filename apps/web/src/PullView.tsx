@@ -2,7 +2,7 @@ import type { LocalReviewRun, PullAfterMerge, PullCi, PullDetail, PullHead, Pull
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { afterMergeLine, afterMergeName, afterMergeTile, arrivalWords, ciOf, ciWords, commitHref, headsOf, laterKind, laterOf, laterTile, signalName, tenths, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewNote, reviewTarget, roundsLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, arrivalWords, ciOf, ciWords, commitHref, headsOf, mergeCiWords, laterKind, laterOf, laterTile, signalName, tenths, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewNote, reviewTarget, roundsLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
 import { cost, count, dateTime, duration, modelName, usd, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -151,7 +151,7 @@ export function PullView({
 
       {outcomes && <LaterCommits outcomes={outcomes} />}
 
-      {heads && <Pushes heads={heads} mergeCi={mergeCi} merged={p.state === "merged"} pullUrl={p.url} />}
+      {heads && <Pushes heads={heads} mergeCi={mergeCi} merged={p.state === "merged"} mergeCommitKnown={typeof p.merge_commit_sha === "string"} pullUrl={p.url} />}
 
       {a.now.by.length > 0 && (
         <section className="card" aria-label="By model">
@@ -579,7 +579,7 @@ function SessionRow({ s, lines, arrival }: { s: PullSession; lines: number; arri
  * said of it (a red push), and once merged what it said of the commit it
  * was merged as (the base branch red after it).
  */
-function Pushes({ heads, mergeCi, merged, pullUrl }: { heads: PullHead[]; mergeCi: PullCi | null; merged: boolean; pullUrl: string | null }) {
+function Pushes({ heads, mergeCi, merged, mergeCommitKnown, pullUrl }: { heads: PullHead[]; mergeCi: PullCi | null; merged: boolean; mergeCommitKnown: boolean; pullUrl: string | null }) {
   const red = heads.filter((h) => h.ci.state === "failure").length;
   const known = heads.filter((h) => h.ci.state === "failure" || h.ci.state === "success").length;
   return (
@@ -587,17 +587,16 @@ function Pushes({ heads, mergeCi, merged, pullUrl }: { heads: PullHead[]; mergeC
       <h2>Pushes and CI</h2>
       <p className="muted hint">
         What the checks and statuses said of each head the pull request was reported at, as the Action read them: red when
-        any failed, green when they all came out well, still running while any waits, and none to go by when there were
-        no checks (or all were cancelled). The Action's own check is left out. CI failing is linked, not caused: tests are
+        any failed, green when they all came out well, still running while any waits, none to go by when there were
+        no checks (or all were cancelled), and not read where no run of the Action has read it. Sessionly's own checks are
+        left out. Of the merge, only the checks its push started count. CI failing is linked, not caused: tests are
         flaky and systems go down.
         {known > 0 && ` ${count(red)} of ${count(known)} ${known === 1 ? "push" : "pushes"} with checks ${red === 1 ? "was" : "were"} red.`}
       </p>
       {merged && (
         <dl className="facts">
           <dt>After merging</dt>
-          <dd>
-            {mergeCi ? `The base branch was ${ciWords(mergeCi)}${mergeCi.failed_checks ? ` (${mergeCi.failed_checks.join(", ")})` : ""}.` : "Not known yet: the Action reads the checks on the commit it was merged as."}
-          </dd>
+          <dd>{mergeCiWords(mergeCi, mergeCommitKnown)}</dd>
         </dl>
       )}
       {heads.length === 0 ? (
