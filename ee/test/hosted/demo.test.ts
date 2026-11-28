@@ -561,6 +561,8 @@ test("later commits of a pull request where the repository is shown are kept wit
   await db.query(`DELETE FROM pull_outcome_commits WHERE org_id = $1`, [p.there]);
   await db.query(`UPDATE pull_requests SET outcomes_scanned_until = NULL, outcomes_held = NULL WHERE org_id = $1`, [p.there]);
   assert.equal((await call(p.ci, "PUT", "/prs", merged)).status, 200);
+  // Its session's copy has lines in it before it is read: one matched with them after would have it read again from the merge.
+  await importDemo(p.from, p.to, { repo: REPO, hide: [] });
   assert.equal((await call(p.ci, "PUT", "/prs/outcomes", scan)).status, 200);
   assert.match(await keptOf(), /notes\/SECRET-plan\.md.*notes\/SECRET-moved\.md/);
   await importDemo(p.from, p.to, { repo: REPO, hide: ["notes"] });

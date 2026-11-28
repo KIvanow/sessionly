@@ -814,7 +814,7 @@ test("a pull request read again from the merge for a session's new file counts w
   const repo = "github.com/acme/reread";
   const q = encodeURIComponent(repo);
   assert.equal((await upload(repo, "rr-1", "claude-code", [file("a.ts", 1, 2, 3)])).status, 200);
-  await merged(repo, 1, 10, [file("a.ts", 1, 2, 3), file("b.ts", 20, 21, 22)]);
+  await merged(repo, 1, 10, [file("a.ts", 1, 2, 3), file("b.ts", 20, 21, 22), file("c.ts", 30, 31)]);
   const first = (await call(tokens.ci, "GET", `/prs/outcomes/due?repo=${q}`)).body.branches[0].pulls[0];
   assert.deepEqual(first.paths, ["a.ts"]);
   // Commit 1 changed both files; only a.ts was read.
@@ -829,6 +829,10 @@ test("a pull request read again from the merge for a session's new file counts w
   assert.deepEqual(put.body.stored.map((s: any) => [s.sha, s.kind]), [[sha(1), "fix"]]);
   const [c] = (await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=1`)).body.outcomes.commits;
   assert.deepEqual(c.sessions.map((s: any) => [s.session_id, s.lines]).sort(), [["rr-1", 2], ["rr-2", 2]]);
+  // Merged into a branch that is gone since, it cannot be read again: what was kept stays.
+  await db.query(`UPDATE pull_requests SET outcomes_gone_at = now() WHERE repo = $1`, [repo]);
+  assert.equal((await upload(repo, "rr-3", "cursor", [file("c.ts", 30, 31)])).status, 200);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=1`)).body.outcomes.commits.length, 1);
 });
 
 test("a scan that did not read a file a session was matched with meanwhile leaves the pull request as it was", async () => {

@@ -1618,13 +1618,14 @@ async function keepSessions(db: OrgDb, repo: string, number: number, sessions: K
   }
   // A file none of its sessions had lines in was not asked for when its later commits were read
   // (outcomes.ts): one that has some now is read again from the merge, no further than its 30 days.
-  // Not one merged before those of the organisation are read, which would then not be asked for again.
-  // The commits kept of it go too: one kept already is kept again with what it did in the new file.
+  // Not one merged before those of the organisation are read, nor one merged into a branch that is gone,
+  // which would then not be asked for again. The commits kept of it go too: one kept already is kept
+  // again with what it did in the new file.
   const inFiles = new Set(had.flatMap((row) => Object.keys(kept(row.matched) ?? {})));
   if ([...next.values()].some((s) => Object.keys(s.matched ?? {}).some((path) => !inFiles.has(path)))) {
     const reset = await db.query(
       `UPDATE pull_requests SET outcomes_scanned_until = NULL, outcomes_held = NULL, outcomes_tips = NULL
-       WHERE org_id = $1 AND repo = $2 AND number = $3 AND outcomes_scanned_until IS NOT NULL
+       WHERE org_id = $1 AND repo = $2 AND number = $3 AND outcomes_scanned_until IS NOT NULL AND outcomes_gone_at IS NULL
          AND merged_at >= (SELECT outcomes_since FROM orgs WHERE id = $1)
        RETURNING number`,
       [db.orgId, repo, number],
