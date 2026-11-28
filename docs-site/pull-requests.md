@@ -34,6 +34,8 @@ jobs:
         with:
           url: https://sessionly.example.com
           token: ${{ secrets.SESSIONLY_TOKEN }}   # a token with the ci role
+          # Every file that holds Sessionly jobs, on every Sessionly job (see CI below).
+          sessionly-workflows: sessionly.yml, sessionly-nightly.yml, sessionly-ci.yml
 ```
 
 It needs three things:
@@ -79,6 +81,7 @@ pull request's agent lines are counted again on the branch it was merged into, *
 Action does the looking, on a schedule:
 
 ```yaml
+# .github/workflows/sessionly-nightly.yml
 on:
   schedule:
     - cron: "17 5 * * *"   # once a day
@@ -88,11 +91,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read   # to read the files as they are on the branch
+      checks: read     # what CI said of commits still pending (see CI below)
+      statuses: read
+      actions: read
     steps:
       - uses: KIvanow/sessionly/action@main
         with:
           url: https://sessionly.example.com
           token: ${{ secrets.SESSIONLY_TOKEN }}
+          sessionly-workflows: sessionly.yml, sessionly-nightly.yml, sessionly-ci.yml
 ```
 
 Put it in the same workflow file as the report, with `if: github.event_name != 'schedule' &&
@@ -162,6 +169,7 @@ The run needs the repository's history, so the job checks it out whole:
         with:
           url: https://sessionly.example.com
           token: ${{ secrets.SESSIONLY_TOKEN }}
+          sessionly-workflows: sessionly.yml, sessionly-nightly.yml, sessionly-ci.yml
 ```
 
 How it is read:
@@ -298,11 +306,19 @@ How CI is read:
   on every event alike, and for its earlier runs on the same commit (reported when it was
   opened, reviewed, closed: each a run). In a repository with no CI of its own, a head reads as
   none to go by, not green. So **keep the Sessionly jobs in workflow files of their own**, as the
-  examples here are. Where one has to sit in a CI workflow, set `sessionly-workflows` to the
-  files that hold only Sessionly jobs (or to `none`): that CI file's jobs
+  examples here are, and **with Sessionly's jobs in several files, set `sessionly-workflows` to
+  all of them on every Sessionly job** (the examples here name their three), since each run
+  knows only its own file. A reusable workflow runs as its caller's file: that file is the one
+  to name, and naming the reusable file matches nothing. Where a Sessionly job has to sit in a
+  CI workflow, set `sessionly-workflows` to the files that hold only Sessionly jobs (or to
+  `none`): that CI file's jobs
   then count, with only this job's own check run (the `check-run-id` input, which the workflow
-  run fills in itself) left out of it. Without `actions: read`, only this job's own check run
-  and skipped runs are left out, and the run warns once. `ci-ignore` leaves out checks and
+  run fills in itself) left out of it. On a pull request event, where this run's check runs are
+  on the head it reads, a CI job of this run in a file not named is seen, and that file is then
+  read but for the check runs named as this job, with a warning once to set
+  `sessionly-workflows`; on other events the file goes whole. Without `actions: read`, only this
+  job's own check run and skipped runs are left out, workflow runs that never had jobs are not
+  counted, and the run warns once. `ci-ignore` leaves out checks and
   statuses by name (`deploy-*`, `codecov`); `ci-only` counts only the ones it names, such as
   those required to merge.
 - Of a **merge commit**, GitHub Actions check runs count only for the workflow runs its push
@@ -316,8 +332,9 @@ How CI is read:
   run reads those too. They are read again **when a workflow of your CI finishes**, if the
   workflow runs the Action on `workflow_run`, and once a day by **the scheduled run**, which
   asks the server for the heads still pending (reported in the last 7 days) and for the merge
-  commits of merged pull requests with agent lines that were not read yet, or read while their
-  checks were still running, in the 7 days after merging.
+  commits of merged pull requests with agent lines merged in the last 7 days, not read yet or
+  read while their checks were still running; after that a merge is not asked for again, and one
+  read as still running by then has none to go by.
 - A pull request reported before version 0.5.0 of the Action has no heads kept: its next report
   keeps the head it is at, with all of its lines as arriving there.
 
@@ -331,6 +348,7 @@ workflow run, as its merge CI. A fork's pull request gets this only once it has 
 for a fork.
 
 ```yaml
+# .github/workflows/sessionly-ci.yml
 on:
   workflow_run:
     workflows: [CI]          # the names of your CI workflows
@@ -349,11 +367,13 @@ jobs:
         with:
           url: https://sessionly.example.com
           token: ${{ secrets.SESSIONLY_TOKEN }}
+          sessionly-workflows: sessionly.yml, sessionly-nightly.yml, sessionly-ci.yml
 ```
 
 Without `checks: read` and `statuses: read` the run warns once, CI is not known, and the rest
 is not affected; without `actions: read` it warns once, leaves out only its own check run and
-skipped runs, and knows no merge commit's CI; `ci: false` reads none. `ci-check-names: true` also sends the names of the
+skipped runs, does not count workflow runs that never had jobs, and knows no merge commit's CI;
+`ci: false` reads none. `ci-check-names: true` also sends the names of the
 checks that failed on a red commit (at most 20, each cut to 100 characters), off by default
 because names can carry the names of clients, environments or systems.
 
@@ -388,7 +408,7 @@ either way), the same for every age, and says for how many pull requests CI is n
 | `bug-labels` | | Words that make a linked issue's label a bug label, separated by commas, in place of the default list. |
 | `ci` | `true` | Read what CI made of the pull request's commits, when it is reported, on `workflow_run`, and on the scheduled run. Needs `checks: read` and `statuses: read`, and `actions: read` to tell Sessionly's own runs apart and to read merge commits. See [CI](#ci). |
 | `sessionly-workflows` | | The workflow files that hold only Sessionly's jobs (`sessionly.yml`, or `.github/workflows/sessionly.yml`), separated by commas or new lines: their runs are left out of the CI it reads, in place of this run's own file. See [CI](#ci). |
-| `ci-ignore` | | Checks and statuses to leave out, by name, separated by commas or new lines; `*` stands for any text. Sessionly's own workflow runs are left out without being named. |
+| `ci-ignore` | | Checks and statuses to leave out, by name, separated by commas or new lines; `*` stands for any text. Sessionly's own workflow runs are left out by file (`sessionly-workflows`), not here. |
 | `ci-only` | | Count only the checks and statuses named here (as `ci-ignore` names them). |
 | `ci-check-names` | `false` | Also send the names of the checks that failed on a red commit (at most 20, each cut to 100 characters). |
 | `check-run-id` | the job's own | The id of this job's check run, left out of the CI it reads. The workflow run fills it in; leave it. |
@@ -768,12 +788,16 @@ jobs:
     permissions:
       pull-requests: read
       contents: read   # backfill compares commits
+      checks: read     # what CI said of its commits (see CI)
+      statuses: read
+      actions: read
     steps:
       - uses: KIvanow/sessionly/action@main
         with:
           url: https://sessionly.example.com
           token: ${{ secrets.SESSIONLY_TOKEN }}
           pr-number: ${{ inputs.number }}
+          sessionly-workflows: sessionly.yml, sessionly-nightly.yml, sessionly-ci.yml
           backfill: true
           comment: false
 ```

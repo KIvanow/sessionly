@@ -129,8 +129,8 @@ inputs:
   ci-ignore:
     description: >-
       Checks and statuses to leave out when reading CI, by name, separated
-      by commas or new lines; * stands for any text. The runs of Sessionly's
-      own workflow files are left out without being named.
+      by commas or new lines; * stands for any text. Sessionly's own
+      workflow runs are left out by file (sessionly-workflows), not here.
     default: ""
   ci-only:
     description: >-
