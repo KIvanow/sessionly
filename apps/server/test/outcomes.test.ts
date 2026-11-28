@@ -524,7 +524,7 @@ test("lines three sessions wrote in a file are common: a commit that removes onl
   assert.equal(page.outcomes.windows["7d"].rework_commits, 1);
 });
 
-test("a pull request matched before common lines were kept has them worked out when it is first asked for", async () => {
+test("a pull request matched before common lines were kept has them worked out when its later commits are first stored", async () => {
   await readingSince();
   const repo = "github.com/acme/oldcommon";
   const q = encodeURIComponent(repo);
@@ -534,10 +534,12 @@ test("a pull request matched before common lines were kept has them worked out w
   await merged(repo, 1, 20, [file("a.ts", 1, 2, 5, 6)]);
   // As a server from before them left it.
   await db.query(`UPDATE pull_requests SET common_lines = NULL WHERE repo = $1`, [repo]);
+  const common = async () => (await db.query(`SELECT common_lines FROM pull_requests WHERE repo = $1`, [repo]))[0]!.common_lines;
+  // Asking what is due changes nothing: they are worked out as its later commits are stored.
   assert.equal((await call(tokens.ci, "GET", `/prs/outcomes/due?repo=${q}`)).status, 200);
-  const [row] = await db.query(`SELECT common_lines FROM pull_requests WHERE repo = $1`, [repo]);
-  assert.deepEqual(row!.common_lines, { "a.ts": [h(1), h(2)] });
+  assert.equal(await common(), null);
   assert.equal((await scanOf(repo, [1], [commit(1, ago(15), [{ path: "a.ts", removed: [1, 2] }])])).status, 200);
+  assert.deepEqual(await common(), { "a.ts": [h(1), h(2)] });
   const page = (await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=1`)).body;
   assert.deepEqual(page.outcomes.commits.map((c: any) => [c.sha, c.counted]), [[sha(1), false]]);
 });
@@ -761,7 +763,7 @@ test("pull requests merged into branches that are gone are not asked for again, 
   assert.equal((await call(tokens.ci, "PUT", "/prs/outcomes", { repo, base_ref: "main", scanned_until: ago(0), pulls: [], commits: [], gone: [2 ** 31] })).status, 422);
 });
 
-test("pull requests asked for and not read go behind the others, so a branch that cannot be read holds back none", async () => {
+test("pull requests said not to be read go behind the others, so a branch that cannot be read holds back none", async () => {
   await readingSince();
   const repo = "github.com/acme/unreadable";
   const q = encodeURIComponent(repo);
@@ -771,11 +773,37 @@ test("pull requests asked for and not read go behind the others, so a branch tha
   await merged(repo, 99, 3, [file("a.ts", 1, 2, 3)]);
   const bases = async () => (await call(tokens.ci, "GET", `/prs/outcomes/due?repo=${q}`)).body.branches.map((b: any) => [b.base_ref, b.pulls.length]);
   assert.deepEqual(await bases(), [["release", 50]]);
-  // None of them read: the next run is asked for #99 first.
+  // Asked for again, the same: asking changes nothing.
+  assert.deepEqual(await bases(), [["release", 50]]);
+  // Said not to be read (one named for another branch than its own is left as it is): the next run is asked for #99 first.
+  const unread = Array.from({ length: 50 }, (_, i) => i + 1);
+  const said = await call(tokens.ci, "PUT", "/prs/outcomes", { repo, base_ref: "release", tip: null, scanned_until: ago(0), pulls: [], commits: [], unread: [...unread, 99] });
+  assert.deepEqual(said.body.stored, []);
   assert.deepEqual(await bases(), [["main", 1], ["release", 49]]);
-  // Read, #99 is one read up to now, behind those asked for longest ago.
+  // That says nothing of how far the branch was read.
+  assert.deepEqual(await db.query(`SELECT 1 FROM repo_outcome_scans WHERE repo = $1`, [repo]), []);
+  // Read, #99 is one read up to now, behind those said not to be read before.
   assert.equal((await scanOf(repo, [99], [])).status, 200);
   assert.deepEqual((await bases())[0], ["release", 50]);
+  assert.equal((await call(tokens.ci, "PUT", "/prs/outcomes", { repo, base_ref: "release", scanned_until: ago(0), pulls: [], commits: [], unread: [0] })).status, 422);
+});
+
+test("asking what is due and not reading it holds back no pull request", async () => {
+  await readingSince();
+  const repo = "github.com/acme/polled";
+  const q = encodeURIComponent(repo);
+  assert.equal((await upload(repo, "po-1", "codex", [file("a.ts", 1, 2, 3)])).status, 200);
+  for (let n = 1; n <= 110; n += 1) await merged(repo, n, 20 - n * 0.1, [file("a.ts", 1, 2, 3)]);
+  const due = async () => (await call(tokens.ci, "GET", `/prs/outcomes/due?repo=${q}`)).body.branches.flatMap((b: any) => b.pulls.map((p: any) => p.number));
+  const read = new Set<number>();
+  // Each day, one that asks and does not read (a script, or a job without a checkout), then a run that reads all it is given.
+  for (let day = 0; day < 4; day += 1) {
+    await due();
+    const numbers = await due();
+    assert.equal((await scanOf(repo, numbers, [])).status, 200);
+    for (const n of numbers) read.add(n);
+  }
+  assert.equal(read.size, 110);
 });
 
 test("a commit that landed the moment its pull request was merged counts when the history says it came after", async () => {

@@ -95,16 +95,15 @@ const KEPT = `(jsonb_typeof(s.matched) = 'object' AND s.matched <> '{}'::jsonb)`
  * go back), and whose branch is not gone. Each says from when (`since`,
  * how far it was read, and `tips`, the commits it was read up to); a branch
  * reads from the earliest of its pull requests. No line hashes. Those read
- * or asked for longest ago come first, and those given are marked asked
- * for: one a run cannot read (its branch is not in the checkout, or its
- * reading fails) goes behind the rest, rather than first at every run.
- * One matched before common lines were kept has them worked out first
- * (with `key`, as matching): its later commits are counted by them.
+ * longest ago come first; one a run said it could not read (`unread`: its
+ * branch is not in the checkout, or its reading fails) counts as read
+ * then, so it goes behind the rest rather than first at every run. Asking
+ * changes nothing.
  */
-export async function outcomesDue(db: OrgDb, repo: string, since: string | null = null, key?: string): Promise<OutcomesDue> {
+export async function outcomesDue(db: OrgDb, repo: string, since: string | null = null): Promise<OutcomesDue> {
   const rows = await db.query(
     `SELECT p.number, p.base_ref, p.merged_at, p.merge_commit_sha, coalesce(p.outcomes_scanned_until, p.merged_at) AS since,
-            p.outcomes_held, p.outcomes_tips, p.common_lines IS NULL AS uncommon,
+            p.outcomes_held, p.outcomes_tips,
             (SELECT array_agg(DISTINCT k.path ORDER BY k.path)
              FROM pull_sessions s, jsonb_object_keys(CASE WHEN ${KEPT} THEN s.matched ELSE '{}'::jsonb END) AS k(path)
              WHERE s.org_id = p.org_id AND s.repo = p.repo AND s.number = p.number) AS paths
@@ -114,16 +113,10 @@ export async function outcomesDue(db: OrgDb, repo: string, since: string | null 
        AND (p.outcomes_scanned_until IS NULL OR p.outcomes_scanned_until < p.merged_at + interval '720 hours')
        AND p.outcomes_gone_at IS NULL
        AND EXISTS (SELECT 1 FROM pull_sessions s WHERE s.org_id = p.org_id AND s.repo = p.repo AND s.number = p.number AND ${KEPT})
-     ORDER BY greatest(coalesce(p.outcomes_scanned_until, p.merged_at), p.outcomes_asked_at), p.number
+     ORDER BY greatest(coalesce(p.outcomes_scanned_until, p.merged_at), p.outcomes_unread_at), p.number
      LIMIT ${DUE_AT_ONCE}`,
     [db.orgId, repo, since],
   );
-  for (const row of rows) if (row.uncommon === true) await keepCommonLines(db, repo, num(row.number), key);
-  if (rows.length > 0) {
-    await db.query(`UPDATE pull_requests SET outcomes_asked_at = clock_timestamp() WHERE org_id = $1 AND repo = $2 AND number = ANY($3::integer[])`, [
-      db.orgId, repo, rows.map((row) => num(row.number)),
-    ]);
-  }
   const branches = new Map<string, OutcomesDueBranch>();
   for (const row of rows) {
     const base = String(row.base_ref);
@@ -218,6 +211,7 @@ export function checkOutcomes(body: unknown): PullOutcomesReport {
       };
     }),
     gone: numbers(r.gone ?? [], "gone"),
+    unread: numbers(r.unread ?? [], "unread"),
     commits: (commits as Record<string, unknown>[]).map((c): OutcomeCommitReport => {
       if (!c || typeof c.sha !== "string" || !COMMIT_SHA.test(c.sha)) fail("each commit needs a SHA");
       const changed = Array.isArray(c.files) ? c.files : fail("each commit needs files");
@@ -522,11 +516,14 @@ function agentShares(matched: (Lines | null)[], files: { path: string; hashes: s
  * did not see its lines (and one after it may have landed the moment it was
  * merged). One matched since with lines in a file the run did not read
  * (`paths`) is left as it is. A commit kept once is not changed, but for a
- * later revert of it (`relands`).
+ * later revert of it (`relands`). One matched before common lines were
+ * kept has them worked out first (with `key`, as matching): its later
+ * commits are counted by them.
  */
 export async function storeOutcomes(
   each: <T>(fn: (db: OrgDb) => Promise<T>) => Promise<T>,
   report: PullOutcomesReport,
+  key?: string,
   now = Date.now(),
 ): Promise<PullOutcomesStored> {
   const stored: PullOutcomesStored["stored"] = [];
@@ -535,6 +532,7 @@ export async function storeOutcomes(
   const commits = report.commits.map((commit) => ({ commit, landed: time(commit.landed_at), lines: counted(commit) }));
   for (const asked of report.pulls) {
     const kept = await each(async (db) => {
+      await keepCommonLines(db, report.repo, asked.number, key);
       await holdPull(db, report.repo, asked.number);
       const [pull] = await db.query(
         `SELECT state, base_ref, merged_at, merge_commit_sha, outcomes_scanned_until, outcomes_held, outcomes_tips, last_files
@@ -621,8 +619,19 @@ export async function storeOutcomes(
       ),
     );
   }
-  // The tip a run read to stays the branch's until a run reads further: one that read less and ended later says nothing of it.
+  // Not read: they go behind the others, as if read now. One that only says so says nothing of how far the branch was read.
   const scanned = new Date(read).toISOString();
+  if ((report.unread ?? []).length > 0) {
+    await each((db) =>
+      db.query(
+        `UPDATE pull_requests SET outcomes_unread_at = clock_timestamp()
+         WHERE org_id = $1 AND repo = $2 AND base_ref = $3 AND state = 'merged' AND number = ANY($4::integer[])`,
+        [db.orgId, report.repo, report.base_ref, report.unread],
+      ),
+    );
+    if (report.pulls.length === 0 && report.commits.length === 0 && (report.gone ?? []).length === 0) return { stored, scanned_until: scanned };
+  }
+  // The tip a run read to stays the branch's until a run reads further: one that read less and ended later says nothing of it.
   await each((db) =>
     db.query(
       `INSERT INTO repo_outcome_scans (org_id, repo, branch, scanned_until, tip) VALUES ($1, $2, $3, $4, $5)

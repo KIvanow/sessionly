@@ -948,7 +948,7 @@ const MIGRATIONS: string[] = [
   // Of its lines as last reported, those 3 or more sessions wrote in their
   // file (`common_lines`, {path: [hashes]}): a later commit that removes
   // only these does not count. Worked out each time it is matched; null for
-  // one matched before this, until its later commits are first asked for
+  // one matched before this, until its later commits are first stored
   // (`keepCommonLines`).
   // And what later commits on its base branch did to its lines (outcomes.ts):
   // how far that branch has been read for it, and which of its lines it
@@ -959,9 +959,9 @@ const MIGRATIONS: string[] = [
   // reachable from one of them was sent, whatever its date; null while not
   // known. And when the Action said that branch is gone (`outcomes_gone_at`):
   // its later commits cannot be read, so it is not asked for again, and
-  // counts nowhere. And when a run was last asked to read it
-  // (`outcomes_asked_at`): one asked for and not read since goes behind
-  // those read longer ago, so a branch no run can read holds back none.
+  // counts nowhere. And when a run last said it could not read it
+  // (`outcomes_unread_at`): one not read since goes behind those read
+  // longer ago, so a branch no run can read holds back none.
   `ALTER TABLE pull_requests
      ADD COLUMN head_sha text,
      ADD COLUMN merge_commit_sha text,
@@ -970,7 +970,7 @@ const MIGRATIONS: string[] = [
      ADD COLUMN outcomes_held jsonb,
      ADD COLUMN outcomes_tips jsonb,
      ADD COLUMN outcomes_gone_at timestamptz,
-     ADD COLUMN outcomes_asked_at timestamptz`,
+     ADD COLUMN outcomes_unread_at timestamptz`,
   // From when an organisation's merged pull requests have their later
   // commits read: 30 days before it began to, the longest age, so the first
   // run has some to show. Those are history, so the Action can be asked to

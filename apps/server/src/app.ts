@@ -329,11 +329,9 @@ export function dashboardPolicy(telemetry?: Telemetry | null): string {
 /**
  * Reading pull requests takes several statements, whose figures and
  * sessions have to be of one moment: a report stored between two of them
- * would otherwise leave lines of before beside costs of after. Not what is
- * due after merging, which marks those it gives as asked for.
+ * would otherwise leave lines of before beside costs of after.
  */
-const readsPulls = (method: string, path: string): boolean =>
-  method === "GET" && /\/prs(?:\/[a-z]+){0,2}$/.test(path) && !path.endsWith("/prs/outcomes/due");
+const readsPulls = (method: string, path: string): boolean => method === "GET" && /\/prs(?:\/[a-z]+){0,2}$/.test(path);
 
 /** What a ci token may ask for: pull request reports, and what is due after merging. The whole path, so no other route ending so is one. */
 const REPORTING = { PUT: /^\/api\/v1\/prs(?:\/after-merge|\/outcomes)?$/, GET: /^\/api\/v1\/prs(?:\/outcomes)?\/due$/ };
@@ -572,7 +570,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   // none is held while the others are walked.
   api.put("/prs/outcomes", async (c) => {
     const each = <T>(fn: (db: OrgDb) => Promise<T>) => ownerDb.asOrg(c.get("principal").orgId, fn);
-    return c.json(await storeOutcomes(each, c.get("outcomes")!));
+    return c.json(await storeOutcomes(each, c.get("outcomes")!, options.hashKey));
   });
 
   // The rest of the request runs in one transaction, as the organisation of
@@ -818,7 +816,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     reportersOnly(c.get("principal"));
     const repo = c.req.query("repo");
     if (!repo) throw new BadRequest("repo is required");
-    return c.json(await outcomesDue(c.get("db"), repo.replace(/\/+$/, ""), time(c.req.query("since"), "since") ?? null, options.hashKey));
+    return c.json(await outcomesDue(c.get("db"), repo.replace(/\/+$/, ""), time(c.req.query("since"), "since") ?? null));
   });
   // What later commits did to merged pull requests' lines, summed by group (merge clock).
   api.get("/prs/outcomes/summary", async (c) => {

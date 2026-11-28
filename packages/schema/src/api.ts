@@ -1338,6 +1338,12 @@ export interface PullOutcomesReport {
    * the branch is gone. They are not asked for again, and count nowhere.
    */
   gone?: number[];
+  /**
+   * Pull requests merged into `base_ref` that this run could not read: the
+   * branch is not in the checkout, or its reading failed. They are asked
+   * for after the others from then on, as if read now.
+   */
+  unread?: number[];
 }
 
 /** What `PUT /prs/outcomes` answers: the later commits kept, by pull request. */
