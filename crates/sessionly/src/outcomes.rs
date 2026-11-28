@@ -719,6 +719,109 @@ type Read = (usize, Option<(Vec<OutcomeEvent>, &'static str)>);
 /// What a reading of one repository found.
 type Found = Result<(Vec<OutcomeEvent>, &'static str), Stop>;
 
+/// Where the files in a directory are read, as what is on disk says.
+#[derive(Debug, Clone)]
+enum Under {
+    /// In the worktree `root`, the paths taken from `top`: the worktree
+    /// itself, or one Claude Code made in it, removed since.
+    Repo { top: PathBuf, root: PathBuf },
+    /// In the worktree `root`, through `gone` (a path in it), which is not
+    /// there now: a directory of the repository removed since, or one it
+    /// never had.
+    Doubt { root: PathBuf, gone: PathBuf },
+    /// In a worktree noted before that is not there now: read later.
+    Away,
+    /// In no repository.
+    Outside,
+}
+
+/// Where the files in `dir` are read: in the nearest directory above it
+/// with a `.git`, or the repository a worktree Claude Code made was of. On
+/// the way there, a worktree noted before that is gone now says the files
+/// are in a repository away, and a directory gone now leaves it in doubt.
+fn under(dir: &Path, noted: &HashMap<String, NotedRepo>) -> Under {
+    let (mut gone, mut noted_gone): (Option<&Path>, bool) = (None, false);
+    for at in dir.ancestors() {
+        if at.join(".git").exists() {
+            let root = at.to_path_buf();
+            return match (claude_worktree(dir), gone) {
+                (Some((top, of)), _) if of == root => Under::Repo { top, root },
+                _ if noted_gone => Under::Away,
+                (_, Some(gone)) => match gone.strip_prefix(at) {
+                    Ok(gone) => Under::Doubt {
+                        gone: gone.to_path_buf(),
+                        root,
+                    },
+                    Err(_) => Under::Away,
+                },
+                (_, None) => Under::Repo {
+                    top: root.clone(),
+                    root,
+                },
+            };
+        }
+        if noted.contains_key(at.to_string_lossy().as_ref()) {
+            noted_gone = true;
+        } else if !at.exists() {
+            gone = Some(at);
+        }
+    }
+    if noted_gone {
+        Under::Away
+    } else {
+        Under::Outside
+    }
+}
+
+/// The worktree `<root>/.claude/worktrees/<name>` that `dir` is in, as
+/// Claude Code makes them, when it has no `.git` now (removed, merged) and
+/// `<root>` has: where its paths start, and the repository it was of. What
+/// was written in it is read in `<root>`, with the paths as they were in it.
+fn claude_worktree(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    dir.ancestors().find_map(|top| {
+        let worktrees = top.parent()?;
+        let claude = worktrees.parent()?;
+        let root = claude.parent()?;
+        (worktrees.file_name()? == "worktrees"
+            && claude.file_name()? == ".claude"
+            && !top.join(".git").exists()
+            && root.join(".git").exists())
+        .then(|| (top.to_path_buf(), root.to_path_buf()))
+    })
+}
+
+/// Why a session's files could not all be placed.
+#[derive(Debug, Clone, PartialEq)]
+enum Unplaced {
+    /// Not in this sync's time: read on another.
+    NotNow,
+    /// A repository of it is not there now: tried again later, with no
+    /// count kept without it.
+    Away,
+}
+
+/// Whether a commit since `since` (in any branch) has a path under `gone`,
+/// relative to the worktree `root`. Git is asked for `ASKING` at most.
+fn has_path(root: &Path, gone: &Path, since: i64, deadline: Instant) -> Result<bool, Unplaced> {
+    let until = deadline.min(Instant::now() + ASKING);
+    let mut command = history(root, false);
+    command
+        .args([
+            "rev-list",
+            "-1",
+            &format!("--max-age={since}"),
+            "--all",
+            "--",
+        ])
+        .arg(gone);
+    match crate::git::lookup(command, until) {
+        Ok(found) => Ok(found.is_some_and(|sha| !sha.is_empty())),
+        // Out of the sync's time, not of its own: asked again.
+        Err(Stop::TimedOut) if until == deadline => Err(Unplaced::NotNow),
+        Err(_) => Err(Unplaced::Away),
+    }
+}
+
 /// `path` with `.` and `..` taken out as they are written, links not
 /// followed: a path into a repository and out of it again
 /// (`repo/../notes.md`) is not in it.
@@ -802,7 +905,7 @@ pub fn measure(
         .filter(|t| counting(t))
         .map(|t| t.session_id.as_str())
         .collect();
-    let mut root_of: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
+    let mut root_of: HashMap<PathBuf, Under> = HashMap::new();
     let mut roots: BTreeSet<PathBuf> = targets
         .iter()
         .filter(|t| counting(t))
@@ -817,10 +920,15 @@ pub fn measure(
             None => PathBuf::from(path),
         });
         let Some(dir) = path.parent() else { continue };
-        let root = root_of
+        match root_of
             .entry(dir.to_path_buf())
-            .or_insert_with(|| crate::git::repo_root(dir));
-        roots.extend(root.clone());
+            .or_insert_with(|| under(dir, &worktrees.noted))
+        {
+            Under::Repo { root, .. } | Under::Doubt { root, .. } => {
+                roots.insert(root.clone());
+            }
+            Under::Away | Under::Outside => {}
+        }
     }
     let finding = (started + worktrees.asking * 2).min(deadline);
     for root in roots {
@@ -868,14 +976,16 @@ pub fn measure(
         .collect();
     // Per repository: the worktrees, and the lines by file.
     type Placed = (BTreeSet<PathBuf>, BTreeMap<String, Vec<u64>>);
+    // Whether a commit has a directory gone now, by worktree, path, and since when.
+    let mut committed: HashMap<(PathBuf, PathBuf, i64), Result<bool, Unplaced>> = HashMap::new();
     // Where a session's files are read, by repository (of those in `only`,
-    // when given); none when one could not be found in this sync's time,
-    // for a session to read. One only read beside them (`only`) is placed
-    // without that file: what it has in the others says whose their lines
-    // are, and which agent made a commit.
+    // when given); for a session to read, not when one could not be found
+    // in this sync's time, or is not there now. One only read beside them
+    // (`only`) is placed without that file: what it has in the others says
+    // whose their lines are, and which agent made a commit.
     let mut place = |target: &OutcomeTarget,
                      only: Option<&HashSet<PathBuf>>|
-     -> Option<BTreeMap<PathBuf, Placed>> {
+     -> Result<BTreeMap<PathBuf, Placed>, Unplaced> {
         let mut by_repo: BTreeMap<PathBuf, Placed> = BTreeMap::new();
         for (path, hashes) in &target.files {
             let path = lexical(&match &target.base {
@@ -888,11 +998,34 @@ pub fn measure(
                 Some((gone, common)) => (gone.clone(), common.clone(), common.clone()),
                 None => {
                     let Some(dir) = path.parent() else { continue };
-                    let root = root_of
+                    let found = root_of
                         .entry(dir.to_path_buf())
-                        .or_insert_with(|| crate::git::repo_root(dir))
+                        .or_insert_with(|| under(dir, &worktrees.noted))
                         .clone();
-                    let Some(root) = root else { continue };
+                    let (top, root) = match found {
+                        Under::Repo { top, root } => (top, root),
+                        // A directory of the repository removed since, or a
+                        // repository of its own in it (a worktree removed
+                        // before any sync saw it): which one, a commit that
+                        // has it says. One no commit has (a directory made
+                        // and removed again, never committed) is not read.
+                        Under::Doubt { root, gone } => {
+                            let since = target.started_at.timestamp().saturating_sub(SLACK);
+                            let has = committed
+                                .entry((root.clone(), gone.clone(), since))
+                                .or_insert_with(|| has_path(&root, &gone, since, deadline))
+                                .clone();
+                            match has {
+                                Ok(true) => (root.clone(), root),
+                                Ok(false) => continue,
+                                Err(_) if only.is_some() => continue,
+                                Err(unplaced) => return Err(unplaced),
+                            }
+                        }
+                        Under::Away if only.is_some() => continue,
+                        Under::Away => return Err(Unplaced::Away),
+                        Under::Outside => continue,
+                    };
                     let asked = repo_of.entry(root.clone()).or_insert_with(|| {
                         // Git is not asked of one in a repository nothing is read in.
                         let named = only.and_then(|only| {
@@ -907,9 +1040,9 @@ pub fn measure(
                         if only.is_some() {
                             continue;
                         }
-                        return None;
+                        return Err(Unplaced::NotNow);
                     };
-                    (root.clone(), root, repo.clone())
+                    (top, root, repo.clone())
                 }
             };
             if only.is_some_and(|only| !only.contains(&repo)) {
@@ -932,7 +1065,7 @@ pub fn measure(
                 most_of(kept, hashes)
             };
         }
-        Some(by_repo)
+        Ok(by_repo)
     };
     // The sessions to read first, then the others in the repositories they
     // are in: no repository is made up for nothing to read in it.
@@ -946,7 +1079,9 @@ pub fn measure(
             }
             if target.repo.as_ref().is_some_and(|repo| {
                 let repo = Path::new(repo);
-                !repo.join(".git").exists() && !removed.contains_key(repo)
+                !repo.join(".git").exists()
+                    && !removed.contains_key(repo)
+                    && claude_worktree(repo).is_none()
             }) {
                 unavailable.insert(index);
                 continue;
@@ -956,15 +1091,18 @@ pub fn measure(
                 break;
             }
             match place(target, (!scanning).then_some(&due_repos)) {
-                Some(by_repo) if scanning => {
+                Ok(by_repo) if scanning => {
                     due_repos.extend(by_repo.keys().cloned());
                     placed.insert(index, by_repo);
                 }
-                Some(by_repo) => {
+                Ok(by_repo) => {
                     placed.insert(index, by_repo);
                 }
-                None => {
+                Err(Unplaced::NotNow) => {
                     deferred.insert(index);
+                }
+                Err(Unplaced::Away) => {
+                    unavailable.insert(index);
                 }
             }
         }
@@ -4582,6 +4720,153 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
                 "in it: {in_it}"
             );
         }
+    }
+
+    /// A worktree in the repository, at `<repo>/<at>`, ignored there, with
+    /// the session's lines committed in it, merged and removed; noted on a
+    /// sync while it was there when `seen`. The session ran in it, when
+    /// `in_it`, or in the repository and wrote in it (a subagent's).
+    fn a_worktree_inside(at: &str, seen: bool, in_it: bool) -> World {
+        let mut world = World::new();
+        let ignored = at.split('/').next().unwrap();
+        world.commit(".gitignore", &format!("{ignored}/\n"), "ignore", T0);
+        world.commit("f.js", "// base line one\n", "init", T0);
+        let wt = world.root().join(at);
+        world.git(
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "task",
+                wt.to_str().unwrap(),
+            ],
+            T0,
+        );
+        commit_in(
+            &wt,
+            "f.js",
+            &format!("// base line one\n{}\n", AGENT.join("\n")),
+            "Add compute",
+            T0 + HOUR,
+        );
+        let there = wt.join("f.js");
+        let (root, file) = if in_it {
+            (wt.clone(), "f.js")
+        } else {
+            (world.root(), there.to_str().unwrap())
+        };
+        world.session_in(
+            &root,
+            "claude-code",
+            "s1",
+            T0,
+            T0 + 2 * HOUR,
+            &[(file, AGENT)],
+        );
+        if seen {
+            world.measure(T0 + 2 * HOUR);
+        }
+        world.git(&["merge", "--quiet", "--ff-only", "task"], T0 + 3 * HOUR);
+        world.git(&["worktree", "remove", wt.to_str().unwrap()], T0 + 3 * HOUR);
+        fix_two(&world, T0 + 3 * DAY);
+        world.measure(T0 + 8 * DAY);
+        world
+    }
+
+    #[test]
+    fn a_worktree_claude_code_made_in_the_repository_is_read_there_once_removed() {
+        // As Claude Code makes them: `<repo>/.claude/worktrees/<name>`.
+        for (seen, in_it) in [(false, false), (false, true), (true, false), (true, true)] {
+            let world = a_worktree_inside(".claude/worktrees/task", seen, in_it);
+            let week = world
+                .at("s1", "7d")
+                .map(|w| (w.fix_commits, w.lines_tracked));
+            assert_eq!(week, Some((1, 4)), "seen: {seen}, in it: {in_it}");
+        }
+    }
+
+    #[test]
+    fn a_worktree_in_the_repository_removed_unseen_is_not_read_as_the_repository() {
+        // Its paths are no commit's there: read as they were, nothing would
+        // ever have happened to its lines.
+        let world = a_worktree_inside("work/task", false, false);
+        assert_eq!(world.at("s1", "7d").map(|w| w.lines_tracked), None);
+        let world = a_worktree_inside("work/task", true, false);
+        let week = world
+            .at("s1", "7d")
+            .map(|w| (w.fix_commits, w.lines_tracked));
+        assert_eq!(week, Some((1, 4)));
+    }
+
+    #[test]
+    fn a_directory_the_repository_removed_since_is_read_there() {
+        let mut world = World::new();
+        world.commit("f.js", "// base line one\n", "init", T0);
+        world.commit(
+            "lib/f.js",
+            &format!("{}\n", AGENT.join("\n")),
+            "Add compute",
+            T0 + HOUR,
+        );
+        world.session("s1", T0, T0 + 2 * HOUR, &[("lib/f.js", AGENT)]);
+        world.git(&["rm", "-r", "--quiet", "lib"], T0 + 2 * DAY);
+        world.git(&["commit", "--quiet", "-m", "Drop lib"], T0 + 2 * DAY);
+        world.measure(T0 + 8 * DAY);
+        let week = world.at("s1", "7d").expect("never counted");
+        assert_eq!(
+            (week.lines_tracked, week.rework_commits, week.lines_reworked),
+            (4, 1, 4.0)
+        );
+    }
+
+    #[test]
+    fn a_second_repository_away_gives_no_count_from_the_first() {
+        let (mut world, _) = written();
+        let other = World::new();
+        let lib: &[&str] = &[
+            "let one = helper(1);",
+            "let two = helper(2);",
+            "let three = helper(3);",
+        ];
+        other.commit("g.js", "// lib base\n", "init", T0);
+        other.commit(
+            "g.js",
+            &format!("// lib base\n{}\n", lib.join("\n")),
+            "Add helper",
+            T0 + HOUR,
+        );
+        let g = other.root().join("g.js");
+        world.session(
+            "s1",
+            T0,
+            T0 + 2 * HOUR,
+            &[("f.js", AGENT), (g.to_str().unwrap(), lib)],
+        );
+        // A sync while both are there notes them.
+        world.measure(T0 + 3 * HOUR);
+        let fixed = lib
+            .join("\n")
+            .replace("helper(1)", "helper(10)")
+            .replace("helper(2)", "helper(20)");
+        other.commit(
+            "g.js",
+            &format!("// lib base\n{fixed}\n"),
+            "fix: helper arguments",
+            T0 + 4 * DAY,
+        );
+        // The second repository is away (an unmounted disk, a moved folder):
+        // nothing is kept, and it is tried again later.
+        let away = other.dir.path().join("away");
+        std::fs::rename(other.root(), &away).unwrap();
+        world.measure(T0 + 8 * DAY);
+        assert!(world.at("s1", "7d").is_none());
+        assert_eq!(world.target("s1").failures, 1);
+        // Back again, it is counted with both.
+        std::fs::rename(&away, other.root()).unwrap();
+        world.measure(T0 + 9 * DAY);
+        let week = world.at("s1", "7d").expect("never counted");
+        assert_eq!((week.fix_commits, week.lines_tracked), (1, 7));
     }
 
     #[cfg(unix)]
