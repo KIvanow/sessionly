@@ -1709,15 +1709,16 @@ type Move = (String, String, u64, u64);
 fn unmoved(mut files: HashMap<String, FileDiff>) -> (HashMap<String, FileDiff>, f64, Vec<Move>) {
     let mut paths: Vec<String> = files.keys().cloned().collect();
     paths.sort();
-    // Which files each line was removed from and added to, in that order,
-    // and how many: found once, not file by file for each line.
-    let mut removed: HashMap<u64, Vec<(&str, u64)>> = HashMap::new();
-    let mut added: HashMap<u64, Vec<(&str, u64)>> = HashMap::new();
-    for path in &paths {
+    // Which files each line was removed from and added to, by their place
+    // in `paths`, in that order, and how many: found once, not file by file
+    // for each line.
+    let mut removed: HashMap<u64, Vec<(usize, u64)>> = HashMap::new();
+    let mut added: HashMap<u64, Vec<(usize, u64)>> = HashMap::new();
+    for (p, path) in paths.iter().enumerate() {
         let diff = &files[path];
         for (bag, at) in [(&diff.removed, &mut removed), (&diff.added, &mut added)] {
             for (hash, n) in bag {
-                at.entry(*hash).or_default().push((path.as_str(), *n));
+                at.entry(*hash).or_default().push((p, *n));
             }
         }
     }
@@ -1730,23 +1731,28 @@ fn unmoved(mut files: HashMap<String, FileDiff>) -> (HashMap<String, FileDiff>, 
     // Which file each moved line left, and which it went to, in order; and
     // how many copies of each line come out of each file, removed and added.
     let mut moves = Vec::new();
-    let mut out: HashMap<(&str, u64), (u64, u64)> = HashMap::new();
+    let mut out: HashMap<(usize, u64), (u64, u64)> = HashMap::new();
     for hash in hashes {
-        let (mut from, mut to) = (removed[&hash].clone(), added[&hash].clone());
-        // In the same file first: not moved.
-        let here: HashMap<&str, usize> = to
-            .iter()
-            .enumerate()
-            .map(|(k, (path, _))| (*path, k))
-            .collect();
-        for (path, n) in from.iter_mut() {
-            let Some(&k) = here.get(path) else {
+        let (Some(mut from), Some(mut to)) = (removed.remove(&hash), added.remove(&hash)) else {
+            continue;
+        };
+        // In the same file first: not moved. Both lists are in path order,
+        // and most are one file long.
+        let mut k = 0;
+        for (p, n) in from.iter_mut() {
+            while k < to.len() && to[k].0 < *p {
+                k += 1;
+            }
+            if k == to.len() {
+                break;
+            }
+            if to[k].0 != *p {
                 continue;
-            };
+            }
             let same = (*n).min(to[k].1);
             *n -= same;
             to[k].1 -= same;
-            let cut = out.entry((*path, hash)).or_default();
+            let cut = out.entry((*p, hash)).or_default();
             cut.0 += same;
             cut.1 += same;
         }
@@ -1755,7 +1761,12 @@ fn unmoved(mut files: HashMap<String, FileDiff>) -> (HashMap<String, FileDiff>, 
         while f < from.len() && t < to.len() {
             let taken = from[f].1.min(to[t].1);
             if taken > 0 {
-                moves.push((from[f].0.to_string(), to[t].0.to_string(), hash, taken));
+                moves.push((
+                    paths[from[f].0].clone(),
+                    paths[to[t].0].clone(),
+                    hash,
+                    taken,
+                ));
                 from[f].1 -= taken;
                 to[t].1 -= taken;
                 out.entry((from[f].0, hash)).or_default().0 += taken;
@@ -1769,13 +1780,13 @@ fn unmoved(mut files: HashMap<String, FileDiff>) -> (HashMap<String, FileDiff>, 
             }
         }
     }
-    for path in &paths {
+    for (p, path) in paths.iter().enumerate() {
         let Some(diff) = files.get_mut(path) else {
             continue;
         };
         for (bag, removing) in [(&mut diff.removed, true), (&mut diff.added, false)] {
             for (hash, n) in bag.iter_mut() {
-                if let Some(&(gone, back)) = out.get(&(path.as_str(), *hash)) {
+                if let Some(&(gone, back)) = out.get(&(p, *hash)) {
                     *n -= if removing { gone } else { back };
                 }
             }
