@@ -524,6 +524,24 @@ test("lines three sessions wrote in a file are common: a commit that removes onl
   assert.equal(page.outcomes.windows["7d"].rework_commits, 1);
 });
 
+test("a pull request matched before common lines were kept has them worked out when it is first asked for", async () => {
+  await readingSince();
+  const repo = "github.com/acme/oldcommon";
+  const q = encodeURIComponent(repo);
+  assert.equal((await upload(repo, "oc-1", "claude-code", [file("a.ts", 1, 2)], 50)).status, 200);
+  assert.equal((await upload(repo, "oc-2", "claude-code", [file("a.ts", 1, 2)], 40)).status, 200);
+  assert.equal((await upload(repo, "oc-3", "claude-code", [file("a.ts", 1, 2, 5, 6)], 30)).status, 200);
+  await merged(repo, 1, 20, [file("a.ts", 1, 2, 5, 6)]);
+  // As a server from before them left it.
+  await db.query(`UPDATE pull_requests SET common_lines = NULL WHERE repo = $1`, [repo]);
+  assert.equal((await call(tokens.ci, "GET", `/prs/outcomes/due?repo=${q}`)).status, 200);
+  const [row] = await db.query(`SELECT common_lines FROM pull_requests WHERE repo = $1`, [repo]);
+  assert.deepEqual(row!.common_lines, { "a.ts": [h(1), h(2)] });
+  assert.equal((await scanOf(repo, [1], [commit(1, ago(15), [{ path: "a.ts", removed: [1, 2] }])])).status, 200);
+  const page = (await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=1`)).body;
+  assert.deepEqual(page.outcomes.commits.map((c: any) => [c.sha, c.counted]), [[sha(1), false]]);
+});
+
 test("a session matched after its pull request was read has the later commits of its files read from the merge", async () => {
   await readingSince();
   const repo = "github.com/acme/late";

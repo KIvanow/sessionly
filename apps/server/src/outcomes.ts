@@ -29,7 +29,7 @@ import type {
   PullOutcomeWindow,
 } from "@sessionly/schema";
 import type { OrgDb } from "./db.ts";
-import { BadReport, COMMIT_SHA, COMMON_LINE, HASH, holdPull, MAX_FILES, where, type PullFilters } from "./pulls.ts";
+import { BadReport, COMMIT_SHA, COMMON_LINE, HASH, holdPull, keepCommonLines, MAX_FILES, where, type PullFilters } from "./pulls.ts";
 
 /** The ages counted after merging, in days: the binary's `CHECKPOINTS`. */
 export const OUTCOME_AGES: readonly [OutcomeAge, number][] = [
@@ -98,11 +98,13 @@ const KEPT = `(jsonb_typeof(s.matched) = 'object' AND s.matched <> '{}'::jsonb)`
  * or asked for longest ago come first, and those given are marked asked
  * for: one a run cannot read (its branch is not in the checkout, or its
  * reading fails) goes behind the rest, rather than first at every run.
+ * One matched before common lines were kept has them worked out first
+ * (with `key`, as matching): its later commits are counted by them.
  */
-export async function outcomesDue(db: OrgDb, repo: string, since: string | null = null): Promise<OutcomesDue> {
+export async function outcomesDue(db: OrgDb, repo: string, since: string | null = null, key?: string): Promise<OutcomesDue> {
   const rows = await db.query(
     `SELECT p.number, p.base_ref, p.merged_at, p.merge_commit_sha, coalesce(p.outcomes_scanned_until, p.merged_at) AS since,
-            p.outcomes_held, p.outcomes_tips,
+            p.outcomes_held, p.outcomes_tips, p.common_lines IS NULL AS uncommon,
             (SELECT array_agg(DISTINCT k.path ORDER BY k.path)
              FROM pull_sessions s, jsonb_object_keys(CASE WHEN ${KEPT} THEN s.matched ELSE '{}'::jsonb END) AS k(path)
              WHERE s.org_id = p.org_id AND s.repo = p.repo AND s.number = p.number) AS paths
@@ -116,6 +118,7 @@ export async function outcomesDue(db: OrgDb, repo: string, since: string | null 
      LIMIT ${DUE_AT_ONCE}`,
     [db.orgId, repo, since],
   );
+  for (const row of rows) if (row.uncommon === true) await keepCommonLines(db, repo, num(row.number), key);
   if (rows.length > 0) {
     await db.query(`UPDATE pull_requests SET outcomes_asked_at = clock_timestamp() WHERE org_id = $1 AND repo = $2 AND number = ANY($3::integer[])`, [
       db.orgId, repo, rows.map((row) => num(row.number)),

@@ -1902,6 +1902,41 @@ export async function rematchPull(
 export const MATCH_ON_UPLOAD = 5;
 
 /**
+ * Work out the common lines (`common_lines`) of a pull request matched
+ * before they were kept: of its lines as last reported, against the
+ * sessions held now, as matching does. Nothing else about it changes. One
+ * that cannot be matched again here (see `rematchPull`) is kept as having
+ * none, as it was read before.
+ */
+export async function keepCommonLines(db: OrgDb, repo: string, number: number, key?: string): Promise<void> {
+  await holdPull(db, repo, number);
+  const [r] = await db.query(
+    `SELECT head_repo, head_ref, created_at, last_files, committers, aliases FROM pull_requests
+     WHERE org_id = $1 AND repo = $2 AND number = $3 AND common_lines IS NULL FOR UPDATE`,
+    [db.orgId, repo, number],
+  );
+  if (!r) return;
+  let common: Lines = {};
+  const kept = json<string[] | null>(r.committers);
+  if (kept && keptWith(kept, key)) {
+    const names = { repo, head_repo: (r.head_repo as string) ?? null, aliases: json<string[]>(r.aliases) ?? [] };
+    const { emails, nobody } = await committersAmong(db, repoNames(names), kept, key);
+    const now = json<FileHashes[] | null>(r.last_files) ?? [];
+    const claims = await claimsFor(db, {
+      ...names,
+      head_ref: (r.head_ref as string) ?? null,
+      commit_emails: emails,
+      nobody,
+      created_at: iso(r.created_at) ?? new Date().toISOString(),
+    });
+    common = commonLines(now, writersOf(now, claims).common);
+  }
+  await db.query(`UPDATE pull_requests SET common_lines = $4::jsonb WHERE org_id = $1 AND repo = $2 AND number = $3`, [
+    db.orgId, repo, number, JSON.stringify(common),
+  ]);
+}
+
+/**
  * The pull requests a session just stored can change the figures of: in its
  * repository, open or closed in the last two weeks and not before it started,
  * committed to by its person (or, for a cloud session, on its branch), with a

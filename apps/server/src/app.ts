@@ -818,7 +818,7 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     reportersOnly(c.get("principal"));
     const repo = c.req.query("repo");
     if (!repo) throw new BadRequest("repo is required");
-    return c.json(await outcomesDue(c.get("db"), repo.replace(/\/+$/, ""), time(c.req.query("since"), "since") ?? null));
+    return c.json(await outcomesDue(c.get("db"), repo.replace(/\/+$/, ""), time(c.req.query("since"), "since") ?? null, options.hashKey));
   });
   // What later commits did to merged pull requests' lines, summed by group (merge clock).
   api.get("/prs/outcomes/summary", async (c) => {

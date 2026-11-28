@@ -948,7 +948,8 @@ const MIGRATIONS: string[] = [
   // Of its lines as last reported, those 3 or more sessions wrote in their
   // file (`common_lines`, {path: [hashes]}): a later commit that removes
   // only these does not count. Worked out each time it is matched; null for
-  // one matched before this, which then has none.
+  // one matched before this, until its later commits are first asked for
+  // (`keepCommonLines`).
   // And what later commits on its base branch did to its lines (outcomes.ts):
   // how far that branch has been read for it, and which of its lines it
   // still has there as of then, by file (`outcomes_held`: the pull request's
