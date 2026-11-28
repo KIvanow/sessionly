@@ -99,12 +99,14 @@ test("what CI says of a commit is checked: its state, counts and at most 20 name
   assert.throws(() => checkCi([ci(1, "red")], fail), /state must be one of/);
   assert.throws(() => checkCi([ci(1, "failure", { failed: -1 })], fail), /whole number/);
   assert.throws(() => checkCi([ci(1, "failure", { total: 1.5 })], fail), /whole number/);
+  assert.throws(() => checkCi([ci(1, "failure", { total: 2 ** 31 })], fail), /at most 2147483647/);
   assert.throws(() => checkCi([ci(1, "failure", { failed_checks: Array(21).fill("x") })], fail), /at most 20 names/);
   assert.throws(() => checkCi([ci(1, "failure", { failed_checks: ["x".repeat(101)] })], fail), /100 characters/);
   assert.throws(() => checkCi(Array(21).fill(ci(1, "success")), fail), /at most 20 commits/);
-  // the report of CI alone: by pull request, up to 100, a commit once with each
-  const checked = checkCiReport({ repo: "github.com/acme/web/", heads: [{ number: 1, ...ci(1, "success") }, { number: 2, ...ci(1, "success") }, { number: 1, ...ci(1, "failure") }] });
-  assert.deepEqual(checked, { repo: "github.com/acme/web", heads: [{ number: 1, ...ci(1, "success") }, { number: 2, ...ci(1, "success") }], merges: [] });
+  // the report of CI alone: by pull request, up to 100, a commit once with each, each entry as itself
+  const checked = checkCiReport({ repo: "github.com/acme/web/", heads: [{ number: 1, ...ci(1, "success") }, { number: 2, ...ci(1, "failure") }, { number: 1, ...ci(1, "failure") }] });
+  assert.deepEqual(checked, { repo: "github.com/acme/web", heads: [{ number: 1, ...ci(1, "success") }, { number: 2, ...ci(1, "failure") }], merges: [] });
+  assert.throws(() => checkCiReport({ repo: "r", heads: [{ number: 1, ...ci(1, "success") }, { number: 2, ...ci(1, "red") }] }), /state must be one of/);
   assert.throws(() => checkCiReport({ repo: "r", heads: [ci(1, "success")] }), /needs a pull request number/);
   assert.throws(() => checkCiReport({ repo: "r", merges: Array(101).fill({ number: 1, ...ci(1, "success") }) }), /at most 100 commits/);
   assert.throws(() => checkCiReport({ heads: [] }), /repo is required/);
@@ -215,12 +217,23 @@ test("the Action is told which heads and merge commits to read CI for, and what 
   assert.equal((await report(repo, 2, 3, [file("a.ts", 1, 2)], { state: "merged", merged_at: ago(1), merge_commit_sha: sha(30), event: "closed" })).status, 200);
   assert.equal((await report(repo, 3, 4, [file("docs.md", 70)], { state: "merged", merged_at: ago(1), merge_commit_sha: sha(40), event: "closed" })).status, 200);
   assert.equal((await report(repo, 4, 5, [file("a.ts", 1, 2)], { state: "merged", merged_at: ago(2), event: "closed" })).status, 200);
+  // #5 merged 8 days ago with agent lines and never read: not asked for (the Action may not be able to read it), as a head that old is not.
+  assert.equal((await report(repo, 5, 6, [file("a.ts", 1, 2)], { state: "merged", merged_at: ago(8), merge_commit_sha: sha(50), event: "closed" })).status, 200);
   const due = await call(tokens.ci, "GET", `/prs/ci/due?repo=${q}`);
   assert.equal(due.status, 200);
   assert.deepEqual(due.body, {
-    heads: [{ number: 1, sha: sha(1) }, { number: 1, sha: sha(2) }, { number: 2, sha: sha(3) }, { number: 3, sha: sha(4) }, { number: 4, sha: sha(5) }],
+    heads: [{ number: 1, sha: sha(1) }, { number: 1, sha: sha(2) }, { number: 2, sha: sha(3) }, { number: 3, sha: sha(4) }, { number: 4, sha: sha(5) }, { number: 5, sha: sha(6) }],
     merges: [{ number: 2, sha: sha(30), base_ref: "main" }],
   });
+  // Of the merge states kept: pending is due (within the 7 days), none is not, and one read as pending 7 days ago has none.
+  await db.query(`UPDATE pull_requests SET merge_ci = '{"state": "pending", "total": 1}' WHERE repo = $1 AND number = 2`, [repo]);
+  assert.deepEqual((await call(tokens.ci, "GET", `/prs/ci/due?repo=${q}`)).body.merges, [{ number: 2, sha: sha(30), base_ref: "main" }]);
+  await db.query(`UPDATE pull_requests SET merge_ci = '{"state": "none", "total": 0}' WHERE repo = $1 AND number = 2`, [repo]);
+  assert.deepEqual((await call(tokens.ci, "GET", `/prs/ci/due?repo=${q}`)).body.merges, []);
+  await db.query(`UPDATE pull_requests SET merge_ci = '{"state": "pending", "total": 1}', merged_at = now() - interval '8 days' WHERE repo = $1 AND number = 2`, [repo]);
+  assert.deepEqual((await call(tokens.ci, "GET", `/prs/ci/due?repo=${q}`)).body.merges, []);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=2`)).body.merge_ci.state, "none");
+  await db.query(`UPDATE pull_requests SET merge_ci = NULL, merged_at = now() - interval '1 day' WHERE repo = $1 AND number = 2`, [repo]);
   assert.ok(!JSON.stringify(due.body).includes("hashes"), "no hashes are sent out");
   assert.equal((await call(tokens.ann, "GET", `/prs/ci/due?repo=${q}`)).status, 403);
   assert.equal((await call(tokens.ci, "GET", `/prs/ci/due`)).status, 400);
@@ -242,7 +255,9 @@ test("the Action is told which heads and merge commits to read CI for, and what 
   assert.ok(left.body.heads.some((x: any) => x.sha === sha(2)) && !left.body.heads.some((x: any) => x.sha === sha(1)));
   // A state that came out one way is not put back to pending or none, head or merge; success over failure is (a re-run,
   // or a read that left out what it should not have), and failure over success.
-  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "pending") }, { number: 1, ...ci(1, "none", { total: 0 }) }], merges: [{ number: 2, ...ci(30, "pending") }, { number: 2, ...ci(30, "none", { total: 0 }) }] })).body, { heads: 0, merges: 0 });
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "pending") }], merges: [{ number: 2, ...ci(30, "pending") }] })).body, { heads: 0, merges: 0 });
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "none", { total: 0 }) }], merges: [{ number: 2, ...ci(30, "none", { total: 0 }) }] })).body, { heads: 0, merges: 0 });
+  assert.deepEqual((await headsOf(repo, 1)).map((x) => x.state), ["failure", "pending"]);
   assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "success") }], merges: [{ number: 2, ...ci(30, "success") }] })).body, { heads: 1, merges: 1 });
   assert.deepEqual((await headsOf(repo, 1)).map((x) => [x.state, x.names]), [["success", null], ["pending", null]]);
   assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=2`)).body.merge_ci.state, "success");
@@ -262,10 +277,18 @@ test("the Action is told which heads and merge commits to read CI for, and what 
   // One that old no run has read is not due either, and stays as it is: not known, rather than none to go by.
   await db.query(`UPDATE pull_heads SET first_reported_at = now() - interval '8 days' WHERE repo = $1 AND number = 3`, [repo]);
   const aged = await call(tokens.ci, "GET", `/prs/ci/due?repo=${q}`);
-  assert.deepEqual(aged.body.heads.map((x: any) => x.number), [2, 4]);
+  assert.deepEqual(aged.body.heads.map((x: any) => x.number), [2, 4, 5]);
   assert.deepEqual((await headsOf(repo, 1)).map((x) => [x.sha, x.state]), [[sha(2), "none"], [sha(1), "success"]]);
   assert.deepEqual((await headsOf(repo, 3)).map((x) => x.state), ["pending"]);
   assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=3`)).body.heads[0].ci.state, "unknown");
+  // A commit that is a head of one pull request and the merge commit of another is read for each apart: a head entry
+  // touches no merge, and a merge entry no head.
+  assert.equal((await report(repo, 6, 30, [file("a.ts", 1, 2)], { state: "open", created_at: ago(1), event: "opened" })).status, 200);
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 6, ...ci(30, "pending") }], merges: [{ number: 2, ...ci(30, "pending") }] })).body, { heads: 1, merges: 0 });
+  await db.query(`UPDATE pull_requests SET merge_ci = NULL WHERE repo = $1 AND number = 2`, [repo]);
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 6, ...ci(30, "success") }], merges: [{ number: 2, ...ci(30, "failure") }] })).body, { heads: 1, merges: 1 });
+  assert.deepEqual((await headsOf(repo, 6)).map((x) => x.state), ["success"]);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=2`)).body.merge_ci.state, "failure");
   // Refused as a whole when any of it is wrong, and by a member.
   assert.equal((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "red") }] })).status, 422);
   assert.equal((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "failure", { failed_checks: Array(21).fill("x") }) }] })).status, 422);

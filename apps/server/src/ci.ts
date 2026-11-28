@@ -10,7 +10,7 @@
 import type { CiReport, CiState, PullCi, PullCiDue, PullCiReport, PullCiStored, PullHead } from "@sessionly/schema";
 import type { OrgDb } from "./db.ts";
 import { type Lines, lineKey } from "./contributed.ts";
-import { applyCi, BadReport, checkCi } from "./pulls.ts";
+import { applyCi, BadReport, checkCi, type CiChannel } from "./pulls.ts";
 
 /** A head nobody said anything of for this long is taken to have no CI: pending no more. */
 export const PENDING_DAYS = 7;
@@ -53,20 +53,19 @@ export function checkCiReport(body: unknown): PullCiReport {
   if (typeof r.repo !== "string" || r.repo === "") fail("repo is required");
   if (Buffer.byteLength(r.repo as string) > MOST_NAME_BYTES) fail(`repo is longer than ${MOST_NAME_BYTES} bytes`);
   const numbered = (value: unknown, what: string): (CiReport & { number: number })[] => {
-    const list = value ?? [];
-    if (!Array.isArray(list)) fail(`${what} must be a list`);
+    const list: unknown[] = Array.isArray(value ?? []) ? (value as unknown[] | undefined) ?? [] : fail(`${what} must be a list`);
     for (const item of list as Record<string, unknown>[]) {
       if (!item || !Number.isInteger(item.number) || (item.number as number) < 1 || (item.number as number) > 2 ** 31 - 1) fail(`each of ${what} needs a pull request number`);
     }
-    // Checked as one list, a commit once for each pull request it is named with.
-    const checked = checkCi(list, fail, MOST_IN_REPORT) ?? [];
-    const by = new Map(checked.map((c) => [c.sha, c]));
+    // Each entry checked as itself, and kept once for each pull request a commit is named with.
+    if (list.length > MOST_IN_REPORT) fail(`${what} must be a list of at most ${MOST_IN_REPORT} commits`);
     const seen = new Set<string>();
     return (list as Record<string, unknown>[]).flatMap((item) => {
+      const [checked] = checkCi([item], fail) ?? [];
       const key = `${item.number}\n${item.sha}`;
-      if (seen.has(key)) return [];
+      if (!checked || seen.has(key)) return [];
       seen.add(key);
-      return [{ ...by.get(item.sha as string)!, number: item.number as number }];
+      return [{ ...checked, number: item.number as number }];
     });
   };
   return { repo: (r.repo as string).replace(/\/+$/, ""), heads: numbered(r.heads, "heads"), merges: numbered(r.merges, "merges") };
@@ -97,7 +96,9 @@ async function agePending(db: OrgDb, repo: string): Promise<void> {
  * pending (reported in the last `PENDING_DAYS`; older ones are taken to
  * have none first), and the commits merged pull requests with agent lines
  * were merged as, of which nothing is known yet or only that CI was
- * pending. Oldest first, `DUE_AT_ONCE` of each. No hashes.
+ * pending, merged in the last `PENDING_DAYS` (one the Action could not
+ * read by then is not asked for again, as a head is not). Oldest first,
+ * `DUE_AT_ONCE` of each. No hashes.
  */
 export async function ciDue(db: OrgDb, repo: string): Promise<PullCiDue> {
   await agePending(db, repo);
@@ -111,6 +112,7 @@ export async function ciDue(db: OrgDb, repo: string): Promise<PullCiDue> {
     `SELECT p.number, p.merge_commit_sha AS sha, p.base_ref FROM pull_requests p
      WHERE p.org_id = $1 AND p.repo = $2 AND p.state = 'merged' AND p.merged_at IS NOT NULL AND p.merge_commit_sha IS NOT NULL
        AND (p.merge_ci IS NULL OR p.merge_ci->>'state' = 'pending')
+       AND p.merged_at >= now() - make_interval(days => ${PENDING_DAYS})
        AND EXISTS (SELECT 1 FROM pull_sessions s WHERE s.org_id = p.org_id AND s.repo = p.repo AND s.number = p.number AND ${KEPT})
      ORDER BY p.merged_at, p.number LIMIT ${DUE_AT_ONCE}`,
     [db.orgId, repo],
@@ -119,15 +121,17 @@ export async function ciDue(db: OrgDb, repo: string): Promise<PullCiDue> {
   return { heads: named(heads), merges: merges.map((row) => ({ number: Number(row.number), sha: String(row.sha), base_ref: (row.base_ref as string) ?? null })) };
 }
 
-/** Keep what a report of CI says, of the commits the server knows (`applyCi`); how many of each were changed. */
+/** Keep what a report of CI says, of the commits the server knows (`applyCi`), heads as heads and merges as merges; how many of each were changed. */
 export async function storeCi(db: OrgDb, report: PullCiReport): Promise<PullCiStored> {
   const stored = { heads: 0, merges: 0 };
-  const byPull = new Map<number, CiReport[]>();
-  for (const c of [...report.heads, ...report.merges]) byPull.set(c.number, [...(byPull.get(c.number) ?? []), c]);
-  for (const [number, ci] of byPull) {
-    const { heads, merges } = await applyCi(db, report.repo, number, ci);
-    stored.heads += heads;
-    stored.merges += merges;
+  for (const channel of ["heads", "merges"] as CiChannel[]) {
+    const byPull = new Map<number, CiReport[]>();
+    for (const c of report[channel]) byPull.set(c.number, [...(byPull.get(c.number) ?? []), c]);
+    for (const [number, ci] of byPull) {
+      const { heads, merges } = await applyCi(db, report.repo, number, ci, channel);
+      stored.heads += heads;
+      stored.merges += merges;
+    }
   }
   return stored;
 }
@@ -135,11 +139,12 @@ export async function storeCi(db: OrgDb, report: PullCiReport): Promise<PullCiSt
 /** A pull request's heads whose CI is still pending, oldest first, `PENDING_AT_ONCE` at most: the answer to its report names them, and the same run reads them. */
 export async function ciPending(db: OrgDb, repo: string, number: number, now = Date.now()): Promise<{ number: number; sha: string }[]> {
   const rows = await db.query(
-    `SELECT sha, first_reported_at FROM pull_heads WHERE org_id = $1 AND repo = $2 AND number = $3 AND ci_state = 'pending'
+    `SELECT sha FROM pull_heads
+     WHERE org_id = $1 AND repo = $2 AND number = $3 AND ci_state = 'pending' AND first_reported_at >= $4::timestamptz - make_interval(days => ${PENDING_DAYS})
      ORDER BY first_reported_at, sha LIMIT ${PENDING_AT_ONCE}`,
-    [db.orgId, repo, number],
+    [db.orgId, repo, number, new Date(now).toISOString()],
   );
-  return rows.filter((row) => now < time(row.first_reported_at) + PENDING_DAYS * DAY).map((row) => ({ number, sha: String(row.sha) }));
+  return rows.map((row) => ({ number, sha: String(row.sha) }));
 }
 
 /** A head as read: its state as it is now, and which of the pull request's lines were new at it (null where not read). */

@@ -1182,10 +1182,11 @@ export interface PullDetail extends PullRow {
 /**
  * What CI said of a commit, from its check runs and commit statuses:
  * `failure` when any failed (timed out too), `success` when all that ran
- * came out well (neutral and skipped count as well), `pending` while any is
- * still running or waiting, `none` when there is nothing to go by (no
- * checks and no statuses, or every one cancelled). Sessionly's own check
- * runs and the ones its `ci-ignore` names are left out first. `unknown` is
+ * came out well (neutral counts as well; skipped does not count at all),
+ * `pending` while any is still running or waiting, `none` when there is
+ * nothing to go by (no checks and no statuses, or every one cancelled).
+ * Sessionly's own workflow runs and the checks its `ci-ignore` names are
+ * left out first. `unknown` is
  * only served, never sent or kept: a head no run has read yet (the Action
  * reads no CI, or may not), which is not running and not aged into `none`.
  */

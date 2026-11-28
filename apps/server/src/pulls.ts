@@ -59,6 +59,10 @@ export const MOST_FAILED_CHECKS = 20;
 export const CHECK_NAME_LENGTH = 100;
 /** No more heads than this are kept for a pull request: the oldest go. */
 export const MOST_HEADS = 100;
+/** The largest count of checks kept (a Postgres integer). */
+const MOST_COUNT = 2 ** 31 - 1;
+/** What a commit's CI is kept as: a head's, or the merge commit's. */
+export type CiChannel = "heads" | "merges";
 
 const num = (value: unknown): number => (value == null ? 0 : Number(value));
 const iso = (value: unknown): string | null =>
@@ -787,7 +791,7 @@ export function checkCi(value: unknown, fail: (what: string) => never, most = MO
     if (!CI_STATES.includes(item.state as CiState)) fail(`a commit's CI state must be one of ${CI_STATES.join(", ")}`);
     const count = (key: string): number => {
       const n = item[key] ?? 0;
-      return Number.isInteger(n) && (n as number) >= 0 ? (n as number) : fail(`a commit's ${key} must be a whole number`);
+      return Number.isInteger(n) && (n as number) >= 0 && (n as number) <= MOST_COUNT ? (n as number) : fail(`a commit's ${key} must be a whole number of at most ${MOST_COUNT}`);
     };
     const names = item.failed_checks;
     const named =
@@ -1606,20 +1610,21 @@ function linesOfFiles(files: FileHashes[]): Lines {
 
 /**
  * Keep what CI said of commits of a pull request, where the commit is one
- * of its heads or the one it was merged as; a commit that is neither is
- * passed over. A state that came out one way or the other is not put back
+ * of its heads or the one it was merged as (or only the one `channel`
+ * names: a commit that is both is read for each apart); a commit that is
+ * neither is passed over. A state that came out one way or the other is not put back
  * to pending, nor to none (a run that read an earlier attempt, or found
  * nothing), but is put right by a later read that came out the other way
  * (a re-run, or a read that left out what it should not have). The names of
  * failed checks are kept only with a failure. How many heads, and whether
  * the merge commit, were changed.
  */
-export async function applyCi(db: OrgDb, repo: string, number: number, ci: CiReport[]): Promise<{ heads: number; merges: number }> {
+export async function applyCi(db: OrgDb, repo: string, number: number, ci: CiReport[], channel: CiChannel | null = null): Promise<{ heads: number; merges: number }> {
   let heads = 0;
   let merges = 0;
   for (const c of ci) {
     const names = c.state === "failure" && c.failed_checks && c.failed_checks.length > 0 ? c.failed_checks : null;
-    const changed = await db.query(
+    const changed = channel === "merges" ? [] : await db.query(
       `UPDATE pull_heads SET ci_state = $5, ci_failed = $6, ci_total = $7, ci_cancelled = $8, ci_checked_at = clock_timestamp(), failed_checks = $9::jsonb
        WHERE org_id = $1 AND repo = $2 AND number = $3 AND sha = $4 AND NOT ($5 IN ('pending', 'none') AND ci_state IN ('success', 'failure'))
        RETURNING sha`,
@@ -1627,7 +1632,7 @@ export async function applyCi(db: OrgDb, repo: string, number: number, ci: CiRep
     );
     heads += changed.length;
     const kept = { state: c.state, failed: c.failed, total: c.total, cancelled: c.cancelled, checked_at: new Date().toISOString(), ...(names ? { failed_checks: names } : {}) };
-    const merged = await db.query(
+    const merged = channel === "heads" ? [] : await db.query(
       `UPDATE pull_requests SET merge_ci = $5::jsonb
        WHERE org_id = $1 AND repo = $2 AND number = $3 AND state = 'merged' AND merge_commit_sha = $4
          AND (merge_ci IS NULL OR NOT ($6 IN ('pending', 'none') AND merge_ci->>'state' IN ('success', 'failure')))
