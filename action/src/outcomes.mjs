@@ -129,15 +129,44 @@ export function putsBack(message) {
   return first === "revert" || first === "reapply" || reverts(message).length > 0;
 }
 
-/** How deep a subject says a commit is in a chain of reverts: one for each `Revert` it begins with, two for each `Reapply`; one at least for a revert that names a commit. */
-function subjectDepth(message) {
+/**
+ * How deep a commit's subject says it is in a chain of reverts, as git
+ * titles them: one for each `Revert "` it begins with, two for each
+ * `Reapply "`. A conventional `revert:` type is one, and a `Revert "` right
+ * after it is that same revert. One at least when its message names a
+ * commit it reverts. A subject that only begins with the word (`Revert to
+ * polling`, `Revert revert-button styling`) says nothing of a chain.
+ */
+export function subjectDepth(message) {
+  const subject = subjectOf(message);
+  const typed = conventional(subject);
   let depth = 0;
-  for (const word of words(subjectOf(message))) {
-    if (word === "revert") depth += 1;
-    else if (word === "reapply") depth += 2;
-    else break;
+  let rest = subject;
+  if (typed?.kind === "revert") {
+    depth = 1;
+    rest = typed.rest.replace(/^\s+/, "");
+    rest = stripTitle(rest, 'revert "') ?? rest;
+  } else if (typed) {
+    rest = typed.rest.replace(/^\s+/, "");
+  }
+  for (;;) {
+    const reverted = stripTitle(rest, 'revert "');
+    const reapplied = reverted == null ? stripTitle(rest, 'reapply "') : null;
+    if (reverted != null) {
+      depth += 1;
+      rest = reverted;
+    } else if (reapplied != null) {
+      depth += 2;
+      rest = reapplied;
+    } else break;
   }
   return depth === 0 && reverts(message).length > 0 ? 1 : depth;
+}
+
+/** `text` less `title` at its start, in any case (ASCII only, as the binary compares); null if it does not begin so. */
+function stripTitle(text, title) {
+  const head = text.slice(0, title.length);
+  return head.length === title.length && head.replace(/[A-Z]/g, (c) => c.toLowerCase()) === title ? text.slice(title.length) : null;
 }
 
 /** How many reverts in a row are followed through the commits they name. */

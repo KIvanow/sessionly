@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { addedHashes, lineHash, removedHashes } from "../src/lines.mjs";
 import { parseBatch, splitTree } from "../src/history.mjs";
-import { BUG_LABELS, FIX_TYPES, FIX_WORDS, pullSignals, putsBack, revertDepth, reverts, signals, waitOf, wordsOf } from "../src/outcomes.mjs";
+import { BUG_LABELS, FIX_TYPES, FIX_WORDS, pullSignals, putsBack, revertDepth, reverts, signals, subjectDepth, waitOf, wordsOf } from "../src/outcomes.mjs";
 import { buildReport, render } from "../src/report.mjs";
 
 const FIXTURE = JSON.parse(readFileSync(new URL("./outcome-signals.json", import.meta.url), "utf8"));
@@ -16,9 +16,10 @@ test("the word lists are the binary's", () => {
 
 test("a commit message is read as the binary reads it", () => {
   assert.ok(FIXTURE.cases.length > 20);
-  for (const { message, signals: expected, reverts: named } of FIXTURE.cases) {
+  for (const { message, signals: expected, reverts: named, depth } of FIXTURE.cases) {
     assert.deepEqual(signals(message), expected, JSON.stringify(message));
     if (named !== undefined) assert.deepEqual(reverts(message), named, JSON.stringify(message));
+    if (depth !== undefined) assert.equal(subjectDepth(message), depth, JSON.stringify(message));
   }
 });
 
