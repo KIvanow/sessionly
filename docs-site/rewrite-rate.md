@@ -106,20 +106,34 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   commits that descend from that one.** Before it, or beside it, a line like them that a
   commit removes (an `if err != nil {` that was there already) was someone else's: so a commit
   on a branch from before the session's work, or on `main` while the work is on a feature
-  branch, does not count against it. A commit that puts them back after a revert gives the
-  session those lines again, so a later change to them counts. Lines a commit moves to another
-  file (a rename) are followed there, also when that was done before the session ended, and
-  are never more than the session wrote.
+  branch, does not count against it. On a branch without the work, a commit puts it there once
+  the branch has three of its lines that fewer than three sessions wrote (or all of them, for
+  a session of fewer): a squash merge or a cherry-pick of the work does, a teammate's own
+  `if err != nil {` and `return err` on `main` while the session runs do not. A commit that
+  puts them back after a revert gives the session those lines again, so a later change to
+  them counts. Lines a commit moves to another file (a rename) are followed there, also when
+  that was done before the session ended, and are never more than the session wrote.
+- **Each branch is counted on its own.** A commit counts against what its own history has of
+  the session's lines, so a fix on `main` and rework of the same lines on a feature branch
+  both count, whichever is newer; a merge has as many of each line as either side. The same
+  change made on two branches (a fix cherry-picked to a release branch) counts once, as the
+  first made, and each commit counts once however many branches have it.
 - **A session's own commits don't count:** those after it began that add its lines (and not
   only move or re-indent them) where the history did not have them. A later commit that adds a
   copy of lines already there (a block copied, or generic lines like `return err`) is not one.
   A revert, or a revert of one, is not a session's own work, so it is never taken for the
   commit a later revert undoes, nor credited to an agent; and a revert of a revert (git
-  before 2.43 and GitHub name it `Revert "Revert "…""`) is no revert of the session.
-- **Worktrees of one repository are read as one**, with what each has checked out. A session
-  in a worktree removed since (merged and done with) is read from the repository's own
-  directory, with what is checked out in its main worktree, once a sync has seen the worktree
-  while it was there.
+  before 2.43 and GitHub name it `Revert "Revert "…""`) is no revert of the session, while a
+  revert of that (`Revert "Reapply "…""`) is one again, and so on down the chain.
+- **Worktrees of one repository are read as one**, with what each that a session with an age
+  still to count wrote in has checked out. One git can no longer read (broken since, or not
+  yours) is read without, unless the session being read wrote in it. A session in a worktree
+  removed since (merged and done with), or whose own directory in the repository was pruned,
+  is read from the repository's own directory, with what is checked out in its main worktree,
+  once a sync has seen the worktree while it was there; a directory that is another
+  repository now is read as that one. Which repository a worktree is of is asked of git for at
+  most 2 seconds (a tenth of a sync's time, if less); one git does not answer for is asked
+  again an hour later.
 - **A repository whose history can't be read** (gone, unmounted, too slow, or one git will
   not read, such as another user's) is tried again an hour later, then after longer and
   longer, up to about five days; no count is kept from part of a session's history, for a
@@ -166,6 +180,10 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   again, they are sent where a server may not have them, and the ages reached meanwhile are
   counted, as late. What a server already has stays, until the session is deleted or goes on:
   a session that is resumed later has a new end, and the counts from its old one are dropped.
+  A server of an older version that took an upload meanwhile (one running beside a newer one
+  in an upgrade, or one gone back to) loses none of them: the newer server keeps them from what
+  it stored, when it starts and within the hour after, and a session that went on there drops
+  its old end's counts the same way.
 
 On the dashboard, **By tool** and **By model** have **Changed by a fix @7d** and
 **Reverted @30d**, each of the sessions counted at that age, once any is; under the first, which

@@ -136,15 +136,19 @@ fn run(
     let mut stdout = child.stdout.take().ok_or(Stop::Failed)?;
     // Read while it runs, so a long answer cannot block it: done once git,
     // and whatever it started, are done printing.
+    // A read that fails is no answer, not the end of one.
     let (sent, printed) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut kept = Vec::new();
         let mut chunk = [0u8; 64 * 1024];
         let mut fits = true;
-        while let Ok(n) = stdout.read(&mut chunk) {
-            if n == 0 {
-                break;
-            }
+        loop {
+            let n = match stdout.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return,
+            };
             let room = max_bytes.saturating_sub(kept.len());
             kept.extend_from_slice(&chunk[..n.min(room)]);
             if n > room {
@@ -258,6 +262,38 @@ pub fn common_dir(root: &Path, deadline: Instant) -> Result<PathBuf, Stop> {
         }
         _ => Err(Stop::Failed),
     }
+}
+
+/// The repository a worktree's `.git` names, read as git reads it, without
+/// running it: the directory itself, or the one a `.git` file names, and
+/// the common directory that one's `commondir` names, if any. None when it
+/// names none that is there (a worktree pruned since) or cannot be read.
+pub fn named_common_dir(root: &Path) -> Option<PathBuf> {
+    let dot = root.join(".git");
+    let git_dir = if std::fs::metadata(&dot).ok()?.is_dir() {
+        dot
+    } else {
+        let mut text = String::new();
+        std::fs::File::open(&dot)
+            .ok()?
+            .take(4096)
+            .read_to_string(&mut text)
+            .ok()?;
+        let named = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+        if named.is_empty() {
+            return None;
+        }
+        // Relative to where the file is.
+        root.join(named)
+    };
+    let common = match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(text) => match text.lines().next().map(str::trim) {
+            Some(named) if !named.is_empty() => git_dir.join(named),
+            _ => return None,
+        },
+        Err(_) => git_dir,
+    };
+    common.canonicalize().ok().filter(|dir| dir.is_dir())
 }
 
 /// Walk up from `dir` to the directory containing `.git` (a directory, or a
@@ -412,8 +448,16 @@ mod tests {
         let far = Instant::now() + Duration::from_secs(10);
         let common = main.join(".git").canonicalize().unwrap();
         assert_eq!(common_dir(&main, far), Ok(common.clone()));
-        assert_eq!(common_dir(&wt, far), Ok(common));
+        assert_eq!(common_dir(&wt, far), Ok(common.clone()));
         assert_eq!(common_dir(&dir.path().join("none"), far), Err(Stop::Failed));
+        // What their `.git` says, as git says it; and nothing once a
+        // worktree's own directory in the repository is gone.
+        assert_eq!(named_common_dir(&main), Some(common.clone()));
+        assert_eq!(named_common_dir(&wt), Some(common.clone()));
+        assert_eq!(named_common_dir(&dir.path().join("none")), None);
+        let name = wt.file_name().unwrap();
+        std::fs::remove_dir_all(common.join("worktrees").join(name)).unwrap();
+        assert_eq!(named_common_dir(&wt), None);
     }
 
     #[test]

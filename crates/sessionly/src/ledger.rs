@@ -160,7 +160,8 @@ CREATE TABLE IF NOT EXISTS checkpoints_since (
 /// `outcome_scans` how far each session's history has been read, counted
 /// from the end it had then; `outcome_repos` the repository each worktree a
 /// session ran in is of, noted while it is there, so that the history can be
-/// read from another worktree of it once it is removed.
+/// read from another worktree of it once it is removed (or when git could
+/// not say, so that it is not asked again on every sync).
 const OUTCOME_TABLES: &str = "
 CREATE TABLE IF NOT EXISTS outcome_events (
     session_id  TEXT NOT NULL,
@@ -221,10 +222,23 @@ CREATE TABLE IF NOT EXISTS outcome_scans (
 CREATE TABLE IF NOT EXISTS outcome_repos (
     -- a worktree's top, as sessions name it
     root       TEXT PRIMARY KEY,
-    -- its repository's common git directory
-    common_dir TEXT NOT NULL
+    -- its repository's common git directory; empty when git could not say
+    common_dir TEXT NOT NULL,
+    -- when git could not say; null when it did
+    failed_at  TEXT,
+    -- whether that was for taking too long
+    timed_out  INTEGER NOT NULL DEFAULT 0
 );
 ";
+
+/// What a sync noted of a worktree: the repository it is of (its common
+/// git directory), or when git could not say, and whether that was for
+/// taking too long.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutcomeRepo {
+    Found(String),
+    Failed { at: DateTime<Utc>, timed_out: bool },
+}
 
 /// A session whose lines later commits may have touched.
 #[derive(Debug, Clone)]
@@ -621,6 +635,8 @@ impl Ledger {
             ),
             ("outcome_scans", "failures", "INTEGER NOT NULL DEFAULT 0"),
             ("outcome_scans", "lines_tracked", "INTEGER"),
+            ("outcome_repos", "failed_at", "TEXT"),
+            ("outcome_repos", "timed_out", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             let knows = tx
                 .prepare(&format!(
@@ -1475,41 +1491,67 @@ impl Ledger {
     }
 
     /// The repository each worktree sessions ran in is of, as noted while
-    /// it was there: its top, and the repository's common git directory.
-    pub fn outcome_repos(&self) -> Result<std::collections::HashMap<String, String>> {
-        Ok(self
+    /// it was there: by its top, the repository's common git directory, or
+    /// when git could not say.
+    pub fn outcome_repos(&self) -> Result<std::collections::HashMap<String, OutcomeRepo>> {
+        let rows = self
             .conn
-            .prepare("SELECT root, common_dir FROM outcome_repos")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?)
+            .prepare("SELECT root, common_dir, failed_at, timed_out FROM outcome_repos")?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, bool>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .map(|(root, common_dir, failed_at, timed_out)| {
+                let noted = match time(failed_at) {
+                    Some(at) => OutcomeRepo::Failed { at, timed_out },
+                    None => OutcomeRepo::Found(common_dir),
+                };
+                (root, noted)
+            })
+            .collect())
     }
 
-    /// The files of every session with tracked lines in them, each with what
-    /// a relative path is relative to (the repository root, or the session's
-    /// working directory).
-    pub fn outcome_paths(&self) -> Result<Vec<(Option<String>, String)>> {
+    /// The files of every session with tracked lines in them, each with its
+    /// session and what a relative path is relative to (the repository
+    /// root, or the session's working directory).
+    pub fn outcome_paths(&self) -> Result<Vec<(String, Option<String>, String)>> {
         Ok(self
             .conn
             .prepare(
-                "SELECT coalesce(s.repo_root, s.cwd), f.path FROM session_files f
+                "SELECT s.session_id, coalesce(s.repo_root, s.cwd), f.path FROM session_files f
                  JOIN sessions s ON s.session_id = f.session_id
                  WHERE length(f.added_hashes) >= 8",
             )?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Note the repository of each of these worktrees: its top, and its
-    /// common git directory.
-    pub fn keep_outcome_repos(&mut self, found: &[(String, String)]) -> Result<()> {
+    /// Note what was found of each of these worktrees, by its top.
+    pub fn keep_outcome_repos(&mut self, found: &[(String, OutcomeRepo)]) -> Result<()> {
         if found.is_empty() {
             return Ok(());
         }
         let tx = self.conn.transaction()?;
         {
-            let mut keep = tx.prepare("INSERT OR REPLACE INTO outcome_repos VALUES (?1, ?2)")?;
-            for (root, common_dir) in found {
-                keep.execute([root, common_dir])?;
+            let mut keep = tx.prepare(
+                "INSERT OR REPLACE INTO outcome_repos (root, common_dir, failed_at, timed_out)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (root, noted) in found {
+                let (common_dir, failed_at, timed_out) = match noted {
+                    OutcomeRepo::Found(dir) => (dir.as_str(), None, false),
+                    OutcomeRepo::Failed { at, timed_out } => {
+                        ("", Some(at.to_rfc3339()), *timed_out)
+                    }
+                };
+                keep.execute(rusqlite::params![root, common_dir, failed_at, timed_out])?;
             }
         }
         tx.commit()?;
