@@ -126,6 +126,9 @@ const AGENT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 /** No more agents than there are: the binary sends one entry for each agent. */
 const MOST_AGENTS = 16;
 
+/** Which branches an age's commits were read on, as the binary names them. Any other is `unknown`, as a reader maps an enum's. */
+const SCOPES = ["head_and_default", "head_only"] as const;
+
 /** Of an age's commits, the other agents' share: one entry for each agent, and between them no more than the age's own counts. */
 function byAgentOf(o: Partial<OutcomeAt>, age: Omit<OutcomesBy, "source">): OutcomesBy[] {
   const out: OutcomesBy[] = [];
@@ -182,7 +185,7 @@ export function mergeOutcomes(kept: unknown, upload: Upload): Record<string, Out
       age_seconds: count(o.age_seconds),
       ended_at: new Date(ended).toISOString(),
       late: o.late === true,
-      scope: o.scope === "head_and_default" ? "head_and_default" : "head_only",
+      scope: SCOPES.includes(o.scope as never) ? o.scope! : "unknown",
       by_agent: byAgentOf(o, counts),
     };
   };
@@ -247,8 +250,18 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   // this one, and compares with what it left. (Uploads of other sessions do not wait.)
   const before = await matchedBy(db, { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! }, { hold: true });
   const spentBefore = await spentBy(db, { machine_id: s.machine_id!, source: s.source!, session_id: s.session_id! });
-  const [existing] = await db.query<{ owner_email: string; runtime: string | null; prompts: number; checkpoints: unknown; outcomes: unknown }>(
-    `SELECT owner_email, runtime, prompts, checkpoints, outcomes FROM sessions
+  // The payload's outcomes as text, as `keepOutcomesFromPayloads` (db.ts) reads them: a driver would hand a JSON string over as one.
+  const [existing] = await db.query<{
+    owner_email: string;
+    runtime: string | null;
+    prompts: number;
+    checkpoints: unknown;
+    outcomes: unknown;
+    outcomes_in_payload: string | null;
+  }>(
+    `SELECT owner_email, runtime, prompts, checkpoints, outcomes,
+            CASE WHEN outcomes = '{}'::jsonb THEN (payload->'outcomes')::text END AS outcomes_in_payload
+     FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
     key,
   );
@@ -267,7 +280,14 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   const rewrite = upload.rewrite ?? null;
   // Kept in the payload too, which is what the session's page reads and what a copy is made from (demo.ts).
   const checkpoints = mergeCheckpoints(existing?.checkpoints, upload);
-  const outcomes = mergeOutcomes(existing?.outcomes, upload);
+  // Those a server from before outcomes kept are in the payload alone until
+  // `keepOutcomesFromPayloads` gets to the row: kept already, by the same rule
+  // (one of another end than this upload's is none), so that an upload without
+  // them does not drop them first.
+  const outcomesBefore = existing?.outcomes_in_payload
+    ? mergeOutcomes({}, { session: s, outcomes: JSON.parse(existing.outcomes_in_payload) } as Upload)
+    : existing?.outcomes;
+  const outcomes = mergeOutcomes(outcomesBefore, upload);
   const { checkpoints: _sent, outcomes: _sentOutcomes, ...rest } = upload;
   const kept = CHECKPOINTS.filter((name) => checkpoints[name]).map((name) => ({ checkpoint: name, ...checkpoints[name]! }));
   const keptOutcomes = CHECKPOINTS.filter((name) => outcomes[name]).map((name) => ({ checkpoint: name, ...outcomes[name]! }));

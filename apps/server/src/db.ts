@@ -966,14 +966,16 @@ export async function keepOutcomesFromPayloads(db: Db, atOnce = 100): Promise<{ 
         const outcomes: unknown = JSON.parse(row.outcomes);
         const merged = mergeOutcomes({}, { session: { ended_at: row.ended_at }, outcomes } as Upload);
         const shown = OUTCOME_AGES.filter((age) => merged[age]).map((age) => ({ checkpoint: age, ...merged[age] }));
-        await db.query(
+        const done = await db.query(
           `UPDATE sessions SET outcomes = $5::jsonb, payload = jsonb_set(payload, '{outcomes}', $6::jsonb)
            WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4
              AND outcomes = '{}'::jsonb AND payload->'outcomes' = $7::jsonb
-             AND payload #>> '{session,ended_at}' IS NOT DISTINCT FROM $8`,
+             AND payload #>> '{session,ended_at}' IS NOT DISTINCT FROM $8
+           RETURNING 1`,
           [row.org_id, row.machine_id, row.source, row.session_id, JSON.stringify(merged), JSON.stringify(shown), row.outcomes, row.ended_at],
         );
-        kept += 1;
+        // None for a session uploaded meanwhile, or deleted: it is not among those kept.
+        kept += done.length;
       } catch (err) {
         console.error(`The outcome counts of session ${row.session_id} could not be kept from its payload:`, err);
         failed += 1;

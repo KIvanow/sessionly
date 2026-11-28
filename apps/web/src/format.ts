@@ -159,6 +159,27 @@ export function laterWords(o: OutcomeCheckpoint): string {
   return parts.length ? parts.join(", ") : "nothing";
 }
 
+/** A count as a server sent it, or 0 for one that is no number. */
+const sentCount = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) ? n : 0);
+
+/**
+ * An age's counts as `laterWords` reads them: numbers, and of its agents the
+ * entries that are ones. A server from before outcomes may have kept anything.
+ */
+function laterCounts(o: OutcomeCheckpoint): OutcomeCheckpoint {
+  return {
+    checkpoint: o.checkpoint,
+    fix_commits: sentCount(o.fix_commits),
+    rework_commits: sentCount(o.rework_commits),
+    revert_commits: sentCount(o.revert_commits),
+    relanded: o.relanded === true,
+    age_seconds: sentCount(o.age_seconds),
+    by_agent: (Array.isArray(o.by_agent) ? o.by_agent : [])
+      .filter((b) => b && typeof b === "object")
+      .map((b) => ({ source: String(b.source ?? ""), fix_commits: sentCount(b.fix_commits) })),
+  };
+}
+
 /**
  * What later commits did to a session's lines at each fixed age: a dash for
  * an age not counted, and the day it was counted on when that was late.
@@ -166,8 +187,9 @@ export function laterWords(o: OutcomeCheckpoint): string {
 export function laterAges(outcomes: readonly OutcomeCheckpoint[] | null | undefined): { name: string; words: string; later: string; late: number | null; counted: boolean }[] {
   return KEPT_AGES.map(({ name, days, words }) => {
     // Of what a server sends, the counts only: a server from before them may have kept anything.
-    const o = (Array.isArray(outcomes) ? outcomes : []).find((one) => one && typeof one === "object" && one.checkpoint === name);
-    if (!o) return { name, words, later: "–", late: null, counted: false };
+    const found = (Array.isArray(outcomes) ? outcomes : []).find((one) => one && typeof one === "object" && one.checkpoint === name);
+    if (!found) return { name, words, later: "–", late: null, counted: false };
+    const o = laterCounts(found);
     return { name, words, later: laterWords(o), late: takenLate(o.age_seconds ?? 0, days), counted: true };
   });
 }
@@ -192,7 +214,8 @@ export function takenLate(ageSeconds: number, days: number): number | null {
  */
 export function keptAges(checkpoints: readonly RewriteCheckpoint[] | null | undefined): { name: string; words: string; kept: string; late: number | null; lines: number | null }[] {
   return KEPT_AGES.map(({ name, days, words }) => {
-    const c = (checkpoints ?? []).find((one) => one.checkpoint === name);
+    // A server from before checkpoints kept in the payload what it was sent.
+    const c = (Array.isArray(checkpoints) ? checkpoints : []).find((one) => one && typeof one === "object" && one.checkpoint === name);
     if (!c) return { name, words, kept: "–", late: null, lines: null };
     return {
       name,
