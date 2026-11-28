@@ -762,7 +762,20 @@ export async function runOutcomes(env, { api, server, repo, host, log, git, wait
     );
     return { skipped: true, stored: [] };
   }
-  if (shallow !== "false") throw new Error("the checkout has only the latest commits: give actions/checkout fetch-depth: 0, so the base branch's history can be read");
+  if (shallow !== "false") throw new Error("the checkout has only the latest commits: give actions/checkout fetch-depth: 0, so the base branch's history can be read, or set outcomes: false");
+  // A workspace an earlier job left on a self-hosted runner is not this run's: it has no commit of it.
+  const sha = (env.GITHUB_SHA ?? "").trim();
+  if (sha) {
+    try {
+      git(["cat-file", "-e", `${sha}^{commit}`]);
+    } catch {
+      log(
+        `::notice title=Sessionly::Later commits of merged pull requests were not read: the checkout here does not have this run's commit (${sha.slice(0, 12)}), so it is not this run's. ` +
+          "To read them, add actions/checkout with fetch-depth: 0 before this step; to stop this notice, set outcomes: false.",
+      );
+      return { skipped: true, stored: [] };
+    }
+  }
   let due;
   try {
     due = await server("GET", `/prs/outcomes/due?repo=${encodeURIComponent(name)}${since ? `&since=${encodeURIComponent(new Date(since).toISOString())}` : ""}`);

@@ -178,8 +178,10 @@ run reads by date once, and from where it is from then on.
 
 - Without a checkout (a scheduled job set up before version 0.5.0 has none), the run notes that
   later commits were not read, asks the server for none, and does the rest: add the checkout
-  and the permissions above, or set `outcomes: false`. With a checkout of only the latest commits, later commits are not read
-  and the run says to add `fetch-depth: 0`: a warning, or a failed run with `fail-on-error`.
+  and the permissions above, or set `outcomes: false`. A checkout without the run's commit (one
+  an earlier job left on a self-hosted runner) is taken for none. With a checkout of only the
+  latest commits, later commits are not read and the run says to add `fetch-depth: 0` or set
+  `outcomes: false`: a warning, or a failed run with `fail-on-error`.
 - When GitHub allows the run fewer than 100 more requests, or more than 2,000 commits are to
   be read whole, it stops there, and the next run goes on from there.
 - Without `pull-requests: read`, the run warns once and reads later commits without what their

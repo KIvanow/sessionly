@@ -328,6 +328,15 @@ test("an older server, and a checkout without history, are said", async () => {
   const shallow = () => Buffer.from("true\n");
   await assert.rejects(runOutcomes({}, { api: github(), server: due, repo: "acme/web", host: "github.com", log() {}, git: shallow }), /fetch-depth: 0/);
   await assert.rejects(runOutcomes({ SESSIONLY_OUTCOMES_SINCE: "soon" }, { api: github(), server: due, repo: "acme/web", host: "github.com", log() {}, git: shallow }), /not a date/);
+  // a checkout without this run's commit is not this run's
+  const stale = [];
+  const left = (args) => {
+    if (args[0] === "cat-file") throw new Error("fatal: Not a valid object name");
+    return Buffer.from("false\n");
+  };
+  const notRead = await runOutcomes({ GITHUB_SHA: "a".repeat(40) }, { api: github(), server: due, repo: "acme/web", host: "github.com", log: (l) => stale.push(l), git: left });
+  assert.equal(notRead.skipped, true);
+  assert.match(stale[0], /does not have this run's commit/);
   // the server asked too often waits, and tries again
   const r = history();
   let tries = 0;
