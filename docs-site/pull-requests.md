@@ -187,8 +187,10 @@ How it is read:
   them (no `fix_branch`, `fix_pr_title`, `revert_pr_title` or `bug_issue`).
 - A branch that is gone (a stacked pull request's, deleted after merging) cannot be read: the
   server is told, its pull requests are not named again, and they are counted nowhere, not even
-  among those to reach. One that is on GitHub but not in the checkout, or cannot be read for
-  another reason, is warned of, and the other branches are read. Without a checkout at all the
+  among those to reach. One renamed since is read by its new name, and is gone when that is
+  not in the checkout. One that is on GitHub but not in the checkout, or cannot be read for
+  another reason, is warned of, and the other branches are read; its pull requests are asked
+  for after the others from then on, so they hold back none. Without a checkout at all the
   run only notes that later commits were not read.
 - The server walks the commits in the order they landed, against the lines each pull request
   still has: a line moved goes with the move, a commit that puts lines back (a reland) is the

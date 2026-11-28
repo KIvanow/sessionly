@@ -329,9 +329,11 @@ export function dashboardPolicy(telemetry?: Telemetry | null): string {
 /**
  * Reading pull requests takes several statements, whose figures and
  * sessions have to be of one moment: a report stored between two of them
- * would otherwise leave lines of before beside costs of after.
+ * would otherwise leave lines of before beside costs of after. Not what is
+ * due after merging, which marks those it gives as asked for.
  */
-const readsPulls = (method: string, path: string): boolean => method === "GET" && /\/prs(?:\/[a-z]+){0,2}$/.test(path);
+const readsPulls = (method: string, path: string): boolean =>
+  method === "GET" && /\/prs(?:\/[a-z]+){0,2}$/.test(path) && !path.endsWith("/prs/outcomes/due");
 
 /** What a ci token may ask for: pull request reports, and what is due after merging. The whole path, so no other route ending so is one. */
 const REPORTING = { PUT: /^\/api\/v1\/prs(?:\/after-merge|\/outcomes)?$/, GET: /^\/api\/v1\/prs(?:\/outcomes)?\/due$/ };

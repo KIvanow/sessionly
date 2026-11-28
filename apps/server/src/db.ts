@@ -958,7 +958,9 @@ const MIGRATIONS: string[] = [
   // reachable from one of them was sent, whatever its date; null while not
   // known. And when the Action said that branch is gone (`outcomes_gone_at`):
   // its later commits cannot be read, so it is not asked for again, and
-  // counts nowhere.
+  // counts nowhere. And when a run was last asked to read it
+  // (`outcomes_asked_at`): one asked for and not read since goes behind
+  // those read longer ago, so a branch no run can read holds back none.
   `ALTER TABLE pull_requests
      ADD COLUMN head_sha text,
      ADD COLUMN merge_commit_sha text,
@@ -966,7 +968,8 @@ const MIGRATIONS: string[] = [
      ADD COLUMN outcomes_scanned_until timestamptz,
      ADD COLUMN outcomes_held jsonb,
      ADD COLUMN outcomes_tips jsonb,
-     ADD COLUMN outcomes_gone_at timestamptz`,
+     ADD COLUMN outcomes_gone_at timestamptz,
+     ADD COLUMN outcomes_asked_at timestamptz`,
   // From when an organisation's merged pull requests have their later
   // commits read: 30 days before it began to, the longest age, so the first
   // run has some to show. Those are history, so the Action can be asked to

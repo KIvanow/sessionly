@@ -50,7 +50,7 @@ export const LIKELY_FIX = 0.5;
 const LANDING_LINES = 3;
 const LANDING_SHARE = 0.5;
 
-/** No more pull requests than this are asked for at once, the longest unread first. */
+/** No more pull requests than this are asked for at once, those read or asked for longest ago first. */
 const DUE_AT_ONCE = 50;
 /** No more commits than this in one report, and no more pull requests. */
 export const MOST_COMMITS = 500;
@@ -94,7 +94,10 @@ const KEPT = `(jsonb_typeof(s.matched) = 'object' AND s.matched <> '{}'::jsonb)`
  * (720 hours, as `LONGEST`: 30 days of a calendar are 721 where the clocks
  * go back), and whose branch is not gone. Each says from when (`since`,
  * how far it was read, and `tips`, the commits it was read up to); a branch
- * reads from the earliest of its pull requests. No line hashes.
+ * reads from the earliest of its pull requests. No line hashes. Those read
+ * or asked for longest ago come first, and those given are marked asked
+ * for: one a run cannot read (its branch is not in the checkout, or its
+ * reading fails) goes behind the rest, rather than first at every run.
  */
 export async function outcomesDue(db: OrgDb, repo: string, since: string | null = null): Promise<OutcomesDue> {
   const rows = await db.query(
@@ -109,10 +112,15 @@ export async function outcomesDue(db: OrgDb, repo: string, since: string | null 
        AND (p.outcomes_scanned_until IS NULL OR p.outcomes_scanned_until < p.merged_at + interval '720 hours')
        AND p.outcomes_gone_at IS NULL
        AND EXISTS (SELECT 1 FROM pull_sessions s WHERE s.org_id = p.org_id AND s.repo = p.repo AND s.number = p.number AND ${KEPT})
-     ORDER BY coalesce(p.outcomes_scanned_until, p.merged_at), p.number
+     ORDER BY greatest(coalesce(p.outcomes_scanned_until, p.merged_at), p.outcomes_asked_at), p.number
      LIMIT ${DUE_AT_ONCE}`,
     [db.orgId, repo, since],
   );
+  if (rows.length > 0) {
+    await db.query(`UPDATE pull_requests SET outcomes_asked_at = clock_timestamp() WHERE org_id = $1 AND repo = $2 AND number = ANY($3::integer[])`, [
+      db.orgId, repo, rows.map((row) => num(row.number)),
+    ]);
+  }
   const branches = new Map<string, OutcomesDueBranch>();
   for (const row of rows) {
     const base = String(row.base_ref);

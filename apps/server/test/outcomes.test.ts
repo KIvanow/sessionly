@@ -670,6 +670,23 @@ test("pull requests merged into branches that are gone are not asked for again, 
   assert.equal((await call(tokens.ci, "PUT", "/prs/outcomes", { repo, base_ref: "main", scanned_until: ago(0), pulls: [], commits: [], gone: [2 ** 31] })).status, 422);
 });
 
+test("pull requests asked for and not read go behind the others, so a branch that cannot be read holds back none", async () => {
+  await readingSince();
+  const repo = "github.com/acme/unreadable";
+  const q = encodeURIComponent(repo);
+  assert.equal((await upload(repo, "ur-1", "codex", [file("a.ts", 1, 2, 3)])).status, 200);
+  // 50 merged into a branch the Action fails to read at every run, before one merged into main.
+  for (let n = 1; n <= 50; n += 1) await merged(repo, n, 40 - n * 0.1, [file("a.ts", 1, 2, 3)], { base_ref: "release" });
+  await merged(repo, 99, 3, [file("a.ts", 1, 2, 3)]);
+  const bases = async () => (await call(tokens.ci, "GET", `/prs/outcomes/due?repo=${q}`)).body.branches.map((b: any) => [b.base_ref, b.pulls.length]);
+  assert.deepEqual(await bases(), [["release", 50]]);
+  // None of them read: the next run is asked for #99 first.
+  assert.deepEqual(await bases(), [["main", 1], ["release", 49]]);
+  // Read, #99 is one read up to now, behind those asked for longest ago.
+  assert.equal((await scanOf(repo, [99], [])).status, 200);
+  assert.deepEqual((await bases())[0], ["release", 50]);
+});
+
 test("a commit that landed the moment its pull request was merged counts when the history says it came after", async () => {
   await readingSince();
   const repo = "github.com/acme/moment";
