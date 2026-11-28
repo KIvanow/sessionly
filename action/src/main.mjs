@@ -8,7 +8,7 @@ import { fileHashes, ignoring } from "./lines.mjs";
 import { gitIn } from "./history.mjs";
 import { reportCi, runCi, runWorkflowRun } from "./ci.mjs";
 import { runOutcomes } from "./outcomes.mjs";
-import { buildReport, MARKER, render, renderAfterMerge, renderMany, renderOutcomes } from "./report.mjs";
+import { buildReport, isSha, MARKER, render, renderAfterMerge, renderMany, renderOutcomes } from "./report.mjs";
 
 const on = (value) => /^(true|yes|on|1)$/i.test((value ?? "").trim());
 
@@ -290,9 +290,12 @@ export async function run(env, { api, deliver = send, server, log = console.log,
         // report it gets, and takes the rest from the latest, which is the one
         // that follows. It says nothing of reviews and comments, so that those
         // the server has stay; nor whose feedback its rounds followed, so that
-        // none are taken to be known if the report that follows fails.
-        const { feedback, feedback_total, review_round_authors, ...opened } = buildReport({ ...data, ...then, reviews: [], comments: [], conversation: [], event: "opened", host, ignored });
-        await sendTo(named({ ...opened, state: "open", merged_at: null, closed_at: null }));
+        // none are taken to be known if the report that follows fails. Its
+        // head is the one it had then (the last commit before it was opened),
+        // not the one it has now: the server keeps the lines new at each.
+        const { feedback, feedback_total, review_round_authors, head_sha, ...opened } = buildReport({ ...data, ...then, reviews: [], comments: [], conversation: [], event: "opened", host, ignored });
+        const thenHead = then.commits.at(-1)?.sha;
+        await sendTo(named({ ...opened, ...(isSha(thenHead) ? { head_sha: thenHead } : {}), state: "open", merged_at: null, closed_at: null }));
       }
     }
     const report = named(buildReport({ ...data, event, host, ignored }));

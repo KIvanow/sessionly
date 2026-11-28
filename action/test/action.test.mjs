@@ -437,7 +437,8 @@ test("backfill first reports a pull request as it was when opened", async () => 
   const sha = (minute, id) => ({ sha: id, ...commit(minute) });
   const pull = { ...PULL, state: "closed", merged: true, merged_at: at(50), closed_at: at(50), base: { ...PULL.base, sha: "base0" } };
   // opened at minute 0 with one commit; two more pushed during review
-  const commits = [sha(0, "c1"), sha(20, "c2"), sha(30, "c3")];
+  const c1 = "1".repeat(40);
+  const commits = [sha(0, c1), sha(20, "c2"), sha(30, "c3")];
   const early = [{ filename: "src/parser.rs", status: "added", additions: 1, patch: "@@ -0,0 +1 @@\n+early();" }];
   const calls = [];
   const api = {
@@ -457,9 +458,11 @@ test("backfill first reports a pull request as it was when opened", async () => 
   writeFileSync(env.GITHUB_EVENT_PATH, JSON.stringify({ action: "closed", pull_request: { number: 7 } }));
   await run(env, { api, deliver, log() {} });
 
-  assert.ok(calls.includes("/repos/acme/web/compare/base0...c1"));
+  assert.ok(calls.includes(`/repos/acme/web/compare/base0...${c1}`));
   assert.equal(sent.length, 2);
   const [opened, closed] = sent;
+  // The first is at the head it had then, not the one it has now: the server keeps the lines new at each head.
+  assert.deepEqual([opened.head_sha, closed.head_sha], [c1, PULL.head.sha]);
   assert.deepEqual(
     [opened.event, opened.state, opened.merged_at, opened.commits, opened.reviews, opened.review_rounds],
     ["opened", "open", null, 1, 0, 0],
