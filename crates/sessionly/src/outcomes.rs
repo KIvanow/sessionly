@@ -1172,31 +1172,31 @@ pub fn measure(
         {
             continue;
         }
-        let given = budget
-            .repo
-            .min(deadline.saturating_duration_since(Instant::now()));
-        if given.is_zero() {
-            break;
-        }
-        let until = Instant::now() + given;
         // Newest first: a reading too big for them all is read in halves,
         // down to one session, so that the newest are read first.
         scanning.sort_by_key(|k| std::cmp::Reverse(targets[repo.sessions[*k].target].ended_at));
         let mut groups = std::collections::VecDeque::from([scanning]);
+        // A reading of more failed here on this sync.
+        let mut split = false;
         while let Some(group) = groups.pop_front() {
-            // Its time is up: the rest is read on a later sync.
-            if Instant::now() >= until {
-                break;
-            }
+            // Each reading has the repository's time from when it begins, as
+            // far as the sync's goes.
+            let given = budget
+                .repo
+                .min(deadline.saturating_duration_since(Instant::now()));
             let scanning: Vec<&InRepo> = group.iter().map(|k| &repo.sessions[*k]).collect();
-            let found = scan(
-                &repo.roots,
-                &repo.sessions,
-                &scanning,
-                &targets,
-                words_of,
-                until,
-            );
+            let found = if given.is_zero() {
+                Err(Stop::TimedOut)
+            } else {
+                scan(
+                    &repo.roots,
+                    &repo.sessions,
+                    &scanning,
+                    &targets,
+                    words_of,
+                    Instant::now() + given,
+                )
+            };
             match &found {
                 // Too big, or failing, for them all: one session's paths may
                 // be past what git takes, or not paths it can read.
@@ -1204,10 +1204,13 @@ pub fn measure(
                     let (newer, older) = group.split_at(group.len() / 2);
                     groups.push_front(older.to_vec());
                     groups.push_front(newer.to_vec());
+                    split = true;
                     continue;
                 }
-                // Out of this sync's time, not of the repository's: read on another.
-                Err(Stop::TimedOut) if given < enough => break 'repos,
+                // Out of this sync's time, not of the repository's: read on
+                // another. Not after a reading of more failed, which would
+                // fail again first on each.
+                Err(Stop::TimedOut) if given < enough && !split => break 'repos,
                 Err(Stop::TimedOut) => {
                     // Too slow. A command gives up on them all, for a sync
                     // nobody waits for to read; that one on the older half,
@@ -4897,6 +4900,79 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
         world.measure(T0 + 8 * DAY);
         assert_eq!(world.at("s1", "7d").expect("s1 failed").fix_commits, 1);
         assert_eq!(world.target("s2").failures, 1);
+    }
+
+    /// Sessions `s<n>` in one repository, each with a file of its own, `f<n>.js`.
+    #[cfg(unix)]
+    fn sessions_of_their_own(sessions: &[i64]) -> World {
+        let mut world = World::new();
+        world.commit("base.js", "// base\n", "init", T0);
+        for &n in sessions {
+            let lines: Vec<String> = (0..4)
+                .map(|k| format!("let v{n}_{k} = compute({n}, {k});"))
+                .collect();
+            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let file = format!("f{n}.js");
+            world.commit(&file, &format!("{}\n", lines.join("\n")), "Add", T0 + HOUR);
+            world.session(
+                &format!("s{n}"),
+                T0 + n,
+                T0 + 2 * HOUR + n,
+                &[(&file, &refs)],
+            );
+        }
+        world
+    }
+
+    /// Each listing takes 0.4 s; a reading of both sessions' files fails after
+    /// 1.2 s more (as one with a path git will not take does).
+    #[cfg(unix)]
+    const BOTH_FAIL_SLOWLY: &str = r#"both=0; for a in "$@"; do [ "$a" = rev-list ] && sleep 0.4; [ "$a" = f0.js ] && both=$((both+1)); [ "$a" = f1.js ] && both=$((both+1)); done; [ $both = 2 ] && { sleep 1.2; exit 128; }"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_half_read_after_a_slow_failure_has_the_repository_s_time() {
+        let budget = Budget {
+            all: Duration::from_secs(10),
+            repo: Duration::from_secs(2),
+            waited: false,
+        };
+        // Alone, the newer session is read well within the repository's time;
+        // after a reading of both failed slowly, too.
+        let mut alone = sessions_of_their_own(&[1]);
+        {
+            let _git = FakeGit::new(BOTH_FAIL_SLOWLY);
+            alone.measure_for(T0 + 8 * DAY, budget);
+        }
+        assert!(alone.at("s1", "7d").is_some());
+        let mut world = sessions_of_their_own(&[0, 1]);
+        let _git = FakeGit::new(BOTH_FAIL_SLOWLY);
+        world.measure_for(T0 + 8 * DAY, budget);
+        let failures: Vec<u32> = (0..2)
+            .map(|n| world.target(&format!("s{n}")).failures)
+            .collect();
+        assert_eq!(failures, [0, 0], "a half was taken for too slow");
+        assert!(world.at("s0", "7d").is_some() && world.at("s1", "7d").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_failure_that_leaves_a_sync_no_time_is_not_tried_again_first() {
+        // After the reading of both, no time is left for a half: on the next
+        // sync, the other is read alone.
+        let budget = Budget {
+            all: Duration::from_secs(2),
+            repo: Duration::from_secs(2),
+            waited: false,
+        };
+        let mut world = sessions_of_their_own(&[0, 1]);
+        let _git = FakeGit::new(BOTH_FAIL_SLOWLY);
+        world.measure_for(T0 + 8 * DAY, budget);
+        world.measure_for(T0 + 8 * DAY, budget);
+        let read: Vec<bool> = (0..2)
+            .map(|n| world.at(&format!("s{n}"), "7d").is_some())
+            .collect();
+        assert!(read.contains(&true), "neither read: {read:?}");
     }
 
     #[test]

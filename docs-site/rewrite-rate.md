@@ -164,10 +164,12 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   read. A partial clone fetches what it needs to show a commit; other repositories fetch
   nothing. Nothing git runs while it reads can ask for a password or a key.
 - **How long it reads:** up to a minute in all on `sessionly sync` and the automatic sync, at
-  most 20 seconds of it in one repository, the one tried longest ago first; and 10 seconds on
-  other commands. A repository that takes longer is too slow: on a sync, half of the sessions
-  being read (the older) wait to be tried again and the rest are read on the next sync, down to
-  one at a time; a command leaves it to a sync. What is left is read on a later sync.
+  most 20 seconds of it in one reading of a repository, the one tried longest ago first; and 10
+  seconds on other commands. A reading for fewer sessions, after one for more failed, has that
+  time of its own. A reading that takes longer is too slow, as is one for fewer that the sync has
+  no time left for: on a sync, half of the sessions being read (the older) wait to be tried
+  again and the rest are read on the next sync, down to one at a time; a command leaves it to a
+  sync. What is left is read on a later sync.
 - **The counts are kept at 1, 7 and 30 days, as the rewrite checkpoints are**, and age counts
   from the session's end the same way. Unlike those, an age reached before Sessionly looked can
   be counted later from the history; it then says it was late.
