@@ -3,6 +3,8 @@
 // uploaded with line hashes say which lines an agent added to which file.
 // Matching the two needs no source code on the server.
 import type {
+  CiReport,
+  CiState,
   FileHashes,
   LinesBy,
   LocalReviews,
@@ -49,6 +51,14 @@ const MAX_FEEDBACK = 2000;
 export const HASH = /^[0-9a-f]{16}$/;
 /** A full commit SHA: SHA-1 or SHA-256, lowercase hex. */
 export const COMMIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** What CI may say of a commit (ci.ts). */
+export const CI_STATES: readonly CiState[] = ["pending", "success", "failure", "none"];
+/** No more commits' CI than this in a report, names of failed checks for one commit, and characters in a name. */
+export const MOST_CI = 20;
+export const MOST_FAILED_CHECKS = 20;
+export const CHECK_NAME_LENGTH = 100;
+/** No more heads than this are kept for a pull request: the oldest go. */
+export const MOST_HEADS = 100;
 
 const num = (value: unknown): number => (value == null ? 0 : Number(value));
 const iso = (value: unknown): string | null =>
@@ -762,6 +772,36 @@ function checkRoundAuthors(value: unknown, rounds: number): RoundAuthor[][] | un
   return checked;
 }
 
+/**
+ * What CI said of commits, as the Action sends it, checked: each commit
+ * once, the first time it is named. Undefined when nothing was sent, which
+ * says nothing (an Action from before this, or `ci: false`).
+ */
+export function checkCi(value: unknown, fail: (what: string) => never, most = MOST_CI): CiReport[] | undefined {
+  if (value == null) return undefined;
+  if (!Array.isArray(value) || value.length > most) fail(`ci must be a list of at most ${most} commits`);
+  const seen = new Set<string>();
+  const out: CiReport[] = [];
+  for (const item of value as Record<string, unknown>[]) {
+    if (!item || typeof item !== "object" || typeof item.sha !== "string" || !COMMIT_SHA.test(item.sha)) fail("each commit in ci needs a SHA");
+    if (!CI_STATES.includes(item.state as CiState)) fail(`a commit's CI state must be one of ${CI_STATES.join(", ")}`);
+    const count = (key: string): number => {
+      const n = item[key] ?? 0;
+      return Number.isInteger(n) && (n as number) >= 0 ? (n as number) : fail(`a commit's ${key} must be a whole number`);
+    };
+    const names = item.failed_checks;
+    const named =
+      names != null &&
+      !(Array.isArray(names) && names.length <= MOST_FAILED_CHECKS && names.every((n) => typeof n === "string" && n !== "" && n.length <= CHECK_NAME_LENGTH));
+    if (named) fail(`failed_checks must be at most ${MOST_FAILED_CHECKS} names of at most ${CHECK_NAME_LENGTH} characters`);
+    const counts = { failed: count("failed"), total: count("total"), cancelled: count("cancelled") };
+    if (seen.has(item.sha)) continue;
+    seen.add(item.sha);
+    out.push({ sha: item.sha, state: item.state as CiState, ...counts, ...(Array.isArray(names) ? { failed_checks: names as string[] } : {}) });
+  }
+  return out;
+}
+
 /** A report as the Action sends it, checked; throws `BadReport` saying what is wrong with it. */
 export function checkReport(body: unknown): PullReport {
   const r = body as Record<string, unknown>;
@@ -815,6 +855,7 @@ export function checkReport(body: unknown): PullReport {
     // Left out by an Action before 0.5.0, and one that is not a SHA is too.
     head_sha: COMMIT_SHA.test(optional("head_sha") ?? "") ? optional("head_sha") : null,
     merge_commit_sha: state === "merged" && COMMIT_SHA.test(optional("merge_commit_sha") ?? "") ? optional("merge_commit_sha") : null,
+    ci: checkCi(r.ci, fail),
     created_at: when("created_at", true)!,
     merged_at: when("merged_at", false),
     closed_at: when("closed_at", false),
@@ -1400,8 +1441,8 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
   // read here, or is looked for in this pull request once this is committed
   // (`pullsAddedTo` waits for it).
   await holdPullSessions(db);
-  const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string; head_ref: string | null; base_ref: string | null; merged_at: unknown }>(
-    `SELECT first_files, first_event, state, head_ref, base_ref, merged_at FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
+  const [existing] = await db.query<{ first_files: unknown; first_event: string; state: string; head_ref: string | null; base_ref: string | null; merged_at: unknown; last_files: unknown; head_sha: string | null }>(
+    `SELECT first_files, first_event, state, head_ref, base_ref, merged_at, last_files, head_sha FROM pull_requests WHERE org_id = $1 AND repo = $2 AND number = $3 FOR UPDATE`,
     [db.orgId, report.repo, report.number],
   );
   const first = existing ? json<FileHashes[]>(existing.first_files) : report.files;
@@ -1510,7 +1551,90 @@ export async function storePull(db: OrgDb, report: PullReport, key?: string): Pr
     reporter_version: typeof columns.reporter_version === "string" ? columns.reporter_version : null,
   });
   await keepReviewSplit(db, report.repo, report.number, { reported: true });
+  // The head it is at, when no report named it before, and what CI said of its commits.
+  await keepHead(db, report, existing ?? null);
+  if (report.ci) await applyCi(db, report.repo, report.number, report.ci);
   return attribution;
+}
+
+/**
+ * A head a report names that no report named before is kept, with the
+ * lines new at it: those of the report's files that the head reported
+ * before did not have, by file, a line as often as it is there beyond how
+ * often it was. The first head known has all of them (a report from an
+ * Action that named no head counts as none before). No more heads than
+ * `MOST_HEADS` a pull request: the oldest go. Where a session's lines
+ * arrived is read from these (ci.ts).
+ */
+async function keepHead(
+  db: OrgDb,
+  report: Pick<PullReport, "repo" | "number" | "head_sha" | "files">,
+  before: { last_files: unknown; head_sha: string | null } | null,
+): Promise<void> {
+  if (!report.head_sha) return;
+  const [known] = await db.query(`SELECT 1 FROM pull_heads WHERE org_id = $1 AND repo = $2 AND number = $3 AND sha = $4`, [
+    db.orgId, report.repo, report.number, report.head_sha,
+  ]);
+  if (known) return;
+  const had = copiesAt(linesOfFiles(before?.head_sha ? json<FileHashes[]>(before.last_files) : []));
+  // (A map: a file may be called `constructor`, which every object has already, or `__proto__`.)
+  const fresh = new Map<string, string[]>();
+  for (const file of report.files) {
+    const left = new Map<string, number>();
+    for (const hash of file.hashes) left.set(hash, (left.get(hash) ?? 0) + 1);
+    const hashes = fresh.get(file.path) ?? [];
+    for (const [hash, n] of left) for (let i = had.get(lineKey(file.path, hash)) ?? 0; i < n; i += 1) hashes.push(hash);
+    if (hashes.length > 0) fresh.set(file.path, hashes);
+  }
+  await db.query(
+    `INSERT INTO pull_heads (org_id, repo, number, sha, hashes) VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (org_id, repo, number, sha) DO NOTHING`,
+    [db.orgId, report.repo, report.number, report.head_sha, JSON.stringify(Object.fromEntries(fresh))],
+  );
+  await db.query(
+    `DELETE FROM pull_heads WHERE org_id = $1 AND repo = $2 AND number = $3 AND sha IN (
+       SELECT sha FROM pull_heads WHERE org_id = $1 AND repo = $2 AND number = $3 ORDER BY first_reported_at DESC, sha OFFSET ${MOST_HEADS})`,
+    [db.orgId, report.repo, report.number],
+  );
+}
+
+/** A report's files as lines by file. */
+function linesOfFiles(files: FileHashes[]): Lines {
+  const lines = new Map<string, string[]>();
+  for (const file of files ?? []) lines.set(file.path, [...(lines.get(file.path) ?? []), ...(file.hashes ?? [])]);
+  return Object.fromEntries(lines);
+}
+
+/**
+ * Keep what CI said of commits of a pull request, where the commit is one
+ * of its heads or the one it was merged as; a commit that is neither is
+ * passed over. A state that came out one way or the other is not put back
+ * to pending (a run that read an earlier attempt), and the names of failed
+ * checks are kept only with a failure. How many heads, and whether the merge
+ * commit, were changed.
+ */
+export async function applyCi(db: OrgDb, repo: string, number: number, ci: CiReport[]): Promise<{ heads: number; merges: number }> {
+  let heads = 0;
+  let merges = 0;
+  for (const c of ci) {
+    const names = c.state === "failure" && c.failed_checks && c.failed_checks.length > 0 ? c.failed_checks : null;
+    const changed = await db.query(
+      `UPDATE pull_heads SET ci_state = $5, ci_failed = $6, ci_total = $7, ci_cancelled = $8, ci_checked_at = clock_timestamp(), failed_checks = $9::jsonb
+       WHERE org_id = $1 AND repo = $2 AND number = $3 AND sha = $4 AND NOT ($5 = 'pending' AND ci_state IN ('success', 'failure'))
+       RETURNING sha`,
+      [db.orgId, repo, number, c.sha, c.state, c.failed, c.total, c.cancelled, names ? JSON.stringify(names) : null],
+    );
+    heads += changed.length;
+    const kept = { state: c.state, failed: c.failed, total: c.total, cancelled: c.cancelled, checked_at: new Date().toISOString(), ...(names ? { failed_checks: names } : {}) };
+    const merged = await db.query(
+      `UPDATE pull_requests SET merge_ci = $5::jsonb
+       WHERE org_id = $1 AND repo = $2 AND number = $3 AND state = 'merged' AND merge_commit_sha = $4
+         AND NOT ($6 = 'pending' AND merge_ci->>'state' IN ('success', 'failure'))
+       RETURNING number`,
+      [db.orgId, repo, number, c.sha, JSON.stringify(kept), c.state],
+    );
+    merges += merged.length;
+  }
+  return { heads, merges };
 }
 
 /**

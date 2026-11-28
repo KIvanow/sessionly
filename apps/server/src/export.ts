@@ -137,6 +137,16 @@ const EXPORTED: TableExport[] = [
     cursorOf: (row) => [text(row.repo), Number(row.number), text(row.sha)],
   },
   {
+    // Each head a pull request was reported at, what CI said of it, and which of its lines were new there.
+    type: "pull_head",
+    table: "pull_heads",
+    columns: "*",
+    order: "repo, number, sha",
+    afterSql: "$2::text IS NULL OR (repo, number, sha) > ($2, $3::integer, $4)",
+    blank: [null, null, null],
+    cursorOf: (row) => [text(row.repo), Number(row.number), text(row.sha)],
+  },
+  {
     // How far each base branch has been read for them.
     type: "repo_outcome_scan",
     table: "repo_outcome_scans",

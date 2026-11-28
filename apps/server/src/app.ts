@@ -36,7 +36,7 @@ import {
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
-import type { AuthOptions, PullAfterMergeReport, PullDetail, PullOutcomesBy, PullOutcomesReport, PullReport, Telemetry } from "@sessionly/schema";
+import type { AuthOptions, PullAfterMergeReport, PullCiReport, PullDetail, PullOutcomesBy, PullOutcomesReport, PullReport, Telemetry } from "@sessionly/schema";
 import {
   BadReport,
   checkReport,
@@ -51,6 +51,7 @@ import {
   type PullFilters,
 } from "./pulls.ts";
 import { afterMergeOf, checkAfterMerge, pullsDue, storeAfterMerge } from "./after-merge.ts";
+import { checkCiReport, ciDue, ciOf, ciPending, storeCi } from "./ci.ts";
 import { checkOutcomes, outcomesDue, outcomesOf, storeOutcomes, summarizeOutcomes } from "./outcomes.ts";
 import { uploadProblems, type Upload } from "./validate.ts";
 
@@ -66,6 +67,7 @@ export type Env = {
     report?: PullReport;
     afterMerge?: PullAfterMergeReport;
     outcomes?: PullOutcomesReport;
+    ci?: PullCiReport;
     /** The session an upload stored: the pull requests it adds lines to are matched again once it is committed. */
     stored?: { machine_id: string; source: string; session_id: string };
     /** And one it stored with another cost, or other branches: its pull requests are charged again then too. */
@@ -334,7 +336,7 @@ export function dashboardPolicy(telemetry?: Telemetry | null): string {
 const readsPulls = (method: string, path: string): boolean => method === "GET" && /\/prs(?:\/[a-z]+){0,2}$/.test(path);
 
 /** What a ci token may ask for: pull request reports, and what is due after merging. The whole path, so no other route ending so is one. */
-const REPORTING = { PUT: /^\/api\/v1\/prs(?:\/after-merge|\/outcomes)?$/, GET: /^\/api\/v1\/prs(?:\/outcomes)?\/due$/ };
+const REPORTING = { PUT: /^\/api\/v1\/prs(?:\/after-merge|\/outcomes|\/ci)?$/, GET: /^\/api\/v1\/prs(?:\/outcomes|\/ci)?\/due$/ };
 const PING = "/api/v1/ping";
 
 export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
@@ -351,8 +353,9 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       if (!within) return c.json({ error: "too many requests; try again in a minute", code: "rate_limited" }, 429);
     }
     // A ci token reports pull requests and does nothing else: as they are,
-    // counted again after merging, and the later commits of merged ones,
-    // which it first asks which are due for.
+    // counted again after merging, the later commits of merged ones, and
+    // what CI said of their commits, each of which it first asks which are
+    // due for.
     if (principal.role === "ci") {
       const reporting =
         (c.req.method === "PUT" && REPORTING.PUT.test(c.req.path)) || (c.req.method === "GET" && REPORTING.GET.test(c.req.path));
@@ -460,6 +463,22 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
       return c.json({ error: "the body is not JSON" }, 400);
     }
     c.set("outcomes", checkOutcomes(body));
+    await next();
+  });
+
+  // What CI said of heads and merge commits: parsed here too, for a hosting's hooks.
+  api.put("/prs/ci", async (c, next) => {
+    const role = c.get("principal").role;
+    if (role !== "admin" && role !== "ci") {
+      return c.json({ error: "reporting pull requests needs a ci or admin token" }, 403);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "the body is not JSON" }, 400);
+    }
+    c.set("ci", checkCiReport(body));
     await next();
   });
 
@@ -787,10 +806,12 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     }
     return { repo: query.repo || undefined, state, since: time(query.since, "since") };
   };
+  // Answered with the heads of it whose CI is still pending: the same run reads them.
   api.put("/prs", async (c) => {
     const report = c.get("report");
     if (!report) throw new Error("the report was not checked");
-    return c.json({ stored: true, attribution: await storePull(c.get("db"), report, options.hashKey) });
+    const attribution = await storePull(c.get("db"), report, options.hashKey);
+    return c.json({ stored: true, attribution, ci_pending: await ciPending(c.get("db"), report.repo, report.number) });
   });
   // A merged pull request's agent lines counted again on the branch it was
   // merged into: the Action asks which are due, reads their files there, and
@@ -818,6 +839,18 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     if (!repo) throw new BadRequest("repo is required");
     return c.json(await outcomesDue(c.get("db"), repo.replace(/\/+$/, ""), time(c.req.query("since"), "since") ?? null));
   });
+  // Commits whose CI the Action is to read: heads still pending, and merge commits not known yet.
+  api.get("/prs/ci/due", async (c) => {
+    reportersOnly(c.get("principal"));
+    const repo = c.req.query("repo");
+    if (!repo) throw new BadRequest("repo is required");
+    return c.json(await ciDue(c.get("db"), repo.replace(/\/+$/, "")));
+  });
+  api.put("/prs/ci", async (c) => {
+    const report = c.get("ci");
+    if (!report) throw new Error("the report was not checked");
+    return c.json(await storeCi(c.get("db"), report));
+  });
   // What later commits did to merged pull requests' lines, summed by group (merge clock).
   api.get("/prs/outcomes/summary", async (c) => {
     readersOnly(c.get("principal"));
@@ -841,10 +874,15 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     const number = wholeNumber(query.number, 0, 2 ** 31 - 1, "number");
     const pull = await getPull(c.get("db"), query.repo, number);
     if (!pull) return c.json({ error: "no such pull request" }, 404);
+    const ci = await ciOf(c.get("db"), query.repo, number);
     return c.json({
       ...pull,
+      // Whether CI was red where each session's lines arrived, beside the session.
+      sessions: pull.sessions && pull.sessions.map((s) => ({ ...s, red_on_arrival: ci.red_on_arrival.get(`${s.machine_id}\n${s.source}\n${s.session_id}`) ?? null })),
       after_merge: await afterMergeOf(c.get("db"), query.repo, number),
       outcomes: await outcomesOf(c.get("db"), query.repo, number),
+      heads: ci.heads,
+      merge_ci: ci.merge_ci,
     } satisfies PullDetail);
   });
   // Match one pull request's lines again against the sessions held now.

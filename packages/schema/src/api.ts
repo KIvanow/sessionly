@@ -468,6 +468,12 @@ export interface PullReport {
   head_sha?: string | null;
   /** Once merged, the commit it was merged as (the squash, rebase or merge commit). Left out by an Action before 0.5.0. */
   merge_commit_sha?: string | null;
+  /**
+   * What CI said of its head, of heads the server named as pending, and of
+   * the commit it was merged as: at most 20. Left out by an Action before
+   * 0.5.0, or with `ci: false`; what the server has then stays.
+   */
+  ci?: CiReport[];
   created_at: string;
   merged_at?: string | null;
   closed_at?: string | null;
@@ -983,6 +989,13 @@ export interface PullSession {
    * Its share here is then an estimate (see `PullCost.sessions_unshared`).
    */
   unshared: boolean;
+  /**
+   * Whether CI was red at the first head of the pull request that had one of
+   * its lines (the push its lines arrived with). Null while that head's CI
+   * is not known (pending, none, or from an Action before 0.5.0), or the
+   * session has no lines in it now. Left out by a server from before this.
+   */
+  red_on_arrival?: boolean | null;
   session: Pick<
     SessionRow,
     "owner_email" | "runtime" | "title" | "started_at" | "active_ms" | "cost_usd" | "cost_source" | "primary_model" | "prompts"
@@ -1155,6 +1168,80 @@ export interface PullDetail extends PullRow {
    * clock. Null for one not merged; left out by a server from before this.
    */
   outcomes?: PullOutcomes | null;
+  /**
+   * Each head commit it was reported at, oldest first (at most 100 are
+   * kept), with what CI said of it. Left out by a server from before this.
+   */
+  heads?: PullHead[];
+  /** What CI said of the commit it was merged as; null while not known, or not merged. Left out by a server from before this. */
+  merge_ci?: PullCi | null;
+}
+
+/**
+ * What CI said of a commit, from its check runs and commit statuses:
+ * `failure` when any failed (timed out too), `success` when all that ran
+ * came out well (neutral and skipped count as well), `pending` while any is
+ * still running or waiting, `none` when there is nothing to go by (no
+ * checks and no statuses, or every one cancelled). The Action's own check
+ * run and the ones its `ci-ignore` names are left out first.
+ */
+export type CiState = "pending" | "success" | "failure" | "none";
+
+/** What the Action read of one commit's CI (`PullReport.ci`, `PullCiReport`). No check names unless asked for. */
+export interface CiReport {
+  sha: string;
+  state: CiState;
+  /** How many checks and statuses failed, how many there were, and how many were cancelled (not counted either way). */
+  failed: number;
+  total: number;
+  cancelled: number;
+  /**
+   * The names of the failed checks (check run names and status contexts), at
+   * most 20 of at most 100 characters: only with the Action's
+   * `ci-check-names: true`, off by default, as names can carry the names of
+   * clients, environments or systems.
+   */
+  failed_checks?: string[];
+}
+
+/** What CI said of a commit, as kept: the counts are null while nothing was said of it. */
+export interface PullCi {
+  state: CiState;
+  failed: number | null;
+  total: number | null;
+  cancelled: number | null;
+  /** When the Action last said; null while it never did. */
+  checked_at: string | null;
+  failed_checks?: string[];
+}
+
+/** A head commit a pull request was reported at, and what CI said of it. */
+export interface PullHead {
+  sha: string;
+  /** When a report first named it. */
+  first_reported_at: string;
+  ci: PullCi;
+}
+
+/** `GET /prs/ci/due?repo=`: commits whose CI the Action is to read. No hashes. */
+export interface PullCiDue {
+  /** Heads whose CI is still pending, reported in the last 7 days: oldest first, 50 at most. */
+  heads: { number: number; sha: string }[];
+  /** The commits merged pull requests with agent lines were merged as, whose CI is not known yet: oldest merged first, 50 at most. */
+  merges: { number: number; sha: string }[];
+}
+
+/** `PUT /prs/ci`: what CI said of heads and merge commits. Only commits the server knows are kept; at most 100 of each. */
+export interface PullCiReport {
+  repo: string;
+  heads: (CiReport & { number: number })[];
+  merges: (CiReport & { number: number })[];
+}
+
+/** `PUT /prs/ci` answers how many of each were kept. */
+export interface PullCiStored {
+  heads: number;
+  merges: number;
 }
 
 /** The ages outcomes are counted at, after merging (or, for a session, after it ended). */
@@ -1384,11 +1471,35 @@ export interface PullOutcomesAt {
 
 export type PullOutcomesBy = "tool" | "model" | "user" | "repo" | "day";
 
+/**
+ * What CI said of merged pull requests' pushes and merges, summed: no age,
+ * each is one moment. A head or a pull request counts once in each group
+ * whose sessions had lines in the pull request, and once in the total; a
+ * session once in its group. A commit with no CI to go by (`none`), or not
+ * known yet, is in no denominator. CI failing is linked, not caused: tests
+ * are flaky and systems go down.
+ */
+export interface PullOutcomesCi {
+  /** Heads whose CI came out one way or the other, and of those the red ones (red pushes). */
+  heads_with_ci: number;
+  heads_failed: number;
+  /** Sessions whose lines arrived at a head with CI known, and of those the ones where it was red (red on arrival). */
+  sessions_with_ci: number;
+  red_on_arrival_sessions: number;
+  /** Pull requests whose merge commit's CI is known, and of those the ones where the base branch went red. */
+  pulls_merge_known: number;
+  pulls_merge_failed: number;
+  /** Merged pull requests whose merge commit's CI is not known: not read yet, pending, or none to go by. */
+  pulls_ci_unknown: number;
+}
+
 export interface PullOutcomesGroup {
   key: string;
   outcomes_1d: PullOutcomesAt;
   outcomes_7d: PullOutcomesAt;
   outcomes_30d: PullOutcomesAt;
+  /** Left out by a server from before this. */
+  ci?: PullOutcomesCi;
 }
 
 /** `GET /prs/outcomes/summary?by=`. */

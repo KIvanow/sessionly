@@ -570,3 +570,31 @@ test("later commits of a pull request where the repository is shown are kept wit
   assert.doesNotMatch(kept, /notes|SECRET/);
   assert.match(kept, /src\/a\.ts/);
 });
+
+test("what CI said of a pull request where the repository is shown is kept, names and all, and its heads lose the paths hidden later", async () => {
+  const p = await pair("ci");
+  assert.equal((await send(p.ann, session("c1", REPO))).status, 200);
+  await importDemo(p.from, p.to, { repo: REPO, hide: [] });
+  const sha = (n: number) => n.toString(16).padStart(40, "0");
+  const files = [{ path: "src/a.ts", hashes: [h(1), h(2), h(3)] }, { path: "notes/SECRET-plan.md", hashes: [h(900), h(901)] }];
+  const hiding = shownApp(db, { org: p.there, hide: ["notes"] });
+  // Reported where notes are hidden: the head keeps none of them.
+  assert.equal((await call(p.ci, "PUT", "/prs", pullOf(1, files, { head_sha: sha(1) }), hiding)).status, 200);
+  const headsOf = async () => db.query<{ hashes: unknown; ci_state: string; failed_checks: unknown }>(`SELECT hashes, ci_state, failed_checks FROM pull_heads WHERE org_id = $1 AND number = 1 ORDER BY sha`, [p.there]);
+  assert.doesNotMatch(JSON.stringify((await headsOf()).map((x) => jsonOf(x.hashes))), /notes|SECRET/);
+  // What CI said is kept, the names of failed checks too: a public demo of a public repository.
+  const ci = { repo: REPO, heads: [{ number: 1, sha: sha(1), state: "failure", failed: 1, total: 2, cancelled: 0, failed_checks: ["tests (SECRET-client)"] }] };
+  assert.deepEqual((await call(p.ci, "PUT", "/prs/ci", ci, hiding)).body, { heads: 1, merges: 0 });
+  assert.deepEqual((await headsOf()).map((x) => [x.ci_state, jsonOf(x.failed_checks)]), [["failure", ["tests (SECRET-client)"]]]);
+  assert.doesNotMatch(JSON.stringify((await call(p.ci, "GET", `/prs/ci/due?repo=${REPO}`, undefined, hiding)).body), /notes|hashes/);
+  // and with what not to show not to be read, it is refused
+  const unreadable = shownApp(db, { org: p.there, problem: "SESSIONLY_DEMO_HIDE cannot be used" });
+  assert.deepEqual([(await call(p.ci, "PUT", "/prs/ci", ci, unreadable)).body.code], ["demo_hide_unusable"]);
+  // A head kept whole before notes were hidden loses them when they are.
+  assert.equal((await call(p.ci, "PUT", "/prs", pullOf(1, files, { head_sha: sha(2) }))).status, 200);
+  assert.match(JSON.stringify((await headsOf()).map((x) => jsonOf(x.hashes))), /notes\/SECRET-plan\.md/);
+  await importDemo(p.from, p.to, { repo: REPO, hide: ["notes"] });
+  const kept = JSON.stringify((await headsOf()).map((x) => jsonOf(x.hashes)));
+  assert.doesNotMatch(kept, /notes|SECRET/);
+  assert.match(kept, /src\/a\.ts/);
+});
