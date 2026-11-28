@@ -26,6 +26,7 @@ jobs:
       pull-requests: write   # to comment; "read" is enough with comment: false
       checks: read           # what CI said of the pull request's commits (see CI below)
       statuses: read
+      actions: read          # which runs the push of the merge commit started
     steps:
       - uses: KIvanow/sessionly/action@main
         with:
@@ -66,7 +67,7 @@ shows a warning that the token is missing.
 | `outcomes-since` | | With `outcomes`: also read those of pull requests merged on or after this date, though more than 30 days before the server began to. |
 | `fix-words` | | Words that make a later commit a fix, separated by commas, in place of the default list. |
 | `bug-labels` | | Words that make a linked issue's label a bug label, separated by commas, in place of the default list. |
-| `ci` | `true` | Read what CI made of the pull request's commits: when it is reported, on `workflow_run`, and on the scheduled run. Needs `checks: read` and `statuses: read` (see below). |
+| `ci` | `true` | Read what CI made of the pull request's commits: when it is reported, on `workflow_run`, and on the scheduled run. Needs `checks: read` and `statuses: read`, and `actions: read` for merge commits (see below). |
 | `ci-ignore` | | Checks and statuses to leave out, by name, separated by commas or new lines; `*` stands for any text. The Action's own check run is left out without being named. |
 | `ci-only` | | Count only the checks and statuses named here (as `ci-ignore` names them). |
 | `ci-check-names` | `false` | Also send the names of the checks that failed on a red commit (at most 20, each cut to 100 characters). Off by default: names can carry the names of clients, environments or systems. |
@@ -149,6 +150,7 @@ jobs:
       issues: read          # the labels of the issues it closes
       checks: read          # what CI said of heads still pending, and of merge commits
       statuses: read
+      actions: read         # which runs the push of a merge commit started
     steps:
       - uses: actions/checkout@v4
         with:
@@ -218,6 +220,14 @@ after it), and says for each session whether CI was red where its lines arrived.
 [CI](../docs-site/pull-requests.md#ci) for how a commit is read as red, green, still running or
 none to go by, and what the figures mean (linked, not caused).
 
+A head is read whole; of a merge commit, only the check runs of the workflow runs its push
+started count (a nightly run or a scan on the branch's tip months later says nothing of the
+merge), which takes `actions: read`: without it the run warns once and the CI of merge commits
+is not known. A workflow run that never had jobs (waiting for approval, or failed to start) is
+read from its check suite. Sessionly's own check runs are left out: this run's, and its earlier
+runs' on the same commit, known by the names this run's jobs have (name the jobs of your other
+workflows apart from them).
+
 It is read three ways, each needing `checks: read` and `statuses: read`; without them the run
 warns once and CI is not known, and nothing else is affected:
 
@@ -225,9 +235,11 @@ warns once and CI is not known, and nothing else is affected:
   running, and those of the heads the server says are still pending from earlier pushes.
 - **When your CI finishes.** A job on `workflow_run` of your CI workflows reads the CI of the
   commit that workflow ran on, and sends it for the pull requests the commit is in (asked of
-  GitHub, so a pull request from a fork is covered) and, when it is the commit a pull request
-  was merged as, as its merge CI. It needs `pull-requests: read` for that question; without
-  it, only the pull requests the event names are told. Nothing is reported on `workflow_run`.
+  GitHub: of this repository, or of the fork for a fork's commit) and, when it is the commit a
+  pull request was merged as and its push started the run, as its merge CI. It needs
+  `pull-requests: read` for that question; without it, only the pull requests the event names
+  are told. A fork's pull request gets this once it has been reported (`pull_request_target`,
+  by hand, or `pr-number`). Nothing is reported on `workflow_run`.
 
   ```yaml
   on:
@@ -242,6 +254,7 @@ warns once and CI is not known, and nothing else is affected:
         checks: read
         statuses: read
         pull-requests: read
+        actions: read
       steps:
         - uses: KIvanow/sessionly/action@main
           with:
@@ -253,9 +266,9 @@ warns once and CI is not known, and nothing else is affected:
   heads still pending (reported in the last 7 days; one pending longer has none to go by) and
   the merge commits not read yet, 50 of each a run.
 
-The Action's own check run is left out, by its id (`check-run-id`, which the workflow run fills
-in) or, where the job was given none, every check run of this workflow run. A problem reading
-or sending CI is a warning, and fails the run only with `fail-on-error`.
+This run's check runs are known by the `check-run-id` input, which the workflow run fills in,
+and by the run's page (the jobs skipped by an `if:` included). A problem reading or sending CI
+is a warning, and fails the run only with `fail-on-error`.
 
 ## What is sent
 

@@ -418,13 +418,14 @@
               The Action is plain JavaScript with no dependencies. Reporting a pull request needs
               <code>pull-requests: read</code> (and <code>write</code> if you ask it to comment),
               and <code>checks: read</code> and <code>statuses: read</code> to say what CI made of
-              its commits (without them it warns and says nothing of CI; <code>ci: false</code>
-              reads none). A job on <code>workflow_run</code> of your CI needs the same two and
+              its commits, with <code>actions: read</code> to tell which runs the push of a merge
+              commit started (without them it warns and says nothing of CI; <code>ci: false</code>
+              reads none). A job on <code>workflow_run</code> of your CI needs the same three and
               <code>pull-requests: read</code>. Its scheduled run, which counts merged pull
               requests again, reads the later commits on their branch with git and reads the CI
               still pending, needs <code>contents: read</code>, <code>pull-requests: read</code>,
-              <code>checks: read</code>, <code>statuses: read</code> and, for the labels of linked
-              issues, <code>issues: read</code>. Commit messages and pull request text are read in
+              <code>checks: read</code>, <code>statuses: read</code>, <code>actions: read</code>
+              and, for the labels of linked issues, <code>issues: read</code>. Commit messages and pull request text are read in
               the runner and not sent: only what they are read as (ids such as
               <code>fix_message</code>), the commit SHAs a revert's message names, and the numbers
               of the pull requests a description says it reverts. Of CI, a state and counts; the
