@@ -158,7 +158,9 @@ CREATE TABLE IF NOT EXISTS checkpoints_since (
 /// session, for this machine only (their SHAs and subjects are never
 /// uploaded); `outcome_checkpoints` the counts at fixed ages, written once;
 /// `outcome_scans` how far each session's history has been read, counted
-/// from the end it had then.
+/// from the end it had then; `outcome_repos` the repository each worktree a
+/// session ran in is of, noted while it is there, so that the history can be
+/// read from another worktree of it once it is removed.
 const OUTCOME_TABLES: &str = "
 CREATE TABLE IF NOT EXISTS outcome_events (
     session_id  TEXT NOT NULL,
@@ -211,7 +213,16 @@ CREATE TABLE IF NOT EXISTS outcome_scans (
     tried_at      TEXT NOT NULL,
     scope         TEXT NOT NULL,
     -- readings that failed since the last that did
-    failures      INTEGER NOT NULL DEFAULT 0
+    failures      INTEGER NOT NULL DEFAULT 0,
+    -- the session's lines in repositories the last reading read; null from
+    -- a build that did not note them
+    lines_tracked INTEGER
+);
+CREATE TABLE IF NOT EXISTS outcome_repos (
+    -- a worktree's top, as sessions name it
+    root       TEXT PRIMARY KEY,
+    -- its repository's common git directory
+    common_dir TEXT NOT NULL
 );
 ";
 
@@ -234,6 +245,8 @@ pub struct OutcomeTarget {
     pub scope: Option<String>,
     /// Readings that failed since the last that did.
     pub failures: u32,
+    /// Its lines in the repositories the last reading read, if it noted them.
+    pub tracked: Option<u64>,
     /// The ages already counted.
     pub kept: Vec<String>,
 }
@@ -246,6 +259,8 @@ pub struct OutcomeScan {
     pub session_id: String,
     pub ended_at: DateTime<Utc>,
     pub read: Option<(Vec<OutcomeEvent>, String)>,
+    /// Its lines in the repositories read.
+    pub tracked: u64,
 }
 
 /// A commit that touched a session's lines.
@@ -605,6 +620,7 @@ impl Ledger {
                 "TEXT NOT NULL DEFAULT '[]'",
             ),
             ("outcome_scans", "failures", "INTEGER NOT NULL DEFAULT 0"),
+            ("outcome_scans", "lines_tracked", "INTEGER"),
         ] {
             let knows = tx
                 .prepare(&format!(
@@ -1153,16 +1169,24 @@ impl Ledger {
     /// was read and which ages are counted; with its files' lines when
     /// `files`, else none (see `outcome_files`).
     pub fn outcome_targets(&self, files: bool) -> Result<Vec<OutcomeTarget>> {
-        type Scan = (Option<String>, String, String, u32, String);
+        type Scan = (Option<String>, String, String, u32, String, Option<u64>);
         let mut scans: std::collections::HashMap<String, Scan> = self
             .conn
             .prepare(
-                "SELECT session_id, scanned_until, tried_at, scope, failures, ended_at FROM outcome_scans",
+                "SELECT session_id, scanned_until, tried_at, scope, failures, ended_at, lines_tracked
+                 FROM outcome_scans",
             )?
             .query_map([], |r| {
                 Ok((
                     r.get(0)?,
-                    (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?),
+                    (
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ),
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -1212,6 +1236,7 @@ impl Ledger {
                 scanned_until: scan.as_ref().and_then(|s| time(s.0.clone())),
                 tried_at: scan.as_ref().and_then(|s| time(Some(s.1.clone()))),
                 failures: scan.as_ref().map_or(0, |s| s.3),
+                tracked: scan.as_ref().and_then(|s| s.5),
                 scope: scan.map(|s| s.2),
                 session_id: id,
                 source,
@@ -1271,10 +1296,10 @@ impl Ledger {
             let mut forget = tx.prepare("DELETE FROM outcome_events WHERE session_id = ?1")?;
             let mut read = tx.prepare(
                 "INSERT INTO outcome_scans
-                   (session_id, ended_at, scanned_until, tried_at, scope, failures)
-                 VALUES (?1, ?2, ?3, ?3, ?4, 0)
+                   (session_id, ended_at, scanned_until, tried_at, scope, failures, lines_tracked)
+                 VALUES (?1, ?2, ?3, ?3, ?4, 0, ?5)
                  ON CONFLICT (session_id) DO UPDATE SET ended_at = ?2, scanned_until = ?3,
-                   tried_at = ?3, scope = ?4, failures = 0",
+                   tried_at = ?3, scope = ?4, failures = 0, lines_tracked = ?5",
             )?;
             let mut failed = tx.prepare(
                 "INSERT INTO outcome_scans
@@ -1307,7 +1332,13 @@ impl Ledger {
                     continue;
                 };
                 forget.execute([&scan.session_id])?;
-                read.execute(params![scan.session_id, ended_at, now.to_rfc3339(), scope])?;
+                read.execute(params![
+                    scan.session_id,
+                    ended_at,
+                    now.to_rfc3339(),
+                    scope,
+                    scan.tracked
+                ])?;
                 for e in events.iter().filter(|e| e.session_id == scan.session_id) {
                     insert.execute(params![
                         e.session_id,
@@ -1443,12 +1474,45 @@ impl Ledger {
         Ok(rows)
     }
 
-    /// Forget every outcome: they are switched off. Switched on again, they
-    /// are counted again from the history.
-    pub fn forget_outcomes(&mut self) -> Result<()> {
-        self.conn.execute_batch(
-            "DELETE FROM outcome_events; DELETE FROM outcome_checkpoints; DELETE FROM outcome_scans;",
-        )?;
+    /// The repository each worktree sessions ran in is of, as noted while
+    /// it was there: its top, and the repository's common git directory.
+    pub fn outcome_repos(&self) -> Result<std::collections::HashMap<String, String>> {
+        Ok(self
+            .conn
+            .prepare("SELECT root, common_dir FROM outcome_repos")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The files of every session with tracked lines in them, each with what
+    /// a relative path is relative to (the repository root, or the session's
+    /// working directory).
+    pub fn outcome_paths(&self) -> Result<Vec<(Option<String>, String)>> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT coalesce(s.repo_root, s.cwd), f.path FROM session_files f
+                 JOIN sessions s ON s.session_id = f.session_id
+                 WHERE length(f.added_hashes) >= 8",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Note the repository of each of these worktrees: its top, and its
+    /// common git directory.
+    pub fn keep_outcome_repos(&mut self, found: &[(String, String)]) -> Result<()> {
+        if found.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut keep = tx.prepare("INSERT OR REPLACE INTO outcome_repos VALUES (?1, ?2)")?;
+            for (root, common_dir) in found {
+                keep.execute([root, common_dir])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 

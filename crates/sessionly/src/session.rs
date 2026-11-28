@@ -593,7 +593,8 @@ pub struct Upload {
 pub struct OutcomeCheckpoint {
     /// The age it is for: `1d`, `7d` or `30d` after the session ended.
     pub checkpoint: String,
-    /// Lines the agent added that are tracked.
+    /// Lines the agent added that are tracked, in the repositories whose
+    /// history was read.
     pub lines_tracked: u64,
     /// Commits whose subject says they fix something and that changed the
     /// agent's lines: "changed by a fix". Most such fixes are of something
@@ -622,7 +623,8 @@ pub struct OutcomeCheckpoint {
     /// Counted a day or more after the age was reached.
     pub late: bool,
     /// Which branches were read: `head_and_default` (the one checked out and
-    /// the remote's default branch) or `head_only`.
+    /// the remote's default branch) or `head_only`. A server shows any other
+    /// as `unknown`.
     pub scope: String,
     /// Of the commits above, those that were another agent session's own
     /// (it added lines in them), by that session's agent. Only sessions on

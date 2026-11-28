@@ -60,7 +60,7 @@ The filters of `list` and `summary`: `--repo`, `--user`, `--model`, `--tool`, `-
 | `--content metadata\|previews` | `metadata` | What an upload contains. See [What an upload contains](upload-contents.md). |
 | `--line-hashes on\|off` | `off` | Whether an upload has a hash of each line the agent added, which [pull request](pull-requests.md) figures need. |
 | `--shell-edits sure\|all\|off` | `sure` | How much of what shell commands change is counted as the agent's. See [Shell edits](shell-edits.md). |
-| `--outcomes on\|off` | `on` | Whether the repositories' history is read for later reverts and fixes of agents' lines, and the counts uploaded. See [Later commits](rewrite-rate.md#later-commits-reverts-and-fixes). |
+| `--outcomes on\|off` | `on` | Whether the repositories' history is read for later reverts and fixes of agents' lines, and the counts uploaded. Off, the counts already made stay on this machine, and are not sent. See [Later commits](rewrite-rate.md#later-commits-reverts-and-fixes). |
 | `--fix-words a,b,c` | | The words that make a commit subject a fix, each one word, in place of the defaults (see [Later commits](rewrite-rate.md#later-commits-reverts-and-fixes)); `default` for those. Only on this machine: a team's figures add every machine's. |
 | `--update-check on\|off` | `on` | Whether a background upload asks once a day if a newer release is out. `status` says when one is, and so do `list` and `summary` in a terminal. See [Install](install.md#updating). |
 
@@ -98,3 +98,5 @@ These are run by the agents, not by you:
 The five that name a server and what is sent to it are meant for a
 [cloud environment](cloud-sessions.md), and are followed by `upload`, `exclude`, `include` and
 the automatic sync. `export`, `status` and `settings` show the saved settings.
+`SESSIONLY_OUTCOMES` also decides whether the history is read, by every command that brings the
+ledger up to date first (`sync`, `list`, `show`, `export`, …).

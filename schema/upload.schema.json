@@ -1412,7 +1412,7 @@
           "default": ""
         },
         "lines_tracked": {
-          "description": "Lines the agent added that are tracked.",
+          "description": "Lines the agent added that are tracked, in the repositories whose\nhistory was read.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,
@@ -1497,7 +1497,7 @@
           "default": false
         },
         "scope": {
-          "description": "Which branches were read: `head_and_default` (the one checked out and\nthe remote's default branch) or `head_only`.",
+          "description": "Which branches were read: `head_and_default` (the one checked out and\nthe remote's default branch) or `head_only`. A server shows any other\nas `unknown`.",
           "type": "string",
           "default": ""
         },

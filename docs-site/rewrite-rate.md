@@ -88,9 +88,9 @@ Session    7c2e91d0-…
 Ended      2026-11-13 18:30
 Later      1d nothing, 7d changed by 1 fix (1 likely), reworked 1x, 30d -
 
-COMMIT     DATE              KIND      LINES  SIGNALS                     SUBJECT
-a41f0c9e2  2026-11-16 09:12  fix*          4  fix_message,fix_conventi…   fix: totals skip the last row
-e09b3d771  2026-11-18 14:40  rework        2                              Name the columns
+COMMIT     DATE              KIND      LINES  SIGNALS                     BY                    SUBJECT
+a41f0c9e2  2026-11-16 09:12  fix*          4  fix_message,fix_conventi…   cursor 3b81e2a0       fix: totals skip the last row
+e09b3d771  2026-11-18 14:40  rework        2                              -                     Name the columns
 ```
 
 `show` has the same as a line, `Later`, and `summary` has **FIX@7D** (sessions changed by a fix
@@ -100,31 +100,47 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   is too often a generic one (`if (`, an import) that matched by chance. A line the commit adds
   back, in that file or another, was moved, not changed. A line three sessions or more wrote
   in the same file does not count on its own. A commit too big to read whole (more than
-  100,000 lines added and removed: a vendored, generated or moved tree) does not count.
-- **A session's lines count from when a commit puts them in the history.** Before that, a
-  line like them that a commit removes (an `if err != nil {` that was there already) was
-  someone else's. A commit that puts them back after a revert gives the session those lines
-  again, so a later change to them counts. Lines a commit moves to another file (a rename)
-  are followed there.
+  100,000 lines added and removed: a vendored, generated or moved tree; or more than 64 MB of
+  changes) does not count.
+- **A session's lines count from when a commit puts them in the history, and only in the
+  commits that descend from that one.** Before it, or beside it, a line like them that a
+  commit removes (an `if err != nil {` that was there already) was someone else's: so a commit
+  on a branch from before the session's work, or on `main` while the work is on a feature
+  branch, does not count against it. A commit that puts them back after a revert gives the
+  session those lines again, so a later change to them counts. Lines a commit moves to another
+  file (a rename) are followed there, also when that was done before the session ended, and
+  are never more than the session wrote.
 - **A session's own commits don't count:** those after it began that add its lines (and not
-  only move or re-indent them). A revert, or a revert of one, is not a session's own work,
-  so it is never taken for the commit a later revert undoes, nor credited to an agent.
-- **Worktrees of one repository are read as one**, with what each has checked out.
-- **A repository whose history can't be read** (gone, unmounted, too slow) is tried again an
-  hour later, then after longer and longer, up to about five days; no count is kept from
-  part of a session's history, for a session in two repositories either. One too large to
-  read for every session due at once is read for fewer, the newest first; for a session alone,
+  only move or re-indent them) where the history did not have them. A later commit that adds a
+  copy of lines already there (a block copied, or generic lines like `return err`) is not one.
+  A revert, or a revert of one, is not a session's own work, so it is never taken for the
+  commit a later revert undoes, nor credited to an agent; and a revert of a revert (git
+  before 2.43 and GitHub name it `Revert "Revert "…""`) is no revert of the session.
+- **Worktrees of one repository are read as one**, with what each has checked out. A session
+  in a worktree removed since (merged and done with) is read from the repository's own
+  directory, with what is checked out in its main worktree, once a sync has seen the worktree
+  while it was there.
+- **A repository whose history can't be read** (gone, unmounted, too slow, or one git will
+  not read, such as another user's) is tried again an hour later, then after longer and
+  longer, up to about five days; no count is kept from part of a session's history, for a
+  session in two repositories either. One too large to read for every session due at once,
+  or that fails for one of them, is read for fewer, the newest first; for a session alone,
   only its first 2,000 commits that change its lines are read. A partial clone fetches what
-  it needs to show a commit; other repositories fetch nothing.
-- **How long it reads:** up to a minute in all on `sessionly sync` and the automatic sync, and
-  10 seconds on other commands; what is left is read on a later sync.
+  it needs to show a commit; other repositories fetch nothing. Nothing git runs while it reads
+  can ask for a password or a key.
+- **How long it reads:** up to a minute in all on `sessionly sync` and the automatic sync, at
+  most 20 seconds of it in one repository, the one tried longest ago first; and 10 seconds on
+  other commands. A repository that takes longer is too slow: on a sync, half of the sessions
+  being read (the older) wait to be tried again and the rest are read on the next sync, down to
+  one at a time; a command leaves it to a sync. What is left is read on a later sync.
 - **The counts are kept at 1, 7 and 30 days, as the rewrite checkpoints are**, and age counts
   from the session's end the same way. Unlike those, an age reached before Sessionly looked can
   be counted later from the history; it then says it was late.
 - **History is read only when an age needs it**, so most syncs read none.
 - **Read:** the branch checked out and the remote's default branch (`origin/HEAD`), so a fix on
-  `main` is found while you are on a feature branch. Nothing else: not other branches, not merge
-  commits (a reverted merge counts when the revert takes out most of the lines).
+  `main` is found while you are on a feature branch, once the work is on `main` too. Nothing
+  else: not other branches, not merge commits (a reverted merge counts when the revert takes out
+  most of the lines), and no commit more than 31 days after the session ended.
 - **Not counted:** a fix that only adds lines next to the agent's (a missing check), and a fix
   whose subject has none of the words. A repository whose subjects describe what changed ("Stop
   the sweep from deleting history") has fixes that count as rework.
@@ -146,8 +162,10 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   branches were read, and the names of the agents in `by_agent`; never a commit's SHA, subject
   or files, nor which session made it. `sessionly settings --outcomes off` stops reading
   history and sending them from then on (unless `SESSIONLY_OUTCOMES=on` is set, which wins).
-  What a server already has stays, until the session is deleted or goes on: a session that is
-  resumed later has a new end, and the counts from its old one are dropped.
+  The counts on your machine stay, and `sessionly outcomes` still shows them; switched on
+  again, they are sent where a server may not have them, and the ages reached meanwhile are
+  counted, as late. What a server already has stays, until the session is deleted or goes on:
+  a session that is resumed later has a new end, and the counts from its old one are dropped.
 
 On the dashboard, **By tool** and **By model** have **Changed by a fix @7d** and
 **Reverted @30d**, each of the sessions counted at that age, once any is; under the first, which

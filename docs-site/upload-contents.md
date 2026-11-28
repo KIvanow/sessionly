@@ -17,7 +17,8 @@ sessionly schema upload                        # its JSON Schema
 
 `export` goes by the saved settings. Where `SESSIONLY_CONTENT`, `SESSIONLY_LINE_HASHES` or
 `SESSIONLY_OUTCOMES` is set in the environment, as in a [cloud sandbox](cloud-sessions.md), an upload follows those
-instead, and `export --content` shows that level.
+instead, and `export --content` shows that level. `SESSIONLY_OUTCOMES` also decides whether a
+command reads the history at all.
 
 The payload ([schema/upload.schema.json](https://github.com/KIvanow/sessionly/blob/main/schema/upload.schema.json)) is the session record plus
 the latest rewrite measurement, and that measurement as it was 1, 7 and 30 days after the
@@ -26,7 +27,8 @@ and what later commits did to the agent's lines by those ages (`outcomes`: count
 fixes and rework, and times, and of those how many another agent's session made, by agent
 (`by_agent`); no commit SHA, subject, path or session id, see
 [Later commits](rewrite-rate.md#later-commits-reverts-and-fixes)). `sessionly settings --outcomes off`
-leaves `outcomes` out of uploads from then on.
+leaves `outcomes` out of uploads from then on; what a server has of them stays, and so do the
+counts on your machine.
 Before a record leaves the machine:
 
 - **Paths are made relative:** to the repository for files inside it, otherwise to the home
@@ -64,11 +66,14 @@ know to `unknown`, and ignores fields it doesn't know.
 | `cost.source` | `recorded`, `recorded_and_estimated`, `estimated`, `partial_estimate`, `unknown` |
 | `content` | `metadata`, `previews`; `local` is the record on your machine, which a server refuses |
 | `captured_by` | `hooks`, `transcript` |
-| an outcome's `scope` | `head_and_default` (the branch checked out and the remote's default branch), `head_only` |
 | `runtime.kind` | `cloud`, `unknown` |
 | a review run's `via` | `skill`, `slash_command`, `codex_review`, `unknown` |
 | a review run's `ran` | `local`, `cloud`, `unknown` |
 | a review run's `target` | For Codex: `base_branch`, `uncommitted_changes`, `commit`, `custom`. `other_repository` for a run that named a pull request of another repository (which one is not kept) |
+
+An outcome's `scope` is plain text in the schema: `head_and_default` (the branch checked out and
+the remote's default branch were read) or `head_only`. A server shows any other value, or none,
+as `unknown`.
 
 The agent (`source`) and a tool's name are plain text: `claude-code`, `cursor`, `grok`,
 `codex` or `opencode`, and whatever the tool is called. So is a skill's name (`code-review`, or a plugin's

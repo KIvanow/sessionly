@@ -37,6 +37,7 @@ fn sessionly(home: &Path) -> Command {
         "SESSIONLY_URL",
         "SESSIONLY_CONTENT",
         "SESSIONLY_LINE_HASHES",
+        "SESSIONLY_OUTCOMES",
     ] {
         cmd.env_remove(name);
     }
@@ -1191,6 +1192,80 @@ fn upload_sends_each_session_once_and_again_when_it_changes() {
     stdout(run(home.path(), &["upload"]));
     assert_eq!(server.puts().len(), 5);
     assert!(server.puts()[3].body.contains("Parser module"));
+}
+
+/// Switched off, outcomes are neither read nor sent, and what was counted
+/// stays: on again, they are sent once more, and only where a server may
+/// not have them.
+#[test]
+fn outcomes_switched_off_are_kept_and_neither_read_nor_sent() {
+    let home = tempfile::tempdir().unwrap();
+    let server = StubServer::start();
+    let repo = home.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    capture_editing_session(home.path(), "out-1", &repo);
+    stdout(run(home.path(), &["sync"]));
+    // A count kept by an earlier reading of the history.
+    let db = rusqlite::Connection::open(home.path().join("data/ledger.db")).unwrap();
+    let ended: String = db
+        .query_row(
+            "SELECT ended_at FROM sessions WHERE session_id = 'out-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.execute(
+        "INSERT INTO outcome_checkpoints (session_id, checkpoint, lines_tracked, fix_commits,
+           likely_fix_commits, lines_fixed, rework_commits, lines_reworked, revert_commits,
+           lines_reverted, relanded, computed_at, age_seconds, ended_at, late, scope)
+         VALUES ('out-1', '1d', 6, 1, 1, 2, 0, 0, 0, 0, 0, ?1, 86400, ?1, 0, 'head_only')",
+        [&ended],
+    )
+    .unwrap();
+    let kept = || -> i64 {
+        db.query_row("SELECT count(*) FROM outcome_checkpoints", [], |r| r.get(0))
+            .unwrap()
+    };
+    stdout(run(
+        home.path(),
+        &["connect", &server.url, "--token", "secret-token"],
+    ));
+    stdout(run(home.path(), &["upload"]));
+    let sent = |k: usize| -> serde_json::Value {
+        serde_json::from_str(&session_puts(&server)[k].body).unwrap()
+    };
+    assert_eq!(sent(0)["outcomes"][0]["fix_commits"], 1);
+
+    // Off in the environment of a command that syncs: nothing is forgotten.
+    let out = sessionly(home.path())
+        .env("SESSIONLY_OUTCOMES", "off")
+        .arg("list")
+        .output()
+        .unwrap();
+    stdout(out);
+    assert_eq!(kept(), 1);
+
+    // Off in the settings: not exported or sent, and kept. The server
+    // keeps what it has, so nothing is sent again for it.
+    stdout(run(home.path(), &["settings", "--outcomes", "off"]));
+    assert!(json_of(home.path(), &["export", "out-1"])
+        .get("outcomes")
+        .is_none());
+    let again = stdout(run(home.path(), &["upload"]));
+    assert!(again.contains("1 already up to date"), "{again}");
+    assert_eq!(kept(), 1);
+    // What else changes is sent without them,
+    stdout(run(home.path(), &["settings", "--content", "previews"]));
+    stdout(run(home.path(), &["upload"]));
+    assert_eq!(session_puts(&server).len(), 2);
+    assert!(sent(1).get("outcomes").is_none());
+    // and on again, with them.
+    stdout(run(home.path(), &["settings", "--outcomes", "on"]));
+    stdout(run(home.path(), &["upload"]));
+    assert_eq!(session_puts(&server).len(), 3);
+    assert_eq!(sent(2)["outcomes"][0]["fix_commits"], 1);
+    let last = stdout(run(home.path(), &["upload"]));
+    assert!(last.contains("1 already up to date"), "{last}");
 }
 
 /// Sessions sent to the server, ignoring the requests that stop a repository.
