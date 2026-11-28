@@ -259,6 +259,10 @@ rate. The model is the session's main one.
 | `pr-number` | | The pull request to report, when the workflow was not started by one. Or several: `all` for the latest ones, `20-60` for a range. See [below](#pull-requests-from-before-the-action). |
 | `since` | 90 days ago | With `pr-number: all`, how far back to go: a date such as `2026-01-31`. |
 | `after-merge` | `false` | Count merged pull requests' agent lines again, 7 and 30 days after merging. A run started by a schedule, with no `pr-number`, does this without it. See [After merge](#after-merge). |
+| `outcomes` | `true` | On a scheduled run, or one with `after-merge` and no `pr-number` (started by hand, say), also read the later commits on the branches merged pull requests went into, for 30 days after each merge. Needs a checkout with the whole history; `false` to count only after merge. See [Later commits](#later-commits). |
+| `outcomes-since` | | With `outcomes`: also read those of pull requests merged on or after this date, though more than 30 days before the server began to. |
+| `fix-words` | | Words that make a later commit a fix, separated by commas, in place of the default list. |
+| `bug-labels` | | Words that make a linked issue's label a bug label, separated by commas, in place of the default list. |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 An input that is on or off takes `true`, `yes`, `on` or `1` for on, in any case; anything else

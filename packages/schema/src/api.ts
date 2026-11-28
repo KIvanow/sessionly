@@ -1174,13 +1174,17 @@ export interface PullOutcomeCommit {
   kind: OutcomeKind;
   /**
    * Why it is that kind: `revert_sha` (its message names the commit the
-   * pull request was merged as, or one of its own), `revert_pull` (its pull
-   * request says it reverts this one), `revert_bulk` (a revert subject, and
+   * pull request was merged as; a revert of one of its other commits comes
+   * as `revert_pull`), `revert_pull` (its pull request says it reverts this one), `revert_bulk` (a revert subject, and
    * at least half the agents' lines still there went), and the fix signals
    * `fix_message`, `fix_conventional`, `fix_branch`, `fix_pr_title`, `bug_issue`.
    */
   signals: string[];
-  /** When it landed on the branch: when its pull request was merged, else its committer date. */
+  /**
+   * When it landed on the branch: the committer date of the branch's own
+   * (first-parent) commit that brought it in, never before the pull request
+   * was last read up to. Read by time (no tips), its own committer date.
+   */
   landed_at: string;
   /** The pull request it was merged with, if any. */
   by_pull: number | null;
