@@ -164,7 +164,7 @@ How it is read:
   requests with agent lines, merged since 30 days before the server began reading them, are
   named. A session
   matched to one later, with lines in a file that was not read, has that pull request read
-  again from the merge; a run that was reading it meanwhile, without that file, leaves it as it
+  again from the merge, and the later commits kept of it are worked out again; a run that was reading it meanwhile, without that file, leaves it as it
   is.
 - The run reads that branch's history with git in the runner. A pull request is read from where
   the last run left it: the server keeps the commits the branch was at, and the run reads what

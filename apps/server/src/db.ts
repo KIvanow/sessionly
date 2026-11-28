@@ -977,7 +977,8 @@ const MIGRATIONS: string[] = [
   // own lines it removed (`removed`, {path: [hashes]}, no other hash). Who
   // they count against is worked out as they are read, from the sessions'
   // lines as matched then. Written once, but for `relands`: the later
-  // commit that reverted a revert.
+  // commit that reverted a revert. Those of a pull request read again from
+  // the merge (a session matched later with lines in a new file) go.
   `CREATE TABLE pull_outcome_commits (
      org_id        text NOT NULL REFERENCES orgs ON DELETE CASCADE,
      repo          text NOT NULL,

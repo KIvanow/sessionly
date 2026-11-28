@@ -701,6 +701,28 @@ test("a pull request read to the end of its 30 days is not due again, in whateve
   assert.deepEqual(due, { branches: [] });
 });
 
+test("a pull request read again from the merge for a session's new file counts what a commit kept already did there", async () => {
+  await readingSince();
+  const repo = "github.com/acme/reread";
+  const q = encodeURIComponent(repo);
+  assert.equal((await upload(repo, "rr-1", "claude-code", [file("a.ts", 1, 2, 3)])).status, 200);
+  await merged(repo, 1, 10, [file("a.ts", 1, 2, 3), file("b.ts", 20, 21, 22)]);
+  const first = (await call(tokens.ci, "GET", `/prs/outcomes/due?repo=${q}`)).body.branches[0].pulls[0];
+  assert.deepEqual(first.paths, ["a.ts"]);
+  // Commit 1 changed both files; only a.ts was read.
+  const read = (files: { path: string; removed: number[] }[], paths: string[]) =>
+    scanOf(repo, [1], [commit(1, ago(5), files, { signals: ["fix_message"] })], { pulls: [{ number: 1, found: false, from: null, tips: null, paths }] });
+  assert.deepEqual((await read([{ path: "a.ts", removed: [1, 2] }], ["a.ts"])).body.stored.map((s: any) => s.sha), [sha(1)]);
+  // b.ts's lines turn out to be Codex's: read again from the merge, commit 1 is kept again with b.ts.
+  assert.equal((await upload(repo, "rr-2", "codex", [file("b.ts", 20, 21, 22)])).status, 200);
+  const again = (await call(tokens.ci, "GET", `/prs/outcomes/due?repo=${q}`)).body.branches[0].pulls[0];
+  assert.deepEqual([again.paths, again.since], [["a.ts", "b.ts"], first.merged_at]);
+  const put = await read([{ path: "a.ts", removed: [1, 2] }, { path: "b.ts", removed: [20, 21] }], ["a.ts", "b.ts"]);
+  assert.deepEqual(put.body.stored.map((s: any) => [s.sha, s.kind]), [[sha(1), "fix"]]);
+  const [c] = (await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=1`)).body.outcomes.commits;
+  assert.deepEqual(c.sessions.map((s: any) => [s.session_id, s.lines]).sort(), [["rr-1", 2], ["rr-2", 2]]);
+});
+
 test("a scan that did not read a file a session was matched with meanwhile leaves the pull request as it was", async () => {
   await readingSince();
   const repo = "github.com/acme/meanwhile";
