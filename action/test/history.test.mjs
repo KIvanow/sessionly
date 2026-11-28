@@ -629,6 +629,35 @@ test("a branch that is gone is told the server, one not checked out is said, and
   assert.match(logged.join("\n"), /Later commits of main could not be read \(the Sessionly server answered 422: no\)/);
 });
 
+test("a branch renamed since is read by its new name, and told gone when that is not in the checkout", async () => {
+  const { r, merge, git } = merged();
+  r.write("a.ts", [1, 9].map(L));
+  const rework = r.commit("Rework", START + DAY);
+  r.publish();
+  const branches = [{ ...due(merge), base_ref: "master" }, { ...due(merge), base_ref: "develop" }];
+  branches[1].pulls = [{ ...branches[1].pulls[0], number: 2 }];
+  // GitHub answers an old name with the branch it is now (a 301, followed).
+  const api = github();
+  const request = api.request;
+  api.request = async (method, path) => {
+    if (path.endsWith("/branches/master")) return { name: "main", commit: { sha: rework } };
+    if (path.endsWith("/branches/develop")) return { name: "trunk", commit: { sha: "a".repeat(40) } };
+    return request(method, path);
+  };
+  const sent = [];
+  const server = async (method, path, body) => {
+    if (method === "GET") return { branches };
+    sent.push(body);
+    return { stored: [] };
+  };
+  const logged = [];
+  await runOutcomes({}, { api, server, repo: "o/r", host: "github.com", log: (l) => logged.push(l), git, now: () => (START + 2 * DAY) * 1000 });
+  // read from origin/main, and told the server as the branch it was merged into
+  assert.deepEqual([sent[0].base_ref, sent[0].tip, sent[0].commits.map((c) => c.sha)], ["master", rework, [rework]]);
+  assert.deepEqual(sent[1], { repo: "github.com/o/r", base_ref: "develop", tip: null, scanned_until: iso(START + 2 * DAY), pulls: [], commits: [], gone: [2] });
+  assert.doesNotMatch(logged.join("\n"), /is not in the checkout/);
+});
+
 test("the server's tips go back with what was read, and the refused question of a ci token is said for what it is", async () => {
   const { r, merge, git } = merged();
   r.write("a.ts", [1, 9].map(L));

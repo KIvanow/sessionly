@@ -555,18 +555,25 @@ async function readByTime(ctx, pulls, paths, readAt) {
  * GitHub cannot be asked, or more is to be read whole than at once, the
  * reading stops there, and the next run goes on from there. `tip` is null
  * when the branch is not in the checkout, and `gone` true when it is not on
- * GitHub either (deleted since).
+ * GitHub either (deleted since). One renamed since is read by its new name,
+ * and is gone when that is not in the checkout either.
  */
 export async function scanBranch({ git, api, repo, branch, words: of = wordsOf(), log = () => {}, now = Date.now(), github = asking(api, repo, log) }) {
-  const tip = commitOf(git, `refs/remotes/origin/${branch.base_ref}`)?.sha;
+  let tip = commitOf(git, `refs/remotes/origin/${branch.base_ref}`)?.sha;
   if (!tip) {
     let gone = false;
     try {
-      await api.request("GET", `/repos/${repo}/branches/${branch.base_ref.split("/").map(encodeURIComponent).join("/")}`);
+      const answer = await api.request("GET", `/repos/${repo}/branches/${branch.base_ref.split("/").map(encodeURIComponent).join("/")}`);
+      // Renamed since: GitHub answers the old name with the branch it is now. That one is read, or the old one is gone.
+      const renamed = typeof answer?.name === "string" && answer.name !== "" && answer.name !== branch.base_ref ? answer.name : null;
+      if (renamed) {
+        tip = commitOf(git, `refs/remotes/origin/${renamed}`)?.sha;
+        gone = !tip;
+      }
     } catch (err) {
       gone = err.status === 404;
     }
-    return { tip: null, gone, scans: [] };
+    if (!tip) return { tip: null, gone, scans: [] };
   }
   const known = branch.pulls.some((p) => "tips" in p);
   // Whether a commit is in the history here and on the branch; the same tips are those of many.

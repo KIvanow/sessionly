@@ -185,8 +185,10 @@ run reads by date once, and from where it is from then on.
 - Without `pull-requests: read`, the run warns once and reads later commits without what their
   pull requests say (no `fix_branch`, `fix_pr_title`, `revert_pr_title` or `bug_issue`).
 - A branch that is not on GitHub any more (one others were stacked on, deleted once merged) is
-  told to the server, which stops asking for the pull requests merged into it. One that is on
-  GitHub but not in the checkout is warned of.
+  told to the server, which stops asking for the pull requests merged into it. One renamed
+  since is read by its new name, and is gone when that is not in the checkout. One that is on
+  GitHub but not in the checkout is warned of, and its pull requests are asked for after the
+  others from then on.
 - A branch that cannot be read is warned of, the others are read, and the run fails at the end
   only with `fail-on-error`.
 
