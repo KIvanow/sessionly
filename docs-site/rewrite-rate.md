@@ -149,20 +149,21 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   while it was there (a later sync that could not ask, the repository away, takes nothing of
   that back); a directory that is another repository now is read as that one. A worktree Claude
   Code made in the repository (`<repo>/.claude/worktrees/<name>`) is read in `<repo>` once
-  removed, seen or not. A file in a directory that is gone now is read in the repository above
-  it only when a commit there has that directory (one the repository removed since); one no
-  commit has (another worktree removed before any sync saw it, a directory made and removed
-  again) is not read, and its lines are not counted as tracked. Which repository a worktree is
-  of is asked of git for at most 2 seconds (a tenth of a sync's time, if less); one git does not
-  answer for is asked again an hour later.
+  removed, seen or not. Any other file in a directory that is gone now (one the repository
+  removed since, another worktree removed before any sync saw it, a repository away) is left
+  out, and its lines are not counted as tracked; a directory still there that is no repository
+  now is read as a directory of the one above it. Which repository a worktree is of is asked of
+  git for at most 2 seconds (a tenth of a sync's time, if less); one git does not answer for is
+  asked again an hour later.
 - **A repository whose history can't be read** (gone, unmounted, too slow, or one git will not
   read, such as another user's) is tried again an hour later, then after longer and longer, up
   to about five days; no count is kept from part of a session's history, for a session in two
-  repositories either, when one of them is away (unmounted, moved) since a sync saw it. One too
-  large to read for every session due at once, or that fails for one of them, is read for fewer,
-  the newest first; for a session alone, only its first 2,000 commits that change its lines are
-  read. A partial clone fetches what it needs to show a commit; other repositories fetch
-  nothing. Nothing git runs while it reads can ask for a password or a key.
+  repositories either. Of a repository away (unmounted, moved, deleted), that holds only the
+  sessions that ran in it; a session that only wrote in it is counted from the others, without
+  its files there. One too large to read for every session due at once, or that fails for one of
+  them, is read for fewer, the newest first; for a session alone, only its first 2,000 commits
+  that change its lines are read. A partial clone fetches what it needs to show a commit; other
+  repositories fetch nothing. Nothing git runs while it reads can ask for a password or a key.
 - **How long it reads:** up to a minute in all on `sessionly sync` and the automatic sync, at
   most 20 seconds of it in one reading of a repository, the one tried longest ago first; and 10
   seconds on other commands. A reading for fewer sessions, after one for more failed, has that
