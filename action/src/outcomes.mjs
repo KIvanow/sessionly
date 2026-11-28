@@ -213,6 +213,8 @@ const MOST_HASHES = 200_000;
 const MOST_PATH = 4096;
 /** No more pull requests than this in a commit's lists. */
 const MOST_LISTED = 100;
+/** The most commits the server keeps a pull request as read up to (its tips). */
+const MOST_TIPS = 20;
 /** Pull requests whose linked issues are asked for in one GraphQL question. */
 const LABELS_AT_ONCE = 20;
 
@@ -476,6 +478,27 @@ async function readByTips(ctx, pulls, paths, readAt) {
     if (!isAt.has(key)) isAt.set(key, isAncestor(git, k, sha));
     return isAt.get(key);
   };
+  // The newest of those sent before `c` that came with the same one of the branch's own commits:
+  // each in the history of none of the others. (Parents come first, so all theirs were sent too.)
+  const sentBefore = (c) => {
+    const { group, order } = place.get(c.sha);
+    const covered = new Set();
+    const newest = [];
+    for (const d of sent.filter((d) => place.get(d.sha).group === group && place.get(d.sha).order < order).reverse()) {
+      if (covered.has(d.sha)) continue;
+      newest.push(d.sha);
+      const stack = [d.sha];
+      while (stack.length > 0) {
+        for (const parent of region.nodes.get(stack.pop())?.parents ?? []) {
+          if (!covered.has(parent) && place.get(parent)?.group === group) {
+            covered.add(parent);
+            stack.push(parent);
+          }
+        }
+      }
+    }
+    return newest;
+  };
   return {
     tip,
     pulls: pulls.map(({ number, merge_commit_sha }) => ({ number, merge_commit_sha, found: true })),
@@ -483,21 +506,30 @@ async function readByTips(ctx, pulls, paths, readAt) {
     scanned_until: new Date(until).toISOString(),
     stopped: stop?.why ?? null,
     through,
-    // Read up to before a commit: the branch's own commits before the one it came with.
-    before: (c) => groupOf(c) - 1,
+    // Read up to before a commit: the branch's own commits before the one it came with, and those
+    // that came with it and were sent before it (a part cut among them), so none is read twice.
+    before: (c) => {
+      const done = sentBefore(c);
+      return done.length > 0 ? { group: groupOf(c) - 1, done } : groupOf(c) - 1;
+    },
     // A part ends best where one of the branch's own commits does.
     apart: (a, b) => groupOf(a) !== groupOf(b),
     from: ctx.known ? new Map(pulls.map((p) => [p.number, p.from])) : null,
     /** What each pull request was read up to, once what comes before `at` is told. */
-    tipsAt: (at) =>
-      new Map(
+    tipsAt: (at) => {
+      const { group, done } = typeof at === "object" && at !== null ? at : { group: at, done: [] };
+      return new Map(
         pulls.map((p) => {
-          if (at === "end") return [p.number, [tip]];
-          const head = chain[at];
-          if (at < 0 || !p.new.has(head)) return [p.number, p.bottom];
-          return [p.number, [head, ...p.bottom.filter((k) => !ancestor(k, head))]];
+          if (group === "end") return [p.number, [tip]];
+          const head = chain[group];
+          const tips = group < 0 || !p.new.has(head) ? p.bottom : [head, ...p.bottom.filter((k) => !ancestor(k, head))];
+          // And the commits sent of the next one's, while the server keeps that many.
+          const mine = done.filter((sha) => p.new.has(sha));
+          const more = [...tips.filter((k) => !mine.some((sha) => ancestor(k, sha))), ...mine];
+          return [p.number, mine.length > 0 && more.length <= MOST_TIPS ? more : tips];
         }),
-      ),
+      );
+    },
   };
 }
 

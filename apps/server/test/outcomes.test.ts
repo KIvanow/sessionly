@@ -360,6 +360,79 @@ test("a branch merged in after a reading, and a push of a commit days old, are r
   }
 });
 
+test("a part refused after one cut inside what a merge brought leaves the next run to read on after the part before it", async () => {
+  type Stored = { number: number; sha: string; kind: string };
+  const action: { runOutcomes: (env: Record<string, string>, ctx: Record<string, unknown>) => Promise<{ stored: Stored[] }> } = await import(
+    new URL("../../../action/src/outcomes.mjs", import.meta.url).href
+  );
+  const { gitIn }: { gitIn: (cwd: string, spawn: typeof spawnSync) => unknown } = await import(new URL("../../../action/src/history.mjs", import.meta.url).href);
+  const { lineHash }: { lineHash: (line: string) => string } = await import(new URL("../../../action/src/lines.mjs", import.meta.url).href);
+  const dir = mkdtempSync(join(tmpdir(), "sessionly-outcomes-"));
+  try {
+    const at = (days: number) => Math.floor((Date.now() - days * 86_400_000) / 1000);
+    const git = (args: string[], when = at(20), input?: string) => {
+      const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: dir, GIT_AUTHOR_DATE: `@${when} +0000`, GIT_COMMITTER_DATE: `@${when} +0000`, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };
+      const done = spawnSync("git", args, { cwd: dir, env, encoding: "utf8", input });
+      assert.equal(done.status, 0, done.stderr);
+      return done.stdout.trim();
+    };
+    const write = (lines: string[]) => writeFileSync(join(dir, "a.ts"), `${lines.join("\n")}\n`);
+    git(["init", "-q", "--initial-branch", "main"]);
+    git(["config", "commit.gpgsign", "false"]);
+    // #1 adds four copies of one line and four others.
+    const x = "repeat_me(input, 1);";
+    const ys = [1, 2, 3, 4].map((n) => `distinct_${n}(input, ${n});`);
+    write([x, x, x, x, ...ys]);
+    git(["add", "-A"], at(12));
+    git(["commit", "-q", "-m", "Agent PR (#1)"], at(12));
+    const merge = git(["rev-parse", "HEAD"]);
+    // A branch of 501 commits, more than one request takes, merged with one merge commit: the first takes two copies.
+    const stream: string[] = [];
+    for (let k = 1; k <= 501; k += 1) {
+      const text = `${(k === 1 ? [x, x, ...ys] : [x, x, ...ys, `filler_${k}(z);`]).join("\n")}\n`;
+      stream.push("commit refs/heads/feature", `committer t <t@example.com> ${at(11) + k * 60} +0000`, "data 6", `c${String(k).padStart(4, "0")}`);
+      if (k === 1) stream.push(`from ${merge}`);
+      stream.push("M 100644 inline a.ts", `data ${Buffer.byteLength(text)}`, text);
+    }
+    git(["fast-import", "--quiet", "--force"], at(11), `${stream.join("\n")}\n`);
+    const first = git(["rev-list", "--reverse", `${merge}..feature`]).split("\n")[0];
+    git(["merge", "-q", "--no-ff", "--no-edit", "feature"], at(5));
+    git(["checkout", "-q", "-f", "main"], at(5));
+    // Then a fix on main takes the other two.
+    write([...ys, "filler_501(z);"]);
+    git(["commit", "-q", "-am", "fix: drop the repeats"], at(3));
+    const fix = git(["rev-parse", "HEAD"]);
+    git(["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+    const repo = "github.com/acme/group";
+    await db.query(`UPDATE orgs SET outcomes_since = now() - interval '20 days' WHERE id = 'default'`);
+    const hashes = [x, x, x, x, ...ys].map(lineHash);
+    assert.equal((await upload(repo, "group-1", "codex", [{ path: "a.ts", hashes }])).status, 200);
+    await call(tokens.ci, "PUT", "/prs", {
+      repo, number: 1, author: "ann", state: "merged", created_at: ago(13), merged_at: new Date(at(12) * 1000 + 30_000).toISOString(), base_ref: "main", event: "closed",
+      commits: 1, reviews: 0, changes_requested: 0, review_comments: 0, bot_review_comments: 0, review_rounds: 0,
+      files: [{ path: "a.ts", hashes }], merge_commit_sha: merge,
+    });
+    const api = { request: async () => [], graphql: async () => ({ repository: {} }) };
+    // The second part is refused once.
+    let puts = 0;
+    const server = async (method: string, path: string, body?: unknown) => {
+      if (method === "PUT" && (puts += 1) === 2) throw Object.assign(new Error("the Sessionly server answered 503"), { status: 503 });
+      const answer = await call(tokens.ci, method, path, body);
+      if (answer.status !== 200) throw Object.assign(new Error(JSON.stringify(answer.body)), { status: answer.status });
+      return answer.body;
+    };
+    const run = () => action.runOutcomes({}, { api, server, repo: "acme/group", host: "github.com", log: () => {}, git: gitIn(dir, spawnSync) });
+    await assert.rejects(run(), /503/);
+    await run();
+    // The first part's commits are not walked again: the fix still finds the two copies it took.
+    const outcomes = (await call(tokens.admin, "GET", `/prs/detail?repo=${encodeURIComponent(repo)}&number=1`)).body.outcomes;
+    assert.deepEqual(outcomes.commits.map((c: any) => c.sha).sort(), [first, fix].sort());
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a scan is checked before anything of it is kept", async () => {
   const put = (body: unknown, token = tokens.ci) => call(token, "PUT", "/prs/outcomes", body);
   const base = { repo: "github.com/acme/later", base_ref: "main", scanned_until: ago(0), pulls: [], commits: [] };
