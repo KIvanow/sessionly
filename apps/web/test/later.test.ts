@@ -90,6 +90,10 @@ test("what CI said of a commit is read as sent, said in a few words, and not kno
   assert.equal(ciWords(ciOf({ state: "failure" })), "red");
   assert.equal(ciWords(ciOf({ state: "success", total: 1 })), "green, 1 check");
   assert.equal(ciWords(ciOf({ state: "pending" })), "still running");
+  assert.equal(ciWords(ciOf({ state: "pending", total: 3 })), "still running, 3 checks");
+  // read as pending and not since: aged into none, with checks counted, which a read of nothing never has
+  assert.equal(ciWords(ciOf({ state: "none", total: 3, failed: 0 })), "still running when last read (3 checks), not read since");
+  assert.equal(ciWords(ciOf({ state: "none", total: 0, cancelled: 0 })), "none to go by");
   assert.equal(ciWords(ciOf({ state: "none", cancelled: 2 })), "none to go by, 2 checks cancelled");
   assert.equal(ciWords(ciOf({ state: "none", cancelled: 0 })), "none to go by");
   assert.equal(ciWords(null), "not known");
@@ -98,7 +102,9 @@ test("what CI said of a commit is read as sent, said in a few words, and not kno
   assert.equal(mergeCiWords(ciOf({ state: "failure", failed: 1, total: 3, failed_checks: ["tests"] }), true), "The base branch was red: 1 of 3 checks failed (tests).");
   assert.equal(mergeCiWords(ciOf({ state: "failure" }), true), "The base branch was red: checks failed.");
   assert.equal(mergeCiWords(ciOf({ state: "success", total: 1 }), true), "The base branch was green (1 check).");
-  assert.equal(mergeCiWords(ciOf({ state: "pending" }), true), "Its checks were still running when last read.");
+  assert.equal(mergeCiWords(ciOf({ state: "pending" }), true), "The merge commit's checks were still running when last read.");
+  assert.equal(mergeCiWords(ciOf({ state: "pending", total: 1 }), true), "The merge commit's checks were still running when last read (1 check).");
+  assert.equal(mergeCiWords(ciOf({ state: "none", total: 3 }), true), "The merge commit's checks were still running when last read (3 checks), and were not read since.");
   assert.equal(mergeCiWords(ciOf({ state: "none", cancelled: 2 }), true), "No checks to go by on the commit it was merged as: 2 checks cancelled.");
   assert.equal(mergeCiWords(ciOf({ state: "none" }), true), "No checks to go by on the commit it was merged as.");
   assert.match(mergeCiWords(null, true), /^Not read yet/);

@@ -219,7 +219,7 @@ test("the Action is told which heads and merge commits to read CI for, and what 
   assert.equal(due.status, 200);
   assert.deepEqual(due.body, {
     heads: [{ number: 1, sha: sha(1) }, { number: 1, sha: sha(2) }, { number: 2, sha: sha(3) }, { number: 3, sha: sha(4) }, { number: 4, sha: sha(5) }],
-    merges: [{ number: 2, sha: sha(30) }],
+    merges: [{ number: 2, sha: sha(30), base_ref: "main" }],
   });
   assert.ok(!JSON.stringify(due.body).includes("hashes"), "no hashes are sent out");
   assert.equal((await call(tokens.ann, "GET", `/prs/ci/due?repo=${q}`)).status, 403);
@@ -240,19 +240,20 @@ test("the Action is told which heads and merge commits to read CI for, and what 
   const left = await call(tokens.ci, "GET", `/prs/ci/due?repo=${q}`);
   assert.deepEqual(left.body.merges, []);
   assert.ok(left.body.heads.some((x: any) => x.sha === sha(2)) && !left.body.heads.some((x: any) => x.sha === sha(1)));
-  // A head's state that came out one way is not put back to pending; success over failure is (a re-run). A merge
-  // commit's stays once it came out either way: a later run on the branch's tip says nothing of the merge.
-  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "pending") }], merges: [{ number: 2, ...ci(30, "pending") }, { number: 2, ...ci(30, "success") }] })).body, { heads: 0, merges: 0 });
-  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "success") }] })).body, { heads: 1, merges: 0 });
+  // A state that came out one way is not put back to pending, head or merge; success over failure is (a re-run, or a
+  // read that left out what it should not have), and failure over success.
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "pending") }], merges: [{ number: 2, ...ci(30, "pending") }] })).body, { heads: 0, merges: 0 });
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, heads: [{ number: 1, ...ci(1, "success") }], merges: [{ number: 2, ...ci(30, "success") }] })).body, { heads: 1, merges: 1 });
   assert.deepEqual((await headsOf(repo, 1)).map((x) => [x.state, x.names]), [["success", null], ["pending", null]]);
+  assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=2`)).body.merge_ci.state, "success");
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, merges: [{ number: 2, ...ci(30, "failure") }] })).body, { heads: 0, merges: 1 });
   assert.equal((await call(tokens.admin, "GET", `/prs/detail?repo=${q}&number=2`)).body.merge_ci.state, "failure");
-  // Read as pending, a merge is replaced by what comes out, and read as none to go by too (workflows that started late).
+  // Read as none to go by (workflows that started late), a merge is replaced by what comes out.
   await db.query(`UPDATE pull_requests SET merge_ci = NULL WHERE repo = $1 AND number = 2`, [repo]);
-  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, merges: [{ number: 2, ...ci(30, "pending") }] })).body, { heads: 0, merges: 1 });
   assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, merges: [{ number: 2, ...ci(30, "none", { total: 0 }) }] })).body, { heads: 0, merges: 1 });
   assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, merges: [{ number: 2, ...ci(30, "failure") }] })).body, { heads: 0, merges: 1 });
   // A merge commit with nothing to go by is known as such, and not due again; a head read as pending 7 days ago likewise.
-  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, merges: [{ number: 2, ...ci(30, "none", { total: 0 }) }] })).body, { heads: 0, merges: 0 });
+  assert.deepEqual((await call(tokens.ci, "PUT", "/prs/ci", { repo, merges: [{ number: 2, ...ci(30, "none", { total: 0 }) }] })).body, { heads: 0, merges: 1 });
   await db.query(`UPDATE pull_heads SET first_reported_at = now() - interval '8 days' WHERE repo = $1 AND number = 1 AND sha = $2`, [repo, sha(2)]);
   // One that old no run has read is not due either, and stays as it is: not known, rather than none to go by.
   await db.query(`UPDATE pull_heads SET first_reported_at = now() - interval '8 days' WHERE repo = $1 AND number = 3`, [repo]);

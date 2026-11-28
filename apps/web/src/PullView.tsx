@@ -588,9 +588,9 @@ function Pushes({ heads, mergeCi, merged, mergeCommitKnown, pullUrl }: { heads: 
       <p className="muted hint">
         What the checks and statuses said of each head the pull request was reported at, as the Action read them: red when
         any failed, green when they all came out well, still running while any waits, none to go by when there were
-        no checks (or all were cancelled), and not read where no run of the Action has read it. Sessionly's own checks are
-        left out. Of the merge, only the checks its push started count. CI failing is linked, not caused: tests are
-        flaky and systems go down.
+        no checks (or all were cancelled), and not read where no run of the Action has read it. Skipped jobs never count,
+        and Sessionly's own workflow runs are left out, by workflow file. Of the merge, only the checks its push started
+        on the branch count. CI failing is linked, not caused: tests are flaky and systems go down.
         {known > 0 && ` ${count(red)} of ${count(known)} ${known === 1 ? "push" : "pushes"} with checks ${red === 1 ? "was" : "were"} red.`}
       </p>
       {merged && (

@@ -1231,8 +1231,8 @@ export interface PullHead {
 export interface PullCiDue {
   /** Heads whose CI is still pending, reported in the last 7 days: oldest first, 50 at most. */
   heads: { number: number; sha: string }[];
-  /** The commits merged pull requests with agent lines were merged as, whose CI is not known yet: oldest merged first, 50 at most. */
-  merges: { number: number; sha: string }[];
+  /** The commits merged pull requests with agent lines were merged as, whose CI is not known yet, with the branch each was merged into: oldest merged first, 50 at most. */
+  merges: { number: number; sha: string; base_ref: string | null }[];
 }
 
 /** `PUT /prs/ci`: what CI said of heads and merge commits. Only commits the server knows are kept; at most 100 of each. */

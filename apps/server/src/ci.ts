@@ -108,7 +108,7 @@ export async function ciDue(db: OrgDb, repo: string): Promise<PullCiDue> {
     [db.orgId, repo],
   );
   const merges = await db.query(
-    `SELECT p.number, p.merge_commit_sha AS sha FROM pull_requests p
+    `SELECT p.number, p.merge_commit_sha AS sha, p.base_ref FROM pull_requests p
      WHERE p.org_id = $1 AND p.repo = $2 AND p.state = 'merged' AND p.merged_at IS NOT NULL AND p.merge_commit_sha IS NOT NULL
        AND (p.merge_ci IS NULL OR p.merge_ci->>'state' = 'pending')
        AND EXISTS (SELECT 1 FROM pull_sessions s WHERE s.org_id = p.org_id AND s.repo = p.repo AND s.number = p.number AND ${KEPT})
@@ -116,7 +116,7 @@ export async function ciDue(db: OrgDb, repo: string): Promise<PullCiDue> {
     [db.orgId, repo],
   );
   const named = (rows: Record<string, unknown>[]) => rows.map((row) => ({ number: Number(row.number), sha: String(row.sha) }));
-  return { heads: named(heads), merges: named(merges) };
+  return { heads: named(heads), merges: merges.map((row) => ({ number: Number(row.number), sha: String(row.sha), base_ref: (row.base_ref as string) ?? null })) };
 }
 
 /** Keep what a report of CI says, of the commits the server knows (`applyCi`); how many of each were changed. */
