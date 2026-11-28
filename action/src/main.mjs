@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { branchFor, filesAt, github, listPulls, readPull, upsertComment } from "./github.mjs";
 import { fileHashes, ignoring } from "./lines.mjs";
 import { gitIn } from "./history.mjs";
+import { reportCi, runCi, runWorkflowRun } from "./ci.mjs";
 import { runOutcomes } from "./outcomes.mjs";
 import { buildReport, MARKER, render, renderAfterMerge, renderMany, renderOutcomes } from "./report.mjs";
 
@@ -61,7 +62,7 @@ export async function whenOpened(api, repo, { pull, commits }) {
   return Array.isArray(compared?.files) ? { commits: before, files: compared.files } : null;
 }
 
-/** Send a report; returns the server's attribution. */
+/** Send a report; returns what the server answers: its attribution, and the heads of it whose CI is still pending (`ci_pending`). */
 export async function send(url, token, report) {
   const response = await fetch(`${url.replace(/\/+$/, "")}/api/v1/prs`, {
     method: "PUT",
@@ -72,7 +73,7 @@ export async function send(url, token, report) {
   if (!response.ok) {
     throw Object.assign(new Error(`the Sessionly server answered ${response.status}: ${body.error ?? "no reason given"}`), { status: response.status });
   }
-  return body.attribution;
+  return body;
 }
 
 /** Ask the server something, or tell it; what it answers. A refusal is an error with its status. */
@@ -194,9 +195,9 @@ export async function run(env, { api, deliver = send, server, log = console.log,
     api ??= github(need("SESSIONLY_GITHUB_TOKEN", "the github-token input"), env.GITHUB_API_URL || undefined, env.GITHUB_GRAPHQL_URL || undefined);
     server ??= (method, path, body) => ask(url, token, method, path, body);
     const host = new URL(env.GITHUB_SERVER_URL || "https://github.com").host;
-    // Both, each whatever the other does: a count that fails does not keep
-    // later commits from being read, nor the other way round. The first
-    // failure is the run's; a second is said.
+    // All three, each whatever the others do: a count that fails does not
+    // keep later commits from being read, nor CI, nor the other way round.
+    // The first failure is the run's; the others are said.
     let counts = { counted: [], later: 0 };
     let failure;
     try {
@@ -227,8 +228,32 @@ export async function run(env, { api, deliver = send, server, log = console.log,
         failure ??= Object.assign(new Error(why), { status: err.status });
       }
     }
+    // And the CI of heads still pending and of merge commits not known yet: no checkout needed.
+    let ci;
+    if (on(env.SESSIONLY_CI ?? "true")) {
+      try {
+        ci = await runCi(env, { api, server, repo, host, log });
+      } catch (err) {
+        const why = `CI was not read: ${err.message ?? err}`;
+        if (failure) log(`::warning title=Sessionly::${why.replace(/\r?\n/g, " ")}`);
+        failure ??= Object.assign(new Error(why), { status: err.status });
+      }
+    }
     if (failure) throw failure;
-    return { ...counts, outcomes };
+    return { ...counts, outcomes, ci };
+  }
+  // A workflow of the repository's own CI finished: what it made of the
+  // commit is sent for the pull requests the commit is in. Nothing is reported.
+  if (env.GITHUB_EVENT_NAME === "workflow_run" && !numbered) {
+    const payload = env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")) : {};
+    if (!on(env.SESSIONLY_CI ?? "true")) {
+      log("CI is not read (ci: false), and a workflow_run event reports no pull request: nothing to do.");
+      return { ci: null };
+    }
+    api ??= github(need("SESSIONLY_GITHUB_TOKEN", "the github-token input"), env.GITHUB_API_URL || undefined, env.GITHUB_GRAPHQL_URL || undefined);
+    server ??= (method, path, body) => ask(url, token, method, path, body);
+    const host = new URL(env.GITHUB_SERVER_URL || "https://github.com").host;
+    return { ci: await runWorkflowRun(env, payload, { api, server, repo, host, log }) };
   }
   const payload = env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")) : {};
   const which = wanted(env.SESSIONLY_PR_NUMBER || payload.pull_request?.number || payload.number);
@@ -238,6 +263,7 @@ export async function run(env, { api, deliver = send, server, log = console.log,
     );
   }
   api ??= github(need("SESSIONLY_GITHUB_TOKEN", "the github-token input"), env.GITHUB_API_URL || undefined);
+  server ??= (method, path, body) => ask(url, token, method, path, body);
 
   const host = new URL(env.GITHUB_SERVER_URL || "https://github.com").host;
   const ignored = ignoring(env.SESSIONLY_IGNORE ?? "");
@@ -270,15 +296,28 @@ export async function run(env, { api, deliver = send, server, log = console.log,
       }
     }
     const report = named(buildReport({ ...data, event, host, ignored }));
-    const attribution = await sendTo(report);
+    const answer = await sendTo(report);
+    const attribution = answer.attribution;
     log(`Reported ${report.repo}#${number}: ${attribution.now.agent_lines} of ${attribution.now.lines} added lines matched to a coding agent.`);
-    return { data, report, attribution };
+    return { data, report, attribution, answer };
   };
 
   if (which.number === undefined) return runMany(env, which, { api, repo, reportOne, log, url });
 
   const number = which.number;
-  const { data, report, attribution } = await reportOne(number, eventName(env.GITHUB_EVENT_NAME, payload.action));
+  const { data, report, attribution, answer } = await reportOne(number, eventName(env.GITHUB_EVENT_NAME, payload.action));
+  // What CI says of its head, of heads still pending, and of its merge commit: read once the
+  // report is in, and never in the way of it. A problem is said, and fails the run only when asked to.
+  let ci = null;
+  let ciProblem;
+  if (on(env.SESSIONLY_CI ?? "true")) {
+    try {
+      ci = await reportCi(env, { api, server, repo, host, log }, report, answer);
+    } catch (err) {
+      ciProblem = err;
+      log(`::warning title=Sessionly::What CI said of this pull request could not be sent (${String(err.message ?? err).replace(/\r?\n/g, " ")}). It is read again at the next scheduled run.`);
+    }
+  }
   const text = render(report, attribution, url);
   if (env.GITHUB_OUTPUT) {
     appendFileSync(env.GITHUB_OUTPUT, `lines=${attribution.now.lines}\nagent-lines=${attribution.now.agent_lines}\n`);
@@ -300,7 +339,8 @@ export async function run(env, { api, deliver = send, server, log = console.log,
       );
     }
   }
-  return { report, attribution, text };
+  if (ciProblem && on(env.SESSIONLY_FAIL_ON_ERROR)) throw ciProblem;
+  return { report, attribution, text, ci };
 }
 
 /**
