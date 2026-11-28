@@ -115,9 +115,10 @@ async function runAfterMerge(env, { api, server, repo, host, log, url }) {
     due = (await server("GET", `/prs/due?repo=${encodeURIComponent(name)}`)).due;
   } catch (err) {
     // A server from before this has no such address, and tells a ci token so.
-    if (err.status === 403 || err.status === 404) {
+    if (err.status === 404 || (err.status === 403 && /only reports pull requests/.test(err.message ?? ""))) {
       throw new Error(`the Sessionly server does not count pull requests after merging (${err.message}): it is from before that, and needs updating`);
     }
+    if (err.status === 403) throw new Error(`the Sessionly server would not say which merged pull requests are due (${err.message}): the token needs the ci or admin role`);
     throw err;
   }
   if (!Array.isArray(due)) throw new Error("the Sessionly server did not say which pull requests are due");
@@ -195,7 +196,7 @@ export async function run(env, { api, deliver = send, server, log = console.log,
     const host = new URL(env.GITHUB_SERVER_URL || "https://github.com").host;
     // Both, each whatever the other does: a count that fails does not keep
     // later commits from being read, nor the other way round. The first
-    // failure is the run's.
+    // failure is the run's; a second is said.
     let counts = { counted: [], later: 0 };
     let failure;
     try {
@@ -207,12 +208,23 @@ export async function run(env, { api, deliver = send, server, log = console.log,
     if (on(env.SESSIONLY_OUTCOMES ?? "true")) {
       try {
         git ??= gitIn(env.GITHUB_WORKSPACE || process.cwd(), spawnSync);
-        outcomes = await runOutcomes(env, { api, server, repo, host, log, git });
-        if (on(env.SESSIONLY_SUMMARY ?? "true") && env.GITHUB_STEP_SUMMARY && outcomes.stored.length > 0) {
-          appendFileSync(env.GITHUB_STEP_SUMMARY, `${renderOutcomes(outcomes.stored, url)}\n`);
+        const summary = (stored) => {
+          if (on(env.SESSIONLY_SUMMARY ?? "true") && env.GITHUB_STEP_SUMMARY && stored.length > 0) {
+            appendFileSync(env.GITHUB_STEP_SUMMARY, `${renderOutcomes(stored, url)}\n`);
+          }
+        };
+        try {
+          outcomes = await runOutcomes(env, { api, server, repo, host, log, git });
+        } catch (err) {
+          // Some branches were read before one could not be: what they changed is shown.
+          summary(err.stored ?? []);
+          throw err;
         }
+        summary(outcomes.stored);
       } catch (err) {
-        failure ??= Object.assign(new Error(`later commits were not read: ${err.message ?? err}`), { status: err.status });
+        const why = err.stored ? String(err.message) : `later commits were not read: ${err.message ?? err}`;
+        if (failure) log(`::warning title=Sessionly::${why.replace(/\r?\n/g, " ")}`);
+        failure ??= Object.assign(new Error(why), { status: err.status });
       }
     }
     if (failure) throw failure;

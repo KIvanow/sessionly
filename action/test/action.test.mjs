@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { all, branchFor, fileOn, filesAt, FILES_AT_ONCE, github } from "../src/github.mjs";
+import { all, branchFor, fileOn, filesAt, FILES_AT_ONCE, github, rateLimited } from "../src/github.mjs";
 import { addedHashes, fileHashes, ignoring, lineHash } from "../src/lines.mjs";
 import { ask, eventName, MOST_AT_ONCE, MOST_FILES, run, send, wanted, whenOpened } from "../src/main.mjs";
 import { buildReport, feedbackOf, MARKER, render, roundAuthors } from "../src/report.mjs";
@@ -855,4 +855,15 @@ test("over the network: pages from GitHub, and the server's answer or refusal", 
   } finally {
     server.close();
   }
+});
+
+test("GitHub refusing for its rate limits is told from refusing what the token may not do", () => {
+  const answer = (status, headers = {}) => new Response(null, { status, headers });
+  assert.ok(rateLimited(answer(429), ""));
+  assert.ok(rateLimited(answer(403, { "x-ratelimit-remaining": "0" }), "API rate limit exceeded for installation"));
+  assert.ok(rateLimited(answer(403, { "x-ratelimit-remaining": "4000", "retry-after": "60" }), "You have exceeded a secondary rate limit"));
+  assert.ok(rateLimited(answer(403, { "x-ratelimit-remaining": "4000" }), "You have exceeded a secondary rate limit"));
+  // a job without pull-requests: read
+  assert.ok(!rateLimited(answer(403, { "x-ratelimit-remaining": "4000" }), '{"message":"Resource not accessible by integration"}'));
+  assert.ok(!rateLimited(answer(404, { "x-ratelimit-remaining": "0" }), ""));
 });

@@ -2,7 +2,7 @@
 // binary reads a repository's: in three steps that nothing in a commit can
 // be mistaken in. `rev-list` for the SHAs and times, `cat-file --batch` for
 // the messages (each with its size), `diff-tree --stdin` for the changes.
-import { lineHash } from "./lines.mjs";
+import { lineHash, SPACE } from "./lines.mjs";
 
 /** How long one git command may take, and how much it may print. */
 const GIT_DEADLINE = 120_000;
@@ -11,8 +11,19 @@ const GIT_MOST = 256 * 1024 * 1024;
 const MOST_PASSES = 3;
 /** A commit that adds and removes more lines than this is not read whole, and not counted: a vendored, generated or moved tree. */
 export const MOST_LINES_SHOWN = 100_000;
-/** Commits read whole at a time. */
+/** Commits read whole in one reading, as the binary's `MOST_SHOWN`: the reading stops before the next. */
+export const MOST_SHOWN = 2000;
+/** Commits read whole at a time, and read for their files and messages. */
 const SHOWN_AT_ONCE = 250;
+const LISTED_AT_ONCE = 1000;
+/**
+ * How much of a command line the paths to read may take: well within what
+ * Linux and macOS allow, and what Windows does (32,767 characters).
+ */
+const PATH_BYTES = process.platform === "win32" ? 24_000 : 200_000;
+
+/** What Rust's `str::trim` removes, at both ends. */
+const ENDS = new RegExp(`^[${SPACE}]+|[${SPACE}]+$`, "gu");
 
 const PATCH = ["-p", "-U0", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"];
 
@@ -23,20 +34,21 @@ export const isSha = (text) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(text);
  * Git in `cwd`, for reading history: paths as they are, whatever the
  * environment says of pathspecs or of which repository; no prompt, no
  * signature checked. `spawn` is `spawnSync`. Returns what it printed, as a
- * Buffer; throws when it fails (with its exit code as `git`), prints too
- * much or takes too long.
+ * Buffer; throws when it fails (with its exit code as `git`), prints more
+ * than `most` bytes (`tooLarge`) or takes too long.
  */
-export function gitIn(cwd, spawn) {
+export function gitIn(cwd, spawn, most = GIT_MOST) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
   return (args, input) => {
     const done = spawn("git", ["-c", "core.quotepath=off", "-c", "log.showSignature=false", "--literal-pathspecs", ...args], {
       cwd,
       input,
       env: { ...env, GIT_TERMINAL_PROMPT: "0" },
-      maxBuffer: GIT_MOST,
+      maxBuffer: most,
       timeout: GIT_DEADLINE,
     });
-    if (done.error) throw new Error(`git ${args[0]} could not be run: ${done.error.message}`);
+    // More than it may print is a commit too large to read so, not git failing.
+    if (done.error) throw Object.assign(new Error(`git ${args[0]} could not be run: ${done.error.message}`), { tooLarge: done.error.code === "ENOBUFS" });
     if (done.status !== 0) {
       throw Object.assign(new Error(`git ${args[0]} failed: ${String(done.stderr ?? "").trim().slice(0, 300)}`), { git: done.status });
     }
@@ -60,7 +72,10 @@ export function parseList(out) {
 /**
  * `cat-file --batch`: each commit's message, by SHA. An object comes with
  * its size, so nothing in a message can be taken for the next one. A
- * message whose commit says it is Latin-1 is read as that.
+ * message whose commit says it is Latin-1 is read as that. As the binary
+ * reads one: the headers as UTF-8, the encoding's name without the white
+ * space around it, and the message without Rust's white space at its ends
+ * (a byte order mark stays, U+0085 goes).
  */
 export function parseBatch(out) {
   const messages = new Map();
@@ -81,22 +96,30 @@ export function parseBatch(out) {
     const headers = split < 0 ? object : object.subarray(0, split);
     const body = split < 0 ? Buffer.alloc(0) : object.subarray(split + 2);
     const latin1 = headers
-      .toString("latin1")
+      .toString("utf8")
       .split("\n")
-      .some((line) => /^encoding (?:iso-?8859-1|latin-?1|l1)\s*$/i.test(line));
-    messages.set(sha, body.toString(latin1 ? "latin1" : "utf8").trim());
+      .some((line) => line.startsWith("encoding ") && ["iso-8859-1", "iso8859-1", "latin1", "latin-1", "l1"].includes(line.slice(9).replace(ENDS, "").replace(/[A-Z]+/g, (c) => c.toLowerCase())));
+    messages.set(sha, body.toString(latin1 ? "latin1" : "utf8").replace(ENDS, ""));
   }
   return messages;
 }
 
-/** `diff-tree --stdin --always` output, cut at each commit's SHA line, in the order the SHAs were given. */
+/**
+ * `diff-tree --stdin --always` output, cut at each commit's SHA line: one
+ * for every commit given, in the order given (a line of a patch always
+ * begins with something else). Git leaves out one it cannot read and goes
+ * on, and then what follows would be taken for another commit's: so, as
+ * the binary does, none of it is, and the reading fails.
+ */
 export function splitTree(text, shas) {
   const parts = new Map();
   let next = 0;
   let open = null;
   let offset = 0;
   for (const line of text.split(/(?<=\n)/)) {
-    if (next < shas.length && line.replace(/\n$/, "") === shas[next]) {
+    const bare = line.replace(/\n$/, "");
+    if (isSha(bare)) {
+      if (bare !== shas[next]) throw new Error(`git diff-tree left out a commit (${shas[next] ?? "none"} was next, ${bare} came)`);
       if (open) parts.set(shas[open.i], text.slice(open.start, offset));
       open = { i: next, start: offset + line.length };
       next += 1;
@@ -104,6 +127,7 @@ export function splitTree(text, shas) {
     offset += line.length;
   }
   if (open) parts.set(shas[open.i], text.slice(open.start));
+  if (next < shas.length) throw new Error(`git diff-tree left out ${shas.length - next} of ${shas.length} commits`);
   return parts;
 }
 
@@ -232,22 +256,81 @@ export function unmoved(files) {
   return { files, removedTotal: total, moves };
 }
 
+/** SHAs as git reads them on its input, one a line. */
+const lines = (shas) => shas.map((sha) => `${sha}\n`).join("");
+
 /**
- * The commits on `tip` between `since` and `until` (seconds since 1970, by
- * committer date) that changed `paths`, parents first, with their messages
- * and changes there. One that removes any line there is read whole: a line
- * it adds back elsewhere was moved, not changed, and is taken out; one too
- * large for that is not counted (its removed lines are cleared). Lines
- * moved out of a path read go with the reading to their new path, which is
- * read too (up to `MOST_PASSES` readings).
+ * `git rev-list` with `args`, from `revs` (`<sha>`, `^<sha>`), for the
+ * commits that changed `paths`. The revisions and the paths go in on its
+ * input, so that there can be any number of them (a command line holds only
+ * so much); a path that a line of input cannot carry (with a line break in
+ * it) goes on the command line.
  */
-export function readHistory(git, tip, since, until, paths) {
+export function revList(git, args, revs, paths) {
+  const odd = paths.filter((path) => /[\n\r]/.test(path));
+  const plain = paths.filter((path) => !/[\n\r]/.test(path));
+  return git(["rev-list", ...args, "--stdin", ...(odd.length > 0 ? ["--", ...odd] : [])], lines([...revs, "--", ...plain]));
+}
+
+/** Paths in parts that each fit on a command line. */
+function pathParts(paths) {
+  const parts = [[]];
+  let bytes = 0;
+  for (const path of paths) {
+    const size = Buffer.byteLength(path) + 1;
+    if (bytes + size > PATH_BYTES && parts.at(-1).length > 0) {
+      parts.push([]);
+      bytes = 0;
+    }
+    parts.at(-1).push(path);
+    bytes += size;
+  }
+  return parts;
+}
+
+/**
+ * What `read` makes of the commits, so many at a time: a batch git prints
+ * too much for is read in halves, and a commit too large on its own is left
+ * out (and is in `left`), as the binary leaves out one that is `TooLarge`.
+ */
+function inBatches(shas, size, read) {
+  const found = new Map();
+  const left = new Set();
+  const queue = [];
+  for (let from = 0; from < shas.length; from += size) queue.push(shas.slice(from, from + size));
+  while (queue.length > 0) {
+    const some = queue.shift();
+    let out;
+    try {
+      out = read(some);
+    } catch (err) {
+      if (!err.tooLarge) throw err;
+      if (some.length === 1) left.add(some[0]);
+      else queue.unshift(some.slice(0, some.length >> 1), some.slice(some.length >> 1));
+      continue;
+    }
+    for (const [sha, value] of out) found.set(sha, value);
+  }
+  return { found, left };
+}
+
+/**
+ * The commits `list(paths)` gives (each `{sha, at}`, in the order they are
+ * to be read) with their messages and changes in `paths`. One that removes
+ * any line there is read whole: a line it adds back elsewhere was moved,
+ * not changed, and is taken out; one too large for that is not counted (its
+ * removed lines are cleared). Lines moved out of a path read go with the
+ * reading to their new path, which is read too (up to `MOST_PASSES`
+ * readings). No more than `MOST_SHOWN` are read whole: `cut` is the first
+ * that would be one more (null if none), where the reading stops.
+ */
+export function readHistory(git, list, paths) {
   const tracked = new Set(paths);
-  let commits = [];
+  let read = { commits: [], cut: null };
   for (let pass = 1; pass <= MOST_PASSES; pass += 1) {
-    commits = readOnce(git, tip, since, until, [...tracked].sort());
+    read = readOnce(git, list, [...tracked].sort());
     let more = false;
-    for (const commit of commits) {
+    for (const commit of read.commits) {
       for (const [from, to] of commit.moves) {
         if (tracked.has(from) && !tracked.has(to)) {
           tracked.add(to);
@@ -257,43 +340,51 @@ export function readHistory(git, tip, since, until, paths) {
     }
     if (!more) break;
   }
-  return { commits, paths: [...tracked].sort() };
+  return { ...read, paths: [...tracked].sort() };
 }
 
-function readOnce(git, tip, since, until, paths) {
-  if (paths.length === 0) return [];
-  const listed = parseList(
-    git(["rev-list", "--no-merges", "--full-history", "--topo-order", "--reverse", "--timestamp", `--max-age=${since}`, `--min-age=${until}`, tip, "--", ...paths]),
-  );
-  if (listed.length === 0) return [];
+function readOnce(git, list, paths) {
+  if (paths.length === 0) return { commits: [], cut: null };
+  const listed = list(paths);
+  if (listed.length === 0) return { commits: [], cut: null };
   const shas = listed.map((c) => c.sha);
-  const input = shas.map((sha) => `${sha}\n`).join("");
-  const messages = parseBatch(git(["cat-file", "--batch"], input));
-  const diffs = splitTree(git(["diff-tree", "--stdin", "--always", "--root", ...PATCH, "--", ...paths], input).toString("utf8"), shas);
+  const messages = inBatches(shas, LISTED_AT_ONCE, (some) => parseBatch(git(["cat-file", "--batch"], lines(some)))).found;
+  // Their changes in the files read: so many commits, and so many paths, at a time.
+  const diffs = new Map();
+  const unread = new Set();
+  for (const part of pathParts(paths)) {
+    const { found, left } = inBatches(shas, LISTED_AT_ONCE, (some) => {
+      const out = git(["diff-tree", "--stdin", "--always", "--root", ...PATCH, "--", ...part], lines(some)).toString("utf8");
+      return [...splitTree(out, some)].map(([sha, diff]) => [sha, parseDiff(diff)]);
+    });
+    for (const sha of left) unread.add(sha);
+    for (const [sha, files] of found) diffs.set(sha, new Map([...(diffs.get(sha) ?? []), ...files]));
+  }
   const commits = listed.map(({ sha, at }) => ({
     sha,
     at,
     message: messages.get(sha) ?? "",
-    files: parseDiff(diffs.get(sha) ?? ""),
+    // One too large to read even in the files read is not counted.
+    files: unread.has(sha) ? new Map() : (diffs.get(sha) ?? new Map()),
     removedTotal: null,
     moves: [],
   }));
   const candidates = commits.filter((c) => [...c.files.values()].some((d) => d.removed.size > 0));
-  if (candidates.length === 0) return commits;
-  const asked = candidates.map((c) => c.sha);
-  const numstat = git(["diff-tree", "--stdin", "--always", "--root", "--numstat", "--no-renames"], asked.map((s) => `${s}\n`).join(""));
-  const sizes = splitTree(numstat.toString("utf8"), asked);
+  if (candidates.length === 0) return { commits, cut: null };
+  const asked = candidates.slice(0, MOST_SHOWN).map((c) => c.sha);
+  const sizes = inBatches(asked, SHOWN_AT_ONCE, (some) =>
+    splitTree(git(["diff-tree", "--stdin", "--always", "--root", "--numstat", "--no-renames"], lines(some)).toString("utf8"), some),
+  ).found;
   const small = asked.filter((sha) => {
-    const counts = (sizes.get(sha) ?? "").split("\n").flatMap((line) => line.split("\t").slice(0, 2)).filter((n) => /^\d+$/.test(n));
+    if (!sizes.has(sha)) return false;
+    const counts = sizes.get(sha).split("\n").flatMap((line) => line.split("\t").slice(0, 2)).filter((n) => /^\d+$/.test(n));
     return counts.reduce((sum, n) => sum + Number(n), 0) <= MOST_LINES_SHOWN;
   });
-  const whole = new Map();
-  for (let from = 0; from < small.length; from += SHOWN_AT_ONCE) {
-    const some = small.slice(from, from + SHOWN_AT_ONCE);
-    const out = git(["diff-tree", "--stdin", "--always", "--root", ...PATCH], some.map((s) => `${s}\n`).join("")).toString("utf8");
-    for (const [sha, diff] of splitTree(out, some)) whole.set(sha, parseDiff(diff));
-  }
-  for (const commit of candidates) {
+  const whole = inBatches(small, SHOWN_AT_ONCE, (some) => {
+    const out = git(["diff-tree", "--stdin", "--always", "--root", ...PATCH], lines(some)).toString("utf8");
+    return [...splitTree(out, some)].map(([sha, diff]) => [sha, parseDiff(diff)]);
+  }).found;
+  for (const commit of candidates.slice(0, MOST_SHOWN)) {
     const files = whole.get(commit.sha);
     if (!files) {
       // Too big to read whole: not counted.
@@ -305,7 +396,68 @@ function readOnce(git, tip, since, until, paths) {
     commit.removedTotal = removedTotal;
     commit.moves = moves;
   }
-  return commits;
+  return { commits, cut: candidates[MOST_SHOWN]?.sha ?? null };
+}
+
+/** The SHAs `rev-list` printed, one a line. */
+export const shasOf = (out) => out.toString("utf8").split("\n").filter(isSha);
+
+/**
+ * The commits on `tip` that are not on the commits of a list in `bottoms`,
+ * for each list: what became part of the branch after it was at those
+ * commits, whatever the commits' dates. `nodes` has each with its time and
+ * parents; `of(bottom)` the SHAs of one list's.
+ */
+export function regionOf(git, tip, bottoms) {
+  const nodes = new Map();
+  const sets = new Map();
+  for (const bottom of bottoms) {
+    const key = JSON.stringify(bottom);
+    if (sets.has(key)) continue;
+    const out = git(["rev-list", "--parents", "--timestamp", "--stdin"], lines([tip, ...bottom.map((sha) => `^${sha}`)]));
+    const set = new Set();
+    for (const line of out.toString("utf8").split("\n")) {
+      const [at, sha, ...parents] = line.split(" ");
+      if (!isSha(sha ?? "") || !/^\d+$/.test(at)) continue;
+      set.add(sha);
+      if (!nodes.has(sha)) nodes.set(sha, { at: Number(at), parents: parents.filter(isSha) });
+    }
+    sets.set(key, set);
+  }
+  return { nodes, of: (bottom) => sets.get(JSON.stringify(bottom)) ?? new Set() };
+}
+
+/**
+ * Where each commit of `nodes` came onto the branch at `tip`: `chain` is
+ * the branch's own commits (first parents from `tip`, oldest first), and
+ * each commit's `group` the first of those it is part of: a merged
+ * branch's commits come with the merge commit. `order` puts them so, and
+ * parents first within each.
+ */
+export function placeOf(nodes, tip) {
+  const chain = [];
+  for (let at = tip; at && nodes.has(at); at = nodes.get(at).parents[0]) chain.push(at);
+  chain.reverse();
+  const place = new Map();
+  const opened = new Set();
+  chain.forEach((head, group) => {
+    const stack = [head];
+    while (stack.length > 0) {
+      const sha = stack.at(-1);
+      if (place.has(sha)) {
+        stack.pop();
+        continue;
+      }
+      if (!opened.has(sha)) {
+        opened.add(sha);
+        stack.push(...nodes.get(sha).parents.filter((p) => nodes.has(p) && !place.has(p)).reverse());
+        continue;
+      }
+      stack.pop();
+      place.set(sha, { group, order: place.size });
+    }
+  });
+  return { chain, place };
 }
 
 /** A commit's full SHA and message, if it is in the history here (`sha` may be short); null if not. */

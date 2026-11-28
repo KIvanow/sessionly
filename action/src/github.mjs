@@ -1,5 +1,16 @@
 // The few GitHub REST calls the Action needs, with the built-in fetch.
 
+/**
+ * Whether GitHub refused for its rate limits rather than for what the token
+ * may do: a 429, or a 403 with no requests left, a time to retry after, or
+ * its limit named (the secondary limits say so only in the message).
+ */
+export function rateLimited(response, text) {
+  if (response.status === 429) return true;
+  if (response.status !== 403) return false;
+  return response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after") || /rate limit/i.test(text);
+}
+
 /** `request(method, path, body)` against GitHub's API at `apiUrl`, and `graphql(query, variables)` against the one at `graphqlUrl`. */
 export function github(token, apiUrl = "https://api.github.com", graphqlUrl = `${apiUrl}/graphql`) {
   // How many requests GitHub said the token has left this hour, at the last answer.
@@ -23,7 +34,11 @@ export function github(token, apiUrl = "https://api.github.com", graphqlUrl = `$
     counted(response);
     if (!response.ok) {
       const text = (await response.text()).slice(0, 300);
-      throw Object.assign(new Error(`GitHub answered ${response.status} to ${method} ${path}: ${text}`), { status: response.status });
+      throw Object.assign(new Error(`GitHub answered ${response.status} to ${method} ${path}: ${text}`), {
+        status: response.status,
+        rateLimited: rateLimited(response, text),
+        retryAfter: response.headers.get("retry-after"),
+      });
     }
     return response.status === 204 ? null : response.json();
   };
