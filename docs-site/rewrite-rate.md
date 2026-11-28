@@ -133,7 +133,9 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   branch after it was undone there, it counts again.
 - **A session's own commits don't count:** those after it began that add its lines (and not
   only move or re-indent them) where the history did not have them. A later commit that adds a
-  copy of lines already there (a block copied, or generic lines like `return err`) is not one.
+  copy of lines already there (a block copied, or generic lines like `return err`) is not one,
+  nor one more than a day after the session ended that puts back fewer than 3 of its lines few
+  other sessions wrote (a check like `if err != nil {` that a refactor took out).
   A revert, or a revert of one, is not a session's own work, so it is never taken for the
   commit a later revert undoes, nor credited to an agent; and a revert of a revert (git
   before 2.43 and GitHub name it `Revert "Revert "…""`) is no revert of the session, while a

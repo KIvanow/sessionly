@@ -2410,21 +2410,25 @@ fn walk(
             }
         }
         // A session's own commit adds copies of its lines that the commit's
-        // history does not have: a copy of lines already there (a person's,
-        // or a block copied) is not. On a history it landed in, at least
+        // history does not have: a copy of lines already there (a person's, or
+        // a block copied) is not. On a history it landed in, at least
         // `LANDING_LINES` of them, or `LANDING_SHARE` of what the commit adds
-        // to the session's files. On one it did not (its own branch before
-        // its first commit, or a branch a cherry-pick or a squash merge
-        // lands it on), a commit that adds `LANDING_LINES` of its lines that
-        // few sessions wrote, each counted once, or every one for a session
-        // of fewer and `LANDING_SHARE` of what it adds: a teammate's `if err
-        // != nil {` and `return err` there are not its lines. Commits of
-        // its time (from when it began to `SLACK` after it ended) that add
-        // two of them or more (any, for a session of fewer) count together.
-        // Where no commit read lands it so, one of its time lands it with
-        // less: two of its lines, at least half of them and `LANDING_SHARE`
-        // of what it adds; or every one, for a session of fewer.
+        // to the session's files; after its time, `LANDING_LINES` that few
+        // sessions wrote, each counted once: a fix that puts back a check it
+        // wrote (`if err != nil {`, `return err`) that a commit took out is
+        // not its own. On one it did not (its own branch before its first
+        // commit, or a branch a cherry-pick or a squash merge lands it on), a
+        // commit that adds `LANDING_LINES` of its lines that few sessions
+        // wrote, each counted once, or every one for a session of fewer and
+        // `LANDING_SHARE` of what it adds: a teammate's `if err != nil {` and
+        // `return err` there are not its lines. Commits of its time (from when
+        // it began to `SLACK` after it ended) that add two of them or more
+        // (any, for a session of fewer) count together. Where no commit read
+        // lands it so, one of its time lands it with less: two of its lines,
+        // at least half of them and `LANDING_SHARE` of what it adds; or every
+        // one, for a session of fewer.
         let mut adds: BTreeMap<usize, (f64, f64, HashSet<u64>)> = BTreeMap::new();
+        let late = |i: usize| commit.at > targets[sessions[i].target].ended_at.timestamp() + SLACK;
         for (path, diff) in &commit.files {
             if diff.added.is_empty() {
                 continue;
@@ -2446,7 +2450,15 @@ fn walk(
                     let free = match held {
                         Some(held) => {
                             let most = written[i].get(hash).copied().unwrap_or(0.0);
-                            (room - held.copies(path, *hash)).min(most - held.line(*hash))
+                            let free =
+                                (room - held.copies(path, *hash)).min(most - held.line(*hash));
+                            if late(i) {
+                                if free > 0.0 && uncommon[i].contains(hash) {
+                                    entry.2.insert(*hash);
+                                }
+                                continue;
+                            }
+                            free
                         }
                         None => {
                             if uncommon[i].contains(hash) {
@@ -2468,7 +2480,7 @@ fn walk(
                 if !new.is_empty() {
                     fresh.push((i, share, new));
                 }
-            } else if mine >= LANDING_LINES || share {
+            } else if mine >= LANDING_LINES || share || new.len() as f64 >= LANDING_LINES {
                 own[i].insert(sha);
                 if !puts_back(commit) {
                     landed[i].insert(sha);
@@ -4263,6 +4275,43 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
         );
         world.measure(T0 + 8 * DAY);
         assert_eq!(world.at("s1", "7d").unwrap().fix_commits, 1);
+    }
+
+    #[test]
+    fn a_later_fix_that_puts_back_generic_lines_it_wrote_is_not_its_own() {
+        let mut world = World::new();
+        world.commit("f.go", "package x\n// tail\n", "init", T0 - HOUR);
+        let agent: &[&str] = &[
+            "func load() error {",
+            "data, err := read()",
+            "if err != nil {",
+            "return err",
+            "x := compute(1)",
+            "y := compute(2)",
+            "z := compute(3)",
+            "return use(data, x, y, z)",
+        ];
+        let load = |check: &str, x: &str, y: &str| {
+            format!(
+                "package x\nfunc load() error {{\ndata, err := read()\n{check}x := compute({x})\n\
+                 y := compute({y})\nz := compute(3)\nreturn use(data, x, y, z)\n}}\n// tail\n"
+            )
+        };
+        let check = "if err != nil {\nreturn err\n}\n";
+        world.commit("f.go", &load(check, "1", "2"), "Add load", T0 + HOUR);
+        world.session("s1", T0, T0 + 2 * HOUR, &[("f.go", agent)]);
+        // A refactor drops the check; a person's fix puts it back, and
+        // changes two of its lines.
+        world.commit("f.go", &load("", "1", "2"), "Refactor load", T0 + DAY);
+        world.commit(
+            "f.go",
+            &load(check, "10", "20"),
+            "fix: check the read and the arguments",
+            T0 + 3 * DAY,
+        );
+        world.measure(T0 + 8 * DAY);
+        let week = world.at("s1", "7d").expect("never counted");
+        assert_eq!((week.fix_commits, week.rework_commits), (1, 1));
     }
 
     #[test]
