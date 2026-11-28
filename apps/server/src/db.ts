@@ -968,9 +968,10 @@ const MIGRATIONS: string[] = [
      ADD COLUMN outcomes_tips jsonb,
      ADD COLUMN outcomes_gone_at timestamptz`,
   // From when an organisation's merged pull requests have their later
-  // commits read. Those are history, so the Action can be asked to read
-  // earlier ones too (its `outcomes-since` input).
-  `ALTER TABLE orgs ADD COLUMN outcomes_since timestamptz NOT NULL DEFAULT now()`,
+  // commits read: 30 days before it began to, the longest age, so the first
+  // run has some to show. Those are history, so the Action can be asked to
+  // read earlier ones too (its `outcomes-since` input).
+  `ALTER TABLE orgs ADD COLUMN outcomes_since timestamptz NOT NULL DEFAULT now() - interval '30 days'`,
   // Later commits on a merged pull request's base branch that removed or
   // changed its lines: what kind each is, and which of the pull request's
   // own lines it removed (`removed`, {path: [hashes]}, no other hash). Who

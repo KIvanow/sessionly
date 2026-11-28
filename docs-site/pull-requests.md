@@ -161,7 +161,8 @@ How it is read:
 
 - The server names the merged pull requests whose first 30 days are not all read yet, the
   branch, and the files their agent lines are in and where later commits moved them. Only pull
-  requests with agent lines, merged since the server began reading them, are named. A session
+  requests with agent lines, merged since 30 days before the server began reading them, are
+  named. A session
   matched to one later, with lines in a file that was not read, has that pull request read
   again from the merge; a run that was reading it meanwhile, without that file, leaves it as it
   is.

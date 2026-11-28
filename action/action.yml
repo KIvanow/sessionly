@@ -84,7 +84,8 @@ inputs:
   outcomes-since:
     description: >-
       With outcomes: also read the later commits of pull requests merged on
-      or after this date (2026-08-01), from before the server began to.
+      or after this date (2026-08-01), more than 30 days before the server
+      began to (it reads those of the 30 days before by itself).
       History is still there, so these can be counted late.
     default: ""
   fix-words:

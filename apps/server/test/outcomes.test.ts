@@ -720,3 +720,10 @@ test("a scan that did not read a file a session was matched with meanwhile leave
   assert.deepEqual((await read(again.paths)).body.stored.map((s: any) => s.sha), [sha(1)]);
   assert.equal((await read(["a.ts", 7] as never)).status, 422);
 });
+
+test("an organisation has the later commits of pull requests merged in the 30 days before it began read", async () => {
+  await db.query(`INSERT INTO orgs (id, name) VALUES ('since-new', 'New')`);
+  const [r] = await db.query<{ days: unknown }>(`SELECT extract(epoch FROM now() - outcomes_since) / 86400 AS days FROM orgs WHERE id = 'since-new'`);
+  assert.equal(Math.round(Number(r.days)), 30);
+  await db.query(`DELETE FROM orgs WHERE id = 'since-new'`);
+});

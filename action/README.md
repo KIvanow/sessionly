@@ -61,7 +61,7 @@ shows a warning that the token is missing.
 | `since` | 90 days ago | With `pr-number: all`, the date from which pull requests are reported, by when they were created. |
 | `after-merge` | `false` | Count merged pull requests' agent lines again on the branch they were merged into, 7 and 30 days after. A run started by a schedule, with no `pr-number`, does this without it (see below). |
 | `outcomes` | `true` | On a scheduled run, or one with `after-merge` and no `pr-number` (started by hand, say), also read the later commits on the branches merged pull requests went into, for 30 days after each merge. Needs a checkout with the whole history; `false` to count only after merge (see below). |
-| `outcomes-since` | | With `outcomes`: also read those of pull requests merged on or after this date, from before the server began to. |
+| `outcomes-since` | | With `outcomes`: also read those of pull requests merged on or after this date, though more than 30 days before the server began to. |
 | `fix-words` | | Words that make a later commit a fix, separated by commas, in place of the default list. |
 | `bug-labels` | | Words that make a linked issue's label a bug label, separated by commas, in place of the default list. |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
