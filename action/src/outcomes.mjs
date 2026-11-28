@@ -82,10 +82,19 @@ export function signals(message, of = wordsOf()) {
 /**
  * The commits a message says it reverts: each `This reverts commit <sha>`,
  * the words apart by any white space, the SHA 7 to 64 hex digits (SHA-1 or
- * SHA-256), lowercased.
+ * SHA-256), lowercased. Only in a revert's message, as git writes one: its
+ * subject begins with "revert" or "reapply", or the body begins with that
+ * line. A squash merge's message, which lists its branch's commits (a
+ * `Revert "wip"` among them, with its line), says it reverts nothing.
  */
 export function reverts(message) {
-  const tokens = message.split(SPACES).filter(Boolean);
+  const first = words(subjectOf(message))[0];
+  let tokens = message.split(SPACES).filter(Boolean);
+  if (first !== "revert" && first !== "reapply") {
+    tokens = firstParagraph(message).split(SPACES).filter(Boolean);
+    const begins = tokens.length >= 3 && ["this", "reverts", "commit"].every((word, i) => tokens[i].toLowerCase() === word);
+    if (!begins) return [];
+  }
   const found = [];
   for (let i = 0; i + 3 < tokens.length; i += 1) {
     const [a, b, c] = tokens.slice(i, i + 3).map((t) => t.toLowerCase());
@@ -117,9 +126,7 @@ function firstParagraph(message) {
  */
 export function putsBack(message) {
   const first = words(subjectOf(message))[0];
-  if (first === "revert" || first === "reapply") return true;
-  const opening = firstParagraph(message).split(SPACES).filter(Boolean).slice(0, 4);
-  return opening.length === 4 && reverts(opening.join(" ")).length > 0;
+  return first === "revert" || first === "reapply" || reverts(message).length > 0;
 }
 
 /** How deep a subject says a commit is in a chain of reverts: one for each `Revert` it begins with, two for each `Reapply`; one at least for a revert that names a commit. */
@@ -130,7 +137,7 @@ function subjectDepth(message) {
     else if (word === "reapply") depth += 2;
     else break;
   }
-  return depth === 0 && putsBack(message) && reverts(message).length > 0 ? 1 : depth;
+  return depth === 0 && reverts(message).length > 0 ? 1 : depth;
 }
 
 /** How many reverts in a row are followed through the commits they name. */
@@ -440,13 +447,12 @@ async function readByTips(ctx, pulls, paths, readAt) {
     return [...found.values()].sort((a, b) => place.get(a.sha).order - place.get(b.sha).order);
   };
   const { commits, paths: tracked, cut } = readHistory(git, list, paths);
-  // Each commit its own time, in order, so that the server can be told them in parts cut anywhere.
+  // Each commit its own time, in order, so that the server can be told them in parts cut anywhere:
+  // a millisecond after the one before at least, so those made since the reading land one by one just after it.
   const landings = new Map();
   let last = -Infinity;
   for (const c of commits) {
-    const group = place.get(c.sha).group;
-    // No later than the reading, unless it is new to a pull request read up to then.
-    last = Math.max(landed[group], Math.min(last + 1, readAt));
+    last = Math.max(landed[place.get(c.sha).group], last + 1);
     landings.set(c.sha, last);
   }
   const afterOf = (c) => pulls.filter((p) => p.new.has(c.sha)).map((p) => p.number);
@@ -729,6 +735,8 @@ export async function runOutcomes(env, { api, server, repo, host, log, git, wait
         await put({ repo: name, base_ref: branch.base_ref, tip: null, scanned_until: new Date(now()).toISOString(), pulls: [], commits: [], gone });
         continue;
       }
+      // The files each was read in: one the server has matched with another meanwhile is left as it is.
+      const paths = new Map(branch.pulls.filter((p) => Array.isArray(p.paths)).map((p) => [p.number, p.paths]));
       for (const scan of read.scans) {
         if (scan.stopped) {
           left = true;
@@ -737,7 +745,11 @@ export async function runOutcomes(env, { api, server, repo, host, log, git, wait
         let from = scan.from;
         for (const part of chunks(scan)) {
           const tips = scan.tipsAt(part.through);
-          const pulls = scan.pulls.map((p) => (from ? { ...p, from: from.get(p.number) ?? null, tips: tips.get(p.number) ?? null } : p));
+          const pulls = scan.pulls.map((p) => ({
+            ...p,
+            ...(paths.has(p.number) ? { paths: paths.get(p.number) } : {}),
+            ...(from ? { from: from.get(p.number) ?? null, tips: tips.get(p.number) ?? null } : {}),
+          }));
           const body = { repo: name, base_ref: branch.base_ref, tip: scan.tip, scanned_until: part.scanned_until, pulls, commits: part.commits };
           const answer = await put(body);
           stored.push(...(answer.stored ?? []));

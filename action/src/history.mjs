@@ -204,51 +204,55 @@ export function parseDiff(diff) {
 
 /**
  * A whole commit's files, less the lines it moved: each line removed and
- * added again, in that file or another, is taken out of both. With the
- * tracked lines it removed, less those, and each line moved to another
- * file: `[from, to, hash, copies]`.
+ * added again, in that file or another, is taken out of both. One removed
+ * and added again in the same file stays there; only what is left of it
+ * moves to another. With the tracked lines it removed, less those, and each
+ * line moved to another file: `[from, to, hash, copies]`.
  */
 export function unmoved(files) {
-  const added = new Map();
-  const removed = new Map();
-  for (const diff of files.values()) {
-    for (const [hash, n] of diff.added) added.set(hash, (added.get(hash) ?? 0) + n);
-    for (const [hash, n] of diff.removed) removed.set(hash, (removed.get(hash) ?? 0) + n);
-  }
-  const moved = new Map();
-  for (const [hash, n] of removed) {
-    const m = Math.min(n, added.get(hash) ?? 0);
-    if (m > 0) moved.set(hash, m);
-  }
   const paths = [...files.keys()].sort();
-  const moves = [];
-  for (const hash of [...moved.keys()].sort()) {
-    const side = (bag) => paths.filter((p) => files.get(p)[bag].has(hash)).map((p) => [p, files.get(p)[bag].get(hash)]);
-    const from = side("removed");
-    const to = side("added");
-    let [f, t, left] = [0, 0, moved.get(hash)];
-    while (left > 0 && f < from.length && t < to.length) {
-      const taken = Math.min(left, from[f][1], to[t][1]);
-      if (from[f][0] !== to[t][0]) moves.push([from[f][0], to[t][0], hash, taken]);
-      from[f][1] -= taken;
-      to[t][1] -= taken;
-      left -= taken;
-      if (from[f][1] === 0) f += 1;
-      if (to[t][1] === 0) t += 1;
-    }
-  }
-  const left = { removed: new Map(moved), added: new Map(moved) };
+  // Which files each line was removed from and added to, in that order, and
+  // how many: found once, not file by file for each line.
+  const removed = new Map();
+  const added = new Map();
+  const push = (map, hash, side) => (map.has(hash) ? map.get(hash).push(side) : map.set(hash, [side]));
   for (const path of paths) {
     const diff = files.get(path);
-    for (const side of ["removed", "added"]) {
-      for (const [hash, n] of [...diff[side]]) {
-        const m = left[side].get(hash);
-        if (!m) continue;
-        const taken = Math.min(n, m);
-        left[side].set(hash, m - taken);
-        if (n - taken > 0) diff[side].set(hash, n - taken);
-        else diff[side].delete(hash);
+    for (const [hash, n] of diff.removed) push(removed, hash, [path, n]);
+    for (const [hash, n] of diff.added) push(added, hash, [path, n]);
+  }
+  const take = (bag, hash, n) => {
+    if (bag.get(hash) > n) bag.set(hash, bag.get(hash) - n);
+    else bag.delete(hash);
+  };
+  const moves = [];
+  for (const hash of [...removed.keys()].filter((h) => added.has(h)).sort()) {
+    const from = removed.get(hash);
+    const to = added.get(hash);
+    // In the same file first: not moved.
+    const here = new Map(to.map((side) => [side[0], side]));
+    for (const side of from) {
+      const there = here.get(side[0]);
+      const same = Math.min(side[1], there?.[1] ?? 0);
+      if (same === 0) continue;
+      side[1] -= same;
+      there[1] -= same;
+      take(files.get(side[0]).removed, hash, same);
+      take(files.get(side[0]).added, hash, same);
+    }
+    // What is left of it, from one file to another, in order.
+    let [f, t] = [0, 0];
+    while (f < from.length && t < to.length) {
+      const taken = Math.min(from[f][1], to[t][1]);
+      if (taken > 0) {
+        moves.push([from[f][0], to[t][0], hash, taken]);
+        from[f][1] -= taken;
+        to[t][1] -= taken;
+        take(files.get(from[f][0]).removed, hash, taken);
+        take(files.get(to[t][0]).added, hash, taken);
       }
+      if (from[f][1] === 0) f += 1;
+      if (to[t][1] === 0) t += 1;
     }
   }
   let total = 0;

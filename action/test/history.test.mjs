@@ -124,6 +124,37 @@ test("git's patches are read for removed and added lines, moved ones taken out",
   assert.equal(unquote('a\\"b\\\\c\\td'), 'a"b\\c\td');
 });
 
+test("a line removed and added again in one file stays there, and only what is left of it moves to another", () => {
+  const bag = (entries) => new Map(entries.map((h) => [lineHash(L(h)), 1]));
+  const of = (removed, added) => ({ removed: bag(removed), added: bag(added) });
+  // z.ts moves line 1 within itself; b.ts gets a copy of it, and line 2 moves from z.ts to b.ts
+  const files = new Map([["z.ts", of([1, 2], [1])], ["b.ts", of([], [1, 2])]]);
+  const { files: left, removedTotal, moves } = unmoved(files);
+  assert.deepEqual(moves, [["z.ts", "b.ts", lineHash(L(2)), 1]]);
+  assert.equal(removedTotal, 0);
+  assert.deepEqual([...left.get("z.ts").added.keys()], []);
+  assert.deepEqual([...left.get("b.ts").added.keys()], [lineHash(L(1))]);
+});
+
+test("a directory moved whole is read in a moment", () => {
+  const files = new Map();
+  for (let f = 0; f < 2000; f += 1) {
+    const [old, moved] = [{ removed: new Map(), added: new Map() }, { removed: new Map(), added: new Map() }];
+    for (let k = 0; k < 50; k += 1) {
+      const hash = (f * 1000 + k).toString(16).padStart(16, "0");
+      old.removed.set(hash, 1);
+      moved.added.set(hash, 1);
+    }
+    files.set(`src/module_${f}/file.js`, old);
+    files.set(`packages/app/src/module_${f}/file.js`, moved);
+  }
+  const started = performance.now();
+  const { files: left, removedTotal, moves } = unmoved(files);
+  assert.ok(performance.now() - started < 5000, `took ${Math.round(performance.now() - started)} ms`);
+  assert.deepEqual([moves.length, removedTotal], [100_000, 0]);
+  assert.ok([...left.values()].every((d) => d.added.size === 0 && d.removed.size === 0));
+});
+
 test("messages are read by their size, whatever they hold", () => {
   const sha = "a".repeat(40);
   const message = `tree x\nencoding latin1\n\nCaf\xe9\n${"b".repeat(40)} commit 5\n`;
@@ -390,6 +421,21 @@ test("commits merged in later are read whatever their dates, from the tips the s
   assert.deepEqual(second.tipsAt(second.through).get(1), [r.sh(["rev-parse", "main"])]);
 });
 
+test("commits made since the reading began each land a moment after the one before, so a scan can be cut between any two", async () => {
+  const { r, merge, git } = merged();
+  // made in the minute before the run, after the five minutes the history is read up to
+  const made = [1, 2, 3].map((n) => {
+    r.write("a.ts", [1, 2, 3, 4].slice(n).map(L));
+    return r.commit(`Rework ${n}`, START + 3 * DAY - 60 + n);
+  });
+  r.publish();
+  const [read] = await scan(git, due(merge, { tips: null }), 3);
+  assert.deepEqual(read.commits.map((c) => c.sha), made);
+  const landed = read.commits.map((c) => Date.parse(c.landed_at));
+  assert.deepEqual(landed, [...new Set(landed)].sort((a, b) => a - b));
+  assert.ok(Date.parse(read.scanned_until) >= landed.at(-1));
+});
+
 test("commits pushed days after they were made land after the branch was last read", async () => {
   const { r, merge, git } = merged();
   const [first] = await scan(git, due(merge, { tips: null }), 4);
@@ -595,7 +641,8 @@ test("the server's tips go back with what was read, and the refused question of 
     return { stored: [] };
   };
   await runOutcomes({}, { api: github(), server, repo: "o/r", host: "github.com", log() {}, git, now: () => (START + 2 * DAY) * 1000 });
-  assert.deepEqual(sent[0].pulls, [{ number: 1, merge_commit_sha: merge, found: true, from: null, tips: [rework] }]);
+  // and the files each was read in, so that a server that matched it with another meanwhile leaves it as it is
+  assert.deepEqual(sent[0].pulls, [{ number: 1, merge_commit_sha: merge, found: true, paths: ["a.ts"], from: null, tips: [rework] }]);
   // a token that is no ci token is not an older server
   const refused = async () => {
     throw Object.assign(new Error("the Sessionly server answered 403: reporting pull requests needs a ci or admin token"), { status: 403 });

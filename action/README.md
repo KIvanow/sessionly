@@ -60,7 +60,7 @@ shows a warning that the token is missing.
 | `pr-number` | | The pull request to report, when the workflow was not started by one. Also `all` for the repository's latest, or `20-60` for those numbered from one to the other (see below). |
 | `since` | 90 days ago | With `pr-number: all`, the date from which pull requests are reported, by when they were created. |
 | `after-merge` | `false` | Count merged pull requests' agent lines again on the branch they were merged into, 7 and 30 days after. A run started by a schedule, with no `pr-number`, does this without it (see below). |
-| `outcomes` | `true` | On a scheduled run, also read the later commits on the branches merged pull requests went into, for 30 days after each merge (see below). |
+| `outcomes` | `true` | On a scheduled run, or one with `after-merge` and no `pr-number` (started by hand, say), also read the later commits on the branches merged pull requests went into, for 30 days after each merge. Needs a checkout with the whole history; `false` to count only after merge (see below). |
 | `outcomes-since` | | With `outcomes`: also read those of pull requests merged on or after this date, from before the server began to. |
 | `fix-words` | | Words that make a later commit a fix, separated by commas, in place of the default list. |
 | `bug-labels` | | Words that make a linked issue's label a bug label, separated by commas, in place of the default list. |
@@ -178,8 +178,8 @@ run reads by date once, and from where it is from then on.
 
 - Without a checkout (a scheduled job set up before version 0.5.0 has none), the run notes that
   later commits were not read and does the rest: add the checkout and the permissions above, or
-  set `outcomes: false`. With a checkout of only the latest commits, it says to add
-  `fetch-depth: 0`.
+  set `outcomes: false`. With a checkout of only the latest commits, later commits are not read
+  and the run says to add `fetch-depth: 0`: a warning, or a failed run with `fail-on-error`.
 - When GitHub allows the run fewer than 100 more requests, or more than 2,000 commits are to
   be read whole, it stops there, and the next run goes on from there.
 - Without `pull-requests: read`, the run warns once and reads later commits without what their
@@ -218,10 +218,10 @@ the pull requests it belongs to and of those it says it reverts, the SHAs its me
 reverts, which of the due pull requests it is a later commit of, and for the files the server
 asked about (and where their lines moved: those paths too), a hash of each line it removed or
 added. For each branch read: the SHA of the commit it was read at, and for each pull request
-the SHAs of the commits it was read up to; for a branch deleted since, the numbers of the pull
-requests merged into it. What a commit is (a fix, a revert) goes as ids such as `fix_message`
-or `bug_issue`: its message, the title, branch and body of its pull request, and the issues'
-labels are read in the runner and never sent.
+the SHAs of the commits it was read up to and the paths the server named for it; for a branch
+deleted since, the numbers of the pull requests merged into it. What a commit is (a fix, a
+revert) goes as ids such as `fix_message` or `bug_issue`: its message, the title, branch and
+body of its pull request, and the issues' labels are read in the runner and never sent.
 
 The report also says it came from this Action and which version (`reporter`, the version in
 `package.json`). Nothing else, and nothing to anyone else.

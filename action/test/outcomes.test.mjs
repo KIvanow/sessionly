@@ -49,6 +49,8 @@ test("a revert or a reapply puts lines back", () => {
   // only as git and GitHub write one: GitHub's squash message lists the branch's commits, a revert among them
   assert.ok(!putsBack('Add the parser (#1)\n\n* wip\n\n* Revert "wip"\n\nThis reverts commit abcdef1.'));
   assert.ok(!putsBack("Add the parser\n\nAs before. This reverts commit abcdef1."));
+  // a body that begins as git's does is read on through its first paragraph, as the binary reads it
+  assert.ok(putsBack("Undo\n\nThis reverts commit abc12, and this reverts commit abcdef1."));
 });
 
 test("a chain of reverts is followed through the commits each names, and only an even depth puts lines back", () => {

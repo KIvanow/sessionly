@@ -812,7 +812,7 @@ test("over the network: pages from GitHub, and the server's answer or refusal", 
       };
       const page = Number(new URL(req.url, "http://x").searchParams.get("page"));
       if (req.url.startsWith("/list")) return reply(200, Array.from({ length: page === 1 ? 100 : 3 }, (_, i) => ({ i })));
-      if (req.url.startsWith("/repos/acme/web/contents/src/")) return res.writeHead(200, { "content-type": "application/vnd.github.raw+json" }).end("one();\n");
+      if (req.url.startsWith("/repos/acme/web/contents/src/")) return res.writeHead(200, { "content-type": "application/vnd.github.raw+json", "x-ratelimit-remaining": "42" }).end("one();\n");
       if (req.url === "/repos/acme/web/branches/main") return reply(200, { name: "main", commit: { sha: "abc123" } });
       if (req.url === "/repos/acme/web/branches/trunk") return reply(200, { name: "trunk", commit: { sha: "def456" } });
       if (req.url === "/graphql") return reply(200, { data: { repository: { f0: null } } });
@@ -837,6 +837,8 @@ test("over the network: pages from GitHub, and the server's answer or refusal", 
     assert.equal(await fileOn(api, "acme/web", "main", "src/a b.ts"), "one();\n");
     assert.equal(seen.at(-1).url, "/repos/acme/web/contents/src/a%20b.ts?ref=main");
     assert.equal(seen.at(-1).accept, "application/vnd.github.raw+json");
+    // and what GitHub says is left of the hour's requests, as any answer does
+    assert.equal(api.remaining, 42);
     assert.equal(await fileOn(api, "acme/web", "main", "gone.ts"), null);
     assert.deepEqual(await branchFor(api, "acme/web", "main"), { branch: "main", sha: "abc123" });
     assert.deepEqual(await branchFor(api, "acme/web", "deleted"), { branch: "trunk", sha: "def456" });

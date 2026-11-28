@@ -66,17 +66,20 @@ inputs:
     default: "false"
   outcomes:
     description: >-
-      On a scheduled run, also read the later commits on the branches merged
-      pull requests went into, for 30 days after each merge: the server then
-      says which of them reverted, fixed or reworked the agents' lines. Needs
-      the repository checked out with its whole history (actions/checkout
-      with fetch-depth: 0; without a checkout the run only notes it), and
-      contents and pull-requests read permission; issues read for the labels
-      of linked issues. Sent for each commit: its SHA and when it landed, the
-      paths it changed among those the server asked about and hashes of the
-      lines it removed and added there, the numbers of its pull requests and
-      of those it reverts, and what it says it is (a fix, a revert) as ids. No
-      message, title, body, branch name or label is sent.
+      On a scheduled run, or one with after-merge and no pr-number, also read
+      the later commits on the branches merged pull requests went into, for
+      30 days after each merge: the server then says which of them reverted,
+      fixed or reworked the agents' lines. Needs the repository checked out
+      with its whole history (actions/checkout with fetch-depth: 0; without a
+      checkout the run only notes it, and with only the latest commits it
+      warns, or fails with fail-on-error), and contents and pull-requests read
+      permission; issues read for the labels of linked issues. Sent for each commit: its SHA and when it
+      landed, the paths it changed among those the server asked about and
+      hashes of the lines it removed and added there, the numbers of its pull
+      requests and of those it reverts, the SHAs it says it reverts, and what
+      it says it is (a fix, a revert) as ids; and the SHAs of the commits the
+      branch was read at. No message, title, body, branch name or label is
+      sent.
     default: "true"
   outcomes-since:
     description: >-

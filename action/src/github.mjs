@@ -13,7 +13,7 @@ export function rateLimited(response, text) {
 
 /** `request(method, path, body)` against GitHub's API at `apiUrl`, and `graphql(query, variables)` against the one at `graphqlUrl`. */
 export function github(token, apiUrl = "https://api.github.com", graphqlUrl = `${apiUrl}/graphql`) {
-  // How many requests GitHub said the token has left this hour, at the last answer.
+  // How many requests GitHub said the token has left this hour, at the last REST answer (GraphQL has its own).
   let remaining;
   const counted = (response) => {
     const left = Number(response.headers.get("x-ratelimit-remaining"));
@@ -52,6 +52,7 @@ export function github(token, apiUrl = "https://api.github.com", graphqlUrl = `$
         "user-agent": "sessionly-action",
       },
     });
+    counted(response);
     if (response.status === 404) return null;
     if (!response.ok) {
       const said = (await response.text()).slice(0, 300);
