@@ -6,7 +6,7 @@ import { average, count, dateTime, modelName, percent, repoName, share, shareOf,
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { costIsFloor, costText, matchAll, MIN_PULLS, nameSome, outcomeRows, perThousand, pullCost, pullHref, pullsCostNote, reachedOf, revertedShare, roundsTitle, survivingOnce, web } from "./pull.ts";
+import { costIsFloor, costText, matchAll, MIN_PULLS, nameSome, ofKnown, outcomeCiRows, outcomeRows, perThousand, pullCost, pullHref, pullsCostNote, reachedOf, revertedShare, roundsTitle, survivingOnce, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -246,6 +246,9 @@ function Outcomes({ token, repo, since, onSignOut }: { token: string; repo?: str
   const rows = data ? outcomeRows(data, age) : null;
   if (data && !rows) return null;
   const total = rows?.total;
+  // And what CI said, which has no age: a server from before it sends none, and the columns are not shown.
+  const ci = data ? outcomeCiRows(data) : null;
+  const unknown = ci?.total.pulls_ci_unknown ?? 0;
   const name = (key: string) => (by === "tool" ? toolName(key) : by === "model" ? modelName(key) : by === "repo" ? repoName(key) : key);
   return (
     <section className="card" aria-label="Later commits">
@@ -258,6 +261,14 @@ function Outcomes({ token, repo, since, onSignOut }: { token: string; repo?: str
         does a commit that changed them; lines are split by session, so they add up. "Changed by a fix" is linked, not
         caused: mostly the fix was of something else, and a careful team has more of them. Rates are per 1,000 agent lines,
         shown from {MIN_PULLS} pull requests reached; below that a group is too few to compare. The model is a session's main one.
+        {ci && (
+          <>
+            {" "}
+            CI, whatever the age: red pushes are heads whose checks failed, of those whose checks came out either way; red on
+            arrival, sessions whose lines arrived with a red push; base red, merge commits whose checks failed. A commit with no
+            checks to go by, or not read yet, is in no figure. CI failing is linked, not caused: tests are flaky and systems go down.
+          </>
+        )}
       </p>
       <div className="pick" role="group" aria-label="Group by">
         {(Object.keys(OUTCOME_BY) as PullOutcomesBy[]).map((key) => (
@@ -286,23 +297,47 @@ function Outcomes({ token, repo, since, onSignOut }: { token: string; repo?: str
                 <th scope="col" className="num" title="Fix commits that changed agent lines, per 1,000 agent lines">Changed by a fix /1k</th>
                 <th scope="col" className="num" title="Of those, at least half of what they removed was the agents'">Likely fixes</th>
                 <th scope="col" className="num" title="Commits that changed agent lines and say neither, per 1,000 agent lines">Rework /1k</th>
+                {ci && (
+                  <>
+                    <th scope="col" className="num" title="Heads whose checks failed, of those whose checks came out either way (any age)">Red pushes</th>
+                    <th scope="col" className="num" title="Sessions whose lines arrived with a red push, of those whose arrival's checks came out either way">Red on arrival</th>
+                    <th scope="col" className="num" title="Merge commits whose checks failed, of those whose checks came out either way">Base red after merge</th>
+                  </>
+                )}
               </tr>
             </thead>
             <tbody>
-              {[...rows!.groups, { key: null, at: total }].map(({ key, at }) => (
-                <tr key={key ?? "total"} className={key === null ? "total" : undefined}>
-                  <th scope="row" className="name">{key === null ? "All" : name(key)}</th>
-                  <td className="num">{reachedOf(at)}</td>
-                  <td className="num">{count(at.agent_lines)}</td>
-                  <td className="num">{revertedShare(at)}</td>
-                  <td className="num">{perThousand(at.fix_commits, at)}</td>
-                  <td className="num">{at.pulls_reached > 0 ? count(at.likely_fix_commits) : "–"}</td>
-                  <td className="num">{perThousand(at.rework_commits, at)}</td>
-                </tr>
-              ))}
+              {[...rows!.groups, { key: null, at: total }].map(({ key, at }) => {
+                const c = key === null ? ci?.total : ci?.groups.get(key);
+                return (
+                  <tr key={key ?? "total"} className={key === null ? "total" : undefined}>
+                    <th scope="row" className="name">{key === null ? "All" : name(key)}</th>
+                    <td className="num">{reachedOf(at)}</td>
+                    <td className="num">{count(at.agent_lines)}</td>
+                    <td className="num">{revertedShare(at)}</td>
+                    <td className="num">{perThousand(at.fix_commits, at)}</td>
+                    <td className="num">{at.pulls_reached > 0 ? count(at.likely_fix_commits) : "–"}</td>
+                    <td className="num">{perThousand(at.rework_commits, at)}</td>
+                    {ci && (
+                      <>
+                        <td className="num">{c ? ofKnown(c.heads_failed, c.heads_with_ci) : "–"}</td>
+                        <td className="num">{c ? ofKnown(c.red_on_arrival_sessions, c.sessions_with_ci) : "–"}</td>
+                        <td className="num">{c ? ofKnown(c.pulls_merge_failed, c.pulls_merge_known) : "–"}</td>
+                      </>
+                    )}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
+      )}
+      {data && total && total.pulls_total > 0 && unknown > 0 && (
+        <p className="muted hint">
+          CI is not known for {count(unknown)} of these merged {unknown === 1 ? "pull request" : "pull requests"}: the commit it was merged as
+          has no checks to go by, they are still running, or no run of the Action has read them yet (a report from version 0.5.0 or later,
+          or its scheduled run, does).
+        </p>
       )}
     </section>
   );
