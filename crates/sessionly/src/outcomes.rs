@@ -1702,9 +1702,10 @@ type Git<'a> = dyn Fn(&[&str], Option<&[u8]>, usize) -> Result<Vec<u8>, Stop> + 
 type Move = (String, String, u64, u64);
 
 /// A whole commit's files, less the lines it moved: each line removed and
-/// added again, in that file or another, is taken out of both. With the
-/// tracked lines it removed, less those, and where each line moved to
-/// another file went.
+/// added again, in that file or another, is taken out of both. One removed
+/// and added again in the same file stays there; only what is left of it
+/// moves to another. With the tracked lines it removed, less those, and
+/// where each line moved to another file went.
 fn unmoved(mut files: HashMap<String, FileDiff>) -> (HashMap<String, FileDiff>, f64, Vec<Move>) {
     let mut paths: Vec<String> = files.keys().cloned().collect();
     paths.sort();
@@ -1726,26 +1727,40 @@ fn unmoved(mut files: HashMap<String, FileDiff>) -> (HashMap<String, FileDiff>, 
         .copied()
         .collect();
     hashes.sort();
-    // Which file each moved line left, and which it went to, in order.
+    // Which file each moved line left, and which it went to, in order; and
+    // how many copies of each line come out of each file, removed and added.
     let mut moves = Vec::new();
-    let mut moved: HashMap<u64, u64> = HashMap::new();
+    let mut out: HashMap<(&str, u64), (u64, u64)> = HashMap::new();
     for hash in hashes {
         let (mut from, mut to) = (removed[&hash].clone(), added[&hash].clone());
-        let n = from
+        // In the same file first: not moved.
+        let here: HashMap<&str, usize> = to
             .iter()
-            .map(|(_, k)| k)
-            .sum::<u64>()
-            .min(to.iter().map(|(_, k)| k).sum());
-        moved.insert(hash, n);
-        let (mut f, mut t, mut left) = (0, 0, n);
-        while left > 0 && f < from.len() && t < to.len() {
-            let taken = left.min(from[f].1).min(to[t].1);
-            if from[f].0 != to[t].0 {
+            .enumerate()
+            .map(|(k, (path, _))| (*path, k))
+            .collect();
+        for (path, n) in from.iter_mut() {
+            let Some(&k) = here.get(path) else {
+                continue;
+            };
+            let same = (*n).min(to[k].1);
+            *n -= same;
+            to[k].1 -= same;
+            let cut = out.entry((*path, hash)).or_default();
+            cut.0 += same;
+            cut.1 += same;
+        }
+        // What is left of it, from one file to another, in order.
+        let (mut f, mut t) = (0, 0);
+        while f < from.len() && t < to.len() {
+            let taken = from[f].1.min(to[t].1);
+            if taken > 0 {
                 moves.push((from[f].0.to_string(), to[t].0.to_string(), hash, taken));
+                from[f].1 -= taken;
+                to[t].1 -= taken;
+                out.entry((from[f].0, hash)).or_default().0 += taken;
+                out.entry((to[t].0, hash)).or_default().1 += taken;
             }
-            from[f].1 -= taken;
-            to[t].1 -= taken;
-            left -= taken;
             if from[f].1 == 0 {
                 f += 1;
             }
@@ -1754,17 +1769,14 @@ fn unmoved(mut files: HashMap<String, FileDiff>) -> (HashMap<String, FileDiff>, 
             }
         }
     }
-    let (mut from, mut to) = (moved.clone(), moved);
     for path in &paths {
         let Some(diff) = files.get_mut(path) else {
             continue;
         };
-        for (bag, left) in [(&mut diff.removed, &mut from), (&mut diff.added, &mut to)] {
+        for (bag, removing) in [(&mut diff.removed, true), (&mut diff.added, false)] {
             for (hash, n) in bag.iter_mut() {
-                if let Some(m) = left.get_mut(hash) {
-                    let taken = (*n).min(*m);
-                    *n -= taken;
-                    *m -= taken;
+                if let Some(&(gone, back)) = out.get(&(path.as_str(), *hash)) {
+                    *n -= if removing { gone } else { back };
                 }
             }
             bag.retain(|_, n| *n > 0);
@@ -4690,6 +4702,27 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
             split_tree(&format!("{a}\n{b}\n"), &[&a, &b, &c]),
             Err(Stop::Failed)
         );
+    }
+
+    #[test]
+    fn a_line_removed_and_added_again_in_one_file_stays_there() {
+        let of = |removed: &[u64], added: &[u64]| FileDiff {
+            removed: removed.iter().map(|h| (*h, 1)).collect(),
+            added: added.iter().map(|h| (*h, 1)).collect(),
+        };
+        // z.ts moves line 1 within itself; b.ts gets a copy of it, and line 2
+        // moves from z.ts to b.ts.
+        let files: HashMap<String, FileDiff> = [
+            ("z.ts".to_string(), of(&[1, 2], &[1])),
+            ("b.ts".to_string(), of(&[], &[1, 2])),
+        ]
+        .into_iter()
+        .collect();
+        let (files, removed, moves) = unmoved(files);
+        assert_eq!(moves, [("z.ts".to_string(), "b.ts".to_string(), 2, 1)]);
+        assert_eq!(removed, 0.0);
+        assert!(files["z.ts"].added.is_empty());
+        assert_eq!(files["b.ts"].added, HashMap::from([(1, 1)]));
     }
 
     #[test]
