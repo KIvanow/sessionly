@@ -106,9 +106,11 @@ inputs:
       branch red after it). Read when a pull request is reported, when a
       workflow named in a workflow_run trigger finishes, and on a scheduled
       run for what is still pending. Needs checks and statuses read
-      permission; without them the run warns, and CI is not known. Sent for
-      each commit: its SHA, a state (success, failure, pending or none), how
-      many checks and statuses failed, how many there were, and how many
+      permission, and actions read for merge commits (only the checks their
+      push started count); without them the run warns, and CI is not known.
+      Sessionly's own check runs are left out, by this run's job names. Sent
+      for each commit: its SHA, a state (success, failure, pending or none),
+      how many checks and statuses failed, how many there were, and how many
       were cancelled. No check's name, unless ci-check-names says so. Set to
       "false" to read none.
     default: "true"
