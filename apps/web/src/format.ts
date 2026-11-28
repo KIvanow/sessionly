@@ -1,5 +1,5 @@
 // How numbers, times and names are shown. Pure functions, tested in test/.
-import type { KeptAt, RewriteCheckpoint, RewriteTotals } from "@sessionly/schema";
+import type { KeptAt, OutcomeCheckpoint, OutcomesAt, RewriteCheckpoint, RewriteTotals } from "@sessionly/schema";
 
 const whole = new Intl.NumberFormat("en-US");
 
@@ -67,7 +67,7 @@ const TOOL_NAMES: Record<string, string> = { "claude-code": "Claude Code", curso
 
 /** "claude-code" -> "Claude Code"; an agent this dashboard doesn't know keeps its id. */
 export function toolName(source: string): string {
-  return TOOL_NAMES[source] ?? source;
+  return Object.hasOwn(TOOL_NAMES, source) ? TOOL_NAMES[source]! : source;
 }
 
 /** "claude-opus-5-5" -> "opus-5-5" */
@@ -115,9 +115,84 @@ export function keptAt(k: KeptAt | null | undefined): string {
 }
 
 /** How many sessions that figure is of: "12 of 40 sessions". */
-export function keptOf(k: KeptAt | null | undefined): string {
+export function keptOf(k: Pick<KeptAt, "sessions_reached" | "sessions_total"> | null | undefined): string {
   if (!k) return "";
   return `${count(k.sessions_reached)} of ${count(k.sessions_total)} ${k.sessions_total === 1 ? "session" : "sessions"}`;
+}
+
+/**
+ * Of the sessions counted at an age, the share a later fix commit changed
+ * lines of by then ("changed by a fix"), or a dash when none was counted.
+ */
+export function fixedAt(o: OutcomesAt | null | undefined): string {
+  return o && o.sessions_reached > 0 ? percent(share(o.sessions_with_fix, o.sessions_reached)) : "–";
+}
+
+/** Of the sessions counted at an age, the share reverted by then and not relanded, or a dash. */
+export function revertedAt(o: OutcomesAt | null | undefined): string {
+  return o && o.sessions_reached > 0 ? percent(share(o.sessions_reverted, o.sessions_reached)) : "–";
+}
+
+/**
+ * Of an age's fix commits, the ones other agents' sessions made, by agent, and
+ * the rest; empty when no agent's session made any. Only sessions on the same
+ * machine are known, so the rest may be a teammate's agent as well as a person.
+ */
+export function fixesBy(o: { fix_commits?: number; by_agent?: readonly { source?: string; fix_commits?: number }[] | null }): string {
+  const by = (o.by_agent ?? []).filter((b) => (b.fix_commits ?? 0) > 0);
+  if (by.length === 0) return "";
+  const rest = Math.max(0, (o.fix_commits ?? 0) - by.reduce((n, b) => n + (b.fix_commits ?? 0), 0));
+  const parts = by.map((b) => `${count(b.fix_commits ?? 0)} by ${toolName(b.source ?? "")}`);
+  if (rest > 0) parts.push(`${count(rest)} by no agent known`);
+  return parts.join(", ");
+}
+
+/** What later commits did to a session's lines by one age, in a few words. */
+export function laterWords(o: OutcomeCheckpoint): string {
+  const parts: string[] = [];
+  if ((o.revert_commits ?? 0) > 0) parts.push(o.relanded ? "reverted, relanded" : "reverted");
+  const fixes = o.fix_commits ?? 0;
+  const by = fixesBy(o);
+  if (fixes > 0) parts.push(`${count(fixes)} ${fixes === 1 ? "fix" : "fixes"}${by ? ` (${by})` : ""}`);
+  const rework = o.rework_commits ?? 0;
+  if (rework > 0) parts.push(`${count(rework)} rework`);
+  return parts.length ? parts.join(", ") : "nothing";
+}
+
+/** A count as a server sent it, or 0 for one that is no number. */
+const sentCount = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) ? n : 0);
+
+/**
+ * An age's counts as `laterWords` reads them: numbers, and of its agents the
+ * entries that are ones. A server from before outcomes may have kept anything.
+ */
+function laterCounts(o: OutcomeCheckpoint): OutcomeCheckpoint {
+  return {
+    checkpoint: o.checkpoint,
+    fix_commits: sentCount(o.fix_commits),
+    rework_commits: sentCount(o.rework_commits),
+    revert_commits: sentCount(o.revert_commits),
+    relanded: o.relanded === true,
+    age_seconds: sentCount(o.age_seconds),
+    by_agent: (Array.isArray(o.by_agent) ? o.by_agent : [])
+      // One with no name, or anything else in its place, says nothing.
+      .filter((b) => b && typeof b === "object" && typeof b.source === "string")
+      .map((b) => ({ source: b.source, fix_commits: sentCount(b.fix_commits) })),
+  };
+}
+
+/**
+ * What later commits did to a session's lines at each fixed age: a dash for
+ * an age not counted, and the day it was counted on when that was late.
+ */
+export function laterAges(outcomes: readonly OutcomeCheckpoint[] | null | undefined): { name: string; words: string; later: string; late: number | null; counted: boolean }[] {
+  return KEPT_AGES.map(({ name, days, words }) => {
+    // Of what a server sends, the counts only: a server from before them may have kept anything.
+    const found = (Array.isArray(outcomes) ? outcomes : []).find((one) => one && typeof one === "object" && one.checkpoint === name);
+    if (!found) return { name, words, later: "–", late: null, counted: false };
+    const o = laterCounts(found);
+    return { name, words, later: laterWords(o), late: takenLate(o.age_seconds ?? 0, days), counted: true };
+  });
 }
 
 /** The ages a measurement is kept at, with each in days and in words. */
@@ -140,14 +215,16 @@ export function takenLate(ageSeconds: number, days: number): number | null {
  */
 export function keptAges(checkpoints: readonly RewriteCheckpoint[] | null | undefined): { name: string; words: string; kept: string; late: number | null; lines: number | null }[] {
   return KEPT_AGES.map(({ name, days, words }) => {
-    const c = (checkpoints ?? []).find((one) => one.checkpoint === name);
+    // A server from before checkpoints kept in the payload what it was sent: of it, the numbers only.
+    const c = (Array.isArray(checkpoints) ? checkpoints : []).find((one) => one && typeof one === "object" && one.checkpoint === name);
     if (!c) return { name, words, kept: "–", late: null, lines: null };
+    const added = sentCount(c.added);
     return {
       name,
       words,
-      kept: percent(share(c.surviving ?? 0, c.added ?? 0)),
-      late: takenLate(c.age_seconds ?? 0, days),
-      lines: c.added ?? 0,
+      kept: percent(share(sentCount(c.surviving), added)),
+      late: takenLate(sentCount(c.age_seconds), days),
+      lines: added,
     };
   });
 }

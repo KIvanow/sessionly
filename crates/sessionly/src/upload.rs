@@ -151,12 +151,13 @@ fn added_lines(ledger: &Ledger, session: &Session, home: Option<&str>) -> Result
 }
 
 /// Everything a server gets for one session. `line_hashes` adds the hashes
-/// of the lines the agent wrote.
+/// of the lines the agent wrote; `outcomes` what later commits did to them.
 pub fn build(
     ledger: &Ledger,
     session: &Session,
     content: Content,
     line_hashes: bool,
+    outcomes: bool,
 ) -> Result<Upload> {
     let home = crate::paths::home_dir().map(|h| h.to_string_lossy().into_owned());
     let home = home.as_deref();
@@ -170,7 +171,27 @@ pub fn build(
             Vec::new()
         },
         checkpoints: ledger.checkpoints_of(&session.session_id)?,
+        outcomes: if outcomes {
+            ledger.outcome_checkpoints_of(&session.session_id)?
+        } else {
+            Vec::new()
+        },
     })
+}
+
+/// What is sent of a session, and the hashes of it the server is known to
+/// have it as. With outcomes switched off they are not sent, and a server
+/// keeps what it has of them: a session that was sent with them, and is
+/// the same but for them, is not sent again; one sent without them is, once
+/// they are on again.
+fn to_send(mut payload: Upload, outcomes: bool) -> (Upload, String, Vec<String>) {
+    let whole = payload_hash(&payload);
+    if outcomes || payload.outcomes.is_empty() {
+        return (payload, whole.clone(), vec![whole]);
+    }
+    payload.outcomes.clear();
+    let without = payload_hash(&payload);
+    (payload, without.clone(), vec![without, whole])
 }
 
 #[cfg(test)]
@@ -1000,17 +1021,20 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
         let Some(session) = ledger.get(&id)? else {
             continue;
         };
-        let payload = build(
-            ledger,
-            &session,
-            config.upload_content,
-            config.upload_line_hashes,
-        )?;
+        let (payload, hash, current) = to_send(
+            build(
+                ledger,
+                &session,
+                config.upload_content,
+                config.upload_line_hashes,
+                true,
+            )?,
+            config.outcomes,
+        );
         if session_excluded(&payload.session, &rules) {
             report.excluded += 1;
             continue;
         }
-        let hash = payload_hash(&payload);
         let sent = ledger.uploaded_hash(&id, &server.url)?;
         // Sent once, and the server does not have it: it was deleted when
         // its repository was stopped, and is sent again.
@@ -1022,7 +1046,7 @@ pub fn run(ledger: &mut Ledger, config: &Config, dry_run: bool) -> Result<Report
         if deleted && !dry_run {
             ledger.forget_upload(&id, &server.url)?;
         }
-        if !deleted && sent.as_deref() == Some(hash.as_str()) {
+        if !deleted && sent.as_ref().is_some_and(|sent| current.contains(sent)) {
             report.unchanged += 1;
             there.insert(id);
             continue;
@@ -1175,6 +1199,7 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
             }),
             lines: Vec::new(),
             checkpoints: Vec::new(),
+            outcomes: Vec::new(),
         };
         let before = payload_hash(&upload);
         upload.rewrite.as_mut().unwrap().measured_at = Some(Utc::now());
@@ -1196,6 +1221,7 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
             rewrite: None,
             lines: Vec::new(),
             checkpoints: Vec::new(),
+            outcomes: Vec::new(),
         };
         // As every agent but Claude Code sends it, and as it was sent before.
         let before = payload_hash(&upload);
@@ -1264,7 +1290,7 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
         ledger.upsert(&session, &built_from, &lines).unwrap();
         let day = chrono::Duration::days(1);
         let hash = |ledger: &Ledger| {
-            let upload = build(ledger, &session, Content::Metadata, false).unwrap();
+            let upload = build(ledger, &session, Content::Metadata, false, true).unwrap();
             (payload_hash(&upload), upload)
         };
 
@@ -1351,11 +1377,11 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
         };
         ledger.upsert(&session, &built_from, &lines).unwrap();
 
-        let off = build(&ledger, &session, Content::Metadata, false).unwrap();
+        let off = build(&ledger, &session, Content::Metadata, false, true).unwrap();
         assert!(off.lines.is_empty());
         assert!(!serde_json::to_string(&off).unwrap().contains("\"lines\""));
 
-        let on = build(&ledger, &session, Content::Metadata, true).unwrap();
+        let on = build(&ledger, &session, Content::Metadata, true, true).unwrap();
         let sent: Vec<_> = on
             .lines
             .iter()
@@ -1377,7 +1403,7 @@ JTGUMfPdGlEUsqI/6GEgOApBFCDeE5Y=\n\
         );
         assert_ne!(payload_hash(&on), payload_hash(&off));
         // a record that stays on the machine carries none
-        assert!(build(&ledger, &session, Content::Local, true)
+        assert!(build(&ledger, &session, Content::Local, true, true)
             .unwrap()
             .lines
             .is_empty());

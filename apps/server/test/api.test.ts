@@ -485,6 +485,383 @@ test("what was still there 1, 7 and 30 days after a session ended is kept, and s
   assert.deepEqual(await kept("k-twice"), [["1d", 19, 1], ["7d", 15, 7]]);
 });
 
+test("what later commits did 1, 7 and 30 days after a session ended is kept as checkpoints are, and summed", async () => {
+  const repo = "github.com/acme/later";
+  const ended = "2026-11-10T10:30:00Z";
+  const days = (n: number) => new Date(Date.parse(ended) + n * 86_400_000).toISOString();
+  /** An age's count taken `age` days after the session ended, which it did `from` days after it first had. */
+  const at = (checkpoint: string, counts: Record<string, unknown>, age: number, from = 0) => ({
+    checkpoint,
+    lines_tracked: 40,
+    fix_commits: 0,
+    likely_fix_commits: 0,
+    lines_fixed: 0,
+    rework_commits: 0,
+    lines_reworked: 0,
+    revert_commits: 0,
+    lines_reverted: 0,
+    relanded: false,
+    computed_at: days(from + age),
+    age_seconds: age * 86_400,
+    ended_at: days(from),
+    late: false,
+    scope: "head_and_default",
+    ...counts,
+  });
+  const send = async (token: string, id: string, outcomes: unknown[] | undefined, overrides: Record<string, unknown> = {}) => {
+    const body = upload(id, { repo: { root: "~/src/later", remote: repo }, ...overrides });
+    assert.equal((await put(token, { ...body, outcomes } as Upload)).status, 200);
+  };
+  const kept = async (id: string, source = "claude-code") =>
+    ((await get(tokens.admin, `/sessions/machine-1/${source}/${id}`)).body.upload.outcomes ?? []).map((o: any) => [
+      o.checkpoint,
+      o.fix_commits,
+      o.age_seconds / 86_400,
+    ]);
+  const byTool = async () => (await get(tokens.admin, `/summary?by=tool&repo_is=${encodeURIComponent(repo)}`)).body;
+
+  // As an older sessionly sends it: none.
+  await send(tokens.ann, "o1", undefined);
+  assert.deepEqual(await kept("o1"), []);
+  assert.equal((await byTool()).total.outcomes_7d.sessions_reached, 0);
+
+  const cursorFixed = { source: "cursor", fix_commits: 1, likely_fix_commits: 1, lines_fixed: 2, revert_commits: 0, lines_reverted: 0, rework_commits: 0, lines_reworked: 0 };
+  await send(tokens.ann, "o1", [
+    at("1d", {}, 1),
+    at(
+      "7d",
+      {
+        fix_commits: 2,
+        likely_fix_commits: 5,
+        lines_fixed: 3.5,
+        // Another agent's commits: no more of them between them than of all, one entry for each agent, and an agent by a name only.
+        by_agent: [{ ...cursorFixed, fix_commits: 3, likely_fix_commits: 9 }, { ...cursorFixed, fix_commits: 2 }, { ...cursorFixed, source: "SECRET name/" }, { ...cursorFixed, source: "codex", fix_commits: 1, lines_fixed: 1 }],
+      },
+      8,
+    ),
+  ]);
+  assert.deepEqual(await kept("o1"), [["1d", 0, 1], ["7d", 2, 8]]);
+  // One kept is not replaced; a lost ledger sends none and takes none away; one counted too early is not taken.
+  await send(tokens.ann, "o1", [at("7d", { fix_commits: 9 }, 9), at("30d", {}, 29)]);
+  await send(tokens.ann, "o1", undefined);
+  assert.deepEqual(await kept("o1"), [["1d", 0, 1], ["7d", 2, 8]]);
+  // Counts, times and the scope are kept, and nothing else sent with one.
+  await send(tokens.ann, "o1", [{ ...at("30d", { revert_commits: 1, lines_reverted: 40, scope: "SECRET" }, 31), sha: "SECRETSHA", subject: "SECRET subject" }]);
+  const [stored] = await db.query<{ payload: unknown; outcomes: unknown }>(`SELECT payload, outcomes FROM sessions WHERE session_id = 'o1'`);
+  assert.doesNotMatch(JSON.stringify(stored), /SECRET/);
+
+  // Another agent's session, reverted and relanded by day 30; and one not yet a week old.
+  await send(tokens.bob, "o2", [at("7d", { rework_commits: 1, lines_reworked: 2, by_agent: [{ ...cursorFixed, fix_commits: 0, likely_fix_commits: 0, lines_fixed: 0, rework_commits: 1, lines_reworked: 2 }] }, 7), at("30d", { revert_commits: 1, relanded: true }, 30)], {
+    source: "cursor",
+  });
+  await send(tokens.ann, "o3", [at("1d", {}, 1)]);
+  const summary = await byTool();
+  const tool = (key: string) => summary.groups.find((g: any) => g.key === key);
+  assert.deepEqual(tool("claude-code").outcomes_7d, {
+    sessions_reached: 1,
+    sessions_total: 2,
+    lines_tracked: 40,
+    sessions_with_fix: 1,
+    fix_commits: 2,
+    // No more likely fixes than fixes.
+    likely_fix_commits: 2,
+    lines_fixed: 3.5,
+    sessions_reverted: 0,
+    revert_commits: 0,
+    lines_reverted: 0,
+    rework_commits: 0,
+    lines_reworked: 0,
+    by_agent: [
+      { ...cursorFixed, source: "codex", fix_commits: 0, likely_fix_commits: 0, lines_fixed: 1 },
+      { ...cursorFixed, fix_commits: 2, likely_fix_commits: 2 },
+    ],
+  });
+  assert.equal(tool("claude-code").outcomes_30d.sessions_reverted, 1);
+  // Relanded within the age: reverted, and not counted as a reverted session.
+  assert.deepEqual([tool("cursor").outcomes_30d.revert_commits, tool("cursor").outcomes_30d.sessions_reverted], [1, 0]);
+  assert.deepEqual(
+    [summary.total.outcomes_7d.sessions_reached, summary.total.outcomes_7d.sessions_total, summary.total.outcomes_7d.rework_commits],
+    [2, 3, 1],
+  );
+  // Summed over the groups, of the same agent.
+  assert.deepEqual(
+    summary.total.outcomes_7d.by_agent.map((b: any) => [b.source, b.fix_commits, b.rework_commits]),
+    [["codex", 0, 0], ["cursor", 2, 1]],
+  );
+
+  // A count is a number, none below nothing, none past what can be summed; and no more agents than there are.
+  await send(tokens.ann, "o4", [
+    at("7d", { lines_tracked: 1.7e308, fix_commits: 2, lines_fixed: -5, by_agent: Array.from({ length: 40 }, (_, i) => ({ ...cursorFixed, source: `agent${i}` })) }, 8),
+  ]);
+  const [o4] = await db.query<{ outcomes: any }>(`SELECT outcomes FROM sessions WHERE session_id = 'o4'`);
+  const week = (typeof o4!.outcomes === "string" ? JSON.parse(o4!.outcomes) : o4!.outcomes)["7d"];
+  assert.deepEqual([week.lines_tracked, week.lines_fixed, week.by_agent.length], [1e12, 0, 16]);
+  assert.equal(week.by_agent.reduce((n: number, b: any) => n + b.fix_commits, 0), 2);
+  assert.ok(week.by_agent.every((b: any) => b.lines_fixed === 0));
+  assert.equal((await get(tokens.admin, `/summary?by=tool&repo_is=${encodeURIComponent(repo)}`)).status, 200);
+  // A session with outcomes and no rewrite measurement is of those they are out of.
+  const before = (await byTool()).total.outcomes_7d;
+  const bare = { ...upload("o5", { repo: { root: "~/src/later", remote: repo } }), rewrite: null, outcomes: [at("7d", {}, 8)] } as Upload;
+  assert.equal((await put(tokens.ann, bare)).status, 200);
+  const after = (await byTool()).total.outcomes_7d;
+  assert.deepEqual([after.sessions_reached - before.sessions_reached, after.sessions_total - before.sessions_total], [1, 1]);
+
+  // The session went on: what was counted from its first end goes.
+  await send(tokens.ann, "o1", [at("1d", {}, 2, 10)], { ended_at: days(10) });
+  assert.deepEqual(await kept("o1"), [["1d", 0, 2]]);
+});
+
+test("outcomes a server from before them kept in the payload are kept from there after the upgrade", async (t) => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { migrationAt, keepOutcomesFromPayloads } = await import("../src/db.ts");
+  const { testDbUrl } = await import("./helpers.ts");
+  const fresh = await testDbUrl();
+  const folder = fresh === "memory://" ? mkdtempSync(join(tmpdir(), "sessionly-outcomes-")) : undefined;
+  t.after(() => folder && rmSync(folder, { recursive: true, force: true }));
+  const url = folder ? `file:${join(folder, "db")}` : fresh;
+  const old = await openDb(url, { migrations: migrationAt("ALTER TABLE sessions ADD COLUMN outcomes") });
+  const ended = "2026-11-10T10:30:00Z";
+  const at = (checkpoint: string, extra: Record<string, unknown> = {}) => ({
+    checkpoint, lines_tracked: 40, fix_commits: 1, likely_fix_commits: 1, lines_fixed: 2, rework_commits: 0, lines_reworked: 0,
+    revert_commits: 0, lines_reverted: 0, relanded: false, computed_at: "2026-11-18T10:30:00Z", age_seconds: 8 * 86_400,
+    ended_at: ended, late: false, scope: "head_and_default", ...extra,
+  });
+  const payload = (outcomes: unknown) => JSON.stringify({ session: { ended_at: ended }, outcomes });
+  await old.query(
+    `INSERT INTO sessions (org_id, machine_id, source, session_id, owner_email, content, rw_lines_added, payload) VALUES
+       ('default', 'm1', 'claude-code', 'with', 'ann@example.com', 'metadata', 20, $1::jsonb),
+       ('default', 'm1', 'claude-code', 'early', 'ann@example.com', 'metadata', 20, $2::jsonb),
+       ('default', 'm1', 'claude-code', 'odd', 'ann@example.com', 'metadata', 20, '{"session":{},"outcomes":"none"}'),
+       ('default', 'm1', 'claude-code', 'nulls', 'ann@example.com', 'metadata', 20, $3::jsonb)`,
+    [payload([at("7d", { sha: "SECRET" }), at("1d"), at("90d")]), payload([at("30d")]), payload([null, 5, at("7d", { by_agent: [null, { source: "cursor", fix_commits: 1 }] })])],
+  );
+  await old.close();
+  const now = await openDb(url);
+  t.after(() => now.close());
+  // An entry that is no count, or a list that is none, is none: and the rest are kept.
+  assert.deepEqual(await keepOutcomesFromPayloads(now, 1), { kept: 4, failed: 0 });
+  // Once kept, not looked at again.
+  assert.deepEqual(await keepOutcomesFromPayloads(now), { kept: 0, failed: 0 });
+  const rows = await now.query<{ session_id: string; outcomes: any; payload: any }>(`SELECT session_id, outcomes, payload FROM sessions ORDER BY session_id`);
+  const of = (id: string) => rows.find((r) => r.session_id === id)!;
+  const json = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
+  assert.deepEqual(Object.keys(json(of("with").outcomes)).sort(), ["1d", "7d"]);
+  assert.deepEqual(json(of("with").payload).outcomes.map((o: any) => o.checkpoint), ["1d", "7d"]);
+  assert.doesNotMatch(JSON.stringify(json(of("with").payload)), /SECRET/);
+  // Counted before the session was 30 days old: not taken, and not looked at again.
+  assert.deepEqual([json(of("early").outcomes), json(of("early").payload).outcomes], [{}, []]);
+  assert.deepEqual([json(of("odd").outcomes), json(of("odd").payload).outcomes], [{}, []]);
+  assert.deepEqual(Object.keys(json(of("nulls").outcomes)), ["7d"]);
+  assert.deepEqual(json(of("nulls").outcomes)["7d"].by_agent.map((b: any) => b.source), ["cursor"]);
+  const upgraded = createApp(now, {});
+  const token = await tokenFor(now, { email: "boss@example.com", role: "admin" });
+  const total = ((await (await upgraded.request("/api/v1/summary?by=tool", { headers: auth(token) })).json()) as any).total;
+  assert.deepEqual([total.outcomes_7d.sessions_reached, total.outcomes_7d.fix_commits], [2, 2]);
+});
+
+test("outcomes a server from before them kept in the payload stay when the session is uploaded without them before they are kept", async (t) => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { migrationAt, keepOutcomesFromPayloads } = await import("../src/db.ts");
+  const { testDbUrl } = await import("./helpers.ts");
+  const fresh = await testDbUrl();
+  const folder = fresh === "memory://" ? mkdtempSync(join(tmpdir(), "sessionly-outcomes-")) : undefined;
+  t.after(() => folder && rmSync(folder, { recursive: true, force: true }));
+  const url = folder ? `file:${join(folder, "db")}` : fresh;
+  const old = await openDb(url, { migrations: migrationAt("ALTER TABLE sessions ADD COLUMN outcomes") });
+  const ended = "2026-11-10T10:30:00Z";
+  const at = (checkpoint: string) => ({
+    checkpoint, lines_tracked: 40, fix_commits: 1, likely_fix_commits: 1, lines_fixed: 2, rework_commits: 0, lines_reworked: 0,
+    revert_commits: 0, lines_reverted: 0, relanded: false, computed_at: "2026-11-18T10:30:00Z", age_seconds: 8 * 86_400,
+    ended_at: ended, late: false, scope: "head_and_default",
+  });
+  const sessions = ["again", "went-on", "meanwhile"];
+  for (const id of sessions) {
+    await old.query(
+      `INSERT INTO sessions (org_id, machine_id, source, session_id, owner_email, content, rw_lines_added, payload)
+       VALUES ('default', 'machine-1', 'claude-code', $1, 'ann@example.com', 'metadata', 20, $2::jsonb)`,
+      [id, JSON.stringify({ ...upload(id), outcomes: [at("7d")] })],
+    );
+  }
+  await old.close();
+  const now = await openDb(url);
+  t.after(() => now.close());
+  const upgraded = createApp(now, {});
+  const ann = await tokenFor(now, { email: "ann@example.com", role: "member" });
+  const send = async (body: Upload) => {
+    const s = body.session!;
+    const response = await upgraded.request(`/api/v1/sessions/${s.machine_id}/${s.source}/${s.session_id}`, {
+      method: "PUT",
+      headers: { ...auth(ann), "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 200);
+  };
+  const kept = async (id: string) => {
+    const [row] = await now.query<{ outcomes: any; payload: any }>(`SELECT outcomes, payload FROM sessions WHERE session_id = $1`, [id]);
+    const json = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
+    return [Object.keys(json(row!.outcomes)), (json(row!.payload).outcomes ?? []).map((o: any) => o.checkpoint)];
+  };
+
+  // Uploaded again before the server got to it, with no outcomes (switched off since, or a ledger lost): what it has stays.
+  await send(upload("again"));
+  assert.deepEqual(await kept("again"), [["7d"], ["7d"]]);
+  // The session went on: those counted from its first end go, as they would have once kept.
+  await send(upload("went-on", { ended_at: "2026-11-12T10:30:00Z" }));
+  assert.deepEqual(await kept("went-on"), [[], []]);
+  // Uploaded between being read and being kept: the upload kept them, and the server, finding it changed, counts it as none it kept.
+  let raced = false;
+  const racing = {
+    query: async (sql: string, params?: unknown[]) => {
+      if (!raced && sql.trimStart().startsWith("UPDATE sessions SET outcomes")) {
+        raced = true;
+        await send(upload("meanwhile"));
+      }
+      return now.query(sql, params);
+    },
+  } as unknown as Db;
+  assert.deepEqual(await keepOutcomesFromPayloads(racing), { kept: 0, failed: 0 });
+  assert.ok(raced);
+  assert.deepEqual(await kept("meanwhile"), [["7d"], ["7d"]]);
+  const admin = await tokenFor(now, { email: "boss@example.com", role: "admin" });
+  const total = ((await (await upgraded.request("/api/v1/summary?by=tool", { headers: auth(admin) })).json()) as any).total;
+  assert.deepEqual([total.outcomes_7d.sessions_reached, total.outcomes_7d.fix_commits], [2, 2]);
+});
+
+test("outcomes a server from before them kept in the payload beside those kept already are kept too", async (t) => {
+  const { keepOutcomesFromPayloads } = await import("../src/db.ts");
+  const now = await testDb();
+  t.after(() => now.close());
+  const upgraded = createApp(now, {});
+  const ann = await tokenFor(now, { email: "ann@example.com", role: "member" });
+  const admin = await tokenFor(now, { email: "boss@example.com", role: "admin" });
+  const ended = "2026-11-10T10:30:00Z";
+  const later = "2026-11-12T10:30:00Z";
+  const at = (checkpoint: string, extra: Record<string, unknown> = {}) => ({
+    checkpoint, lines_tracked: 40, fix_commits: 1, likely_fix_commits: 1, lines_fixed: 2, rework_commits: 0, lines_reworked: 0,
+    revert_commits: 0, lines_reverted: 0, relanded: false, computed_at: "2026-12-14T10:30:00Z", age_seconds: 34 * 86_400,
+    ended_at: ended, late: false, scope: "head_and_default", ...extra,
+  });
+  const send = async (body: Upload) => {
+    const s = body.session!;
+    const response = await upgraded.request(`/api/v1/sessions/${s.machine_id}/${s.source}/${s.session_id}`, {
+      method: "PUT",
+      headers: { ...auth(ann), "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 200);
+  };
+  // A server from before outcomes, still running beside this one (a rolling
+  // upgrade) or rolled back to: it stores the upload as it came, in the
+  // payload, and leaves the column it does not know of as it was.
+  const olderStores = async (body: Upload) => {
+    await now.query(`UPDATE sessions SET payload = $2::jsonb, ended_at = $3 WHERE session_id = $1`, [
+      body.session!.session_id,
+      JSON.stringify(body),
+      body.session!.ended_at,
+    ]);
+  };
+  const json = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
+  const kept = async (id: string) => {
+    const [row] = await now.query<{ outcomes: any; payload: any }>(`SELECT outcomes, payload FROM sessions WHERE session_id = $1`, [id]);
+    return [Object.keys(json(row!.outcomes)), (json(row!.payload).outcomes ?? []).map((o: any) => o.checkpoint)];
+  };
+  const counted = async (id: string, age: string) => {
+    const [row] = await now.query<{ outcomes: any }>(`SELECT outcomes FROM sessions WHERE session_id = $1`, [id]);
+    return json(row!.outcomes)[age];
+  };
+
+  // 7 days kept here; 30 days, when the session was that old, went to the older server.
+  for (const id of ["beside", "uploaded", "first", "raced"]) {
+    await send({ ...upload(id), outcomes: [at("7d")] } as Upload);
+    await olderStores({ ...upload(id), outcomes: [at("7d", { fix_commits: 5 }), at("30d")] } as Upload);
+  }
+  // Uploaded here again, with none (switched off since), before the server got to it: those of the payload stay too.
+  await send(upload("uploaded", { counts: { prompts: 3 } }));
+  assert.deepEqual(await kept("uploaded"), [["7d", "30d"], ["7d", "30d"]]);
+  // It went on while the older server had it: those counted from its first end go.
+  await send({ ...upload("went-on"), outcomes: [at("7d")] } as Upload);
+  await olderStores(upload("went-on", { ended_at: later }));
+  await send({ ...upload("went-on-counted"), outcomes: [at("7d")] } as Upload);
+  await olderStores({ ...upload("went-on-counted", { ended_at: later }), outcomes: [at("7d", { ended_at: later, fix_commits: 3 })] } as Upload);
+  // Uploaded between being read and being kept: what the upload kept stays, and the server counts it as none it kept.
+  let raced = false;
+  const racing = {
+    query: async (sql: string, params?: unknown[]) => {
+      if (!raced && sql.trimStart().startsWith("UPDATE sessions SET outcomes") && params?.[3] === "raced") {
+        raced = true;
+        await send(upload("raced", { counts: { prompts: 3 } }));
+      }
+      return now.query(sql, params);
+    },
+  } as unknown as Db;
+  assert.deepEqual(await keepOutcomesFromPayloads(racing), { kept: 4, failed: 0 });
+  assert.ok(raced);
+  // Once kept, not looked at again.
+  assert.deepEqual(await keepOutcomesFromPayloads(now), { kept: 0, failed: 0 });
+  for (const id of ["beside", "uploaded", "first", "raced"]) assert.deepEqual(await kept(id), [["7d", "30d"], ["7d", "30d"]], id);
+  // The first kept is the one that stays.
+  assert.equal((await counted("beside", "7d")).fix_commits, 1);
+  assert.deepEqual(await kept("went-on"), [[], []]);
+  assert.deepEqual(await kept("went-on-counted"), [["7d"], ["7d"]]);
+  assert.equal((await counted("went-on-counted", "7d")).fix_commits, 3);
+  // Uploaded here again: nothing of it is lost.
+  await send(upload("first", { counts: { prompts: 4 } }));
+  assert.deepEqual(await kept("first"), [["7d", "30d"], ["7d", "30d"]]);
+  const total = ((await (await upgraded.request("/api/v1/summary?by=tool", { headers: auth(admin) })).json()) as any).total;
+  assert.deepEqual([total.outcomes_7d.sessions_reached, total.outcomes_7d.fix_commits], [5, 7]);
+  assert.deepEqual([total.outcomes_30d.sessions_reached, total.outcomes_30d.fix_commits], [4, 4]);
+});
+
+test("an outcome's scope is one of those the binary sends, and any other is unknown", async () => {
+  const { mergeOutcomes } = await import("../src/sessions.ts");
+  const ended = "2026-11-10T10:30:00Z";
+  const at = (checkpoint: string, scope: unknown) => ({ checkpoint, computed_at: "2026-12-18T10:30:00Z", ended_at: ended, scope });
+  const kept = mergeOutcomes({}, {
+    session: { ended_at: ended },
+    outcomes: [at("1d", "head_and_default"), at("7d", "head_only"), at("30d", "every_branch")],
+  } as Upload);
+  assert.deepEqual(["1d", "7d", "30d"].map((age) => kept[age]!.scope), ["head_and_default", "head_only", "unknown"]);
+  // None at all is not known either.
+  const none = mergeOutcomes({}, { session: { ended_at: ended }, outcomes: [{ checkpoint: "7d", computed_at: "2026-11-18T10:30:00Z", ended_at: ended }] } as Upload);
+  assert.equal(none["7d"]!.scope, "unknown");
+});
+
+test("an agent's likely fixes are no more than its fixes, and what it is not left takes nothing from the next", async () => {
+  const { mergeOutcomes } = await import("../src/sessions.ts");
+  const ended = "2026-11-10T10:30:00Z";
+  const by = [
+    { source: "aaa", fix_commits: 0, likely_fix_commits: 1 },
+    { source: "bbb", fix_commits: 2, likely_fix_commits: 1 },
+  ];
+  const kept = mergeOutcomes({}, {
+    session: { ended_at: ended },
+    outcomes: [{ checkpoint: "7d", fix_commits: 2, likely_fix_commits: 1, computed_at: "2026-11-18T10:30:00Z", ended_at: ended, by_agent: by }],
+  } as Upload);
+  assert.deepEqual(kept["7d"]!.by_agent.map((b) => [b.source, b.fix_commits, b.likely_fix_commits]), [["aaa", 0, 0], ["bbb", 2, 1]]);
+});
+
+test("a name or a time an older server kept as anything but a string is none, and fails no upload", async () => {
+  const { mergeOutcomes } = await import("../src/sessions.ts");
+  const ended = "2026-11-10T10:30:00Z";
+  const age = { checkpoint: "7d", fix_commits: 1, computed_at: "2026-11-18T10:30:00Z", ended_at: ended };
+  const odd = { toString: 1 };
+  const kept = mergeOutcomes({}, {
+    session: { ended_at: ended },
+    outcomes: [{ ...age, by_agent: [{ source: odd, fix_commits: 1 }, { source: ["cursor"], fix_commits: 1 }] }],
+  } as unknown as Upload);
+  assert.deepEqual([kept["7d"]!.fix_commits, kept["7d"]!.by_agent], [1, []]);
+  // An age with such a time is none, kept before or brought.
+  for (const at of [{ ended_at: odd }, { computed_at: odd }, { ended_at: ["2026-11-10T10:30:00Z"] }]) {
+    assert.deepEqual(mergeOutcomes({}, { session: { ended_at: ended }, outcomes: [{ ...age, ...at }] } as unknown as Upload), {});
+    assert.deepEqual(mergeOutcomes({ "7d": { ...age, ...at } }, { session: { ended_at: ended } } as Upload), {});
+  }
+  assert.deepEqual(mergeOutcomes({}, { session: { ended_at: odd }, outcomes: [age] } as unknown as Upload), {});
+});
+
 test("checkpoints a server from before them kept in the payload are summed after the upgrade", async (t) => {
   const { mkdtempSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");

@@ -86,6 +86,13 @@
       "items": {
         "$ref": "#/$defs/RewriteCheckpoint"
       }
+    },
+    "outcomes": {
+      "description": "What later commits did to the agent's lines, at 1, 7 and 30 days after\nthe session ended, read from the repository's history on this machine.\nCounts only. Left out while there is none, and when it is switched off\n(`sessionly settings --outcomes off`).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/OutcomeCheckpoint"
+      }
     }
   },
   "$defs": {
@@ -1392,6 +1399,165 @@
           ],
           "format": "date-time",
           "default": null
+        }
+      }
+    },
+    "OutcomeCheckpoint": {
+      "description": "What commits after a session did to the lines its agent added, up to a\nfixed age after it ended. A commit touches the session when it removes or\nchanges at least two of those lines and is not one that brought them in.\nCounts and times only; once taken it is kept as it is.",
+      "type": "object",
+      "properties": {
+        "checkpoint": {
+          "description": "The age it is for: `1d`, `7d` or `30d` after the session ended.",
+          "type": "string",
+          "default": ""
+        },
+        "lines_tracked": {
+          "description": "Lines the agent added that are tracked, in the repositories whose\nhistory was read.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "fix_commits": {
+          "description": "Commits whose subject says they fix something and that changed the\nagent's lines: \"changed by a fix\". Most such fixes are of something\nelse; this does not say the agent's lines were wrong.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "likely_fix_commits": {
+          "description": "Of those, the ones where at least half of the lines the commit removed\nwere the agent's.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_fixed": {
+          "description": "The agent's lines those commits removed or changed. A line several\nsessions wrote is shared among them, so this may be fractional.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "rework_commits": {
+          "description": "Commits that changed the agent's lines and say neither.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_reworked": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "revert_commits": {
+          "description": "Commits that reverted the session's own commits, or took out most of\nits lines with a subject that says revert.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_reverted": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "relanded": {
+          "description": "Every revert in this age was itself reverted in it.",
+          "type": "boolean",
+          "default": false
+        },
+        "computed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "age_seconds": {
+          "description": "How long after the session ended it was counted: the age, or more.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "ended_at": {
+          "description": "When the session had ended, as the age was counted.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "late": {
+          "description": "Counted a day or more after the age was reached.",
+          "type": "boolean",
+          "default": false
+        },
+        "scope": {
+          "description": "Which branches were read: `head_and_default` (the one checked out and\nthe remote's default branch) or `head_only`. A server shows any other\nas `unknown`.",
+          "type": "string",
+          "default": ""
+        },
+        "by_agent": {
+          "description": "Of the commits above, those that were another agent session's own\n(it added lines in them), by that session's agent. Only sessions on\nthe same machine are known; the rest are not by any agent known here.\nOne entry for each agent.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OutcomeBy"
+          },
+          "default": []
+        }
+      }
+    },
+    "OutcomeBy": {
+      "description": "Of a session's later commits, those another agent's sessions made.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "description": "The agent: `claude-code`, `cursor`, ….",
+          "type": "string",
+          "default": ""
+        },
+        "fix_commits": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "likely_fix_commits": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_fixed": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "rework_commits": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_reworked": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "revert_commits": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "lines_reverted": {
+          "type": "number",
+          "format": "double",
+          "default": 0.0
         }
       }
     }

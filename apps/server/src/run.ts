@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp, type Accounts, type Extension, type Hosting } from "./app.ts";
 import { PROVIDER_LABELS, PROVIDER_NAMES, providerSettings } from "./auth.ts";
-import { count, countHashedLines, DB_COUNTS, misset, openDb, runMigrations, type Db, type Migrations } from "./db.ts";
+import { count, countHashedLines, DB_COUNTS, keepOutcomesFromPayloads, misset, openDb, runMigrations, type Db, type Migrations } from "./db.ts";
 import { tidy } from "./limits.ts";
 import { type PullAt, type SessionAt, splitReviews, UNSPLIT, unsplitPulls, UNWEIGHED, weighKeptSome } from "./pulls.ts";
 import { telemetryFrom } from "./telemetry.ts";
@@ -203,6 +203,22 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
         if (again) setTimeout(counting, 10 * 60_000).unref();
       });
   counting();
+
+  // Sessions whose outcome counts a server from before them kept in the payload alone: kept now, beside the
+  // requests, and every hour after, for what one still running stores meanwhile (a rolling upgrade, or one
+  // gone back to), beside those kept already. One at a time.
+  let keeping = false;
+  const keepingOutcomes = () => {
+    if (keeping) return;
+    keeping = true;
+    void keepOutcomesFromPayloads(db)
+      .catch((err) => console.error("keeping outcome counts from payloads failed:", err))
+      .finally(() => {
+        keeping = false;
+      });
+  };
+  keepingOutcomes();
+  setInterval(keepingOutcomes, 60 * 60_000).unref();
 
   // Pull requests' sessions kept before what their opening lines still there
   // count as was, or before what each contributed and is charged was: weighed

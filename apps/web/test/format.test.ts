@@ -118,6 +118,58 @@ test("what was kept at a fixed age, and of how many sessions", () => {
   assert.equal(f.keptOf(null), "");
 });
 
+test("what later commits did: of the sessions counted at an age, and per session in a few words", () => {
+  const at = { sessions_reached: 8, sessions_total: 20, lines_tracked: 400, sessions_with_fix: 2, fix_commits: 3, likely_fix_commits: 1, lines_fixed: 6, sessions_reverted: 1, revert_commits: 1, lines_reverted: 40, rework_commits: 4, lines_reworked: 9, by_agent: [] };
+  assert.equal(f.fixedAt(at), "25%");
+  // which agents' sessions made the fixes, and the rest
+  assert.equal(f.fixesBy(at), "");
+  assert.equal(f.fixesBy({ ...at, by_agent: [{ source: "cursor", fix_commits: 2 }, { source: "codex", fix_commits: 0 }] }), "2 by Cursor, 1 by no agent known");
+  assert.equal(f.fixesBy({ fix_commits: 1, by_agent: [{ source: "claude-code", fix_commits: 1 }] }), "1 by Claude Code");
+  // an agent of any name is named as it is, whatever an object has of its own
+  assert.equal(f.fixesBy({ fix_commits: 1, by_agent: [{ source: "constructor", fix_commits: 1 }] }), "1 by constructor");
+  assert.equal(f.revertedAt(at), "13%");
+  assert.equal(f.keptOf(at), "8 of 20 sessions");
+  const none = { ...at, sessions_reached: 0 };
+  assert.equal(f.fixedAt(none), "–");
+  assert.equal(f.revertedAt(undefined), "–");
+
+  // what a server from before outcomes kept may be anything: nothing counted, and no failure
+  for (const odd of ["none", {}, [null, 5]]) assert.deepEqual(f.laterAges(odd as any).map((a) => a.counted), [false, false, false]);
+  // and an age of anything: its counts numbers, and of its agents the entries that are ones
+  const odd = f.laterAges([
+    { checkpoint: "1d", fix_commits: 1, by_agent: [null, 5, "cursor", { source: "cursor", fix_commits: 1 }] },
+    { checkpoint: "7d", fix_commits: 1, by_agent: "x" },
+    { checkpoint: "30d", fix_commits: "3", rework_commits: {}, revert_commits: Infinity, relanded: "yes", age_seconds: "x" },
+  ] as any);
+  assert.deepEqual(
+    odd.map((a) => [a.name, a.later, a.late, a.counted]),
+    [
+      ["1d", "1 fix (1 by Cursor)", null, true],
+      ["7d", "1 fix", null, true],
+      ["30d", "nothing", null, true],
+    ],
+  );
+
+  const day = 86_400;
+  const ages = f.laterAges([
+    { checkpoint: "7d", fix_commits: 2, rework_commits: 1, age_seconds: 9 * day, by_agent: [{ source: "cursor", fix_commits: 1 }] },
+    { checkpoint: "1d", age_seconds: day },
+    { checkpoint: "30d", revert_commits: 1, relanded: true, age_seconds: 30 * day },
+  ]);
+  assert.deepEqual(
+    ages.map((a) => [a.name, a.later, a.late]),
+    [
+      ["1d", "nothing", null],
+      ["7d", "2 fixes (1 by Cursor, 1 by no agent known), 1 rework", 9],
+      ["30d", "reverted, relanded", null],
+    ],
+  );
+  assert.deepEqual(f.laterAges(undefined).map((a) => a.later), ["–", "–", "–"]);
+  // an agent named with anything but a string is none, and no failure
+  const unnamed = f.laterAges([{ checkpoint: "7d", fix_commits: 1, by_agent: [{ source: { toString: 1 }, fix_commits: 1 }, { source: ["cursor"], fix_commits: 1 }] }] as any);
+  assert.deepEqual(unnamed.map((a) => a.later), ["–", "1 fix", "–"]);
+});
+
 test("a session's lines at each age: a dash where it was not measured, and the day where that was late", () => {
   const day = 86_400;
   const ages = f.keptAges([
@@ -130,6 +182,18 @@ test("a session's lines at each age: a dash where it was not measured, and the d
     ["30d", "–", null, null],
   ]);
   assert.deepEqual(f.keptAges(undefined).map((age) => age.kept), ["–", "–", "–"]);
+  // what a server from before checkpoints kept may be anything: nothing measured, and no failure
+  for (const odd of ["none", {}, [null, 5]]) assert.deepEqual(f.keptAges(odd as any).map((age) => age.lines), [null, null, null]);
+  // and an age of anything: its counts numbers
+  const odd = f.keptAges([
+    { checkpoint: "1d", added: {}, surviving: 3, age_seconds: "x" },
+    { checkpoint: "7d", added: 20, surviving: "15", age_seconds: Infinity },
+  ] as any);
+  assert.deepEqual(odd.map((age) => [age.name, age.kept, age.late, age.lines]), [
+    ["1d", "–", null, 0],
+    ["7d", "0%", null, 20],
+    ["30d", "–", null, null],
+  ]);
   assert.equal(f.takenLate(30 * day, 30), null);
   assert.equal(f.takenLate(31 * day, 30), 31);
 });

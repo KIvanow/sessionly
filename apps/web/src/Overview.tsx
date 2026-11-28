@@ -3,7 +3,7 @@ import { Fragment, useId, useState, type ReactNode } from "react";
 import { query } from "./api.ts";
 import { scopeParams, type Pick, type Scope } from "./App.tsx";
 import { CostChart } from "./CostChart.tsx";
-import { activeTime, compact, count, dateTime, duration, groupCost, keptAt, keptOf, linesKept, modelName, percent, repoName, rewriteRate, share, toolName, usd, usdCompact } from "./format.ts";
+import { activeTime, compact, count, dateTime, duration, fixedAt, fixesBy, groupCost, keptAt, keptOf, linesKept, modelName, percent, repoName, revertedAt, rewriteRate, share, toolName, usd, usdCompact } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { useApi } from "./useApi.ts";
 
@@ -399,6 +399,50 @@ function KeptCells({ group }: { group: Totals }) {
   );
 }
 
+/** The headings of the two columns of what later commits did, read on each machine from the repository's history. */
+function LaterHeads() {
+  return (
+    <>
+      <th
+        scope="col"
+        className="num"
+        title={
+          "Of the sessions 7 days old, the share whose lines a later commit with a fix in its subject changed within those 7 days. " +
+          "Mostly the fix was of something else, so this does not say the agent's lines were wrong."
+        }
+      >
+        Changed by a fix @7d
+      </th>
+      <th scope="col" className="num" title="Of the sessions 30 days old, the share reverted within those 30 days and not relanded.">
+        Reverted @30d
+      </th>
+    </>
+  );
+}
+
+/** A group's sessions changed by a fix by day 7 and reverted by day 30, each with how many sessions that is of. */
+function LaterCells({ group }: { group: Totals }) {
+  return (
+    <>
+      <td
+        className="num"
+        title={
+          `${count(group.outcomes_7d.fix_commits)} fix commits, ${count(group.outcomes_7d.likely_fix_commits)} of them likely fixes of the agent's lines` +
+          (fixesBy(group.outcomes_7d) ? `; ${fixesBy(group.outcomes_7d)} (agents' sessions on the same machine)` : "")
+        }
+      >
+        {fixedAt(group.outcomes_7d)}
+        <span className="under">{keptOf(group.outcomes_7d)}</span>
+        {fixesBy(group.outcomes_7d) && <span className="under">{fixesBy(group.outcomes_7d)}</span>}
+      </td>
+      <td className="num">
+        {revertedAt(group.outcomes_30d)}
+        <span className="under">{keptOf(group.outcomes_30d)}</span>
+      </td>
+    </>
+  );
+}
+
 function Breakdown(props: {
   title: string;
   heading: string;
@@ -425,6 +469,8 @@ function Breakdown(props: {
   const rows = all ? summary.groups : summary.groups.slice(0, INITIAL_ROWS);
   const largest = Math.max(...summary.groups.map((g) => g.cost_usd), 0);
   const label = (g: Totals) => (props.name ? props.name(g.key) : g.key);
+  // Where kept figures are shown, and once some session has an age counted.
+  const later = props.kept === true && (summary.total.outcomes_7d?.sessions_reached ?? 0) + (summary.total.outcomes_30d?.sessions_reached ?? 0) > 0;
   const row = (g: Totals) => (
     <Fragment key={g.key}>
     <tr>
@@ -462,10 +508,11 @@ function Breakdown(props: {
       </td>
       <td className="num">{percent(linesKept(g.rewrite))}</td>
       {props.kept && <KeptCells group={g} />}
+      {later && <LaterCells group={g} />}
     </tr>
     {props.detail && open.has(g.key) && (
       <tr className="detail">
-        <td colSpan={9 + (props.tools ? 1 : 0) + (props.models ? 1 : 0) + (props.kept ? 2 : 0)}>{props.detail(g)}</td>
+        <td colSpan={9 + (props.tools ? 1 : 0) + (props.models ? 1 : 0) + (props.kept ? 2 : 0) + (later ? 2 : 0)}>{props.detail(g)}</td>
       </tr>
     )}
     </Fragment>
@@ -497,6 +544,7 @@ function Breakdown(props: {
               <th scope="col" className="num">Files rewritten</th>
               <th scope="col" className="num">Lines kept</th>
               {props.kept && <KeptHeads />}
+              {later && <LaterHeads />}
             </tr>
           </thead>
           <tbody>{rows.map(row)}</tbody>

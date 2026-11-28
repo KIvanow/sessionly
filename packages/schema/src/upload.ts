@@ -33,6 +33,13 @@ export interface Upload {
    * Left out while there is none.
    */
   checkpoints?: RewriteCheckpoint[];
+  /**
+   * What later commits did to the agent's lines, at 1, 7 and 30 days after
+   * the session ended, read from the repository's history on this machine.
+   * Counts only. Left out while there is none, and when it is switched off
+   * (`sessionly settings --outcomes off`).
+   */
+  outcomes?: OutcomeCheckpoint[];
 }
 export interface Session {
   /**
@@ -559,4 +566,94 @@ export interface RewriteCheckpoint {
    * on since), it is a checkpoint no more.
    */
   ended_at?: string | null;
+}
+/**
+ * What commits after a session did to the lines its agent added, up to a
+ * fixed age after it ended. A commit touches the session when it removes or
+ * changes at least two of those lines and is not one that brought them in.
+ * Counts and times only; once taken it is kept as it is.
+ */
+export interface OutcomeCheckpoint {
+  /**
+   * The age it is for: `1d`, `7d` or `30d` after the session ended.
+   */
+  checkpoint?: string;
+  /**
+   * Lines the agent added that are tracked, in the repositories whose
+   * history was read.
+   */
+  lines_tracked?: number;
+  /**
+   * Commits whose subject says they fix something and that changed the
+   * agent's lines: "changed by a fix". Most such fixes are of something
+   * else; this does not say the agent's lines were wrong.
+   */
+  fix_commits?: number;
+  /**
+   * Of those, the ones where at least half of the lines the commit removed
+   * were the agent's.
+   */
+  likely_fix_commits?: number;
+  /**
+   * The agent's lines those commits removed or changed. A line several
+   * sessions wrote is shared among them, so this may be fractional.
+   */
+  lines_fixed?: number;
+  /**
+   * Commits that changed the agent's lines and say neither.
+   */
+  rework_commits?: number;
+  lines_reworked?: number;
+  /**
+   * Commits that reverted the session's own commits, or took out most of
+   * its lines with a subject that says revert.
+   */
+  revert_commits?: number;
+  lines_reverted?: number;
+  /**
+   * Every revert in this age was itself reverted in it.
+   */
+  relanded?: boolean;
+  computed_at?: string | null;
+  /**
+   * How long after the session ended it was counted: the age, or more.
+   */
+  age_seconds?: number;
+  /**
+   * When the session had ended, as the age was counted.
+   */
+  ended_at?: string | null;
+  /**
+   * Counted a day or more after the age was reached.
+   */
+  late?: boolean;
+  /**
+   * Which branches were read: `head_and_default` (the one checked out and
+   * the remote's default branch) or `head_only`. A server shows any other
+   * as `unknown`.
+   */
+  scope?: string;
+  /**
+   * Of the commits above, those that were another agent session's own
+   * (it added lines in them), by that session's agent. Only sessions on
+   * the same machine are known; the rest are not by any agent known here.
+   * One entry for each agent.
+   */
+  by_agent?: OutcomeBy[];
+}
+/**
+ * Of a session's later commits, those another agent's sessions made.
+ */
+export interface OutcomeBy {
+  /**
+   * The agent: `claude-code`, `cursor`, ….
+   */
+  source?: string;
+  fix_commits?: number;
+  likely_fix_commits?: number;
+  lines_fixed?: number;
+  rework_commits?: number;
+  lines_reworked?: number;
+  revert_commits?: number;
+  lines_reverted?: number;
 }

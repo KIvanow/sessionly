@@ -60,10 +60,14 @@ impl SourceDirs {
 /// Bring the ledger up to date with everything captured or imported on this
 /// machine, then re-measure how much of each session's changes is still in
 /// the files.
+/// History is read for outcomes for no longer than `outcomes_for`: less when
+/// someone waits for the answer. Switched off, none is read, and what was
+/// counted is kept as it is.
 pub fn sync_all(
     ledger: &mut Ledger,
     config: &crate::config::Config,
     force: bool,
+    outcomes_for: crate::outcomes::Budget,
 ) -> Result<(Report, crate::rewrite::Report)> {
     let data_dir = crate::paths::data_dir()?;
     // Imported sessions follow the files they were imported from.
@@ -73,7 +77,12 @@ pub fn sync_all(
         .map(|source| SourceDirs::in_data_dir(&data_dir, source))
         .collect();
     let report = run(&sources, ledger, &config.machine_id, force)?;
-    let rewrite = crate::rewrite::measure(ledger, chrono::Utc::now())?;
+    let now = chrono::Utc::now();
+    let rewrite = crate::rewrite::measure(ledger, now)?;
+    if config.outcomes {
+        let words = crate::outcomes::Words::new(config.outcomes_fix_words.as_deref());
+        crate::outcomes::measure(ledger, &words, now, outcomes_for)?;
+    }
     Ok((report, rewrite))
 }
 

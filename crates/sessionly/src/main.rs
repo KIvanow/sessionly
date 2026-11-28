@@ -21,6 +21,7 @@ mod jsonl;
 mod ledger;
 mod normalize;
 mod opencode;
+mod outcomes;
 mod paths;
 mod pricing;
 mod repo;
@@ -109,6 +110,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// The later commits that changed a session's lines: fixes, reverts, rework
+    Outcomes {
+        /// Session id or a unique prefix of one
+        session: String,
+        /// Print JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
     /// Show tokens, cost, models and timing from a session transcript
     Transcript {
         /// Session id, or a path to a transcript .jsonl file
@@ -178,6 +187,14 @@ enum Command {
         /// status, list and summary. The capture hooks never ask
         #[arg(long, value_name = "on|off", value_parser = parse_on_off)]
         update_check: Option<bool>,
+        /// Read repositories' history for what later commits did to the
+        /// agents' lines (fixes, reverts), and upload the counts
+        #[arg(long, value_name = "on|off", value_parser = parse_on_off)]
+        outcomes: Option<bool>,
+        /// The words that make a commit subject a fix, separated by commas, in
+        /// place of the defaults; `default` for those
+        #[arg(long, value_name = "WORDS")]
+        fix_words: Option<String>,
     },
     /// Replace this binary with the newest release
     Update {
@@ -508,7 +525,7 @@ fn run(command: Command) -> Result<()> {
         Command::Watch => watch::run(&paths::raw_root()?)?,
         Command::Sync { force } => {
             let mut ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
-            let (report, rewrite) = sync_ledger(&mut ledger, force)?;
+            let (report, rewrite) = sync_ledger_for(&mut ledger, force, outcomes::PATIENT)?;
             println!(
                 "Synced: {} updated, {} unchanged, {} without usable events",
                 report.synced, report.unchanged, report.empty
@@ -577,10 +594,39 @@ fn run(command: Command) -> Result<()> {
             } else {
                 let (files, measured_at) = ledger.rewrite_of(&record.session_id)?;
                 let checkpoints = ledger.checkpoints_of(&record.session_id)?;
+                let outcomes = ledger.outcome_checkpoints_of(&record.session_id)?;
                 print!(
                     "{}",
-                    report::session(&record, &files, measured_at.as_deref(), &checkpoints)
+                    report::session(
+                        &record,
+                        &files,
+                        measured_at.as_deref(),
+                        &checkpoints,
+                        &outcomes
+                    )
                 );
+            }
+        }
+        Command::Outcomes { session, json } => {
+            let mut ledger = ledger::Ledger::open(&paths::ledger_path()?)?;
+            sync_ledger(&mut ledger, false)?;
+            let record = ledger
+                .get(&session)?
+                .with_context(|| format!("no session matching \"{session}\" in the ledger"))?;
+            let events = ledger.outcome_events_of(&record.session_id)?;
+            let kept = ledger.outcome_checkpoints_of(&record.session_id)?;
+            if json {
+                let both = serde_json::json!({ "events": events, "checkpoints": kept });
+                println!("{}", serde_json::to_string_pretty(&both)?);
+            } else {
+                print!("{}", report::outcomes(&record, &events, &kept));
+                let config = config::Config::load(&paths::config_path()?)?.with_environment();
+                if !config.outcomes {
+                    println!(
+                        "(outcomes are off: what was counted is kept, nothing more is read or \
+                         sent; sessionly settings --outcomes on)"
+                    );
+                }
             }
         }
         Command::List {
@@ -767,16 +813,26 @@ fn run(command: Command) -> Result<()> {
             line_hashes,
             shell_edits,
             update_check,
+            outcomes,
+            fix_words,
         } => {
             let path = paths::config_path()?;
             let mut config = config::Config::load(&path)?;
-            let asked = [auto_sync, line_hashes, update_check];
-            if content.is_some() || shell_edits.is_some() || asked.iter().any(Option::is_some) {
+            let asked = [auto_sync, line_hashes, update_check, outcomes];
+            if let Some(words) = &fix_words {
+                config.outcomes_fix_words = fix_words_setting(words)?;
+            }
+            if content.is_some()
+                || shell_edits.is_some()
+                || fix_words.is_some()
+                || asked.iter().any(Option::is_some)
+            {
                 config.auto_sync = auto_sync.unwrap_or(config.auto_sync);
                 config.upload_content = content.unwrap_or(config.upload_content);
                 config.upload_line_hashes = line_hashes.unwrap_or(config.upload_line_hashes);
                 config.shell_edits = shell_edits.unwrap_or(config.shell_edits);
                 config.update_check = update_check.unwrap_or(config.update_check);
+                config.outcomes = outcomes.unwrap_or(config.outcomes);
                 config.save(&path)?;
             }
             print_settings(&config);
@@ -796,6 +852,7 @@ fn run(command: Command) -> Result<()> {
                 &record,
                 content.unwrap_or(config.upload_content),
                 config.upload_line_hashes,
+                config.outcomes,
             )?;
             println!("{}", serde_json::to_string_pretty(&payload)?);
         }
@@ -811,14 +868,46 @@ fn run(command: Command) -> Result<()> {
     Ok(())
 }
 
+/// The fix words `--fix-words` saves: as they are written, for `Words` to
+/// read as subjects are read; none for `default`. Lowercased, a word may be
+/// one no more (`İ` is two characters then).
+fn fix_words_setting(text: &str) -> Result<Option<Vec<String>>> {
+    let words: Vec<String> = text
+        .split(',')
+        .map(|w| w.trim().to_string())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.is_empty() {
+        bail!("--fix-words needs at least one word, or `default`");
+    }
+    // A subject is read word by word, so each must be one word as it is read.
+    if let Some(bad) = words.iter().find(|w| !crate::outcomes::is_word(w)) {
+        bail!(
+            "--fix-words: `{bad}` is not one word; subjects are split on everything \
+             that is not a letter or digit"
+        );
+    }
+    let default = words.len() == 1 && words[0].eq_ignore_ascii_case("default");
+    Ok((!default).then_some(words))
+}
+
 /// Bring the ledger up to date with the capture, then re-measure how much of
 /// each session's changes is still in the files.
 fn sync_ledger(
     ledger: &mut ledger::Ledger,
     force: bool,
 ) -> Result<(sync::Report, rewrite::Report)> {
-    let config = config::Config::load(&paths::config_path()?)?;
-    let (report, rewrite) = sync::sync_all(ledger, &config, force)?;
+    sync_ledger_for(ledger, force, outcomes::WAITED_FOR)
+}
+
+/// The same, reading history for outcomes for no longer than `outcomes_for`.
+fn sync_ledger_for(
+    ledger: &mut ledger::Ledger,
+    force: bool,
+    outcomes_for: outcomes::Budget,
+) -> Result<(sync::Report, rewrite::Report)> {
+    let config = config::Config::load(&paths::config_path()?)?.with_environment();
+    let (report, rewrite) = sync::sync_all(ledger, &config, force, outcomes_for)?;
     for (path, err) in &report.failed {
         eprintln!("warning: could not sync {}: {err}", path.display());
     }
@@ -992,6 +1081,17 @@ fn print_settings(config: &config::Config) {
                 "off (only what agents change with their file tools is counted)",
         }
     );
+    println!(
+        "Outcomes:   {}",
+        if config.outcomes {
+            "on (history is read for later fixes and reverts of agents' lines; only counts are sent)"
+        } else {
+            "off (history is not read and no counts are sent; those counted are kept here)"
+        }
+    );
+    if let Some(words) = &config.outcomes_fix_words {
+        println!("Fix words:  {}", words.join(", "));
+    }
 }
 
 /// Install the hooks in Codex's own file.
@@ -1136,5 +1236,26 @@ fn say_newer_release(only_terminal: bool) {
     };
     if let Some(line) = auto::pending_update(&dir) {
         println!("{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_fix_word_is_saved_as_written_and_counts_as_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = crate::config::Config::load(&path).unwrap();
+        config.outcomes_fix_words = super::fix_words_setting("İyileştir, Oops").unwrap();
+        config.save(&path).unwrap();
+        let saved = crate::config::Config::load(&path).unwrap();
+        let words = crate::outcomes::Words::new(saved.outcomes_fix_words.as_deref());
+        let fix = crate::outcomes::signals("İyileştir the parser", &words);
+        assert_eq!(fix, ["fix_message"]);
+        assert_eq!(crate::outcomes::signals("oops", &words), ["fix_message"]);
+        assert!(crate::outcomes::signals("Fix the parser", &words).is_empty());
+        assert_eq!(super::fix_words_setting("Default").unwrap(), None);
+        assert!(super::fix_words_setting("follow-up").is_err());
+        assert!(super::fix_words_setting(" , ").is_err());
     }
 }

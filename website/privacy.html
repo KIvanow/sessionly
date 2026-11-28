@@ -211,7 +211,16 @@
             <li>models, token counts and cost;</li>
             <li>
               the rewrite measurement: how many of the lines the agent added are still in each
-              file.
+              file;
+            </li>
+            <li>
+              what later commits did to those lines, read from the repository's history on the
+              machine: how many reverted them, changed them in a fix, or reworked them, at 1, 7 and
+              30 days, and of those how many were another agent session's own commits, by agent.
+              Counts, with when each was counted, which branches were read and the agents' names:
+              no commit, message, file or session is sent
+              (<code>sessionly settings --outcomes off</code> stops it from then on, unless
+              <code>SESSIONLY_OUTCOMES=on</code> is set in the environment, which overrides it).
             </li>
           </ul>
           <p>Two things are added only if the person uploading switches them on:</p>
