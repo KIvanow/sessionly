@@ -89,8 +89,8 @@ export function mergeCheckpoints(kept: unknown, upload: Upload): Record<string, 
   const out: Record<string, Checkpoint> = {};
   const take = (name: unknown, c: Partial<Checkpoint> | null | undefined) => {
     if (!CHECKPOINTS.includes(name as never) || !c || out[name as string]) return;
-    if (Date.parse(c.ended_at ?? "") !== ended) return;
-    const at = Date.parse(c.measured_at ?? "");
+    if (timeOf(c.ended_at) !== ended) return;
+    const at = timeOf(c.measured_at);
     if (Number.isNaN(at) || at - ended < AGE_SECONDS[name as string]! * 1000) return;
     out[name as string] = {
       added: count(c.added),
@@ -120,6 +120,9 @@ const BY_AGENT_FIELDS = [
   "lines_reworked",
 ] as const satisfies readonly (keyof OutcomesBy)[];
 
+/** A time as an upload sends one, or none (NaN): an older server's payload may hold anything in its place. */
+const timeOf = (value: unknown): number => (typeof value === "string" ? Date.parse(value) : NaN);
+
 /** An agent is named as an upload names one: a short word, no more. */
 const AGENT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
@@ -137,7 +140,8 @@ function byAgentOf(o: Partial<OutcomeAt>, age: Omit<OutcomesBy, "source">): Outc
   for (const b of Array.isArray(o.by_agent) ? o.by_agent : []) {
     if (out.length === MOST_AGENTS) break;
     if (!b || typeof b !== "object") continue;
-    const source = String(b?.source ?? "");
+    // A name, or none: anything else an older server's payload holds is not made one.
+    const source = typeof b.source === "string" ? b.source : "";
     if (!AGENT_NAME.test(source) || seen.has(source)) continue;
     seen.add(source);
     const entry = { source } as OutcomesBy;
@@ -161,12 +165,12 @@ function byAgentOf(o: Partial<OutcomeAt>, age: Omit<OutcomesBy, "source">): Outc
  * the same; keeping the first keeps it so when the history is rewritten.
  */
 export function mergeOutcomes(kept: unknown, upload: Upload): Record<string, OutcomeAt> {
-  const ended = Date.parse(upload.session?.ended_at ?? "");
+  const ended = timeOf(upload.session?.ended_at);
   const out: Record<string, OutcomeAt> = {};
   const take = (name: unknown, o: Partial<OutcomeAt> | null | undefined) => {
     if (!CHECKPOINTS.includes(name as never) || !o || out[name as string]) return;
-    if (Date.parse(o.ended_at ?? "") !== ended) return;
-    const at = Date.parse(o.computed_at ?? "");
+    if (timeOf(o.ended_at) !== ended) return;
+    const at = timeOf(o.computed_at);
     if (Number.isNaN(at) || at - ended < AGE_SECONDS[name as string]! * 1000) return;
     const counts = {
       fix_commits: count(o.fix_commits),

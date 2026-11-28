@@ -844,6 +844,24 @@ test("an agent's likely fixes are no more than its fixes, and what it is not lef
   assert.deepEqual(kept["7d"]!.by_agent.map((b) => [b.source, b.fix_commits, b.likely_fix_commits]), [["aaa", 0, 0], ["bbb", 2, 1]]);
 });
 
+test("a name or a time an older server kept as anything but a string is none, and fails no upload", async () => {
+  const { mergeOutcomes } = await import("../src/sessions.ts");
+  const ended = "2026-11-10T10:30:00Z";
+  const age = { checkpoint: "7d", fix_commits: 1, computed_at: "2026-11-18T10:30:00Z", ended_at: ended };
+  const odd = { toString: 1 };
+  const kept = mergeOutcomes({}, {
+    session: { ended_at: ended },
+    outcomes: [{ ...age, by_agent: [{ source: odd, fix_commits: 1 }, { source: ["cursor"], fix_commits: 1 }] }],
+  } as unknown as Upload);
+  assert.deepEqual([kept["7d"]!.fix_commits, kept["7d"]!.by_agent], [1, []]);
+  // An age with such a time is none, kept before or brought.
+  for (const at of [{ ended_at: odd }, { computed_at: odd }, { ended_at: ["2026-11-10T10:30:00Z"] }]) {
+    assert.deepEqual(mergeOutcomes({}, { session: { ended_at: ended }, outcomes: [{ ...age, ...at }] } as unknown as Upload), {});
+    assert.deepEqual(mergeOutcomes({ "7d": { ...age, ...at } }, { session: { ended_at: ended } } as Upload), {});
+  }
+  assert.deepEqual(mergeOutcomes({}, { session: { ended_at: odd }, outcomes: [age] } as unknown as Upload), {});
+});
+
 test("checkpoints a server from before them kept in the payload are summed after the upgrade", async (t) => {
   const { mkdtempSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");

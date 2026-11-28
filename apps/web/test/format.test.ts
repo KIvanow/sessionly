@@ -165,6 +165,9 @@ test("what later commits did: of the sessions counted at an age, and per session
     ],
   );
   assert.deepEqual(f.laterAges(undefined).map((a) => a.later), ["–", "–", "–"]);
+  // an agent named with anything but a string is none, and no failure
+  const unnamed = f.laterAges([{ checkpoint: "7d", fix_commits: 1, by_agent: [{ source: { toString: 1 }, fix_commits: 1 }, { source: ["cursor"], fix_commits: 1 }] }] as any);
+  assert.deepEqual(unnamed.map((a) => a.later), ["–", "1 fix", "–"]);
 });
 
 test("a session's lines at each age: a dash where it was not measured, and the day where that was late", () => {

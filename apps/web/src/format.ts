@@ -175,8 +175,9 @@ function laterCounts(o: OutcomeCheckpoint): OutcomeCheckpoint {
     relanded: o.relanded === true,
     age_seconds: sentCount(o.age_seconds),
     by_agent: (Array.isArray(o.by_agent) ? o.by_agent : [])
-      .filter((b) => b && typeof b === "object")
-      .map((b) => ({ source: String(b.source ?? ""), fix_commits: sentCount(b.fix_commits) })),
+      // One with no name, or anything else in its place, says nothing.
+      .filter((b) => b && typeof b === "object" && typeof b.source === "string")
+      .map((b) => ({ source: b.source, fix_commits: sentCount(b.fix_commits) })),
   };
 }
 
