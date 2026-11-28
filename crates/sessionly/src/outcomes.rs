@@ -2051,7 +2051,7 @@ fn revert_depth(commits: &[Commit], at: usize, depths: &mut HashMap<usize, u32>)
                 k = named;
             }
             None => {
-                let depth = subject_depth(&commits[k]);
+                let depth = subject_depth(&commits[k].message);
                 depths.insert(k, depth);
                 break depth;
             }
@@ -2064,23 +2064,44 @@ fn revert_depth(commits: &[Commit], at: usize, depths: &mut HashMap<usize, u32>)
     depth
 }
 
-/// How deep a commit's subject says it is in a chain of reverts: one for
-/// each `Revert` it begins with, two for each `Reapply`; one at least when
-/// its message names a commit it reverts.
-fn subject_depth(commit: &Commit) -> u32 {
-    let subject = commit.message.lines().next().unwrap_or_default();
-    let mut depth = 0;
-    for word in words(subject) {
-        match word.as_str() {
-            "revert" => depth += 1,
-            "reapply" => depth += 2,
-            _ => break,
+/// How deep a commit's subject says it is in a chain of reverts, as git
+/// titles them: one for each `Revert "` it begins with, two for each
+/// `Reapply "`. A conventional `revert:` type is one, and a `Revert "` right
+/// after it is that same revert. One at least when its message names a
+/// commit it reverts. A subject that only begins with the word (`Revert to
+/// polling`, `Revert revert-button styling`) says nothing of a chain.
+fn subject_depth(message: &str) -> u32 {
+    let subject = message.lines().next().unwrap_or_default().trim();
+    let (mut depth, mut rest) = match conventional(subject) {
+        Some((kind, rest)) if kind == "revert" => {
+            let rest = rest.trim_start();
+            (1, strip_title(rest, "revert \"").unwrap_or(rest))
+        }
+        Some((_, rest)) => (0, rest.trim_start()),
+        None => (0, subject),
+    };
+    loop {
+        if let Some(inner) = strip_title(rest, "revert \"") {
+            depth += 1;
+            rest = inner;
+        } else if let Some(inner) = strip_title(rest, "reapply \"") {
+            depth += 2;
+            rest = inner;
+        } else {
+            break;
         }
     }
-    if depth == 0 && !reverts(&commit.message).is_empty() {
+    if depth == 0 && !reverts(message).is_empty() {
         depth = 1;
     }
     depth
+}
+
+/// `text` less `title` at its start, in any case.
+fn strip_title<'a>(text: &'a str, title: &str) -> Option<&'a str> {
+    let head = text.get(..title.len())?;
+    head.eq_ignore_ascii_case(title)
+        .then(|| &text[title.len()..])
 }
 
 /// Walk the commits as git does, parents first, and say, for each session in
@@ -2669,6 +2690,9 @@ mod tests {
             if let Some(shas) = case["reverts"].as_array() {
                 let expected: Vec<&str> = shas.iter().map(|s| s.as_str().unwrap()).collect();
                 assert_eq!(reverts(message), expected, "{message}");
+            }
+            if let Some(depth) = case["depth"].as_u64() {
+                assert_eq!(u64::from(subject_depth(message)), depth, "{message}");
             }
         }
     }
@@ -5241,6 +5265,49 @@ fi; done"#,
         assert_eq!(
             (week.revert_commits, week.relanded),
             (2, false),
+            "{:?}",
+            world.kinds("s1")
+        );
+    }
+
+    #[test]
+    fn a_conventional_revert_of_its_commit_by_subject_is_a_revert() {
+        // A revert written by hand, no "This reverts" line: git's title after
+        // the type, or the word again.
+        for subject in [
+            "revert: Revert \"Add compute\"",
+            "revert: revert compute, it double counts",
+        ] {
+            let (mut world, _) = written();
+            world.commit("f.js", "// base line one\n", subject, T0 + 2 * DAY);
+            world.measure(T0 + 8 * DAY);
+            assert_eq!(
+                week_of(&world, "s1"),
+                Some((0, 0.0, 0, 1)),
+                "{subject}: {:?}",
+                world.kinds("s1")
+            );
+        }
+    }
+
+    #[test]
+    fn a_git_revert_of_a_commit_titled_revert_to_is_a_revert() {
+        // The session's own commit begins with the word ("Revert to polling"):
+        // `git revert` of it takes all its lines out.
+        let mut world = World::new();
+        world.commit("f.js", "// base line one\n", "init", T0);
+        let landing = world.commit(
+            "f.js",
+            &format!("// base line one\n{}\n", AGENT.join("\n")),
+            "Revert to polling for compute",
+            T0 + HOUR,
+        );
+        world.session("s1", T0, T0 + 2 * HOUR, &[("f.js", AGENT)]);
+        world.git(&["revert", "--no-edit", &landing], T0 + 2 * DAY);
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(
+            week_of(&world, "s1").map(|w| w.3),
+            Some(1),
             "{:?}",
             world.kinds("s1")
         );

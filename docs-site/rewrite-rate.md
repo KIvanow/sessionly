@@ -137,7 +137,9 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   A revert, or a revert of one, is not a session's own work, so it is never taken for the
   commit a later revert undoes, nor credited to an agent; and a revert of a revert (git
   before 2.43 and GitHub name it `Revert "Revert "…""`) is no revert of the session, while a
-  revert of that (`Revert "Reapply "…""`) is one again, and so on down the chain.
+  revert of that (`Revert "Reapply "…""`) is one again, and so on down the chain. Only the
+  titles git and GitHub give say where a subject is in that chain: `revert: Revert "…"` is one
+  revert, and a subject that only begins with the word (`Revert to polling`) is none.
 - **Worktrees of one repository are read as one**, with what each that a session with an age
   still to count wrote in has checked out. One git can no longer read (broken since, or not
   yours), or does not say within 2 seconds what it has checked out, is read without, unless the
