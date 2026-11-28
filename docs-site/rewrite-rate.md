@@ -151,12 +151,14 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   while it was there (a later sync that could not ask, the repository away, takes nothing of
   that back); a directory that is another repository now is read as that one. A worktree Claude
   Code made in the repository (`<repo>/.claude/worktrees/<name>`) is read in `<repo>` once
-  removed, seen or not. Any other file in a directory that is gone now (one the repository
-  removed since, another worktree removed before any sync saw it, a repository away) is left
-  out, and its lines are not counted as tracked; a directory still there that is no repository
-  now is read as a directory of the one above it. Which repository a worktree is of is asked of
-  git for at most 2 seconds (a tenth of a sync's time, if less); one git does not answer for is
-  asked again an hour later.
+  removed, seen or not. Any other file in a directory that is gone now is read in the
+  repository above it when a commit since the session began has its path (the repository
+  removed the directory or moved it), and is left out, its lines not counted as tracked, when
+  none has (another repository or worktree removed before any sync saw it, a repository away,
+  or git did not say within 2 seconds); a directory still there that is no repository now is
+  read as a directory of the one above it. Which repository a worktree is of is asked of git for
+  at most 2 seconds (a tenth of a sync's time, if less); a session in one git does not answer
+  for is tried again as a repository that can't be read is.
 - **A repository whose history can't be read** (gone, unmounted, too slow, or one git will not
   read, such as another user's) is tried again an hour later, then after longer and longer, up
   to about five days; no count is kept from part of a session's history, for a session in two
@@ -183,8 +185,9 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   else: not other branches, not merge commits (a reverted merge counts when the revert takes out
   most of the lines), no commit more than 31 days after the session ended, and none dated more
   than a day before it began. One dated so after the session's commit (rebased with its author's
-  date) is the only one left out with git 2.41 or later; older git leaves out every commit
-  before it too, the session's own with them.
+  date) is left out with git 2.41 or later, with what it follows from when it is dated more
+  than 30 days before; older git leaves out every commit before it too, the session's own with
+  them.
 - **Not counted:** a fix that only adds lines next to the agent's (a missing check), and a fix
   whose subject has none of the words. A repository whose subjects describe what changed ("Stop
   the sweep from deleting history") has fixes that count as rework.

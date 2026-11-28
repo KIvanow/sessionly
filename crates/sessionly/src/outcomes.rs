@@ -750,6 +750,55 @@ fn claude_worktree(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     })
 }
 
+/// Of the paths `gone` in each worktree, those a commit since the earliest
+/// time given (less `SLACK`) has, on any ref. Git is asked once a worktree,
+/// for `asking` at most and not past `deadline`: what it does not say in
+/// time is left out.
+fn committed(
+    gone: &BTreeMap<PathBuf, (i64, BTreeSet<PathBuf>)>,
+    asking: Duration,
+    deadline: Instant,
+) -> HashSet<PathBuf> {
+    let mut found = HashSet::new();
+    for (root, (since, paths)) in gone {
+        let until = deadline.min(Instant::now() + asking);
+        let mut command = history(root, false);
+        command.args([
+            "log",
+            "--all",
+            "--stdin",
+            "--no-renames",
+            "--name-only",
+            "--format=",
+            &format!("--max-age={}", (since - SLACK).max(0)),
+        ]);
+        let input: String = std::iter::once("--".to_string())
+            .chain(
+                paths
+                    .iter()
+                    .filter_map(|path| path.strip_prefix(root).ok())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .filter(|path| !path.contains('\n') && !path.ends_with('\r')),
+            )
+            .map(|line| format!("{line}\n"))
+            .collect();
+        // What it printed before it was stopped is so too.
+        let Ok((out, _)) =
+            crate::git::bounded(command, Some(input.as_bytes()), MAX_LOG_BYTES, until)
+        else {
+            continue;
+        };
+        found.extend(
+            String::from_utf8_lossy(&out)
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| root.join(line))
+                .filter(|path| paths.contains(path)),
+        );
+    }
+    found
+}
+
 /// `path` with `.` and `..` taken out as they are written, links not
 /// followed: a path into a repository and out of it again
 /// (`repo/../notes.md`) is not in it.
@@ -897,16 +946,54 @@ pub fn measure(
             (gone && common.is_dir()).then_some((root, common))
         })
         .collect();
+    // Files in a directory gone now (removed by the repository, moved):
+    // read in the worktree above it when a commit since the session began
+    // has the path, and left out when none has (one in a repository of its
+    // own then, or ignored).
+    let mut gone_files: BTreeMap<PathBuf, (i64, BTreeSet<PathBuf>)> = BTreeMap::new();
+    for target in targets.iter().filter(|t| counting(t)) {
+        for (path, _) in &target.files {
+            let path = lexical(&match &target.base {
+                Some(base) => Path::new(base).join(path),
+                None => PathBuf::from(path),
+            });
+            let Some(dir) = path.parent() else { continue };
+            if path.ancestors().any(|at| removed.contains_key(at))
+                || root_of
+                    .entry(dir.to_path_buf())
+                    .or_insert_with(|| read_in(dir))
+                    .is_some()
+            {
+                continue;
+            }
+            let Some(root) = crate::git::repo_root(dir) else {
+                continue;
+            };
+            let (since, paths) = gone_files
+                .entry(root)
+                .or_insert((target.started_at.timestamp(), BTreeSet::new()));
+            *since = (*since).min(target.started_at.timestamp());
+            paths.insert(path);
+        }
+    }
+    let committed = committed(
+        &gone_files,
+        worktrees.asking,
+        (Instant::now() + worktrees.asking * 2).min(deadline),
+    );
+    // Whether git is asked of a worktree for all of `ASKING`: one not
+    // answered in it is slow, and not for a short sync's want of time.
+    let patient = worktrees.asking == ASKING;
     // Per repository: the worktrees, and the lines by file.
     type Placed = (BTreeSet<PathBuf>, BTreeMap<String, Vec<u64>>);
     // Where a session's files are read, by repository (of those in `only`,
-    // when given); none when one could not be found in this sync's time,
-    // for a session to read. One only read beside them (`only`) is placed
+    // when given); for a session to read, what was asked when one could not
+    // be found: in this sync's time, or git's own. One only read beside them (`only`) is placed
     // without that file: what it has in the others says whose their lines
     // are, and which agent made a commit.
     let mut place = |target: &OutcomeTarget,
                      only: Option<&HashSet<PathBuf>>|
-     -> Option<BTreeMap<PathBuf, Placed>> {
+     -> Result<BTreeMap<PathBuf, Placed>, Asked> {
         let mut by_repo: BTreeMap<PathBuf, Placed> = BTreeMap::new();
         for (path, hashes) in &target.files {
             let path = lexical(&match &target.base {
@@ -922,7 +1009,11 @@ pub fn measure(
                     let found = root_of
                         .entry(dir.to_path_buf())
                         .or_insert_with(|| read_in(dir))
-                        .clone();
+                        .clone()
+                        .or_else(|| {
+                            let root = crate::git::repo_root(dir)?;
+                            committed.contains(&path).then(|| (root.clone(), root))
+                        });
                     let Some((top, root)) = found else { continue };
                     let asked = repo_of.entry(root.clone()).or_insert_with(|| {
                         // Git is not asked of one in a repository nothing is read in.
@@ -938,7 +1029,7 @@ pub fn measure(
                         if only.is_some() {
                             continue;
                         }
-                        return None;
+                        return Err(asked.clone());
                     };
                     (top, root, repo.clone())
                 }
@@ -963,7 +1054,7 @@ pub fn measure(
                 most_of(kept, hashes)
             };
         }
-        Some(by_repo)
+        Ok(by_repo)
     };
     // The sessions to read first, then the others in the repositories they
     // are in: no repository is made up for nothing to read in it.
@@ -989,14 +1080,19 @@ pub fn measure(
                 break;
             }
             match place(target, (!scanning).then_some(&due_repos)) {
-                Some(by_repo) if scanning => {
+                Ok(by_repo) if scanning => {
                     due_repos.extend(by_repo.keys().cloned());
                     placed.insert(index, by_repo);
                 }
-                Some(by_repo) => {
+                Ok(by_repo) => {
                     placed.insert(index, by_repo);
                 }
-                None => {
+                // Git did not say in its own time: tried again later, and
+                // later, as a reading that failed is.
+                Err(Asked::NotNow) if patient => {
+                    unavailable.insert(index);
+                }
+                Err(_) => {
                     deferred.insert(index);
                 }
             }
@@ -1546,12 +1642,16 @@ fn read_commits(
 ) -> Result<Vec<Commit>, Stop> {
     // From `since`: a commit dated before it (one rebased with its author's
     // date) is left out, and not, as `--max-age` leaves them out, the
-    // commits it follows from too, the session's own with them.
-    let since = if crate::git::filters_since() {
+    // commits it follows from too, the session's own with them. The walk
+    // still stops at commits dated `LONGEST` before it, or git would walk
+    // the whole history to filter it.
+    let filters = crate::git::filters_since();
+    let since = if filters {
         format!("--since-as-filter=@{} +0000", wanted.since)
     } else {
         format!("--max-age={}", wanted.since)
     };
+    let walked = format!("--max-age={}", (wanted.since - LONGEST).max(0));
     let min_age = format!("--min-age={}", wanted.until);
     let mut args = vec![
         "rev-list",
@@ -1564,6 +1664,9 @@ fn read_commits(
         since.as_str(),
         min_age.as_str(),
     ];
+    if filters {
+        args.push(walked.as_str());
+    }
     args.extend(wanted.refs.iter().map(String::as_str));
     // The paths as it reads them, a line each after `--`: more than a
     // command line takes, for a session of many files. One with a line's
@@ -2429,6 +2532,17 @@ fn walk(
         // one, for a session of fewer.
         let mut adds: BTreeMap<usize, (f64, f64, HashSet<u64>)> = BTreeMap::new();
         let late = |i: usize| commit.at > targets[sessions[i].target].ended_at.timestamp() + SLACK;
+        // Whether it takes out lines the session holds: a fix, then, and not
+        // a late landing of its own.
+        let takes = |i: usize| {
+            theirs.get(&i).is_some_and(|held| {
+                commit.files.iter().any(|(path, diff)| {
+                    diff.removed
+                        .keys()
+                        .any(|hash| held.copies(path, *hash) > 0.0)
+                })
+            })
+        };
         for (path, diff) in &commit.files {
             if diff.added.is_empty() {
                 continue;
@@ -2452,11 +2566,8 @@ fn walk(
                             let most = written[i].get(hash).copied().unwrap_or(0.0);
                             let free =
                                 (room - held.copies(path, *hash)).min(most - held.line(*hash));
-                            if late(i) {
-                                if free > 0.0 && uncommon[i].contains(hash) {
-                                    entry.2.insert(*hash);
-                                }
-                                continue;
+                            if late(i) && free > 0.0 && uncommon[i].contains(hash) {
+                                entry.2.insert(*hash);
                             }
                             free
                         }
@@ -2480,7 +2591,9 @@ fn walk(
                 if !new.is_empty() {
                     fresh.push((i, share, new));
                 }
-            } else if mine >= LANDING_LINES || share || new.len() as f64 >= LANDING_LINES {
+            } else if (!(late(i) && takes(i)) && (mine >= LANDING_LINES || share))
+                || new.len() as f64 >= LANDING_LINES
+            {
                 own[i].insert(sha);
                 if !puts_back(commit) {
                     landed[i].insert(sha);
@@ -4315,6 +4428,32 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
     }
 
     #[test]
+    fn a_small_commit_of_its_own_made_days_later_is_its_own() {
+        // Most of it landed in its time; the last two lines days later.
+        let mut world = World::new();
+        world.commit("f.js", "// base line one\n", "init", T0);
+        world.commit(
+            "f.js",
+            &format!("// base line one\n{}\n", AGENT.join("\n")),
+            "Add compute",
+            T0 + HOUR,
+        );
+        let rest: &[&str] = &["let a = alpha(1);", "let b = beta(2);"];
+        let all: Vec<&str> = AGENT.iter().chain(rest).copied().collect();
+        world.session("s1", T0, T0 + 2 * HOUR, &[("f.js", &all)]);
+        let landing = world.commit(
+            "f.js",
+            &format!("// base line one\n{}\n", all.join("\n")),
+            "Add alpha and beta",
+            T0 + 3 * DAY,
+        );
+        world.git(&["revert", "--no-edit", &landing], T0 + 5 * DAY);
+        world.measure(T0 + 8 * DAY);
+        let week = world.at("s1", "7d").expect("never counted");
+        assert_eq!((week.revert_commits, week.rework_commits), (1, 0));
+    }
+
+    #[test]
     fn a_revert_of_a_cherry_pick_of_its_commit_is_a_revert() {
         let mut world = World::new();
         world.commit("f.js", "// base line one\n", "init", T0);
@@ -4764,9 +4903,8 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
     }
 
     #[test]
-    fn a_file_in_a_directory_that_is_gone_now_is_left_out() {
-        // The repository removed `lib/` since: what is there now says nothing
-        // of what was written in it.
+    fn a_file_in_a_directory_the_repository_removed_since_is_read_there() {
+        // The repository removed `lib/` since, and the session's lines in it.
         let mut world = World::new();
         world.commit("f.js", "// base line one\n", "init", T0);
         world.commit(
@@ -4799,8 +4937,42 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
         let week = world.at("s1", "7d").expect("never counted");
         assert_eq!(
             (week.lines_tracked, week.fix_commits, week.rework_commits),
-            (4, 1, 0)
+            (7, 1, 1)
         );
+    }
+
+    #[test]
+    fn a_file_in_a_directory_gone_now_that_no_commit_had_is_left_out() {
+        // `web/` was a repository of its own, ignored by this one, and is
+        // removed since: this one's history has nothing of it.
+        let mut world = World::new();
+        world.commit(".gitignore", "web/\n", "ignore", T0);
+        world.commit("f.js", "// base line one\n", "init", T0);
+        world.commit(
+            "f.js",
+            &format!("// base line one\n{}\n", AGENT.join("\n")),
+            "Add compute",
+            T0 + HOUR,
+        );
+        let web = world.root().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        let lib: &[&str] = &[
+            "let one = helper(1);",
+            "let two = helper(2);",
+            "let three = helper(3);",
+        ];
+        std::fs::write(web.join("g.js"), format!("{}\n", lib.join("\n"))).unwrap();
+        world.session(
+            "s1",
+            T0,
+            T0 + 2 * HOUR,
+            &[("f.js", AGENT), ("web/g.js", lib)],
+        );
+        std::fs::remove_dir_all(&web).unwrap();
+        fix_two(&world, T0 + 3 * DAY);
+        world.measure(T0 + 8 * DAY);
+        let week = world.at("s1", "7d").expect("never counted");
+        assert_eq!((week.lines_tracked, week.fix_commits), (4, 1));
     }
 
     #[test]
@@ -4868,7 +5040,7 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
             &["commit", "--quiet", "-m", "Drop lib"],
             T0 + 7 * DAY + HOUR,
         );
-        let _git = FakeGit::new(r#"for a in "$@"; do [ "$a" = lib ] && sleep 1; done"#);
+        let _git = FakeGit::new(r#"for a in "$@"; do [ "$a" = --name-only ] && sleep 5; done"#);
         world.measure_for(T0 + 8 * DAY, WAITED_FOR);
         assert_eq!(world.at("s1", "7d").expect("never counted").fix_commits, 1);
     }
@@ -5529,6 +5701,17 @@ fi; done"#,
         // Neither read nor failed: read on another sync.
         let t = world.target("s1");
         assert_eq!((t.tried_at, t.failures), (None, 0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_worktree_git_is_slow_to_name_the_repository_of_is_tried_later_and_later() {
+        let (mut world, _) = written();
+        let _git =
+            FakeGit::new(r#"for a in "$@"; do [ "$a" = --git-common-dir ] && exec sleep 30; done"#);
+        world.measure(T0 + 8 * DAY);
+        let t = world.target("s1");
+        assert_eq!((t.tried_at.is_some(), t.failures), (true, 1));
     }
 
     #[cfg(unix)]
