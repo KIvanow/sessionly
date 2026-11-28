@@ -268,14 +268,14 @@
             pull request was read from and up to; and for each commit that changed those files its
             SHA, when it landed, the numbers of the pull requests it belongs to, of those it says
             it reverts and of the due ones it is a later commit of, the SHAs it says it reverts,
-            hashes of the lines it removed and added in those files, the paths of the files it
-            moved lines of theirs to, and what it is as a classification (a fix word in its
+            hashes of the lines it removed and added in those files, how many lines it removed in
+            all (a count, in every file), the paths of the files it moved lines of theirs to, and what it is as a classification (a fix word in its
             subject, a fix branch, a linked issue labelled a bug, a revert). It also names the pull requests merged into a branch that is gone.
             Commit messages, the title, branch name and description of the pull request a commit
             came with, and the labels of the issues it closes are read on the runner and are not
             sent. Of the hashes, the server keeps only those of the pull request's own lines; the
-            rest are dropped at once. It keeps the SHAs, and the paths lines were moved to, which
-            it names to the next run to read.
+            rest are dropped at once. It keeps the SHAs, each commit's count of removed lines, and
+            the paths lines were moved to, which it names to the next run to read.
           </p>
           <p>
             <strong>What is never uploaded:</strong> full prompts, the agent's replies, file

@@ -688,12 +688,13 @@
               was read from and up to; each commit's SHA, when it landed, the numbers of the pull
               requests it belongs to, of those it says it reverts and of the due ones it is a
               later commit of, the SHAs it says it reverts, hashes of the lines it removed and
-              added in those files, the paths of the files it moved lines of theirs to, and its
+              added in those files, the number of lines it removed in all (a count, in every
+              file), the paths of the files it moved lines of theirs to, and its
               classification (fix, revert or neither, and why, as identifiers); and the numbers of
               pull requests merged into a branch that no longer exists. Commit messages, pull request titles, branch names and descriptions, and
               issue labels are read in the Customer's GitHub runner and not received. Of the
-              hashes, only those of the pull request's own lines are kept; the SHAs and the paths
-              lines were moved to are kept as well.
+              hashes, only those of the pull request's own lines are kept; the SHAs, each commit's
+              number of lines removed in all, and the paths lines were moved to are kept as well.
             </li>
             <li>
               <strong>Tokens:</strong> the email address (stored lower-case), optional name and
