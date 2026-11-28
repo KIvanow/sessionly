@@ -316,6 +316,8 @@ export async function run(env, { api, deliver = send, server, log = console.log,
   if (on(env.SESSIONLY_CI ?? "true")) {
     try {
       ci = await reportCi(env, { api, server, repo, host, log }, report, answer);
+      // Reads that failed were said as they did; they fail the run below only when asked to.
+      ciProblem = ci.failed ?? undefined;
     } catch (err) {
       ciProblem = err;
       log(`::warning title=Sessionly::What CI said of this pull request could not be sent (${String(err.message ?? err).replace(/\r?\n/g, " ")}). It is read again at the next scheduled run.`);

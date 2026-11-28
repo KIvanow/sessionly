@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ciOptions, ciReading, naming, reduceCi, runCi, runWorkflowRun, sayCi, workflowFile, workflowPath } from "../src/ci.mjs";
+import { ciOptions, ciReading, MOST_CHECKS, naming, reduceCi, runCi, runWorkflowRun, sayCi, workflowFile, workflowPath } from "../src/ci.mjs";
 import { run } from "../src/main.mjs";
 
 const sha = (n) => n.toString(16).padStart(40, "0");
@@ -91,13 +91,15 @@ test("Sessionly's check runs are left out by workflow file, and this job's by id
   assert.deepEqual(reduceCi(earlier, [], { own: own(), excluded: new Set([10, 11]) }), { state: "failure", failed: 1, total: 1, cancelled: 0 });
   // a repository with no CI of its own: nothing, not green
   assert.deepEqual(reduceCi(earlier.slice(0, 2), [], { own: own(), excluded: new Set([10, 11]) }), { state: "none", failed: 0, total: 0, cancelled: 0 });
-  // a same-named job of another file counts: nothing goes by name
+  // a same-named job of another file counts: nothing goes by name, but in a suite of a file CI jobs share with this job
   const mixed = [
     check("report", "success", { id: 60, details_url: "https://github.com/acme/web/actions/runs/106/job/60", check_suite: { id: 20 } }),
     check("tests", "failure", { id: 61, details_url: "https://github.com/acme/web/actions/runs/106/job/61", check_suite: { id: 20 } }),
     check("report", "success", { id: 62, details_url: "https://github.com/acme/web/actions/runs/107/job/62", check_suite: { id: 21 } }),
   ];
   assert.deepEqual(reduceCi(mixed, [], { own: own() }), { state: "failure", failed: 1, total: 3, cancelled: 0 });
+  assert.deepEqual(reduceCi(mixed, [], { own: own({ name: "report" }), nameOnly: new Set([20]) }), { state: "failure", failed: 1, total: 2, cancelled: 0 });
+  assert.deepEqual(reduceCi(mixed, [], { own: own({ name: null }), nameOnly: new Set([20]) }), { state: "failure", failed: 1, total: 3, cancelled: 0 });
   const ignore = naming("*deploy-*, Codecov");
   assert.deepEqual(reduceCi([check("deploy-staging", "failure"), check("codecov", "failure"), check("tests", "success")], [status("ci/deploy-prod", "error")], { ignore }), { state: "success", failed: 0, total: 1, cancelled: 0 });
   const only = naming("tests\nlint");
@@ -115,9 +117,14 @@ test("Sessionly's check runs are left out by workflow file, and this job's by id
   // the files that are Sessionly's: this run's own, or exactly those named, however they are written
   const env = { SESSIONLY_CI_IGNORE: "a*", SESSIONLY_CI_CHECK_NAMES: "true", SESSIONLY_CHECK_RUN_ID: " 5 ", GITHUB_RUN_ID: "9", GITHUB_REPOSITORY: "acme/web", GITHUB_WORKFLOW_REF: "acme/web/.github/workflows/sessionly.yml@refs/heads/main" };
   const options = ciOptions(env);
-  assert.deepEqual([options.ignore("abc"), options.ignore("b"), options.only, options.own, [...options.files], options.names], [
-    true, false, null, { checkRunId: "5", runId: "9" }, [".github/workflows/sessionly.yml"], true,
+  assert.deepEqual([options.ignore("abc"), options.ignore("b"), options.only, options.own, [...options.files], options.guard, options.names], [
+    true, false, null, { checkRunId: "5", runId: "9", name: null }, [".github/workflows/sessionly.yml"], false, true,
   ]);
+  // a CI job sharing this run's file is looked for on a pull request event, where this run's check runs are on the head
+  assert.equal(ciOptions({ ...env, GITHUB_EVENT_NAME: "pull_request" }).guard, true);
+  assert.equal(ciOptions({ ...env, GITHUB_EVENT_NAME: "pull_request_review" }).guard, true);
+  assert.equal(ciOptions({ ...env, GITHUB_EVENT_NAME: "pull_request", SESSIONLY_WORKFLOWS: "none" }).guard, false);
+  assert.equal(ciOptions({ ...env, GITHUB_EVENT_NAME: "schedule" }).guard, false);
   assert.deepEqual([...ciOptions({ ...env, SESSIONLY_WORKFLOWS: "nightly.yml, ./.github/workflows/Report.yaml\n/.github/workflows/sessionly.yml" }).files], [".github/workflows/nightly.yml", ".github/workflows/report.yaml", ".github/workflows/sessionly.yml"]);
   assert.deepEqual([...ciOptions({ ...env, SESSIONLY_WORKFLOWS: " none " }).files], []);
   assert.deepEqual([...ciOptions({ ...env, SESSIONLY_WORKFLOWS: " , " }).files], []);
@@ -304,6 +311,62 @@ test("Sessionly's workflow runs are left out by file on every commit, a merge co
   assert.equal(refused.calls.filter((c) => c.includes("/actions/runs")).length, 1);
 });
 
+test("on a pull request event, a CI job sharing this run's file leaves that file read but for the check runs named as this job, said once; on a schedule the file goes whole", async () => {
+  // this run (500, suite 50) is from ci.yml beside tests; an earlier run of the file (300) on the head too, and on an older head alone
+  const shared = (run, suiteId) => [
+    check("report", "success", { id: run === 500 ? 77 : run, details_url: `https://github.com/acme/web/actions/runs/${run}/job/${run}1`, check_suite: { id: suiteId } }),
+    check("tests", "failure", { id: run + 1, details_url: `https://github.com/acme/web/actions/runs/${run}/job/${run}2`, check_suite: { id: suiteId } }),
+    check("docs", "skipped", { id: run + 2, details_url: `https://github.com/acme/web/actions/runs/${run}/job/${run}3`, check_suite: { id: suiteId } }),
+  ];
+  const commits = {
+    [sha(1)]: { runs: [...shared(500, 50), ...shared(300, 30)], workflows: [workflow(50, CI, { id: 500 }), workflow(30, CI, { id: 300 })] },
+    [sha(2)]: { runs: shared(301, 31), workflows: [workflow(31, CI, { id: 301 })] },
+  };
+  const env = { ...OPTIONS, GITHUB_WORKFLOW_REF: `acme/web/${CI}@refs/heads/main`, GITHUB_EVENT_NAME: "pull_request" };
+  const logged = [];
+  const reading = ciReading(fakeChecks(commits), "acme/web", (line) => logged.push(line), ciOptions(env));
+  // the head first: tests of both runs count, the reports go; then the older head the same way, the file now known to be shared
+  assert.deepEqual(await reading.of(sha(1)), { sha: sha(1), state: "failure", failed: 2, total: 2, cancelled: 0 });
+  assert.deepEqual(await reading.of(sha(2)), { sha: sha(2), state: "failure", failed: 1, total: 1, cancelled: 0 });
+  assert.equal(logged.length, 1);
+  assert.match(logged[0], /shares its workflow file with CI jobs.*sessionly-workflows/);
+  // only this run's jobs say so: a run whose other jobs were all skipped is no CI
+  const alone = { [sha(1)]: { runs: [shared(500, 50)[0], shared(500, 50)[2], ...shared(300, 30)], workflows: commits[sha(1)].workflows } };
+  const quietly = [];
+  assert.deepEqual(await ciReading(fakeChecks(alone), "acme/web", (line) => quietly.push(line), ciOptions(env)).of(sha(1)), { sha: sha(1), state: "none", failed: 0, total: 0, cancelled: 0 });
+  assert.deepEqual(quietly, []);
+  // on a schedule this run's check runs are elsewhere: the fixed rule, the file whole
+  assert.deepEqual(await ciReading(fakeChecks(commits), "acme/web", quiet, ciOptions({ ...env, GITHUB_EVENT_NAME: "schedule" })).of(sha(1)), { sha: sha(1), state: "none", failed: 0, total: 0, cancelled: 0 });
+  // and with sessionly-workflows set, what it says
+  assert.deepEqual(await ciReading(fakeChecks(commits), "acme/web", quiet, ciOptions({ ...env, SESSIONLY_WORKFLOWS: "none" })).of(sha(1)), { sha: sha(1), state: "failure", failed: 2, total: 3, cancelled: 0 });
+});
+
+test("a commit with more checks than are read is not known, said once, and a read that failed for another reason is kept for a run told to fail", async () => {
+  const many = fakeChecks({ [sha(1)]: { runs: Array.from({ length: MOST_CHECKS + 1 }, (_, i) => check(`c${i}`, "success")) }, [sha(2)]: { workflows: Array.from({ length: MOST_CHECKS + 1 }, (_, i) => workflow(i + 1, CI)) } });
+  const said = [];
+  const reading = ciReading(many, "acme/web", (line) => said.push(line));
+  assert.equal(await reading.of(sha(1)), null);
+  assert.equal(await reading.of(sha(2)), null);
+  assert.equal(said.length, 2);
+  assert.match(said[0], /more than 1000 check runs on the commit: more than are read/);
+  assert.match(said[1], /workflow runs/);
+  assert.deepEqual(reading.state.failed, []);
+  // GitHub answering 500 is said, and kept as a failure; the next commit is still read
+  const broken = fakeChecks({ [sha(1)]: {}, [sha(2)]: {} }, { fail: { [sha(1)]: 500 } });
+  const logged = [];
+  const failing = ciReading(broken, "acme/web", (line) => logged.push(line));
+  assert.equal(await failing.of(sha(1)), null);
+  assert.equal((await failing.of(sha(2))).state, "none");
+  assert.equal(failing.state.failed.length, 1);
+  assert.match(logged[0], /could not be read \(GitHub answered 500/);
+  // on a schedule that is the run's failure only when asked
+  const server = async (method, path) => (path.startsWith("/prs/ci/due") ? { heads: [{ number: 1, sha: sha(1) }, { number: 2, sha: sha(2) }], merges: [] } : path.startsWith("/prs/due") ? { due: [] } : { heads: 1, merges: 0 });
+  const env = environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_OUTCOMES: "false" });
+  writeFileSync(env.GITHUB_EVENT_PATH, JSON.stringify({ schedule: "17 5 * * *" }));
+  assert.deepEqual((await run(env, { api: fakeChecks({ [sha(1)]: {}, [sha(2)]: {} }, { fail: { [sha(1)]: 500 } }), server, log: quiet })).ci.stored, { heads: 1, merges: 0 });
+  await assert.rejects(run({ ...env, SESSIONLY_FAIL_ON_ERROR: "true" }, { api: fakeChecks({ [sha(1)]: {}, [sha(2)]: {} }, { fail: { [sha(1)]: 500 } }), server, log: quiet }), /CI was not read: the CI of 1 commit could not be read: GitHub answered 500/);
+});
+
 function environment(extra = {}) {
   const dir = mkdtempSync(join(tmpdir(), "sessionly-ci-"));
   writeFileSync(join(dir, "event.json"), "{}");
@@ -389,6 +452,12 @@ test("after a pull request is reported, the CI of its head and of the heads the 
   assert.equal((await run(env, { api: fakePull(PULL, { [sha(1)]: {} }), deliver, server: down, log: (line) => warned.push(line) })).ci, null);
   assert.ok(warned.some((line) => /::warning title=Sessionly::What CI said of this pull request could not be sent/.test(line)));
   await assert.rejects(run({ ...env, SESSIONLY_FAIL_ON_ERROR: "true" }, { api: fakePull(PULL, { [sha(1)]: {} }), deliver, server: down, log: quiet }), /answered 503/);
+  // and so is a head whose CI GitHub would not answer for (500): a warning, and the run's failure only when asked to, after the report
+  const broken = () => fakePull(PULL, { [sha(1)]: {} }, { fail: { [sha(1)]: 500 } });
+  const partly = await run(env, { api: broken(), deliver, server, log: quiet });
+  assert.match(partly.ci.failed.message, /GitHub answered 500/);
+  assert.deepEqual(partly.ci.heads.map((h) => h.sha), [sha(3)]);
+  await assert.rejects(run({ ...env, SESSIONLY_FAIL_ON_ERROR: "true" }, { api: broken(), deliver, server, log: quiet }), /the CI of 1 commit could not be read: GitHub answered 500/);
 });
 
 test("on a schedule, the heads still pending and the merge commits not known yet are read and sent, apart from counting and later commits", async () => {
