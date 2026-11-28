@@ -286,8 +286,9 @@
               <strong>Roles.</strong> A <code>member</code> token uploads sessions and reads only
               the sessions filed under its owner. An <code>admin</code> token reads everyone's and
               manages tokens. A <code>ci</code> token, for the GitHub Action, can report pull
-              requests, ask which merged ones are due and send their counts and later commits, and
-              check that it is accepted; every other request is refused. An
+              requests, ask which merged ones are due and send their counts, later commits and
+              what CI made of their commits, and check that it is accepted; every other request is
+              refused. An
               <code>env</code> token, for a cloud environment, can upload sessions and check
               that it is accepted; every other request is refused.
             </li>
@@ -415,14 +416,24 @@
           <ul>
             <li>
               The Action is plain JavaScript with no dependencies. Reporting a pull request needs
-              <code>pull-requests: read</code> (and <code>write</code> if you ask it to comment).
-              Its scheduled run, which counts merged pull requests again and reads the later
-              commits on their branch with git, needs <code>contents: read</code>,
-              <code>pull-requests: read</code> and, for the labels of linked issues,
-              <code>issues: read</code>. Commit messages and pull request text are read in the
-              runner and not sent: only what they are read as (ids such as
+              <code>pull-requests: read</code> (and <code>write</code> if you ask it to comment),
+              and <code>checks: read</code> and <code>statuses: read</code> to say what CI made of
+              its commits, with <code>actions: read</code> to tell which workflow file each check
+              is from, so that Sessionly's own runs are left out, and which runs the push of a
+              merge commit started (without the first two it warns and says nothing of CI; without
+              the third it warns, leaves out only its own check run, and says nothing of merge
+              commits; <code>ci: false</code> reads none). A job on <code>workflow_run</code> of
+              your CI needs the same three and
+              <code>pull-requests: read</code>. Its scheduled run, which counts merged pull
+              requests again, reads the later commits on their branch with git and reads the CI
+              still pending, needs <code>contents: read</code>, <code>pull-requests: read</code>,
+              <code>checks: read</code>, <code>statuses: read</code>, <code>actions: read</code>
+              and, for the labels of linked issues, <code>issues: read</code>. Commit messages and pull request text are read in
+              the runner and not sent: only what they are read as (ids such as
               <code>fix_message</code>), the commit SHAs a revert's message names, and the numbers
-              of the pull requests a description says it reverts.
+              of the pull requests a description says it reverts. Of CI, a state and counts; the
+              names of failed checks only with <code>ci-check-names: true</code>, which is off
+              unless you set it.
             </li>
             <li>
               It authenticates with a <code>ci</code> token kept as a repository secret. If that

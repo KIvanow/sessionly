@@ -215,6 +215,8 @@ const ATTRIBUTION = {
     { tool: "cursor", model: null, lines: 100, surviving: 100 },
   ],
 };
+/** What the server answers a report with: the attribution, and no head still pending. */
+const ANSWER = { stored: true, attribution: ATTRIBUTION, ci_pending: [] };
 
 test("reviews and comments are reported as who, when, where and a link, never as what they say", () => {
   const said = "this parser leaks SECRET_TEXT";
@@ -331,6 +333,8 @@ function environment(extra = {}) {
     GITHUB_OUTPUT: join(dir, "output"),
     GITHUB_STEP_SUMMARY: join(dir, "summary"),
     SESSIONLY_IGNORE: "pnpm-lock.yaml",
+    // CI is read in tests of its own (ci.test.mjs): not from these.
+    SESSIONLY_CI: "false",
     ...extra,
   };
 }
@@ -339,7 +343,7 @@ test("a run reads the pull request, reports it, and writes the summary and outpu
   const api = fakeGithub();
   const sent = [];
   const env = environment();
-  const deliver = async (url, token, report) => (sent.push([url, token, report]), ATTRIBUTION);
+  const deliver = async (url, token, report) => (sent.push([url, token, report]), ANSWER);
   const logged = [];
   await run(env, { api, deliver, log: (line) => logged.push(line) });
 
@@ -358,7 +362,7 @@ test("a run reads the pull request, reports it, and writes the summary and outpu
 });
 
 test("the figures are posted as one comment, kept up to date rather than repeated, unless switched off", async () => {
-  const deliver = async () => ATTRIBUTION;
+  const deliver = async () => ANSWER;
   const writes = (api) => api.calls.filter(([method]) => method !== "GET").map(([method, path]) => `${method} ${path}`);
 
   // On by default, and when said so.
@@ -416,7 +420,7 @@ test("a job that may not comment still reports, and says what to change", async 
   const sent = [];
   const logged = [];
   const env = environment();
-  const out = await run(env, { api, deliver: async (...args) => (sent.push(args), ATTRIBUTION), log: (line) => logged.push(line) });
+  const out = await run(env, { api, deliver: async (...args) => (sent.push(args), ANSWER), log: (line) => logged.push(line) });
   // The report went, the outputs and the summary are written, and the run does not fail.
   assert.equal(sent.length, 1);
   assert.equal(out.attribution, ATTRIBUTION);
@@ -433,7 +437,8 @@ test("backfill first reports a pull request as it was when opened", async () => 
   const sha = (minute, id) => ({ sha: id, ...commit(minute) });
   const pull = { ...PULL, state: "closed", merged: true, merged_at: at(50), closed_at: at(50), base: { ...PULL.base, sha: "base0" } };
   // opened at minute 0 with one commit; two more pushed during review
-  const commits = [sha(0, "c1"), sha(20, "c2"), sha(30, "c3")];
+  const c1 = "1".repeat(40);
+  const commits = [sha(0, c1), sha(20, "c2"), sha(30, "c3")];
   const early = [{ filename: "src/parser.rs", status: "added", additions: 1, patch: "@@ -0,0 +1 @@\n+early();" }];
   const calls = [];
   const api = {
@@ -448,14 +453,16 @@ test("backfill first reports a pull request as it was when opened", async () => 
     },
   };
   const sent = [];
-  const deliver = async (url, token, report) => (sent.push(report), ATTRIBUTION);
+  const deliver = async (url, token, report) => (sent.push(report), ANSWER);
   const env = environment({ SESSIONLY_BACKFILL: "true", SESSIONLY_OTHER_NAMES: "oldco/web" });
   writeFileSync(env.GITHUB_EVENT_PATH, JSON.stringify({ action: "closed", pull_request: { number: 7 } }));
   await run(env, { api, deliver, log() {} });
 
-  assert.ok(calls.includes("/repos/acme/web/compare/base0...c1"));
+  assert.ok(calls.includes(`/repos/acme/web/compare/base0...${c1}`));
   assert.equal(sent.length, 2);
   const [opened, closed] = sent;
+  // The first is at the head it had then, not the one it has now: the server keeps the lines new at each head.
+  assert.deepEqual([opened.head_sha, closed.head_sha], [c1, PULL.head.sha]);
   assert.deepEqual(
     [opened.event, opened.state, opened.merged_at, opened.commits, opened.reviews, opened.review_rounds],
     ["opened", "open", null, 1, 0, 0],
@@ -481,18 +488,18 @@ test("backfill first reports a pull request as it was when opened", async () => 
 test("a run that is not about a pull request, or lacks an input, says so", async () => {
   const env = environment();
   writeFileSync(env.GITHUB_EVENT_PATH, "{}");
-  await assert.rejects(run(env, { api: fakeGithub(), deliver: async () => ATTRIBUTION }), /pr-number/);
+  await assert.rejects(run(env, { api: fakeGithub(), deliver: async () => ANSWER }), /pr-number/);
   // the input names one
   const named = await run({ ...env, SESSIONLY_PR_NUMBER: "7", GITHUB_EVENT_NAME: "workflow_dispatch" }, {
     api: fakeGithub(),
-    deliver: async () => ATTRIBUTION,
+    deliver: async () => ANSWER,
     log() {},
   });
   assert.equal(named.report.event, "manual");
   // names the repository used to have, on a GitHub server of one's own
   const moved = await run(
     { ...env, SESSIONLY_PR_NUMBER: "7", SESSIONLY_OTHER_NAMES: "oldco/website, ann/web-old", GITHUB_SERVER_URL: "https://git.example.com" },
-    { api: fakeGithub(), deliver: async () => ATTRIBUTION, log() {} },
+    { api: fakeGithub(), deliver: async () => ANSWER, log() {} },
   );
   assert.deepEqual(moved.report.aliases, ["git.example.com/oldco/website", "git.example.com/ann/web-old"]);
   assert.equal(moved.report.repo, "git.example.com/acme/web");
@@ -546,7 +553,7 @@ test("all of a repository's latest pull requests are reported in one run, and no
   const sent = [];
   const logged = [];
   const env = environment({ SESSIONLY_PR_NUMBER: "all", SESSIONLY_SINCE: "2026-11-05", SESSIONLY_COMMENT: "true", GITHUB_EVENT_NAME: "workflow_dispatch" });
-  const going = run(env, { api, deliver: async (url, token, report) => (sent.push(report), ATTRIBUTION), log: (line) => logged.push(line) });
+  const going = run(env, { api, deliver: async (url, token, report) => (sent.push(report), ANSWER), log: (line) => logged.push(line) });
   // one that cannot be read is said, the others are still reported, and the run says so at its end
   await assert.rejects(going, /1 of 4 pull requests could not be reported: #10/);
   assert.deepEqual(sent.map((report) => [report.number, report.event]), [[12, "manual"], [11, "manual"], [9, "manual"]]);
@@ -561,7 +568,7 @@ test("all of a repository's latest pull requests are reported in one run, and no
 
   // ninety days back when since does not say; a since that is no date is refused
   const recent = fakeRepository([{ number: 2, created_at: new Date().toISOString() }, { number: 1, created_at: "2020-01-01T00:00:00Z" }]);
-  const quiet = { deliver: async () => ATTRIBUTION, log() {} };
+  const quiet = { deliver: async () => ANSWER, log() {} };
   const out = await run(environment({ SESSIONLY_PR_NUMBER: "all" }), { api: recent, ...quiet });
   assert.deepEqual(out.reported.map(({ report }) => report.number), [2]);
   await assert.rejects(run(environment({ SESSIONLY_PR_NUMBER: "all", SESSIONLY_SINCE: "lately" }), { api: recent, ...quiet }), /since input is not a date/);
@@ -573,7 +580,7 @@ test("all of a repository's latest pull requests are reported in one run, and no
 test("no more are reported at once than GitHub allows for, and the run says how to go on", async () => {
   const many = Array.from({ length: MOST_AT_ONCE + 30 }, (_, i) => ({ number: 500 - i, created_at: "2026-11-10T10:00:00Z" }));
   const logged = [];
-  const quiet = { deliver: async () => ATTRIBUTION, log: (line) => logged.push(line) };
+  const quiet = { deliver: async () => ANSWER, log: (line) => logged.push(line) };
   const latest = await run(environment({ SESSIONLY_PR_NUMBER: "all", SESSIONLY_SINCE: "2026-01-01" }), { api: fakeRepository(many), ...quiet });
   assert.deepEqual([latest.reported.length, latest.more], [MOST_AT_ONCE, 30]);
   assert.equal(latest.reported.at(-1).report.number, 501 - MOST_AT_ONCE);
@@ -627,7 +634,7 @@ test("no more are reported at once than GitHub allows for, and the run says how 
   const wrong = async () => {
     sent += 1;
     if (sent === 1) throw Object.assign(new Error("the Sessionly server answered 422: the report does not match the schema"), { status: 422 });
-    return ATTRIBUTION;
+    return ANSWER;
   };
   await assert.rejects(run(environment({ SESSIONLY_PR_NUMBER: "60-62" }), { api: fakeRepository([]), deliver: wrong, log: quiet.log }), /1 of 3 pull requests could not be reported: #62/);
   // when GitHub allows no more requests, the ones left are not asked for
@@ -740,7 +747,7 @@ test("a scheduled run that names pull requests reports them, as it did before", 
   const sent = [];
   const reported = await run(env, {
     api: fakeGithub(),
-    deliver: async (url, token, report) => (sent.push(report.number), ATTRIBUTION),
+    deliver: async (url, token, report) => (sent.push(report.number), ANSWER),
     server: () => assert.fail("nothing is counted after merging"),
     log() {},
   });
@@ -852,7 +859,7 @@ test("over the network: pages from GitHub, and the server's answer or refusal", 
     assert.deepEqual(await ask(`${base}/`, "good", "GET", "/prs/due?repo=github.com%2Facme%2Fweb"), { due: [] });
     await assert.rejects(ask(base, "bad", "GET", "/prs/due?repo=x"), (err) => err.status === 403);
 
-    assert.deepEqual(await send(`${base}/`, "good", build()), ATTRIBUTION);
+    assert.deepEqual(await send(`${base}/`, "good", build()), { stored: true, attribution: ATTRIBUTION });
     assert.equal(JSON.parse(seen.at(-1).body).number, 7);
     await assert.rejects(send(base, "bad", build()), /answered 403: reporting pull requests needs a ci or admin token/);
   } finally {

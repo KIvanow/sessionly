@@ -1,6 +1,6 @@
 // A pull request's page: where it is, how current its figures are, and its
 // reviews and comments counted by whose they are.
-import type { LocalReviewRun, LocalReviews, OutcomeAge, OutcomeKind, PullCost, PullDetail, PullFeedback, PullMatches, PullOutcomeCommit, PullOutcomes, PullOutcomesAt, PullOutcomeWindow, PullReviewer, PullRow, PullSession, ReviewSplit } from "@sessionly/schema";
+import type { CiState, LocalReviewRun, LocalReviews, OutcomeAge, OutcomeKind, PullCi, PullCost, PullDetail, PullFeedback, PullHead, PullMatches, PullOutcomeCommit, PullOutcomes, PullOutcomesAt, PullOutcomesCi, PullOutcomeWindow, PullReviewer, PullRow, PullSession, ReviewSplit } from "@sessionly/schema";
 import { count, dateTime, usd, usdEach } from "./format.ts";
 
 /** Whether a cost is a floor: a session of it has no cost figure, or one that leaves requests out. */
@@ -610,4 +610,103 @@ export function revertedShare(at: Pick<PullOutcomesAt, "pulls_reached" | "pulls_
   if (at.pulls_reached === 0) return "–";
   if (at.pulls_reached < MIN_PULLS) return `${count(at.pulls_reverted)} (too few)`;
   return `${Math.round((at.pulls_reverted / at.pulls_reached) * 100)}% (${count(at.pulls_reverted)})`;
+}
+
+const CI_STATES: readonly CiState[] = ["pending", "success", "failure", "none", "unknown"];
+
+/** What CI said of a commit, as a server sent it: null for none, or for one that is no answer. */
+export function ciOf(value: unknown): PullCi | null {
+  if (!thing(value) || !CI_STATES.includes(value.state as CiState)) return null;
+  const maybe = (n: unknown): number | null => (typeof n === "number" && Number.isFinite(n) ? n : null);
+  const names = (Array.isArray(value.failed_checks) ? value.failed_checks : []).filter((n): n is string => typeof n === "string");
+  return {
+    state: value.state as CiState,
+    failed: maybe(value.failed),
+    total: maybe(value.total),
+    cancelled: maybe(value.cancelled),
+    checked_at: text(value.checked_at),
+    ...(names.length > 0 ? { failed_checks: names } : {}),
+  };
+}
+
+/** A pull request's heads as a server sent them, those that are ones; and undefined from a server before them, which is told apart. */
+export function headsOf(value: unknown): PullHead[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((head): PullHead[] => {
+    if (!thing(head) || typeof head.sha !== "string") return [];
+    return [{ sha: head.sha, first_reported_at: text(head.first_reported_at) ?? "", ci: ciOf(head.ci) ?? { state: "unknown", failed: null, total: null, cancelled: null, checked_at: null } }];
+  });
+}
+
+const checksOf = (n: number | null) => (n == null ? "" : `${count(n)} ${n === 1 ? "check" : "checks"}`);
+
+/** Read as still running, and not read since: `none` with checks counted, which a read of nothing never has. */
+const agedPending = (ci: PullCi): boolean => ci.state === "none" && ci.total != null && ci.total > 0;
+
+/** What CI said of a commit, in a few words: "red, 1 of 3 checks failed", "green, 3 checks", "still running", "none to go by", "not read", "not known". */
+export function ciWords(ci: PullCi | null | undefined): string {
+  if (!ci) return "not known";
+  if (ci.state === "failure") return ci.failed != null && ci.total != null ? `red, ${count(ci.failed)} of ${checksOf(ci.total)} failed` : "red";
+  if (ci.state === "success") return ci.total != null ? `green, ${checksOf(ci.total)}` : "green";
+  if (ci.state === "pending") return ci.total != null ? `still running (${checksOf(ci.total)} so far)` : "still running";
+  if (ci.state === "unknown") return "not read";
+  if (agedPending(ci)) return `still running when last read (${checksOf(ci.total)} so far), not read since`;
+  return ci.cancelled ? `none to go by, ${checksOf(ci.cancelled)} cancelled` : "none to go by";
+}
+
+/**
+ * What CI said of the commit a pull request was merged as, as a sentence
+ * for its page. With no merge commit known (reported merged by an Action
+ * from before 0.5.0) it is not known, and nothing reads it.
+ */
+export function mergeCiWords(ci: PullCi | null, mergeCommitKnown: boolean): string {
+  if (!mergeCommitKnown) return "Not known: it was reported merged by an Action from before 0.5.0, which named no merge commit.";
+  if (!ci || ci.state === "unknown") return "Not read yet: the Action reads the checks the push of the commit it was merged as started.";
+  const names = ci.failed_checks ? ` (${ci.failed_checks.join(", ")})` : "";
+  if (ci.state === "failure") return `The base branch was red: ${ci.failed != null && ci.total != null ? `${count(ci.failed)} of ${checksOf(ci.total)} failed` : "checks failed"}${names}.`;
+  if (ci.state === "success") return `The base branch was green${ci.total != null ? ` (${checksOf(ci.total)})` : ""}.`;
+  if (ci.state === "pending") return `The merge commit's checks were still running when last read${ci.total != null ? ` (${checksOf(ci.total)} so far)` : ""}.`;
+  if (agedPending(ci)) return `The merge commit's checks were still running when last read (${checksOf(ci.total)} so far), and were not read since.`;
+  return ci.cancelled ? `No checks to go by on the commit it was merged as: ${checksOf(ci.cancelled)} cancelled.` : "No checks to go by on the commit it was merged as.";
+}
+
+/** Whether CI was red where a session's lines arrived, in a word; a dash while not known. */
+export const arrivalWords = (red: boolean | null | undefined): string => (red == null ? "–" : red ? "red" : "green");
+
+/** A commit's page in the repository the pull request's address names, or null when that is not GitHub's shape. */
+export function commitHref(pullUrl: string | null, sha: string): string | null {
+  const page = web(pullUrl);
+  const found = page && /^(https:\/\/[^/]+\/[^/]+\/[^/]+)\/pull\/\d+/.exec(page);
+  return found ? `${found[1]}/commit/${sha}` : null;
+}
+
+const CI_COUNTS = ["heads_with_ci", "heads_failed", "sessions_with_ci", "red_on_arrival_sessions", "pulls_merge_known", "pulls_merge_failed", "pulls_ci_unknown"] as const;
+
+/** A group's CI counts of a summary as a server sent them, or null for none (a server from before them). */
+export function outcomeCiOf(value: unknown): PullOutcomesCi | null {
+  if (!thing(value)) return null;
+  return Object.fromEntries(CI_COUNTS.map((name) => [name, sent(value[name])])) as unknown as PullOutcomesCi;
+}
+
+/**
+ * Of `/prs/outcomes/summary` as a server sent it, the CI counts by group
+ * key, and the total; null when the server sent none, and the columns are
+ * then not shown.
+ */
+export function outcomeCiRows(summary: unknown): { groups: Map<string, PullOutcomesCi>; total: PullOutcomesCi } | null {
+  if (!thing(summary) || !thing(summary.total)) return null;
+  const total = outcomeCiOf(summary.total.ci);
+  if (!total) return null;
+  const groups = new Map<string, PullOutcomesCi>();
+  for (const g of Array.isArray(summary.groups) ? summary.groups : []) {
+    const ci = thing(g) && typeof g.key === "string" ? outcomeCiOf(g.ci) : null;
+    if (ci) groups.set((g as { key: string }).key, ci);
+  }
+  return { groups, total };
+}
+
+/** A share of those known, "33% (1 of 3)"; a dash where none is known. */
+export function ofKnown(part: number, known: number): string {
+  if (known <= 0) return "–";
+  return `${Math.round((part / known) * 100)}% (${count(part)} of ${count(known)})`;
 }

@@ -99,6 +99,57 @@ inputs:
       Words that make a linked issue's label a bug label, separated by
       commas, in place of the default list (bug, regression, defect, incident).
     default: ""
+  ci:
+    description: >-
+      Read what CI made of the pull request's commits: of each head it was
+      reported at (a red push), and of the commit it was merged as (the base
+      branch red after it). Read when a pull request is reported, when a
+      workflow named in a workflow_run trigger finishes, and on a scheduled
+      run for what is still pending. Needs checks and statuses read
+      permission, and actions read to tell which workflow file each check is
+      from and which runs a merge commit's push started. Without the first
+      two the run warns and CI is not known; without actions read it warns,
+      leaves out only this job's own check run, and knows no merge commit's
+      CI. The runs of the workflow files that hold Sessionly's jobs are left
+      out: this run's own file, or the files sessionly-workflows names where
+      that is set. Skipped jobs never count. Sent for each commit: its SHA, a state (success, failure, pending or none),
+      how many checks and statuses failed, how many there were, and how many
+      were cancelled. No check's name, unless ci-check-names says so. Set to
+      "false" to read none.
+    default: "true"
+  sessionly-workflows:
+    description: >-
+      The workflow files that hold only Sessionly's jobs, separated by commas
+      or new lines (sessionly.yml, or .github/workflows/sessionly.yml): their
+      runs are left out of the CI it reads, in place of this run's own file.
+      Keep Sessionly's jobs in files of their own; where one has to sit in a
+      CI workflow, name the other files here (or "none"), and that file's CI
+      jobs count, with only this job's own check run left out of it.
+    default: ""
+  ci-ignore:
+    description: >-
+      Checks and statuses to leave out when reading CI, by name, separated
+      by commas or new lines; * stands for any text. Sessionly's own
+      workflow runs are left out by file (sessionly-workflows), not here.
+    default: ""
+  ci-only:
+    description: >-
+      Count only the checks and statuses named here (as ci-ignore names
+      them), for example the ones required to merge. Everything else is
+      left out.
+    default: ""
+  ci-check-names:
+    description: >-
+      Also send the names of the checks and statuses that failed on a red
+      commit (at most 20, each cut to 100 characters), so the dashboard can
+      say which. Off by default: names can carry the names of clients,
+      environments or systems.
+    default: "false"
+  check-run-id:
+    description: >-
+      The id of this job's own check run, which is left out of the CI it
+      reads. Set by the workflow run itself; leave it.
+    default: ${{ job.check_run_id }}
   fail-on-error:
     description: Fail the job if the report cannot be made or sent. By default a problem is only a warning.
     default: "false"
@@ -133,4 +184,10 @@ runs:
         SESSIONLY_OUTCOMES_SINCE: ${{ inputs.outcomes-since }}
         SESSIONLY_FIX_WORDS: ${{ inputs.fix-words }}
         SESSIONLY_BUG_LABELS: ${{ inputs.bug-labels }}
+        SESSIONLY_CI: ${{ inputs.ci }}
+        SESSIONLY_WORKFLOWS: ${{ inputs.sessionly-workflows }}
+        SESSIONLY_CI_IGNORE: ${{ inputs.ci-ignore }}
+        SESSIONLY_CI_ONLY: ${{ inputs.ci-only }}
+        SESSIONLY_CI_CHECK_NAMES: ${{ inputs.ci-check-names }}
+        SESSIONLY_CHECK_RUN_ID: ${{ inputs.check-run-id }}
         SESSIONLY_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { laterKind, laterOf, laterTile, laterWindow, MIN_PULLS, outcomeRows, perThousand, reachedOf, revertedShare, signalName, tenths } from "../src/pull.ts";
+import { arrivalWords, ciOf, ciWords, commitHref, headsOf, laterKind, mergeCiWords, laterOf, laterTile, laterWindow, MIN_PULLS, ofKnown, outcomeCiRows, outcomeRows, perThousand, reachedOf, revertedShare, signalName, tenths } from "../src/pull.ts";
 
 const window = (more: Record<string, unknown> = {}) => ({
   reached: true,
@@ -77,4 +77,62 @@ test("later commits a server sent that are not an answer break neither the page 
 
 test("the agents' share of a later commit's lines is shown to a tenth, and a whole number as one", () => {
   assert.deepEqual([tenths(2), tenths(1.5), tenths(0.34), tenths(1234.56)], ["2", "1.5", "0.3", "1,234.6"]);
+});
+
+test("what CI said of a commit is read as sent, said in a few words, and not known when it is no answer", () => {
+  assert.equal(ciOf(null), null);
+  assert.equal(ciOf({ state: "red" }), null);
+  assert.deepEqual(ciOf({ state: "failure", failed: 1, total: 3, cancelled: 0, checked_at: "2026-11-28T00:00:00Z", failed_checks: ["tests", 4] }), {
+    state: "failure", failed: 1, total: 3, cancelled: 0, checked_at: "2026-11-28T00:00:00Z", failed_checks: ["tests"],
+  });
+  assert.deepEqual(ciOf({ state: "pending", failed: "1" }), { state: "pending", failed: null, total: null, cancelled: null, checked_at: null });
+  assert.equal(ciWords(ciOf({ state: "failure", failed: 1, total: 3 })), "red, 1 of 3 checks failed");
+  assert.equal(ciWords(ciOf({ state: "failure" })), "red");
+  assert.equal(ciWords(ciOf({ state: "success", total: 1 })), "green, 1 check");
+  assert.equal(ciWords(ciOf({ state: "pending" })), "still running");
+  assert.equal(ciWords(ciOf({ state: "pending", total: 3 })), "still running (3 checks so far)");
+  // read as pending and not since: aged into none, with checks counted, which a read of nothing never has
+  assert.equal(ciWords(ciOf({ state: "none", total: 3, failed: 0 })), "still running when last read (3 checks so far), not read since");
+  assert.equal(ciWords(ciOf({ state: "none", total: 0, cancelled: 0 })), "none to go by");
+  assert.equal(ciWords(ciOf({ state: "none", cancelled: 2 })), "none to go by, 2 checks cancelled");
+  assert.equal(ciWords(ciOf({ state: "none", cancelled: 0 })), "none to go by");
+  assert.equal(ciWords(null), "not known");
+  assert.equal(ciWords(ciOf({ state: "unknown" })), "not read");
+  // the merge, as a sentence
+  assert.equal(mergeCiWords(ciOf({ state: "failure", failed: 1, total: 3, failed_checks: ["tests"] }), true), "The base branch was red: 1 of 3 checks failed (tests).");
+  assert.equal(mergeCiWords(ciOf({ state: "failure" }), true), "The base branch was red: checks failed.");
+  assert.equal(mergeCiWords(ciOf({ state: "success", total: 1 }), true), "The base branch was green (1 check).");
+  assert.equal(mergeCiWords(ciOf({ state: "pending" }), true), "The merge commit's checks were still running when last read.");
+  assert.equal(mergeCiWords(ciOf({ state: "pending", total: 1 }), true), "The merge commit's checks were still running when last read (1 check so far).");
+  assert.equal(mergeCiWords(ciOf({ state: "none", total: 3 }), true), "The merge commit's checks were still running when last read (3 checks so far), and were not read since.");
+  assert.equal(mergeCiWords(ciOf({ state: "none", cancelled: 2 }), true), "No checks to go by on the commit it was merged as: 2 checks cancelled.");
+  assert.equal(mergeCiWords(ciOf({ state: "none" }), true), "No checks to go by on the commit it was merged as.");
+  assert.match(mergeCiWords(null, true), /^Not read yet/);
+  assert.match(mergeCiWords(ciOf({ state: "unknown" }), true), /^Not read yet/);
+  assert.match(mergeCiWords(null, false), /^Not known: .*before 0\.5\.0/);
+  assert.match(mergeCiWords(ciOf({ state: "failure" }), false), /^Not known/);
+  assert.deepEqual([arrivalWords(true), arrivalWords(false), arrivalWords(null), arrivalWords(undefined)], ["red", "green", "–", "–"]);
+  // heads: a server from before them sends none, which is not an empty list
+  assert.equal(headsOf(undefined), undefined);
+  assert.deepEqual(headsOf([{ sha: "a".repeat(40), first_reported_at: "2026-11-01T00:00:00Z", ci: { state: "success", total: 2 } }, { ci: {} }, null]), [
+    { sha: "a".repeat(40), first_reported_at: "2026-11-01T00:00:00Z", ci: { state: "success", failed: null, total: 2, cancelled: null, checked_at: null } },
+  ]);
+  assert.equal(headsOf([{ sha: "b" }])![0]!.ci.state, "unknown");
+  assert.equal(commitHref("https://github.com/acme/web/pull/7", "abc"), "https://github.com/acme/web/commit/abc");
+  assert.equal(commitHref("https://git.example.com/acme/web/pull/7#x", "abc"), "https://git.example.com/acme/web/commit/abc");
+  assert.equal(commitHref("https://github.com/acme/web", "abc"), null);
+  assert.equal(commitHref(null, "abc"), null);
+});
+
+test("the CI columns of the summary come from what the server sent, and are left out when it sent none", () => {
+  const ci = { heads_with_ci: 4, heads_failed: 1, sessions_with_ci: 3, red_on_arrival_sessions: 2, pulls_merge_known: 2, pulls_merge_failed: 1, pulls_ci_unknown: 5 };
+  assert.equal(outcomeCiRows(null), null);
+  assert.equal(outcomeCiRows({ groups: [], total: {} }), null);
+  const rows = outcomeCiRows({ groups: [{ key: "codex", ci }, { key: "cursor" }, { ci }], total: { ci: { ...ci, heads_failed: "x" } } });
+  assert.deepEqual([...rows!.groups.keys()], ["codex"]);
+  assert.deepEqual(rows!.groups.get("codex"), ci);
+  assert.deepEqual([rows!.total.heads_failed, rows!.total.pulls_ci_unknown], [0, 5]);
+  assert.equal(ofKnown(1, 3), "33% (1 of 3)");
+  assert.equal(ofKnown(0, 0), "–");
+  assert.equal(ofKnown(0, 2), "0% (0 of 2)");
 });

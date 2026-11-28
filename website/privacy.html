@@ -256,7 +256,15 @@
             committed. The addresses are used for that comparison and are not stored; a hash of
             each is kept, so that the lines can be compared again when sessions arrive later.
             A report also names the pull request's head commit and, once merged, the commit it
-            was merged as (their SHAs).
+            was merged as (their SHAs), and may say what <strong>CI</strong> made of them: for a
+            commit, a state (success, failure, pending or none), and how many checks and statuses
+            failed, how many there were, and how many were cancelled. The same is sent when a
+            workflow of the repository's own CI finishes, if the org sets that up, and by the
+            scheduled run below for commits not read yet. The names of the checks that failed are
+            sent only if the org switches that on in the Action (<code>ci-check-names</code>); what
+            a check ran or said is never sent. The server keeps, for each head commit, which of
+            the pull request's own line hashes were new at it, to say with which push a session's
+            lines arrived.
           </p>
           <p>
             A <strong>scheduled run</strong> of the Action, once a day if the org sets one up,
@@ -275,7 +283,9 @@
             came with, and the labels of the issues it closes are read on the runner and are not
             sent. Of the hashes, the server keeps only those of the pull request's own lines; the
             rest are dropped at once. It keeps the SHAs, each commit's count of removed lines, and
-            the paths lines were moved to, which it names to the next run to read.
+            the paths lines were moved to, which it names to the next run to read. The same run
+            also reads what CI made of the head commits still pending and of the commits merged
+            pull requests were merged as, and sends the states and counts above.
           </p>
           <p>
             <strong>What is never uploaded:</strong> full prompts, the agent's replies, file

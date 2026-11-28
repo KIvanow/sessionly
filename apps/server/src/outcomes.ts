@@ -13,6 +13,7 @@
 // other's. Of each commit's hashes only the pull request's own lines are
 // kept, and where commits moved them (paths); the rest are dropped at once.
 import type {
+  CiState,
   OutcomeAge,
   OutcomeCommitReport,
   OutcomeKind,
@@ -22,6 +23,7 @@ import type {
   PullOutcomes,
   PullOutcomesAt,
   PullOutcomesBy,
+  PullOutcomesCi,
   PullOutcomesGroup,
   PullOutcomesReport,
   PullOutcomesStored,
@@ -29,6 +31,7 @@ import type {
   PullOutcomeWindow,
 } from "@sessionly/schema";
 import type { OrgDb } from "./db.ts";
+import { arrivals, known, mergeCiOf, redOnArrival, stateNow, type HeadRead } from "./ci.ts";
 import { BadReport, COMMIT_SHA, COMMON_LINE, HASH, holdPull, keepCommonLines, MAX_FILES, where, type PullFilters } from "./pulls.ts";
 
 /** The ages counted after merging, in days: the binary's `CHECKPOINTS`. */
@@ -766,10 +769,12 @@ const READABLE = `(p.base_ref IS NOT NULL AND p.outcomes_gone_at IS NULL
  * own, are read only of those with commits kept: the others need only how
  * many. (Each session a row: one value of all of them is slow to build.)
  */
-async function readOutcomes(db: OrgDb, chosen: { sql: string; params: unknown[] }) {
+async function readOutcomes(db: OrgDb, chosen: { sql: string; params: unknown[] }, now = Date.now()) {
   const changed = `EXISTS (SELECT 1 FROM pull_outcome_commits c WHERE c.org_id = r.org_id AND c.repo = r.repo AND c.number = r.number)`;
+  // A head whose CI came out one way or the other: only then is where a session's lines arrived worth reading.
+  const judged = `EXISTS (SELECT 1 FROM pull_heads k WHERE k.org_id = r.org_id AND k.repo = r.repo AND k.number = r.number AND k.ci_state IN ('success', 'failure'))`;
   const pulls = await db.query(
-    `SELECT p.repo, p.number, p.merged_at, p.outcomes_scanned_until, ${READABLE} AS readable,
+    `SELECT p.repo, p.number, p.merged_at, p.outcomes_scanned_until, p.merge_ci, ${READABLE} AS readable,
             CASE WHEN p.changed THEN p.last_files END AS last_files, CASE WHEN p.changed THEN p.common_lines END AS common_lines
      FROM (SELECT r.*, ${changed} AS changed FROM pull_requests r ${chosen.sql}) p
      WHERE p.state = 'merged' AND p.merged_at IS NOT NULL
@@ -781,12 +786,19 @@ async function readOutcomes(db: OrgDb, chosen: { sql: string; params: unknown[] 
             coalesce(x.primary_model, '${UNKNOWN}') AS model, coalesce(x.owner_email, '${UNKNOWN}') AS owner,
             (SELECT coalesce(sum(CASE WHEN jsonb_typeof(v) = 'array' THEN jsonb_array_length(v) ELSE 0 END), 0)
              FROM jsonb_each(s.matched) AS e(k, v)) AS lines,
-            CASE WHEN p.changed THEN s.matched END AS matched
+            CASE WHEN p.changed OR p.judged THEN s.matched END AS matched
      FROM pull_sessions s
-       JOIN (SELECT r.repo, r.number, ${changed} AS changed FROM pull_requests r ${chosen.sql}) p USING (repo, number)
+       JOIN (SELECT r.repo, r.number, ${changed} AS changed, ${judged} AS judged FROM pull_requests r ${chosen.sql}) p USING (repo, number)
        LEFT JOIN sessions x ON x.org_id = s.org_id AND x.machine_id = s.machine_id AND x.source = s.source AND x.session_id = s.session_id
      WHERE s.org_id = $1 AND ${KEPT}
      ORDER BY s.machine_id, s.source, s.session_id`,
+    chosen.params,
+  );
+  const heads = await db.query(
+    `SELECT h.repo, h.number, h.sha, h.ci_state, h.first_reported_at, h.ci_checked_at, CASE WHEN p.judged THEN h.hashes END AS hashes
+     FROM pull_heads h JOIN (SELECT r.repo, r.number, ${judged} AS judged FROM pull_requests r ${chosen.sql}) p USING (repo, number)
+     WHERE h.org_id = $1
+     ORDER BY h.first_reported_at, h.sha`,
     chosen.params,
   );
   const commits = await db.query(
@@ -810,10 +822,21 @@ async function readOutcomes(db: OrgDb, chosen: { sql: string; params: unknown[] 
   }
   const byPull = new Map<string, Record<string, unknown>[]>();
   for (const row of commits) push(byPull, `${row.repo}\n${row.number}`, row);
+  const headsOf = new Map<string, HeadRead[]>();
+  for (const row of heads) {
+    push(headsOf, `${row.repo}\n${row.number}`, {
+      sha: String(row.sha),
+      first_reported_at: time(row.first_reported_at),
+      state: stateNow(row.ci_state as CiState, time(row.first_reported_at), now, row.ci_checked_at == null ? null : time(row.ci_checked_at)),
+      hashes: row.hashes == null ? null : json<Lines>(row.hashes),
+    });
+  }
   return pulls.map((p) => {
     const its = holding.get(`${p.repo}\n${p.number}`) ?? [];
     const kept = byPull.get(`${p.repo}\n${p.number}`) ?? [];
     const copies = kept.length > 0 ? copiesOf(its, json(p.last_files), json(p.common_lines)) : null;
+    const pushed = headsOf.get(`${p.repo}\n${p.number}`) ?? [];
+    const at = arrivals(pushed);
     return {
       repo: String(p.repo),
       number: num(p.number),
@@ -822,6 +845,10 @@ async function readOutcomes(db: OrgDb, chosen: { sql: string; params: unknown[] 
       readable: p.readable === true,
       holders: its,
       commits: kept.map((row) => split(row, its, copies!)),
+      // What CI said of its heads and its merge commit, and where each session's lines arrived.
+      heads: pushed.map((h) => h.state),
+      merge_ci: mergeCiOf(p.merge_ci, time(p.merged_at), now)?.state ?? null,
+      arrived: new Map(its.map((h) => [holderKey(h), redOnArrival(pushed, at, h.matched)])),
     };
   });
 }
@@ -860,7 +887,7 @@ export async function outcomesOf(db: OrgDb, repo: string, number: number, now = 
   const [pull] = await readOutcomes(db, {
     sql: `WHERE org_id = $1 AND repo = $2 AND number = $3`,
     params: [db.orgId, repo, number],
-  });
+  }, now);
   if (!pull) return null;
   return {
     scanned_until: pull.scanned_until == null ? null : new Date(pull.scanned_until).toISOString(),
@@ -868,6 +895,16 @@ export async function outcomesOf(db: OrgDb, repo: string, number: number, now = 
     commits: pull.commits.map(({ shares: _, ...commit }) => commit),
   };
 }
+
+const blankCi = (): PullOutcomesCi => ({
+  heads_with_ci: 0,
+  heads_failed: 0,
+  sessions_with_ci: 0,
+  red_on_arrival_sessions: 0,
+  pulls_merge_known: 0,
+  pulls_merge_failed: 0,
+  pulls_ci_unknown: 0,
+});
 
 const blank = (): PullOutcomesAt => ({
   pulls_reached: 0,
@@ -902,10 +939,19 @@ interface Sums {
   ages: Record<OutcomeAge, PullOutcomesAt>;
   seen: Record<OutcomeAge, Seen>;
   lines: number;
+  ci: PullOutcomesCi;
+  /** Sessions whose lines arrived where CI was known, and where it was red: once each, whatever the pull requests. */
+  arrived: { known: Set<string>; red: Set<string> };
 }
 
 const seen = (): Seen => ({ commits: { revert: new Set(), fix: new Set(), rework: new Set() }, likely: new Set(), fixed: new Set() });
-const sums = (): Sums => ({ ages: { "1d": blank(), "7d": blank(), "30d": blank() }, seen: { "1d": seen(), "7d": seen(), "30d": seen() }, lines: 0 });
+const sums = (): Sums => ({
+  ages: { "1d": blank(), "7d": blank(), "30d": blank() },
+  seen: { "1d": seen(), "7d": seen(), "30d": seen() },
+  lines: 0,
+  ci: blankCi(),
+  arrived: { known: new Set(), red: new Set() },
+});
 
 /**
  * Merged pull requests' outcomes summed by tool, model, person, repository
@@ -915,10 +961,12 @@ const sums = (): Sums => ({ ages: { "1d": blank(), "7d": blank(), "30d": blank()
  * session, so they add up across groups; a commit, a pull request or a
  * session counts once in each group whose lines it changed, and once in the
  * total, however many pull requests a commit changed. The model is the
- * session's main one.
+ * session's main one. What CI said (`ci`) is summed the same way, of every
+ * pull request with agent lines, read or not: a head and a merge commit
+ * once for each group with lines in the pull request, a session once.
  */
 export async function summarizeOutcomes(db: OrgDb, by: PullOutcomesBy, filters: OutcomeFilters, now = Date.now()): Promise<PullOutcomesSummary> {
-  const pulls = await readOutcomes(db, where(db.orgId, { repo: filters.repo, state: "merged", since: filters.since }));
+  const pulls = await readOutcomes(db, where(db.orgId, { repo: filters.repo, state: "merged", since: filters.since }), now);
   const keyOf = (pull: Read, h: Holder): string =>
     by === "tool" ? h.source : by === "model" ? h.model : by === "user" ? h.user : by === "repo" ? pull.repo : new Date(pull.merged_at).toISOString().slice(0, 10);
   const wanted = (h: Holder) =>
@@ -953,18 +1001,37 @@ export async function summarizeOutcomes(db: OrgDb, by: PullOutcomesBy, filters: 
       if (revertedBy(mine.map(({ c }) => c), pull.merged_at + days * DAY)) at.pulls_reverted += 1;
     }
   };
+  const addCi = (into: Sums, pull: Read, holders: Holder[]) => {
+    const ci = into.ci;
+    for (const state of pull.heads) {
+      if (!known(state)) continue;
+      ci.heads_with_ci += 1;
+      if (state === "failure") ci.heads_failed += 1;
+    }
+    for (const h of holders) {
+      const red = pull.arrived.get(holderKey(h));
+      if (red == null) continue;
+      into.arrived.known.add(holderKey(h));
+      if (red) into.arrived.red.add(holderKey(h));
+    }
+    if (known(pull.merge_ci)) {
+      ci.pulls_merge_known += 1;
+      if (pull.merge_ci === "failure") ci.pulls_merge_failed += 1;
+    } else ci.pulls_ci_unknown += 1;
+  };
   for (const pull of pulls) {
-    if (!pull.readable) continue;
     const holders = pull.holders.filter(wanted);
     if (holders.length === 0) continue;
     const byKey = new Map<string, Holder[]>();
     for (const h of holders) push(byKey, keyOf(pull, h), h);
     for (const [key, some] of byKey) {
       const into = groups.get(key) ?? sums();
-      add(into, pull, some);
+      if (pull.readable) add(into, pull, some);
+      addCi(into, pull, some);
       groups.set(key, into);
     }
-    add(total, pull, holders);
+    if (pull.readable) add(total, pull, holders);
+    addCi(total, pull, holders);
   }
   const out = (into: Sums): Omit<PullOutcomesGroup, "key"> => {
     const at = (age: OutcomeAge): PullOutcomesAt => {
@@ -978,7 +1045,12 @@ export async function summarizeOutcomes(db: OrgDb, by: PullOutcomesBy, filters: 
         rework_commits: counted.commits.rework.size,
       };
     };
-    return { outcomes_1d: at("1d"), outcomes_7d: at("7d"), outcomes_30d: at("30d") };
+    return {
+      outcomes_1d: at("1d"),
+      outcomes_7d: at("7d"),
+      outcomes_30d: at("30d"),
+      ci: { ...into.ci, sessions_with_ci: into.arrived.known.size, red_on_arrival_sessions: into.arrived.red.size },
+    };
   };
   const sorted = [...groups].sort(([a, x], [b, y]) => (by === "day" ? a.localeCompare(b) : y.lines - x.lines || a.localeCompare(b)));
   return { groups: sorted.map(([key, into]) => ({ key, ...out(into) })), total: out(total) };

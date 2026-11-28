@@ -1015,6 +1015,40 @@ const MIGRATIONS: string[] = [
    )`,
   toApp(`SELECT, INSERT, UPDATE, DELETE ON repo_outcome_scans`),
   ...rowLevelSecurity("repo_outcome_scans"),
+  // Each head commit a pull request was reported at (ci.ts): when a report
+  // first named it, what CI said of it (`ci_state`, pending until a run
+  // says, and none after 7 days of nobody saying; the counts and when they
+  // were read), and which of the pull request's line hashes were new at it
+  // against the head reported before (`hashes`, {path: [hashes]}, the pull
+  // request's own lines, which `last_files` holds already): a session's
+  // lines arrived with the first head that has one of them, and whether CI
+  // was red there is worked out as it is read, from the sessions' lines as
+  // matched then. The names of the checks that failed (`failed_checks`)
+  // only where the Action was asked to send them. At most 100 heads a pull
+  // request, the oldest dropped.
+  `CREATE TABLE pull_heads (
+     org_id            text NOT NULL REFERENCES orgs ON DELETE CASCADE,
+     repo              text NOT NULL,
+     number            integer NOT NULL,
+     sha               text NOT NULL,
+     first_reported_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+     ci_state          text NOT NULL DEFAULT 'pending' CHECK (ci_state IN ('pending', 'success', 'failure', 'none')),
+     ci_failed         integer,
+     ci_total          integer,
+     ci_cancelled      integer,
+     ci_checked_at     timestamptz,
+     failed_checks     jsonb,
+     hashes            jsonb NOT NULL,
+     PRIMARY KEY (org_id, repo, number, sha),
+     FOREIGN KEY (org_id, repo, number) REFERENCES pull_requests (org_id, repo, number) ON DELETE CASCADE
+   )`,
+  `CREATE INDEX pull_heads_pending ON pull_heads (org_id, repo) WHERE ci_state = 'pending'`,
+  toApp(`SELECT, INSERT, UPDATE, DELETE ON pull_heads`),
+  ...rowLevelSecurity("pull_heads"),
+  // What CI said of the commit a pull request was merged as: {state, failed,
+  // total, cancelled, checked_at, failed_checks?}, the same as a head's.
+  // Null while no run said.
+  `ALTER TABLE pull_requests ADD COLUMN merge_ci jsonb`,
 ];
 
 /**

@@ -447,9 +447,10 @@ const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.str
  * Take out of one pull request kept where the repository is shown what is
  * not shown now: its files as first and as last reported, the files of its
  * page, where its comments are, which of its lines each session wrote and
- * which are common, and of its later commits (outcomes.ts) where its lines
- * are now and which of them each removed. One that had any is left to be
- * matched again (no time it was matched). Whether anything was taken out.
+ * which are common, of its later commits (outcomes.ts) where its lines
+ * are now and which of them each removed, and of its heads (ci.ts) which
+ * lines were new at each. One that had any is left to be matched again (no
+ * time it was matched). Whether anything was taken out.
  */
 async function hidePull(db: OrgDb, repo: string, number: number, hide: string[], rules: string): Promise<boolean> {
   // As a report holds it: one arriving meanwhile waits, and then keeps the first files as they are after this.
@@ -512,6 +513,18 @@ async function hidePull(db: OrgDb, repo: string, number: number, hide: string[],
     changed = true;
     await db.query(`UPDATE pull_outcome_commits SET removed = $5::jsonb WHERE org_id = $1 AND repo = $2 AND number = $3 AND sha = $4`, [
       db.orgId, repo, number, c.sha, JSON.stringify(matchedShown(removed, hide)),
+    ]);
+  }
+  const heads = await db.query<{ sha: string; hashes: unknown }>(
+    `SELECT sha, hashes FROM pull_heads WHERE org_id = $1 AND repo = $2 AND number = $3`,
+    [db.orgId, repo, number],
+  );
+  for (const head of heads) {
+    const hashes = jsonOf<Record<string, string[]>>(head.hashes);
+    if (same(hashes, matchedShown(hashes, hide))) continue;
+    changed = true;
+    await db.query(`UPDATE pull_heads SET hashes = $5::jsonb WHERE org_id = $1 AND repo = $2 AND number = $3 AND sha = $4`, [
+      db.orgId, repo, number, head.sha, JSON.stringify(matchedShown(hashes, hide)),
     ]);
   }
   await db.query(

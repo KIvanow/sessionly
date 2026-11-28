@@ -26,11 +26,16 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write   # to comment; "read" is enough with comment: false
+      checks: read           # what CI said of the pull request's commits (see CI below)
+      statuses: read
+      actions: read          # which workflow file each check is from, and which runs a merge's push started
     steps:
       - uses: KIvanow/sessionly/action@main
         with:
           url: https://sessionly.example.com
           token: ${{ secrets.SESSIONLY_TOKEN }}   # a token with the ci role
+          # Every file that holds Sessionly jobs, on every Sessionly job (see CI below).
+          sessionly-workflows: sessionly.yml, sessionly-nightly.yml, sessionly-ci.yml
 ```
 
 It needs three things:
@@ -76,6 +81,7 @@ pull request's agent lines are counted again on the branch it was merged into, *
 Action does the looking, on a schedule:
 
 ```yaml
+# .github/workflows/sessionly-nightly.yml
 on:
   schedule:
     - cron: "17 5 * * *"   # once a day
@@ -85,15 +91,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read   # to read the files as they are on the branch
+      checks: read     # what CI said of commits still pending (see CI below)
+      statuses: read
+      actions: read
     steps:
       - uses: KIvanow/sessionly/action@main
         with:
           url: https://sessionly.example.com
           token: ${{ secrets.SESSIONLY_TOKEN }}
+          sessionly-workflows: sessionly.yml, sessionly-nightly.yml, sessionly-ci.yml
 ```
 
-Put it in the same workflow file as the report, with `if: github.event_name != 'schedule'` on
-the report's job, or in a file of its own. A run started by a schedule, with no `pr-number`, does this and reports
+Put it in the same workflow file as the report, with `if: github.event_name != 'schedule' &&
+github.event_name != 'workflow_run'` on the report's job, or in a file of its own; either way a
+file that holds only Sessionly's jobs (see [CI](#ci)). A run started by a schedule, with no `pr-number`, does this and reports
 no pull request; `after-merge: true` does the same in a run started any other way.
 
 A scheduled run was chosen over a run on every push to the default branch because it is one
@@ -147,6 +158,9 @@ The run needs the repository's history, so the job checks it out whole:
       contents: read        # the files, and the history
       pull-requests: read   # which pull request a later commit came with
       issues: read          # the labels of the issues that one closes
+      checks: read          # what CI said of heads still pending, and of merge commits (see CI below)
+      statuses: read
+      actions: read         # which workflow file each check is from, and which runs a merge's push started
     steps:
       - uses: actions/checkout@v4
         with:
@@ -155,6 +169,7 @@ The run needs the repository's history, so the job checks it out whole:
         with:
           url: https://sessionly.example.com
           token: ${{ secrets.SESSIONLY_TOKEN }}
+          sessionly-workflows: sessionly.yml, sessionly-nightly.yml, sessionly-ci.yml
 ```
 
 How it is read:
@@ -247,6 +262,131 @@ A pull request counts under each group whose sessions had lines in it, and so do
 lines are split, so they add up. Below 10 pull requests a group says **too few** rather than a
 rate. The model is the session's main one.
 
+## CI
+
+Did the agents' lines arrive with a red build, and did the base branch go red once they were
+merged? The Action reads what the **checks and statuses** on a commit came to, and sends a state
+and counts: never what ran or what it said, unless you ask it to name the checks that failed.
+
+Three figures, none of them an age:
+
+- **Red pushes**: of the heads a pull request was reported at (each push), those whose checks
+  failed, out of those whose checks came out either way.
+- **Red on arrival**: a session's lines arrived with the first head that brought one of them.
+  The session is red on arrival when that head's checks failed. Of a line the pull request has
+  several copies of, a session's copies are taken for the last to arrive (the earlier ones may
+  be another session's, or a person's, as copies are shared out when a commit removes them).
+  Worked out as the page is read, from the sessions' lines as matched now, so matching again,
+  a session deleted, or a path hidden where a repository is shown moves it; the heads stay.
+- **Base red after merge**: the checks the push of the commit the pull request was merged as
+  started on its branch failed. Only those of GitHub Actions: a nightly run, a scan, a run
+  someone started on the branch's tip months later, or the push of a release tag at the same
+  commit says nothing of the merge; another app's checks and statuses on the commit count
+  whenever they were made. One moment, however old the merge, read until it came out either way.
+
+How CI is read:
+
+- A commit is **red** when any check run concluded `failure` or `timed_out`, or any status is
+  `failure` or `error`; **green** when none did and the rest came out well (`success` and
+  `neutral` are well); **still running** while any check has not finished, or
+  waits for someone (`action_required`, as a first-time contributor's workflows do), or a
+  status is `pending`, and **still running when last read** once that is what it says 7 days
+  on, until a run reads it again; and **none to go by** when there is nothing else: no checks and no
+  statuses, or every run cancelled (a concurrency group cancels the run before a push).
+  **Skipped jobs never count**, in no direction. A workflow run that never had jobs leaves no
+  check run, so it is read by the workflow run itself: waiting for approval or still queued is
+  still running, one that failed to start is red; one that says it failed with no jobs (GitHub
+  fails a run still waiting for approval when its pull request is closed) is left out, as
+  nothing. None to go by is not green, and is in no figure; neither is a commit whose CI was
+  **not read**, which the page tells apart from still running.
+- **Sessionly's own runs are left out by workflow file.** The Action asks GitHub which workflow
+  run each of a commit's checks is from (`actions: read`), and leaves out the runs of the files
+  that hold Sessionly's jobs: this run's own file, or, where `sessionly-workflows` is set,
+  exactly the files it names (`sessionly.yml`, or `.github/workflows/sessionly.yml`). That holds
+  on every event alike, and for its earlier runs on the same commit (reported when it was
+  opened, reviewed, closed: each a run). In a repository with no CI of its own, a head reads as
+  none to go by, not green. So **keep the Sessionly jobs in workflow files of their own**, as the
+  examples here are, and **with Sessionly's jobs in several files, set `sessionly-workflows` to
+  all of them on every Sessionly job** (the examples here name their three), since each run
+  knows only its own file. A reusable workflow runs as its caller's file: that file is the one
+  to name, and naming the reusable file matches nothing. Where a Sessionly job has to sit in a
+  CI workflow, set `sessionly-workflows` to the files that hold only Sessionly jobs (or to
+  `none`): that CI file's jobs
+  then count, with only this job's own check run (the `check-run-id` input, which the workflow
+  run fills in itself) left out of it. On a pull request event, where this run's check runs are
+  on the head it reads, a CI job of this run in a file not named is seen, and that file is then
+  read but for the check runs named as this job, with a warning once to set
+  `sessionly-workflows`; on other events the file goes whole. Without `actions: read`, only this
+  job's own check run and skipped runs are left out, workflow runs that never had jobs are not
+  counted, and the run warns once. `ci-ignore` leaves out checks and
+  statuses by name (`deploy-*`, `codecov`); `ci-only` counts only the ones it names, such as
+  those required to merge.
+- Of a **merge commit**, GitHub Actions check runs count only for the workflow runs its push
+  started on the branch (`actions: read`; without it, the run warns once and the CI of merge
+  commits is not known); other apps' check runs and the statuses on it always. A head is read
+  whole. Of a merge, as of a head, a state that came out one way or the other is replaced only
+  by a later read that came out the other way (a re-run); one still running, or with nothing to
+  go by, does not replace it.
+- A head's checks are read **when the pull request is reported**, which is usually while they
+  are still running: the server then says which of its heads are still pending, and the same
+  run reads those too. They are read again **when a workflow of your CI finishes**, if the
+  workflow runs the Action on `workflow_run`, and once a day by **the scheduled run**, which
+  asks the server for the heads still pending (reported in the last 7 days) and for the merge
+  commits of merged pull requests with agent lines merged in the last 7 days, not read yet or
+  read while their checks were still running; after that a merge is not asked for again, and one
+  read as still running by then has none to go by.
+- A pull request reported before version 0.5.0 of the Action has no heads kept: its next report
+  keeps the head it is at, with all of its lines as arriving there.
+
+To read a commit's checks once your CI has finished, add the workflows to a `workflow_run`
+trigger and give the job `checks: read`, `statuses: read` and `actions: read`. The run reads the CI of the
+commit that workflow ran on, and sends it for the pull requests the commit is in (asked of
+GitHub: of this repository, or of the fork for a fork's commit, which this repository does not
+answer for) and, when the commit is one a pull request was merged as and its push started that
+workflow run, as its merge CI. A fork's pull request gets this only once it has been reported
+(by `pull_request_target`, by hand, or with `pr-number`): a run on `pull_request` has no token
+for a fork.
+
+```yaml
+# .github/workflows/sessionly-ci.yml
+on:
+  workflow_run:
+    workflows: [CI]          # the names of your CI workflows
+    types: [completed]
+jobs:
+  ci-done:
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    permissions:
+      checks: read
+      statuses: read
+      pull-requests: read    # which pull requests the commit is in
+      actions: read          # which workflow file each check is from, and which runs a merge's push started
+    steps:
+      - uses: KIvanow/sessionly/action@main
+        with:
+          url: https://sessionly.example.com
+          token: ${{ secrets.SESSIONLY_TOKEN }}
+          sessionly-workflows: sessionly.yml, sessionly-nightly.yml, sessionly-ci.yml
+```
+
+Without `checks: read` and `statuses: read` the run warns once, CI is not known, and the rest
+is not affected; without `actions: read` it warns once, leaves out only its own check run and
+skipped runs, does not count workflow runs that never had jobs, and knows no merge commit's CI;
+`ci: false` reads none. `ci-check-names: true` also sends the names of the
+checks that failed on a red commit (at most 20, each cut to 100 characters), off by default
+because names can carry the names of clients, environments or systems.
+
+What it means: **CI failing is linked, not caused.** Tests are flaky, systems go down, and a
+red push may be red for lines nobody's agent wrote. Read the figures beside the later commits,
+and with "n of m" in view.
+
+On the pull request's page, **Pushes and CI** lists each head with when it was first reported,
+what CI said of it and when that was read, and what it said of the merge; the sessions table
+says for each whether CI was red on arrival. The **Later commits** table of the Pull requests
+page has the three figures as columns ("1 of 9": the red ones of those whose checks came out
+either way), the same for every age, and says for how many pull requests CI is not known.
+
 ## Inputs
 
 | Input | Default | |
@@ -266,6 +406,12 @@ rate. The model is the session's main one.
 | `outcomes-since` | | With `outcomes`: also read those of pull requests merged on or after this date, though more than 30 days before the server began to. |
 | `fix-words` | | Words that make a later commit a fix, separated by commas, in place of the default list. |
 | `bug-labels` | | Words that make a linked issue's label a bug label, separated by commas, in place of the default list. |
+| `ci` | `true` | Read what CI made of the pull request's commits, when it is reported, on `workflow_run`, and on the scheduled run. Needs `checks: read` and `statuses: read`, and `actions: read` to tell Sessionly's own runs apart and to read merge commits. See [CI](#ci). |
+| `sessionly-workflows` | | The workflow files that hold only Sessionly's jobs (`sessionly.yml`, or `.github/workflows/sessionly.yml`), separated by commas or new lines: their runs are left out of the CI it reads, in place of this run's own file. See [CI](#ci). |
+| `ci-ignore` | | Checks and statuses to leave out, by name, separated by commas or new lines; `*` stands for any text. Sessionly's own workflow runs are left out by file (`sessionly-workflows`), not here. |
+| `ci-only` | | Count only the checks and statuses named here (as `ci-ignore` names them). |
+| `ci-check-names` | `false` | Also send the names of the checks that failed on a red commit (at most 20, each cut to 100 characters). |
+| `check-run-id` | the job's own | The id of this job's check run, left out of the CI it reads. The workflow run fills it in; leave it. |
 | `fail-on-error` | `false` | Fail the job if the report cannot be made or sent. |
 
 An input that is on or off takes `true`, `yes`, `on` or `1` for on, in any case; anything else
@@ -307,13 +453,15 @@ The **Pull requests** page (admins) then shows, for the period, repository and s
 
 - per pull request: lines added, how many an agent wrote and with which tool and model, how
   many of the agent's lines survived review, review rounds, and review comments by people and
-  by bots (CodeRabbit and the like);
+  by bots (CodeRabbit and the like); and, under **Later commits**, what came of merged ones'
+  agent lines, with what [CI](#ci) said of their pushes and merges;
 - on a pull request's own page (its name in the list leads there): the sessions that wrote its
   lines, each a link to the session; its files, with how much of each an agent wrote; and its
   reviews and comments, a row for each reviewer under people, bots and the author (reviews,
   those asking for changes, comments on the diff, replies, comments in the conversation), and
   each one with who, when, which line, and a link to it on GitHub. What reviews and comments
-  say is not sent to the server and not stored;
+  say is not sent to the server and not stored; and each head it was reported at with what
+  [CI](#ci) said of it, and for each session whether CI was red where its lines arrived;
 - **by model**: the same summed, so you can see whose lines get through review as written and
   whose take several rounds;
 - **review bots**: each bot that reviewed these pull requests, and all people together: how
@@ -640,12 +788,16 @@ jobs:
     permissions:
       pull-requests: read
       contents: read   # backfill compares commits
+      checks: read     # what CI said of its commits (see CI)
+      statuses: read
+      actions: read
     steps:
       - uses: KIvanow/sessionly/action@main
         with:
           url: https://sessionly.example.com
           token: ${{ secrets.SESSIONLY_TOKEN }}
           pr-number: ${{ inputs.number }}
+          sessionly-workflows: sessionly.yml, sessionly-nightly.yml, sessionly-ci.yml
           backfill: true
           comment: false
 ```
@@ -704,6 +856,15 @@ pull request, and the labels of the issues it closes. The server keeps the hashe
 request's own lines a commit removed, the paths of the files its lines were moved to (which it
 names to later runs), and those SHAs; the other hashes are dropped at once. The link to a
 commit is made by the server from the repository and the SHA.
+
+For [CI](#ci): for each commit read (a head the pull request was reported at, or the one it
+was merged as), its SHA, a state (`success`, `failure`, `pending` or `none`), how many checks
+and statuses failed, how many there were, and how many were cancelled; with a report, on
+`workflow_run`, or on the scheduled run. The names of the checks that failed only with
+`ci-check-names: true`, at most 20 of 100 characters. What ran, what it said, and the names
+otherwise are read in the runner and not sent. The server keeps, for each head, the hashes of
+the pull request's own lines that were new at it (hashes it holds already), so it can say
+with which push a session's lines arrived.
 
 Limits: a report has at most 5000 files and 500 commit addresses. Of reviews and comments the
 latest 2000 are kept, and the pull request's page says when there were more. A changed file

@@ -107,6 +107,15 @@ export function hosting(ownerDb: Db, { accounts, demo }: HostingSettings): Hosti
         if (shownIn && report) c.set("outcomes", shownOutcomes(report, shownIn.hide));
         await next();
       });
+      // What CI said of its commits names no path, and the checks that
+      // failed are named only where the Action is asked to: a public demo
+      // of a public repository keeps them. Refused with the rest while what
+      // not to show cannot be told.
+      api.put("/prs/ci", async (c, next) => {
+        const shownIn = demo?.org === c.get("principal").orgId ? demo : undefined;
+        if (shownIn && "problem" in shownIn) return c.json(refused(shownIn.org, shownIn.problem), 503);
+        await next();
+      });
 
       // Adding a person puts an organisation in front of them the next time
       // they sign in, on an admin's word, and anyone can be the admin of an

@@ -297,6 +297,8 @@ test("a scheduled run reads later commits after counting, and tells the server",
     GITHUB_REPOSITORY: "acme/web",
     GITHUB_EVENT_NAME: "schedule",
     GITHUB_STEP_SUMMARY: join(dir, "summary.md"),
+    // CI is read in tests of its own (ci.test.mjs): not from these.
+    SESSIONLY_CI: "false",
     SESSIONLY_OUTCOMES_SINCE: "2026-09-01",
   };
   writeFileSync(env.GITHUB_STEP_SUMMARY, "");
@@ -365,7 +367,7 @@ test("when counting after merge and reading later commits both fail, the first i
   const down = async (method, path) => {
     throw Object.assign(new Error(`the Sessionly server answered 503: ${path.startsWith("/prs/due") ? "counts" : "commits"}`), { status: 503 });
   };
-  const env = { SESSIONLY_URL: "https://sessionly.example.com", SESSIONLY_TOKEN: "t", SESSIONLY_GITHUB_TOKEN: "gh", GITHUB_REPOSITORY: "acme/web", GITHUB_EVENT_NAME: "schedule" };
+  const env = { SESSIONLY_URL: "https://sessionly.example.com", SESSIONLY_TOKEN: "t", SESSIONLY_GITHUB_TOKEN: "gh", GITHUB_REPOSITORY: "acme/web", GITHUB_EVENT_NAME: "schedule", SESSIONLY_CI: "false" };
   const logged = [];
   await assert.rejects(run(env, { api: github(), server: down, git: () => Buffer.from("false\n"), log: (line) => logged.push(line) }), /503: counts/);
   assert.ok(logged.some((line) => line === "::warning title=Sessionly::later commits were not read: the Sessionly server answered 503: commits"), logged.join("\n"));

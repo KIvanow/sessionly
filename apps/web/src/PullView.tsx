@@ -1,8 +1,8 @@
-import type { LocalReviewRun, PullAfterMerge, PullDetail, PullHistory, PullOutcomes, PullHistoryNamedSession, PullSession } from "@sessionly/schema";
+import type { LocalReviewRun, PullAfterMerge, PullCi, PullDetail, PullHead, PullHistory, PullOutcomes, PullHistoryNamedSession, PullSession } from "@sessionly/schema";
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { afterMergeLine, afterMergeName, afterMergeTile, laterKind, laterOf, laterTile, signalName, tenths, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewNote, reviewTarget, roundsLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, arrivalWords, ciOf, ciWords, commitHref, headsOf, mergeCiWords, laterKind, laterOf, laterTile, signalName, tenths, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewNote, reviewTarget, roundsLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
 import { cost, count, dateTime, duration, modelName, usd, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -55,6 +55,9 @@ export function PullView({
   // And what later commits there did to them (a server from before this says nothing).
   const outcomes = laterOf(p.outcomes);
   const later = afterMerge && p.outcomes !== undefined ? laterTile(outcomes, p.merged_at) : null;
+  // What CI said of each head it was reported at, and of the merge (a server from before this says nothing).
+  const heads = headsOf(p.heads);
+  const mergeCi = p.state === "merged" ? ciOf(p.merge_ci) : null;
   const state = p.state === "merged" ? `merged${p.merged_at ? ` ${dateTime(p.merged_at)}` : ""}` : p.state === "closed" ? `closed${p.closed_at ? ` ${dateTime(p.closed_at)}` : ""}` : p.draft ? "open, a draft" : "open";
   // Comments on the diff, per file: where review looked.
   const comments = new Map<string, number>();
@@ -148,6 +151,8 @@ export function PullView({
 
       {outcomes && <LaterCommits outcomes={outcomes} />}
 
+      {heads && <Pushes heads={heads} mergeCi={mergeCi} merged={p.state === "merged"} mergeCommitKnown={typeof p.merge_commit_sha === "string"} pullUrl={p.url} />}
+
       {a.now.by.length > 0 && (
         <section className="card" aria-label="By model">
           <h2>Written with</h2>
@@ -208,9 +213,10 @@ export function PullView({
                   <th scope="col">Started</th>
                   <th scope="col" className="num">Cost in this pull request</th>
                   <th scope="col" className="num">Lines in this pull request</th>
+                  {heads && <th scope="col" title="Whether CI was red at the push its lines arrived with: the first head that had one of them">CI on arrival</th>}
                 </tr>
               </thead>
-              <tbody>{p.sessions.map((s) => <SessionRow key={`${s.machine_id} ${s.source} ${s.session_id}`} s={s} lines={a.now.lines} />)}</tbody>
+              <tbody>{p.sessions.map((s) => <SessionRow key={`${s.machine_id} ${s.source} ${s.session_id}`} s={s} lines={a.now.lines} arrival={heads !== undefined} />)}</tbody>
             </table>
           </div>
         )}
@@ -530,7 +536,7 @@ function HistorySession({ s }: { s: PullHistoryNamedSession }) {
   return <a href={sessionHref(s)}>{label}</a>;
 }
 
-function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
+function SessionRow({ s, lines, arrival }: { s: PullSession; lines: number; arrival: boolean }) {
   const known = s.session;
   const name = known?.title || `Session ${s.session_id.slice(0, 8)}`;
   const its = sessionShare(s);
@@ -559,7 +565,73 @@ function SessionRow({ s, lines }: { s: PullSession; lines: number }) {
       <td className="num" title={gave > s.lines ? `It gave this pull request ${count(gave)} ${gave === 1 ? "line" : "lines"} in all: review took the rest out` : undefined}>
         {count(s.lines)} <span className="muted">({percent(share(s.lines, lines))})</span>
       </td>
+      {arrival && (
+        <td className="nowrap" title={s.red_on_arrival == null ? "Not known: its lines are not in a head whose checks came out either way, or it has none now" : undefined}>
+          {arrivalWords(s.red_on_arrival)}
+        </td>
+      )}
     </tr>
+  );
+}
+
+/**
+ * Each head the pull request was reported at, oldest first, with what CI
+ * said of it (a red push), and once merged what it said of the commit it
+ * was merged as (the base branch red after it).
+ */
+function Pushes({ heads, mergeCi, merged, mergeCommitKnown, pullUrl }: { heads: PullHead[]; mergeCi: PullCi | null; merged: boolean; mergeCommitKnown: boolean; pullUrl: string | null }) {
+  const red = heads.filter((h) => h.ci.state === "failure").length;
+  const known = heads.filter((h) => h.ci.state === "failure" || h.ci.state === "success").length;
+  return (
+    <section className="card" aria-label="Pushes and CI">
+      <h2>Pushes and CI</h2>
+      <p className="muted hint">
+        What the checks and statuses said of each head the pull request was reported at, as the Action read them: red when
+        any failed, green when they all came out well, still running while any waits, none to go by when there were
+        no checks (or all were cancelled), and not read where no run of the Action has read it. Skipped jobs never count,
+        and the runs of the workflow files that hold Sessionly's jobs are left out (the Action's own file, or the files its
+        sessionly-workflows input names, which every Sessionly job in several files must list). Of the merge, only the
+        checks its push started on the branch count. CI failing is linked, not caused: tests are flaky and systems go down.
+        {known > 0 && ` ${count(red)} of ${count(known)} ${known === 1 ? "push" : "pushes"} with checks ${red === 1 ? "was" : "were"} red.`}
+      </p>
+      {merged && (
+        <dl className="facts">
+          <dt>After merging</dt>
+          <dd>{mergeCiWords(mergeCi, mergeCommitKnown)}</dd>
+        </dl>
+      )}
+      {heads.length === 0 ? (
+        <p className="muted">No head was reported with its commit: a report from version 0.5.0 of the Action or later names it.</p>
+      ) : (
+        <div className="scroll">
+          <table className="rows">
+            <thead>
+              <tr>
+                <th scope="col">Reported</th>
+                <th scope="col">Head</th>
+                <th scope="col">CI</th>
+                <th scope="col">Failed checks</th>
+                <th scope="col">Read</th>
+              </tr>
+            </thead>
+            <tbody>
+              {heads.map((h) => {
+                const href = commitHref(pullUrl, h.sha);
+                return (
+                  <tr key={h.sha} className={h.ci.state === "failure" ? undefined : "muted"}>
+                    <td className="nowrap">{dateTime(h.first_reported_at)}</td>
+                    <td className="nowrap">{href ? <a href={href} target="_blank" rel="noreferrer"><code>{h.sha.slice(0, 10)}</code></a> : <code>{h.sha.slice(0, 10)}</code>}</td>
+                    <td className="nowrap">{ciWords(h.ci)}</td>
+                    <td>{h.ci.failed_checks ? <span className="chips">{h.ci.failed_checks.map((name) => <span key={name} className="chip">{name}</span>)}</span> : "–"}</td>
+                    <td className="nowrap">{h.ci.checked_at ? dateTime(h.ci.checked_at) : "–"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 
