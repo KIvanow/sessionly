@@ -1608,10 +1608,11 @@ function linesOfFiles(files: FileHashes[]): Lines {
  * Keep what CI said of commits of a pull request, where the commit is one
  * of its heads or the one it was merged as; a commit that is neither is
  * passed over. A state that came out one way or the other is not put back
- * to pending (a run that read an earlier attempt), but may be put right by
- * a later read that came out the other way (a re-run, or a read that left
- * out what it should not have). The names of failed checks are kept only
- * with a failure. How many heads, and whether the merge commit, were changed.
+ * to pending, nor to none (a run that read an earlier attempt, or found
+ * nothing), but is put right by a later read that came out the other way
+ * (a re-run, or a read that left out what it should not have). The names of
+ * failed checks are kept only with a failure. How many heads, and whether
+ * the merge commit, were changed.
  */
 export async function applyCi(db: OrgDb, repo: string, number: number, ci: CiReport[]): Promise<{ heads: number; merges: number }> {
   let heads = 0;
@@ -1620,7 +1621,7 @@ export async function applyCi(db: OrgDb, repo: string, number: number, ci: CiRep
     const names = c.state === "failure" && c.failed_checks && c.failed_checks.length > 0 ? c.failed_checks : null;
     const changed = await db.query(
       `UPDATE pull_heads SET ci_state = $5, ci_failed = $6, ci_total = $7, ci_cancelled = $8, ci_checked_at = clock_timestamp(), failed_checks = $9::jsonb
-       WHERE org_id = $1 AND repo = $2 AND number = $3 AND sha = $4 AND NOT ($5 = 'pending' AND ci_state IN ('success', 'failure'))
+       WHERE org_id = $1 AND repo = $2 AND number = $3 AND sha = $4 AND NOT ($5 IN ('pending', 'none') AND ci_state IN ('success', 'failure'))
        RETURNING sha`,
       [db.orgId, repo, number, c.sha, c.state, c.failed, c.total, c.cancelled, names ? JSON.stringify(names) : null],
     );
@@ -1629,7 +1630,7 @@ export async function applyCi(db: OrgDb, repo: string, number: number, ci: CiRep
     const merged = await db.query(
       `UPDATE pull_requests SET merge_ci = $5::jsonb
        WHERE org_id = $1 AND repo = $2 AND number = $3 AND state = 'merged' AND merge_commit_sha = $4
-         AND NOT ($6 = 'pending' AND merge_ci->>'state' IN ('success', 'failure'))
+         AND (merge_ci IS NULL OR NOT ($6 IN ('pending', 'none') AND merge_ci->>'state' IN ('success', 'failure')))
        RETURNING number`,
       [db.orgId, repo, number, c.sha, JSON.stringify(kept), c.state],
     );
