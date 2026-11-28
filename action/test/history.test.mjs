@@ -319,10 +319,12 @@ test("an older server, and a checkout without history, are said", async () => {
   const old = async () => {
     throw Object.assign(new Error("the Sessionly server answered 404: not found"), { status: 404 });
   };
-  const skipped = await runOutcomes({}, { api: github(), server: old, repo: "acme/web", host: "github.com", log: (l) => logged.push(l), git: () => assert.fail("no git") });
+  const full = () => Buffer.from("false\n");
+  const skipped = await runOutcomes({}, { api: github(), server: old, repo: "acme/web", host: "github.com", log: (l) => logged.push(l), git: full });
   assert.equal(skipped.skipped, true);
   assert.match(logged[0], /from before that/);
-  const due = async () => ({ branches: [BRANCH("a".repeat(40))] });
+  // a shallow checkout is found before the server is asked
+  const due = async () => assert.fail("not asked");
   const shallow = () => Buffer.from("true\n");
   await assert.rejects(runOutcomes({}, { api: github(), server: due, repo: "acme/web", host: "github.com", log() {}, git: shallow }), /fetch-depth: 0/);
   await assert.rejects(runOutcomes({ SESSIONLY_OUTCOMES_SINCE: "soon" }, { api: github(), server: due, repo: "acme/web", host: "github.com", log() {}, git: shallow }), /not a date/);
@@ -356,7 +358,7 @@ test("when counting after merge and reading later commits both fail, the first i
   };
   const env = { SESSIONLY_URL: "https://sessionly.example.com", SESSIONLY_TOKEN: "t", SESSIONLY_GITHUB_TOKEN: "gh", GITHUB_REPOSITORY: "acme/web", GITHUB_EVENT_NAME: "schedule" };
   const logged = [];
-  await assert.rejects(run(env, { api: github(), server: down, git: () => assert.fail("no git"), log: (line) => logged.push(line) }), /503: counts/);
+  await assert.rejects(run(env, { api: github(), server: down, git: () => Buffer.from("false\n"), log: (line) => logged.push(line) }), /503: counts/);
   assert.ok(logged.some((line) => line === "::warning title=Sessionly::later commits were not read: the Sessionly server answered 503: commits"), logged.join("\n"));
 });
 
@@ -591,7 +593,7 @@ test("paths of any number and length are read, and a commit git prints too much 
   assert.deepEqual(files(cut.commits[1]), [[paths[0], 0, 1], [paths[1], 0, 1]]);
 });
 
-test("a branch that is gone is told the server, one not checked out is said, and one that fails leaves the others", async () => {
+test("a branch that is gone is told the server, one not checked out or that fails is said and told, and leaves the others", async () => {
   const { r, merge, git } = merged();
   r.write("a.ts", [1, 9].map(L));
   r.commit("Rework", START + DAY);
@@ -622,10 +624,15 @@ test("a branch that is gone is told the server, one not checked out is said, and
   // the gone one is told, with none of its pull requests read
   assert.deepEqual(sent[0], { repo: "github.com/o/r", base_ref: "stack/base", tip: null, scanned_until: iso(START + 2 * DAY), pulls: [], commits: [], gone: [1] });
   assert.match(logged.join("\n"), /stack\/base is not on GitHub any more/);
-  // the one GitHub has, but the checkout not, is only said
+  // the one GitHub has, but the checkout not, is said, and told unread so that the others are asked for first
   assert.match(logged.join("\n"), /origin\/release is not in the checkout/);
-  // the one refused is said, and the branch after it still read
-  assert.deepEqual(sent.slice(1).map((b) => b.pulls[0].number), [1, 4]);
+  const unread = (base_ref, numbers) => ({ repo: "github.com/o/r", base_ref, tip: null, scanned_until: iso(START + 2 * DAY), pulls: [], commits: [], unread: numbers });
+  assert.deepEqual(sent[1], unread("release", [1]));
+  // the one refused is said and told unread, and the branch after it still read
+  assert.deepEqual(sent[2].pulls[0].number, 1);
+  assert.deepEqual(sent[3], unread("main", [1]));
+  assert.deepEqual(sent[4].pulls[0].number, 4);
+  assert.equal(sent.length, 5);
   assert.match(logged.join("\n"), /Later commits of main could not be read \(the Sessionly server answered 422: no\)/);
 });
 
@@ -682,7 +689,9 @@ test("the server's tips go back with what was read, and the refused question of 
   const none = () => {
     throw new Error("git rev-parse failed: fatal: not a git repository");
   };
-  const out = await runOutcomes({}, { api: github(), server, repo: "o/r", host: "github.com", log: (l) => logged.push(l), git: none });
+  // and the server is not asked: what it gives would not be read
+  const unasked = async () => assert.fail("not asked");
+  const out = await runOutcomes({}, { api: github(), server: unasked, repo: "o/r", host: "github.com", log: (l) => logged.push(l), git: none });
   assert.equal(out.skipped, true);
   assert.match(logged[0], /^::notice title=Sessionly::Later commits .* not checked out here/);
 });

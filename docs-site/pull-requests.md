@@ -189,9 +189,10 @@ How it is read:
   server is told, its pull requests are not named again, and they are counted nowhere, not even
   among those to reach. One renamed since is read by its new name, and is gone when that is
   not in the checkout. One that is on GitHub but not in the checkout, or cannot be read for
-  another reason, is warned of, and the other branches are read; its pull requests are asked
-  for after the others from then on, so they hold back none. Without a checkout at all the
-  run only notes that later commits were not read.
+  another reason, is warned of, and the other branches are read; the server is told its pull
+  requests were not read, and asks for them after the others from then on, so they hold back
+  none. Without a checkout at all the run only notes that later commits were not read, and
+  asks the server for nothing.
 - The server walks the commits in the order they landed, against the lines each pull request
   still has: a line moved goes with the move, a commit that puts lines back (a reland) is the
   pull request's own, and a commit that came before the merge commit in the history (from a

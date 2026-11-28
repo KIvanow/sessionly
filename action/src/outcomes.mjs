@@ -738,12 +738,25 @@ export function waitOf(retryAfter, now = Date.now()) {
  * requests' lines. Needs the repository checked out with its history
  * (`fetch-depth: 0`): without a checkout, that is said and nothing is read.
  * A server from before this is said, and skipped. A branch that cannot be
- * read is said and the others are read; the run fails at the end.
+ * read is said, and told the server (`unread`), and the others are read;
+ * the run fails at the end.
  */
 export async function runOutcomes(env, { api, server, repo, host, log, git, wait = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() }) {
   const name = `${host}/${repo}`;
   const since = (env.SESSIONLY_OUTCOMES_SINCE ?? "").trim();
   if (since && Number.isNaN(Date.parse(since))) throw new Error(`the outcomes-since input is not a date: ${since}`);
+  // Without a checkout there is no history to read: a job that only counts after merge has none. Found before asking, so nothing is asked for that cannot be read.
+  let shallow;
+  try {
+    shallow = git(["rev-parse", "--is-shallow-repository"]).toString("utf8").trim();
+  } catch (err) {
+    log(
+      `::notice title=Sessionly::Later commits of merged pull requests were not read: the repository is not checked out here (${oneLine(err)}). ` +
+        "To read them, add actions/checkout with fetch-depth: 0 before this step; to stop this notice, set outcomes: false.",
+    );
+    return { skipped: true, stored: [] };
+  }
+  if (shallow !== "false") throw new Error("the checkout has only the latest commits: give actions/checkout fetch-depth: 0, so the base branch's history can be read");
   let due;
   try {
     due = await server("GET", `/prs/outcomes/due?repo=${encodeURIComponent(name)}${since ? `&since=${encodeURIComponent(new Date(since).toISOString())}` : ""}`);
@@ -761,18 +774,6 @@ export async function runOutcomes(env, { api, server, repo, host, log, git, wait
     log("No merged pull request was due for its later commits to be read.");
     return { stored: [], left: false };
   }
-  // Without a checkout there is no history to read: a job that only counts after merge has none.
-  let shallow;
-  try {
-    shallow = git(["rev-parse", "--is-shallow-repository"]).toString("utf8").trim();
-  } catch (err) {
-    log(
-      `::notice title=Sessionly::Later commits of merged pull requests were not read: the repository is not checked out here (${oneLine(err)}). ` +
-        "To read them, add actions/checkout with fetch-depth: 0 before this step; to stop this notice, set outcomes: false.",
-    );
-    return { skipped: true, stored: [] };
-  }
-  if (shallow !== "false") throw new Error("the checkout has only the latest commits: give actions/checkout fetch-depth: 0, so the base branch's history can be read");
   const of = wordsOf(env.SESSIONLY_FIX_WORDS, env.SESSIONLY_BUG_LABELS);
   const github = asking(api, repo, log);
   const stored = [];
@@ -789,12 +790,16 @@ export async function runOutcomes(env, { api, server, repo, host, log, git, wait
       }
     }
   };
+  /** Tell the server a branch's pull requests were not read, so that it asks for the others first from then on. */
+  const unread = (branch) =>
+    put({ repo: name, base_ref: branch.base_ref, tip: null, scanned_until: new Date(now()).toISOString(), pulls: [], commits: [], unread: branch.pulls.map((p) => p.number).slice(0, MOST_LISTED) });
   for (const branch of branches) {
     try {
       const read = await scanBranch({ git, api, repo, branch, words: of, log, now: now(), github });
       if (!read.tip) {
         if (!read.gone) {
           log(`::warning title=Sessionly::origin/${branch.base_ref} is not in the checkout, so its later commits were not read. Check it out with fetch-depth: 0.`);
+          await unread(branch);
           continue;
         }
         // Deleted since (a branch others were stacked on goes once it is merged itself): the server stops asking.
@@ -828,7 +833,8 @@ export async function runOutcomes(env, { api, server, repo, host, log, git, wait
       // What the server says of one branch's report is about that one; anything else from it, the next would meet too.
       if (err.sending && ![400, 413, 422].includes(err.status)) throw err;
       failed.push(branch.base_ref);
-      log(`::warning title=Sessionly::Later commits of ${branch.base_ref} could not be read (${oneLine(err)}). The other branches are read, and it is tried again at the next run.`);
+      log(`::warning title=Sessionly::Later commits of ${branch.base_ref} could not be read (${oneLine(err)}). The other branches are read, and it is tried again at the next run, after the others.`);
+      await unread(branch);
     }
   }
   const said = { revert: "a revert", fix: "a fix", rework: "rework" };

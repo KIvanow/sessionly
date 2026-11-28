@@ -177,8 +177,8 @@ made: for a merged branch's commits, the merge commit. After a force-push of the
 run reads by date once, and from where it is from then on.
 
 - Without a checkout (a scheduled job set up before version 0.5.0 has none), the run notes that
-  later commits were not read and does the rest: add the checkout and the permissions above, or
-  set `outcomes: false`. With a checkout of only the latest commits, later commits are not read
+  later commits were not read, asks the server for none, and does the rest: add the checkout
+  and the permissions above, or set `outcomes: false`. With a checkout of only the latest commits, later commits are not read
   and the run says to add `fetch-depth: 0`: a warning, or a failed run with `fail-on-error`.
 - When GitHub allows the run fewer than 100 more requests, or more than 2,000 commits are to
   be read whole, it stops there, and the next run goes on from there.
@@ -187,10 +187,10 @@ run reads by date once, and from where it is from then on.
 - A branch that is not on GitHub any more (one others were stacked on, deleted once merged) is
   told to the server, which stops asking for the pull requests merged into it. One renamed
   since is read by its new name, and is gone when that is not in the checkout. One that is on
-  GitHub but not in the checkout is warned of, and its pull requests are asked for after the
-  others from then on.
-- A branch that cannot be read is warned of, the others are read, and the run fails at the end
-  only with `fail-on-error`.
+  GitHub but not in the checkout is warned of, and the server is told its pull requests were
+  not read: it asks for them after the others from then on.
+- A branch that cannot be read is warned of and told to the server the same way, the others
+  are read, and the run fails at the end only with `fail-on-error`.
 
 `outcomes-since` reads those of older pull requests too: later commits are history, so they can
 be counted late, unlike the lines still there after merge. See
@@ -221,9 +221,10 @@ reverts, which of the due pull requests it is a later commit of, and for the fil
 asked about (and where their lines moved: those paths too), a hash of each line it removed or
 added. For each branch read: the SHA of the commit it was read at, and for each pull request
 the SHAs of the commits it was read up to and the paths the server named for it; for a branch
-deleted since, the numbers of the pull requests merged into it. What a commit is (a fix, a
-revert) goes as ids such as `fix_message` or `bug_issue`: its message, the title, branch and
-body of its pull request, and the issues' labels are read in the runner and never sent.
+deleted since or that could not be read, the numbers of the pull requests merged into it (the
+server named them). What a commit is (a fix, a revert) goes as ids such as `fix_message` or
+`bug_issue`: its message, the title, branch and body of its pull request, and the issues'
+labels are read in the runner and never sent.
 
 The report also says it came from this Action and which version (`reporter`, the version in
 `package.json`). Nothing else, and nothing to anyone else.
