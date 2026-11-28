@@ -236,11 +236,15 @@ const AGES = { "1d": "1 day", "7d": "7 days", "30d": "30 days" } as const;
 function Outcomes({ token, repo, since, onSignOut }: { token: string; repo?: string; since?: string; onSignOut: () => void }) {
   const [by, setBy] = useState<PullOutcomesBy>("tool");
   const [age, setAge] = useState<keyof typeof AGES>("7d");
-  const found = useApi<PullOutcomesSummary>(token, `/prs/outcomes/summary${query({ by, repo, since })}`, onSignOut);
+  const path = `/prs/outcomes/summary${query({ by, repo, since })}`;
+  const found = useApi<PullOutcomesSummary>(token, path, onSignOut);
   if (found.errorStatus === 404 || (!found.data && !found.loading && !found.error)) return null;
+  // Only what came for this grouping, repository and period: until it comes, the one before is not shown under it.
+  const data = found.dataPath === path ? found.data : null;
+  const error = found.dataPath === path ? found.error : null;
   // What a server sent, as counts: hidden when it is no answer.
-  const rows = found.data ? outcomeRows(found.data, age) : null;
-  if (found.data && !rows) return null;
+  const rows = data ? outcomeRows(data, age) : null;
+  if (data && !rows) return null;
   const total = rows?.total;
   const name = (key: string) => (by === "tool" ? toolName(key) : by === "model" ? modelName(key) : by === "repo" ? repoName(key) : key);
   return (
@@ -265,12 +269,12 @@ function Outcomes({ token, repo, since, onSignOut }: { token: string; repo?: str
           <button key={key} aria-pressed={age === key} onClick={() => setAge(key)}>{AGES[key]}</button>
         ))}
       </div>
-      {found.error && <p role="alert">{found.error}</p>}
-      {!found.data && !found.error && <Loader label="Loading later commits" />}
-      {found.data && total && total.pulls_total === 0 && (
+      {error && <p role="alert">{error}</p>}
+      {!data && !error && <Loader label="Loading later commits" />}
+      {data && total && total.pulls_total === 0 && (
         <p className="muted">None of these merged pull requests has agent lines whose later commits are read.</p>
       )}
-      {found.data && total && total.pulls_total > 0 && (
+      {data && total && total.pulls_total > 0 && (
         <div className="scroll">
           <table>
             <thead>

@@ -163,7 +163,8 @@ How it is read:
   branch, and the files their agent lines are in and where later commits moved them. Only pull
   requests with agent lines, merged since the server began reading them, are named. A session
   matched to one later, with lines in a file that was not read, has that pull request read
-  again from the merge.
+  again from the merge; a run that was reading it meanwhile, without that file, leaves it as it
+  is.
 - The run reads that branch's history with git in the runner. A pull request is read from where
   the last run left it: the server keeps the commits the branch was at, and the run reads what
   has come onto the branch since, whatever the commits' own dates (a branch merged with a merge
@@ -219,6 +220,7 @@ How it is read:
   landed, where the binary follows a session's lines along each history they are in. Mostly
   the two agree. Where two branches change the same lines and are then merged (merge commits,
   not squashes), the server may count a commit on one against lines the other one still has.
+  What a merge commit changes itself (a conflict resolved by hand) is not read, by either.
 - A request holds at most 500 commits, 500,000 line hashes and 100,000 files and moves.
 - When GitHub allows the run fewer than 100 more requests, or more than 2,000 commits are to be
   read whole, it stops, and the next run goes on from the branch's own commit before the one it

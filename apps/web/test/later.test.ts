@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { laterKind, laterOf, laterTile, laterWindow, MIN_PULLS, outcomeRows, perThousand, reachedOf, revertedShare, signalName } from "../src/pull.ts";
+import { laterKind, laterOf, laterTile, laterWindow, MIN_PULLS, outcomeRows, perThousand, reachedOf, revertedShare, signalName, tenths } from "../src/pull.ts";
 
 const window = (more: Record<string, unknown> = {}) => ({
   reached: true,
@@ -73,4 +73,8 @@ test("later commits a server sent that are not an answer break neither the page 
   const rows = outcomeRows({ groups: [{ key: "codex", outcomes_7d: at }, { key: "cursor" }, "x", { outcomes_7d: at }], total: { outcomes_7d: { ...at, fix_commits: "1" } } }, "7d");
   assert.deepEqual(rows!.groups.map((g) => [g.key, g.at.pulls_reached, g.at.fix_commits]), [["codex", 2, 0]]);
   assert.deepEqual([rows!.total.pulls_total, rows!.total.fix_commits], [3, 0]);
+});
+
+test("the agents' share of a later commit's lines is shown to a tenth, and a whole number as one", () => {
+  assert.deepEqual([tenths(2), tenths(1.5), tenths(0.34), tenths(1234.56)], ["2", "1.5", "0.3", "1,234.6"]);
 });

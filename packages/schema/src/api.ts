@@ -1320,6 +1320,13 @@ export interface PullOutcomesReport {
     from?: string[] | null;
     /** Read up to here with this report (see `OutcomesDuePull.tips`); left out or null, none are known. */
     tips?: string[] | null;
+    /**
+     * The files it was read in: the `paths` the due answer gave for it. When
+     * its sessions have lines in another now (one matched meanwhile), this
+     * report says nothing of that file and leaves it as it is. Left out: not
+     * checked.
+     */
+    paths?: string[];
   }[];
   commits: OutcomeCommitReport[];
   /**
@@ -1338,13 +1345,16 @@ export interface PullOutcomesStored {
 /**
  * Merged pull requests' outcomes at one age, summed (merge clock). Commit,
  * pull request and session counts count once in each group whose lines they
- * changed, and once in the total; lines are split, so they add up.
+ * changed, and once in the total: a commit by its repository and SHA,
+ * however many pull requests it changed. Lines are split, so they add up.
  */
 export interface PullOutcomesAt {
   /**
    * Merged pull requests with agent lines in the group that have reached the
-   * age, and of how many: those whose later commits can be read (a base
-   * branch that is not gone, merged since they are read or read anyway).
+   * age and were read up to it, and of how many: all of them whose later
+   * commits can be read (a base branch that is not gone, merged since they
+   * are read or read anyway), reached or not. The other counts are of those
+   * reached only.
    */
   pulls_reached: number;
   pulls_total: number;

@@ -90,10 +90,11 @@ const KEPT = `(jsonb_typeof(s.matched) = 'object' AND s.matched <> '{}'::jsonb)`
  * Merged pull requests of a repository whose later commits are to be read,
  * by the branch they were merged into: those with agent lines, merged since
  * the organisation's `outcomes_since` (or `since`, which may be earlier: the
- * history is still there), whose 30 days after merging are not all read,
- * and whose branch is not gone. Each says from when (`since`, how far it
- * was read, and `tips`, the commits it was read up to); a branch reads from
- * the earliest of its pull requests. No line hashes.
+ * history is still there), whose 30 days after merging are not all read
+ * (720 hours, as `LONGEST`: 30 days of a calendar are 721 where the clocks
+ * go back), and whose branch is not gone. Each says from when (`since`,
+ * how far it was read, and `tips`, the commits it was read up to); a branch
+ * reads from the earliest of its pull requests. No line hashes.
  */
 export async function outcomesDue(db: OrgDb, repo: string, since: string | null = null): Promise<OutcomesDue> {
   const rows = await db.query(
@@ -105,7 +106,7 @@ export async function outcomesDue(db: OrgDb, repo: string, since: string | null 
      FROM pull_requests p JOIN orgs o ON o.id = p.org_id
      WHERE p.org_id = $1 AND p.repo = $2 AND p.state = 'merged' AND p.merged_at IS NOT NULL AND p.base_ref IS NOT NULL
        AND p.merged_at >= least(o.outcomes_since, coalesce($3::timestamptz, o.outcomes_since))
-       AND (p.outcomes_scanned_until IS NULL OR p.outcomes_scanned_until < p.merged_at + interval '30 days')
+       AND (p.outcomes_scanned_until IS NULL OR p.outcomes_scanned_until < p.merged_at + interval '720 hours')
        AND p.outcomes_gone_at IS NULL
        AND EXISTS (SELECT 1 FROM pull_sessions s WHERE s.org_id = p.org_id AND s.repo = p.repo AND s.number = p.number AND ${KEPT})
      ORDER BY coalesce(p.outcomes_scanned_until, p.merged_at), p.number
@@ -180,6 +181,10 @@ export function checkOutcomes(body: unknown): PullOutcomesReport {
       : Array.isArray(value) && value.length <= MOST_TIPS && value.every((sha) => typeof sha === "string" && COMMIT_SHA.test(sha))
         ? value.length > 0 ? [...new Set(value as string[])] : null
         : fail(`tips must be at most ${MOST_TIPS} commit SHAs`);
+  const read = (value: unknown): string[] =>
+    Array.isArray(value) && value.length <= MOST_FILES_IN_ALL
+      ? value.map((p) => path(p, "each of a pull's paths"))
+      : fail(`a pull's paths must be a list of at most ${MOST_FILES_IN_ALL}`);
   const pulls = Array.isArray(r.pulls) && r.pulls.length <= MOST_PULLS ? r.pulls : fail(`pulls must be a list of at most ${MOST_PULLS}`);
   const commits = Array.isArray(r.commits) ? r.commits : fail("commits must be a list");
   if (commits.length > MOST_COMMITS) fail(`a report can list at most ${MOST_COMMITS} commits`);
@@ -198,6 +203,7 @@ export function checkOutcomes(body: unknown): PullOutcomesReport {
         found: p.found === true,
         ...("from" in p ? { from: tips(p.from) } : {}),
         tips: tips(p.tips),
+        ...(p.paths != null ? { paths: read(p.paths) } : {}),
       };
     }),
     gone: numbers(r.gone ?? [], "gone"),
@@ -502,8 +508,10 @@ function agentShares(matched: (Lines | null)[], files: { path: string; hashes: s
  * commits that landed after it was last read and by `scanned_until` (no
  * later than now), and in its 30 days, are walked in the order sent; one
  * that comes before its merge commit in the history, when that was found,
- * did not see its lines. A commit kept once is not changed, but for a later
- * revert of it (`relands`).
+ * did not see its lines (and one after it may have landed the moment it was
+ * merged). One matched since with lines in a file the run did not read
+ * (`paths`) is left as it is. A commit kept once is not changed, but for a
+ * later revert of it (`relands`).
  */
 export async function storeOutcomes(
   each: <T>(fn: (db: OrgDb) => Promise<T>) => Promise<T>,
@@ -529,10 +537,15 @@ export async function storeOutcomes(
         `SELECT s.matched FROM pull_sessions s WHERE s.org_id = $1 AND s.repo = $2 AND s.number = $3 AND ${KEPT}`,
         [db.orgId, report.repo, asked.number],
       );
+      // Matched meanwhile with lines in a file the run did not read: it says nothing of that file, and leaves it as it is.
+      const paths = asked.paths && new Set(asked.paths);
+      if (paths && matched.some((row) => Object.keys(json<Lines | null>(row.matched) ?? {}).some((path) => !paths.has(path)))) return [];
       const merged = time(pull.merged_at);
       const since = pull.outcomes_scanned_until == null ? merged : time(pull.outcomes_scanned_until);
       const until = Math.min(read, merged + LONGEST);
       if (until <= since) return [];
+      // Read the first time, a commit of the moment it was merged is later when the history says so (`after`).
+      const from = pull.outcomes_scanned_until == null && asked.found ? merged - 1 : since;
       const mergeSha = (pull.merge_commit_sha as string) ?? asked.merge_commit_sha ?? null;
       const files = json<{ path: string; hashes: string[] }[] | null>(pull.last_files);
       const shares = agentShares(matched.map((row) => json<Lines | null>(row.matched)), files);
@@ -544,7 +557,7 @@ export async function storeOutcomes(
         ])).map((row) => String(row.sha)),
       );
       for (const { commit, landed, lines } of commits) {
-        if (landed <= since || landed > until || landed <= merged) continue;
+        if (landed <= from || landed > until || landed < merged) continue;
         // Not after the commit it was merged as: its lines were not there to change.
         if (asked.found && !(commit.after ?? []).includes(asked.number)) continue;
         const own = commit.pulls.includes(asked.number) || commit.sha === mergeSha;

@@ -586,6 +586,11 @@ export function outcomeRows(summary: unknown, age: OutcomeAge): { groups: { key:
   return { groups, total };
 }
 
+const tenth = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
+
+/** Lines that are shares of lines, split over sessions: to a tenth, a whole number as one. "2", "1.5". */
+export const tenths = (n: number): string => tenth.format(n);
+
 /** Of an age's pull requests, how many reached it: "4 of 9". */
 export const reachedOf = (at: Pick<PullOutcomesAt, "pulls_reached" | "pulls_total">): string => `${count(at.pulls_reached)} of ${count(at.pulls_total)}`;
 

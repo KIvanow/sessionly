@@ -8,7 +8,7 @@ import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
 import type { Db } from "../src/db.ts";
 import { BadReport } from "../src/pulls.ts";
-import { checkOutcomes, classify, MOST_LINES, MOST_LINES_A_COMMIT } from "../src/outcomes.ts";
+import { checkOutcomes, classify, MOST_LINES, MOST_LINES_A_COMMIT, outcomesDue } from "../src/outcomes.ts";
 import { testDb, tokenFor } from "./helpers.ts";
 
 // Hashes are 16 hex digits; these stand for lines.
@@ -219,7 +219,8 @@ test("later commits on the base branch are walked against a merged pull request'
   assert.equal(without.commits[1].counted, false);
 
   // A report from an Action before 0.5.0 says nothing of the merge commit: what is known stays.
-  await merged(repo, 1, 10, [file("a.ts", 1, 2, 3, 4, 5, 6, 9), file("b.ts", 10, 11, 12)], { reporter: { name: "sessionly-action", version: "0.4.0" } });
+  const older = await merged(repo, 1, 10, [file("a.ts", 1, 2, 3, 4, 5, 6, 9), file("b.ts", 10, 11, 12)], { reporter: { name: "sessionly-action", version: "0.4.0" } });
+  assert.equal(older.status, 200, JSON.stringify(older.body));
   const [row] = await db.query(`SELECT merge_commit_sha, head_sha FROM pull_requests WHERE repo = $1 AND number = 1`, [repo]);
   assert.deepEqual([row!.merge_commit_sha, row!.head_sha], [sha(100), sha(99)]);
 
@@ -373,9 +374,23 @@ test("a scan is checked before anything of it is kept", async () => {
   assert.equal((await bad({ reverts: { shas: ["xyz"], pulls: [] } })).status, 422);
   assert.equal((await bad({})).status, 200);
   assert.equal((await put({ ...base, commits: Array.from({ length: 501 }, (_, i) => commit(i + 1, ago(1), [])) })).status, 422);
-  // a branch the pull request was not merged into says nothing of it
-  const other = await put({ ...base, base_ref: "release", pulls: [{ number: 1, found: false }], commits: [commit(50, ago(1), [{ path: "a.ts", removed: [1, 2, 3] }])] });
+});
+
+test("a scan of a branch a pull request was not merged into says nothing of it", async () => {
+  await readingSince();
+  const repo = "github.com/acme/branch";
+  assert.equal((await upload(repo, "br-1", "claude-code", [file("a.ts", 1, 2, 3)])).status, 200);
+  await merged(repo, 1, 5, [file("a.ts", 1, 2, 3)]);
+  const read = () => db.query(`SELECT outcomes_scanned_until, outcomes_held FROM pull_requests WHERE repo = $1 AND number = 1`, [repo]);
+  const before = await read();
+  const scan = (base_ref: string) =>
+    call(tokens.ci, "PUT", "/prs/outcomes", { repo, base_ref, scanned_until: ago(0), pulls: [{ number: 1, found: false }], commits: [commit(50, ago(4), [{ path: "a.ts", removed: [1, 2, 3] }])] });
+  const other = await scan("release");
+  assert.equal(other.status, 200);
   assert.deepEqual(other.body.stored, []);
+  assert.deepEqual(await read(), before);
+  // the same scan of the branch it was merged into keeps it
+  assert.deepEqual((await scan("main")).body.stored.map((s: any) => s.sha), [sha(50)]);
 });
 
 /** The organisation's merged pull requests are read from this many days ago. */
@@ -653,4 +668,55 @@ test("pull requests merged into branches that are gone are not asked for again, 
   const total = (await call(tokens.admin, "GET", `/prs/outcomes/summary?by=tool&repo=${encodeURIComponent("acme/stacked")}`)).body.total;
   assert.equal(total.outcomes_1d.pulls_total, 1);
   assert.equal((await call(tokens.ci, "PUT", "/prs/outcomes", { repo, base_ref: "main", scanned_until: ago(0), pulls: [], commits: [], gone: [2 ** 31] })).status, 422);
+});
+
+test("a commit that landed the moment its pull request was merged counts when the history says it came after", async () => {
+  await readingSince();
+  const repo = "github.com/acme/moment";
+  assert.equal((await upload(repo, "mo-1", "claude-code", [file("a.ts", 1, 2, 3)])).status, 200);
+  assert.equal((await upload(repo, "mo-2", "codex", [file("b.ts", 5, 6, 7)])).status, 200);
+  const at = new Date(Math.floor(Date.now() / 1000 - 5 * 86_400) * 1000).toISOString();
+  await merged(repo, 1, 5, [file("a.ts", 1, 2, 3)], { merged_at: at });
+  await merged(repo, 2, 5, [file("b.ts", 5, 6, 7)], { merged_at: at });
+  // Read by date, of the same second as both merges: after #1's merge commit in the history; #2's was not found,
+  // and a commit of its moment may be its own.
+  const put = await call(tokens.ci, "PUT", "/prs/outcomes", {
+    repo, base_ref: "main", scanned_until: ago(0), pulls: [{ number: 1, found: true }, { number: 2, found: false }],
+    commits: [commit(1, at, [{ path: "a.ts", removed: [1, 2] }, { path: "b.ts", removed: [5, 6] }], { after: [1] })],
+  });
+  assert.deepEqual(put.body.stored.map((s: any) => [s.number, s.sha]), [[1, sha(1)]]);
+});
+
+test("a pull request read to the end of its 30 days is not due again, in whatever time zone the database is", async () => {
+  const repo = "github.com/acme/dst";
+  // Merged three weeks before clocks go back in New York: its 30 days there are 721 hours of calendar.
+  await db.query(`UPDATE orgs SET outcomes_since = '2026-01-01T00:00:00Z' WHERE id = 'default'`);
+  assert.equal((await upload(repo, "dst-1", "claude-code", [file("a.ts", 1, 2, 3)])).status, 200);
+  await merged(repo, 1, 5, [file("a.ts", 1, 2, 3)], { created_at: "2026-10-09T12:00:00Z", merged_at: "2026-10-11T12:00:00Z" });
+  await db.query(`UPDATE pull_requests SET outcomes_scanned_until = merged_at + interval '720 hours' WHERE repo = $1`, [repo]);
+  const due = await db.asOrg("default", async (scoped) => {
+    await scoped.query(`SET LOCAL TIME ZONE 'America/New_York'`);
+    return outcomesDue(scoped, repo);
+  });
+  assert.deepEqual(due, { branches: [] });
+});
+
+test("a scan that did not read a file a session was matched with meanwhile leaves the pull request as it was", async () => {
+  await readingSince();
+  const repo = "github.com/acme/meanwhile";
+  const q = encodeURIComponent(repo);
+  assert.equal((await upload(repo, "mw-1", "claude-code", [file("a.ts", 1, 2, 3)])).status, 200);
+  await merged(repo, 1, 10, [file("a.ts", 1, 2, 3), file("b.ts", 20, 21, 22)]);
+  const [pull] = (await call(tokens.ci, "GET", `/prs/outcomes/due?repo=${q}`)).body.branches[0].pulls;
+  assert.deepEqual([pull.paths, pull.tips], [["a.ts"], null]);
+  // While a run reads a.ts, b.ts's lines turn out to be an agent's too: what it read says nothing of b.ts.
+  assert.equal((await upload(repo, "mw-2", "codex", [file("b.ts", 20, 21, 22)])).status, 200);
+  const read = (paths: string[]) =>
+    scanOf(repo, [1], [commit(1, ago(9), [{ path: "a.ts", removed: [1, 2] }])], { pulls: [{ number: 1, found: false, from: null, tips: [sha(70)], paths }] });
+  assert.deepEqual((await read(pull.paths)).body.stored, []);
+  const [again] = (await call(tokens.ci, "GET", `/prs/outcomes/due?repo=${q}`)).body.branches[0].pulls;
+  assert.deepEqual([again.paths, again.since, again.tips], [["a.ts", "b.ts"], pull.merged_at, null]);
+  // A run that read both goes on.
+  assert.deepEqual((await read(again.paths)).body.stored.map((s: any) => s.sha), [sha(1)]);
+  assert.equal((await read(["a.ts", 7] as never)).status, 422);
 });

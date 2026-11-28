@@ -2,7 +2,7 @@ import type { LocalReviewRun, PullAfterMerge, PullDetail, PullHistory, PullOutco
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { afterMergeLine, afterMergeName, afterMergeTile, laterKind, laterOf, laterTile, signalName, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewNote, reviewTarget, roundsLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, laterKind, laterOf, laterTile, signalName, tenths, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewNote, reviewTarget, roundsLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
 import { cost, count, dateTime, duration, modelName, usd, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -416,7 +416,7 @@ function LaterCommits({ outcomes }: { outcomes: PullOutcomes }) {
                     <span className="chips">{c.signals.map((s) => <span key={s} className="chip">{signalName(s)}</span>)}</span>
                   </td>
                   <td className="num">{count(c.lines)}</td>
-                  <td className="num">{count(Math.round(c.agent_lines * 10) / 10)}</td>
+                  <td className="num">{tenths(c.agent_lines)}</td>
                   <td>
                     {c.sessions.length === 0
                       ? "–"

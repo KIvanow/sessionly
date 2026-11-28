@@ -419,8 +419,10 @@
               Its scheduled run, which counts merged pull requests again and reads the later
               commits on their branch with git, needs <code>contents: read</code>,
               <code>pull-requests: read</code> and, for the labels of linked issues,
-              <code>issues: read</code>; commit messages and pull request text are read in the
-              runner and only their classification is sent.
+              <code>issues: read</code>. Commit messages and pull request text are read in the
+              runner and not sent: only what they are read as (ids such as
+              <code>fix_message</code>), the commit SHAs a revert's message names, and the numbers
+              of the pull requests a description says it reverts.
             </li>
             <li>
               It authenticates with a <code>ci</code> token kept as a repository secret. If that
