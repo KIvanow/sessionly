@@ -174,7 +174,9 @@ How it is read:
   after a force-push of the branch, it is read by date once (from a day before the earliest due
   to a day past the latest one's 30 days), and from where it is from then on.
 - A commit **landed** when the branch's own commit that brought it in was made (for a merged
-  branch's commits, the merge commit), and never before the pull request was last read.
+  branch's commits, the merge commit), and never before the pull request was last read; read
+  by date, when it was committed. Either way no later than 5 minutes before the run: one made
+  since, or by a clock ahead, lands then, and is read with the rest.
 - For each commit that changed those files the run sends the lines it removed and added there,
   as hashes. A commit that removes any of them is read whole: a line it adds back anywhere was
   moved, not changed, and is followed to its new file. A commit of more than 100,000 lines (a

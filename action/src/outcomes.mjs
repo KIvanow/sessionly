@@ -565,9 +565,11 @@ async function readByTips(ctx, pulls, paths, readAt) {
 /**
  * Read the later commits of the pull requests that have no tips to read
  * from, by time, as before there were any: those committed from a day
- * before the earliest was read up to, each landed when it was committed.
- * A commit merged in with a date before that is not read: tips are kept
- * once this is told, and a pull request is read from them from then on.
+ * before the earliest was read up to, each landed when it was committed,
+ * and no later than `readAt` (as `readByTips` lands them): every commit on
+ * the branch is read, so it is read up to its tip. A commit merged in with
+ * a date before that is not read: tips are kept once this is told, and a
+ * pull request is read from them from then on.
  */
 async function readByTime(ctx, pulls, paths, readAt) {
   const { git, tip } = ctx;
@@ -578,18 +580,22 @@ async function readByTime(ctx, pulls, paths, readAt) {
   for (const p of pulls) {
     if (p.found) after.set(p.number, new Set(shasOf(git(["rev-list", "--ancestry-path", `${p.merge_commit_sha}..${tip}`]))));
   }
-  const args = ["--no-merges", "--full-history", "--topo-order", "--reverse", "--timestamp", `--max-age=${Math.floor(since / 1000)}`, `--min-age=${Math.floor(until / 1000)}`];
-  // In the order they were committed; those of the same second, as git walked them.
-  const list = (some) => parseList(revList(git, args, [tip], some)).map((c, i) => ({ ...c, i })).sort((a, b) => a.at - b.at || a.i - b.i);
+  const args = ["--no-merges", "--full-history", "--topo-order", "--reverse", "--timestamp", `--max-age=${Math.floor(since / 1000)}`];
+  // In the order they were committed; those of the same second, as git walked them. Those that land after every one's 30 days are not wanted.
+  const list = (some) =>
+    parseList(revList(git, args, [tip], some))
+      .map((c, i) => ({ ...c, i }))
+      .filter((c) => Math.min(c.at * 1000, readAt) <= end)
+      .sort((a, b) => a.at - b.at || a.i - b.i);
   const { commits, paths: tracked, cut } = readHistory(git, list, paths);
   const landings = new Map();
   let previous = -Infinity;
   for (const c of commits) {
-    previous = Math.max(c.at * 1000, previous + 1);
+    previous = Math.max(Math.min(c.at * 1000, readAt), previous + 1);
     landings.set(c.sha, previous);
   }
   const afterOf = (c) => pulls.filter((p) => after.get(p.number)?.has(c.sha)).map((p) => p.number);
-  // Git reads no later than `until`; those of its last second are all read, a millisecond apart.
+  // Those made since `readAt` (or with a clock ahead of this one) land then, a millisecond apart.
   const { kept, stop } = await examine({ ...ctx, commits, tracked: new Set(tracked), landings, end: Infinity, cut, afterOf });
   const last = kept.reduce((most, c) => Math.max(most, Date.parse(c.landed_at)), until);
   return {

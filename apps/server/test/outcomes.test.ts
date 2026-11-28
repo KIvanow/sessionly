@@ -360,6 +360,69 @@ test("a branch merged in after a reading, and a push of a commit days old, are r
   }
 });
 
+test("a fix pushed minutes before a run that reads by date is read, not passed over for the tip", async () => {
+  type Stored = { number: number; sha: string; kind: string };
+  const action: { runOutcomes: (env: Record<string, string>, ctx: Record<string, unknown>) => Promise<{ stored: Stored[] }> } = await import(
+    new URL("../../../action/src/outcomes.mjs", import.meta.url).href
+  );
+  const { gitIn }: { gitIn: (cwd: string, spawn: typeof spawnSync) => unknown } = await import(new URL("../../../action/src/history.mjs", import.meta.url).href);
+  const { lineHash }: { lineHash: (line: string) => string } = await import(new URL("../../../action/src/lines.mjs", import.meta.url).href);
+  const dir = mkdtempSync(join(tmpdir(), "sessionly-outcomes-"));
+  try {
+    const at = (days: number) => Math.floor((Date.now() - days * 86_400_000) / 1000);
+    const git = (args: string[], when = at(20)) => {
+      const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: dir, GIT_AUTHOR_DATE: `@${when} +0000`, GIT_COMMITTER_DATE: `@${when} +0000`, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };
+      const done = spawnSync("git", args, { cwd: dir, env, encoding: "utf8" });
+      assert.equal(done.status, 0, done.stderr);
+      return done.stdout.trim();
+    };
+    const lines = (...ns: number[]) => ns.map((n) => `compute_${n}(input, ${n});`);
+    git(["init", "-q", "--initial-branch", "main"]);
+    git(["config", "commit.gpgsign", "false"]);
+    writeFileSync(join(dir, "app.ts"), `${lines(1, 2, 3, 4).join("\n")}\n`);
+    git(["add", "-A"], at(12));
+    git(["commit", "-q", "-m", "Add compute (#1)"], at(12));
+    const merge = git(["rev-parse", "HEAD"]);
+    writeFileSync(join(dir, "other.ts"), "other();\n");
+    git(["add", "-A"], at(10));
+    git(["commit", "-q", "-m", "Other"], at(10));
+    git(["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+    const repo = "github.com/acme/minutes";
+    await db.query(`UPDATE orgs SET outcomes_since = now() - interval '20 days' WHERE id = 'default'`);
+    const hashes = lines(1, 2, 3, 4).map(lineHash);
+    assert.equal((await upload(repo, "minutes-1", "codex", [{ path: "app.ts", hashes }])).status, 200);
+    await call(tokens.ci, "PUT", "/prs", {
+      repo, number: 1, author: "ann", state: "merged", created_at: ago(13), merged_at: new Date(at(12) * 1000 + 60_000).toISOString(), base_ref: "main", event: "closed",
+      commits: 1, reviews: 0, changes_requested: 0, review_comments: 0, bot_review_comments: 0, review_rounds: 0,
+      files: [{ path: "app.ts", hashes }], merge_commit_sha: merge,
+    });
+    const api = { request: async () => [], graphql: async () => ({ repository: {} }) };
+    const server = async (method: string, path: string, body?: unknown) => {
+      const answer = await call(tokens.ci, method, path, body);
+      if (answer.status !== 200) throw Object.assign(new Error(JSON.stringify(answer.body)), { status: answer.status });
+      return answer.body;
+    };
+    const run = async (now = () => Date.now()) =>
+      (await action.runOutcomes({}, { api, server, repo: "acme/minutes", host: "github.com", log: () => {}, git: gitIn(dir, spawnSync), now })).stored;
+    // Read an hour ago.
+    assert.deepEqual(await run(() => Date.now() - 3_600_000), []);
+    // Then the branch is force-pushed, so the next run reads by date; and a fix is pushed two minutes before it.
+    git(["reset", "-q", "--hard", merge], at(9));
+    writeFileSync(join(dir, "other.ts"), "other(again);\n");
+    git(["add", "-A"], at(9));
+    git(["commit", "-q", "-m", "Other again"], at(9));
+    writeFileSync(join(dir, "app.ts"), `${lines(3, 4).join("\n")}\nfixed();\n`);
+    git(["commit", "-q", "-am", "Fix the crash in compute"], Math.floor(Date.now() / 1000) - 120);
+    const fix = git(["rev-parse", "HEAD"]);
+    git(["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    assert.deepEqual(await run(), [{ number: 1, sha: fix, kind: "fix" }]);
+    assert.deepEqual(await run(), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a part refused after one cut inside what a merge brought leaves the next run to read on after the part before it", async () => {
   type Stored = { number: number; sha: string; kind: string };
   const action: { runOutcomes: (env: Record<string, string>, ctx: Record<string, unknown>) => Promise<{ stored: Stored[] }> } = await import(
