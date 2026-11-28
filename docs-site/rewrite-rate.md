@@ -152,8 +152,8 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   that back); a directory that is another repository now is read as that one. A worktree Claude
   Code made in the repository (`<repo>/.claude/worktrees/<name>`) is read in `<repo>` once
   removed, seen or not. Any other file in a directory that is gone now is read in the
-  repository above it when a commit since the session began has its path (the repository
-  removed the directory or moved it), and is left out, its lines not counted as tracked, when
+  repository above it when a commit since the session began, on the branches read (below), has
+  its path (the repository removed the directory or moved it), and is left out, its lines not counted as tracked, when
   none has (another repository or worktree removed before any sync saw it, a repository away,
   or git did not say within 2 seconds); a directory still there that is no repository now is
   read as a directory of the one above it. Which repository a worktree is of is asked of git for

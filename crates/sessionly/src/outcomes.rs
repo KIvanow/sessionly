@@ -633,6 +633,9 @@ enum Asked {
     Repo(PathBuf),
     /// Git did not answer in its time, now or lately: read later.
     NotNow,
+    /// Git did not answer now in all of `ASKING`: slow, and tried again
+    /// later as a reading that failed is.
+    Slow,
     /// No time is left to ask in.
     OutOfTime,
 }
@@ -697,7 +700,11 @@ impl Worktrees {
                         let timed_out = true;
                         self.found
                             .push((name, OutcomeRepo::Failed { at, timed_out }));
-                        Asked::NotNow
+                        if self.asking == ASKING {
+                            Asked::Slow
+                        } else {
+                            Asked::NotNow
+                        }
                     }
                     Err(_) => {
                         let timed_out = false;
@@ -751,7 +758,8 @@ fn claude_worktree(dir: &Path) -> Option<(PathBuf, PathBuf)> {
 }
 
 /// Of the paths `gone` in each worktree, those a commit since the earliest
-/// time given (less `SLACK`) has, on any ref. Git is asked once a worktree,
+/// time given (less `SLACK`) has, on what a reading reads there: its `HEAD`
+/// and the remote's default branch. Git is asked once a worktree,
 /// for `asking` at most and not past `deadline`: what it does not say in
 /// time is left out.
 fn committed(
@@ -765,7 +773,9 @@ fn committed(
         let mut command = history(root, false);
         command.args([
             "log",
-            "--all",
+            "--ignore-missing",
+            "HEAD",
+            "refs/remotes/origin/HEAD",
             "--stdin",
             "--no-renames",
             "--name-only",
@@ -981,9 +991,6 @@ pub fn measure(
         worktrees.asking,
         (Instant::now() + worktrees.asking * 2).min(deadline),
     );
-    // Whether git is asked of a worktree for all of `ASKING`: one not
-    // answered in it is slow, and not for a short sync's want of time.
-    let patient = worktrees.asking == ASKING;
     // Per repository: the worktrees, and the lines by file.
     type Placed = (BTreeSet<PathBuf>, BTreeMap<String, Vec<u64>>);
     // Where a session's files are read, by repository (of those in `only`,
@@ -1089,7 +1096,7 @@ pub fn measure(
                 }
                 // Git did not say in its own time: tried again later, and
                 // later, as a reading that failed is.
-                Err(Asked::NotNow) if patient => {
+                Err(Asked::Slow) => {
                     unavailable.insert(index);
                 }
                 Err(_) => {
@@ -4942,6 +4949,42 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
     }
 
     #[test]
+    fn a_file_in_a_directory_only_on_a_branch_not_read_is_left_out() {
+        // `lib/` is on a branch of its own, and `main` is checked out.
+        let mut world = World::new();
+        world.commit("f.js", "// base line one\n", "init", T0);
+        world.commit(
+            "f.js",
+            &format!("// base line one\n{}\n", AGENT.join("\n")),
+            "Add compute",
+            T0 + HOUR,
+        );
+        let lib: &[&str] = &[
+            "let one = helper(1);",
+            "let two = helper(2);",
+            "let three = helper(3);",
+        ];
+        world.git(&["checkout", "--quiet", "-b", "feature"], T0 + HOUR);
+        world.commit(
+            "lib/g.js",
+            &format!("{}\n", lib.join("\n")),
+            "Add helper",
+            T0 + HOUR,
+        );
+        world.git(&["checkout", "--quiet", "-"], T0 + HOUR);
+        world.session(
+            "s1",
+            T0,
+            T0 + 2 * HOUR,
+            &[("f.js", AGENT), ("lib/g.js", lib)],
+        );
+        fix_two(&world, T0 + 3 * DAY);
+        world.measure(T0 + 8 * DAY);
+        let week = world.at("s1", "7d").expect("never counted");
+        assert_eq!((week.lines_tracked, week.fix_commits), (4, 1));
+    }
+
+    #[test]
     fn a_file_in_a_directory_gone_now_that_no_commit_had_is_left_out() {
         // `web/` was a repository of its own, ignored by this one, and is
         // removed since: this one's history has nothing of it.
@@ -5712,6 +5755,29 @@ fi; done"#,
         world.measure(T0 + 8 * DAY);
         let t = world.target("s1");
         assert_eq!((t.tried_at.is_some(), t.failures), (true, 1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_worktree_slow_only_in_a_commands_time_is_no_failure_on_the_next_sync() {
+        let (mut world, _) = written();
+        fix_two(&world, T0 + 3 * DAY);
+        let command = Budget {
+            all: Duration::from_secs(10),
+            repo: Duration::from_secs(10),
+            waited: false,
+        };
+        {
+            let _git =
+                FakeGit::new(r#"for a in "$@"; do [ "$a" = --git-common-dir ] && sleep 1.5; done"#);
+            world.measure_for(T0 + 8 * DAY, command);
+        }
+        // Asked again an hour on, and no failure meanwhile.
+        world.measure(T0 + 8 * DAY + 600);
+        let t = world.target("s1");
+        assert_eq!((t.tried_at, t.failures), (None, 0));
+        world.measure(T0 + 8 * DAY + 2 * HOUR);
+        assert_eq!(world.at("s1", "7d").expect("never counted").fix_commits, 1);
     }
 
     #[cfg(unix)]
