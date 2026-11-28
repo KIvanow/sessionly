@@ -697,7 +697,8 @@ test("on a schedule, merged pull requests that are due are counted again on the 
     { number: 9, base_ref: "stack/base", checkpoints: ["7d", "30d"], paths: ["lib/c.ts"] },
   ];
   const world = afterMerge({ due, branches: { main: { "src/a b.ts": "one();\ntwo();\n}\n", "lib/c.ts": "three();\n" } } });
-  const env = environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_GITHUB_TOKEN: "gh" });
+  // later commits are read in tests of their own: not from the checkout these run in
+  const env = environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_GITHUB_TOKEN: "gh", SESSIONLY_OUTCOMES: "false" });
   writeFileSync(env.GITHUB_EVENT_PATH, JSON.stringify({ schedule: "17 5 * * *" }));
   const logged = [];
   const { counted } = await run(env, { api: world.api, server: world.server, log: (line) => logged.push(line), deliver: () => assert.fail("no pull request is reported") });
@@ -727,7 +728,7 @@ test("on a schedule, merged pull requests that are due are counted again on the 
 
   // with nothing due the run says so, and the input does the same without a schedule
   const none = afterMerge({ due: [] });
-  const quiet = environment({ SESSIONLY_AFTER_MERGE: "true", SESSIONLY_GITHUB_TOKEN: "gh" });
+  const quiet = environment({ SESSIONLY_AFTER_MERGE: "true", SESSIONLY_GITHUB_TOKEN: "gh", SESSIONLY_OUTCOMES: "false" });
   assert.deepEqual((await run(quiet, { ...none, log() {} })).counted, []);
   assert.match(readFileSync(quiet.GITHUB_STEP_SUMMARY, "utf8"), /No merged pull request was due/);
   assert.deepEqual(none.calls, []);
@@ -753,7 +754,7 @@ test("a scheduled run that names pull requests reports them, as it did before", 
 
 test("a count the server refuses does not stop the rest, and a server that cannot take any stops the run", async () => {
   const due = [1, 2, 3].map((number) => ({ number, base_ref: "main", checkpoints: ["7d"], paths: ["a.ts"] }));
-  const env = () => environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_GITHUB_TOKEN: "gh" });
+  const env = () => environment({ GITHUB_EVENT_NAME: "schedule", SESSIONLY_GITHUB_TOKEN: "gh", SESSIONLY_OUTCOMES: "false" });
   const logged = [];
   const one = afterMerge({ due, refuse: { 2: 422 } });
   await assert.rejects(run(env(), { ...one, log: (line) => logged.push(line) }), /1 merged pull requests could not be counted: #2/);
