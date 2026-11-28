@@ -270,9 +270,10 @@ Three figures, none of them an age:
   Worked out as the page is read, from the sessions' lines as matched now, so matching again,
   a session deleted, or a path hidden where a repository is shown moves it; the heads stay.
 - **Base red after merge**: the checks the push of the commit the pull request was merged as
-  started failed. Only those: a nightly run, a scan or a run someone started on the branch's
-  tip months later says nothing of the merge. One moment, however old the merge: once read
-  either way, it stays.
+  started on its branch failed. Only those of GitHub Actions: a nightly run, a scan, a run
+  someone started on the branch's tip months later, or the push of a release tag at the same
+  commit says nothing of the merge; another app's checks and statuses on the commit count
+  whenever they were made. One moment, however old the merge.
 
 How CI is read:
 
@@ -280,29 +281,39 @@ How CI is read:
   `failure` or `error`; **green** when none did and the rest came out well (`success`,
   `neutral` and `skipped` are well); **still running** while any check has not finished, or
   waits for someone (`action_required`, as a first-time contributor's workflows do), or a
-  status is `pending`; and **none to go by** when there is nothing else: no checks and no
-  statuses, or every run cancelled (a concurrency group cancels the run before a push). A
-  workflow run that never had jobs leaves no check run, so its check suite is read instead:
-  waiting for approval is still running, one that failed to start is red. None to go by is not
-  green, and is in no figure; neither is a commit whose CI was **not read**, which the page
-  tells apart from still running.
-- **Sessionly's own check runs are left out**: this workflow run's (by the `check-run-id`
-  input, which the workflow run fills in itself, and by the run's page, the jobs skipped by an
-  `if:` included), and those of its earlier runs on the same commit (reported when it was
-  opened, reviewed, closed: each a run), known by the names this run's jobs have. In a
-  repository with no CI of its own, a head reads as none to go by, not green. A job of another
-  workflow with the same name as one of Sessionly's is left out too; name them apart.
-  `ci-ignore` leaves out checks and statuses by name (`deploy-*`, `codecov`); `ci-only` counts
-  only the ones it names, such as those required to merge.
-- Of a **merge commit**, only the check runs of the workflow runs its push started count, which
-  the Action asks GitHub for (`actions: read`; without it, the run warns once and the CI of
-  merge commits is not known), and the statuses on it. A head is read whole.
+  status is `pending`, and **still running when last read** once that is what it says 7 days
+  on, until a run reads it again; and **none to go by** when there is nothing else: no checks and no
+  statuses, or every run cancelled (a concurrency group cancels the run before a push).
+  **Skipped jobs never count**, in no direction. A workflow run that never had jobs leaves no
+  check run, so it is read by the workflow run itself: waiting for approval or still queued is
+  still running, one that failed to start is red; one that says it failed with no jobs (GitHub
+  fails a run still waiting for approval when its pull request is closed) is not known. None to
+  go by is not green, and is in no figure; neither is a commit whose CI was **not read**, which
+  the page tells apart from still running.
+- **Sessionly's own runs are left out by workflow file.** The Action asks GitHub which workflow
+  runs a commit's checks are from (`actions: read`), and leaves out every check run of a run
+  from this run's own file, and from the files `sessionly-workflows` names (for a Sessionly job
+  in a file of its own, say a nightly one). That holds on every event, and for its earlier runs
+  on the same commit (reported when it was opened, reviewed, closed: each a run). In a
+  repository with no CI of its own, a head reads as none to go by, not green. If the Sessionly
+  job runs in a workflow file with CI jobs, that file is not left out whole: only the check runs
+  named as this job are, and the run warns once to keep the Sessionly jobs in a file of their
+  own. Without `actions: read`, only this job's own check run (the `check-run-id` input, which
+  the workflow run fills in itself) is left out, and the run warns once. `ci-ignore` leaves out
+  checks and statuses by name (`deploy-*`, `codecov`); `ci-only` counts only the ones it names,
+  such as those required to merge.
+- Of a **merge commit**, GitHub Actions check runs count only for the workflow runs its push
+  started on the branch (`actions: read`; without it, the run warns once and the CI of merge
+  commits is not known); other apps' check runs and the statuses on it always. A head is read
+  whole. Of a merge, as of a head, a later read that came out the other way (a re-run) replaces
+  what was read; one that is still running does not.
 - A head's checks are read **when the pull request is reported**, which is usually while they
   are still running: the server then says which of its heads are still pending, and the same
   run reads those too. They are read again **when a workflow of your CI finishes**, if the
   workflow runs the Action on `workflow_run`, and once a day by **the scheduled run**, which
-  asks the server for the heads still pending (reported in the last 7 days; one pending longer
-  has none to go by) and for the merge commits not read yet.
+  asks the server for the heads still pending (reported in the last 7 days) and for the merge
+  commits of merged pull requests with agent lines that were not read yet, or read while their
+  checks were still running.
 - A pull request reported before version 0.5.0 of the Action has no heads kept: its next report
   keeps the head it is at, with all of its lines as arriving there.
 
@@ -371,7 +382,8 @@ either way), the same for every age, and says for how many pull requests CI is n
 | `fix-words` | | Words that make a later commit a fix, separated by commas, in place of the default list. |
 | `bug-labels` | | Words that make a linked issue's label a bug label, separated by commas, in place of the default list. |
 | `ci` | `true` | Read what CI made of the pull request's commits, when it is reported, on `workflow_run`, and on the scheduled run. Needs `checks: read` and `statuses: read`, and `actions: read` for merge commits. See [CI](#ci). |
-| `ci-ignore` | | Checks and statuses to leave out, by name, separated by commas or new lines; `*` stands for any text. The Action's own check run is left out without being named. |
+| `sessionly-workflows` | | Other workflow files that run the Sessionly Action, as paths from the repository's root (`.github/workflows/sessionly-nightly.yml`), separated by commas or new lines: their check runs are left out of the CI it reads too. This run's own file needs no naming. |
+| `ci-ignore` | | Checks and statuses to leave out, by name, separated by commas or new lines; `*` stands for any text. Sessionly's own workflow runs are left out without being named. |
 | `ci-only` | | Count only the checks and statuses named here (as `ci-ignore` names them). |
 | `ci-check-names` | `false` | Also send the names of the checks that failed on a red commit (at most 20, each cut to 100 characters). |
 | `check-run-id` | the job's own | The id of this job's check run, left out of the CI it reads. The workflow run fills it in; leave it. |
