@@ -36,7 +36,7 @@ import {
   type Filters,
   type GroupBy,
 } from "./sessions.ts";
-import type { AuthOptions, PullAfterMergeReport, PullDetail, PullOutcomesBy, PullReport, Telemetry } from "@sessionly/schema";
+import type { AuthOptions, PullAfterMergeReport, PullDetail, PullOutcomesBy, PullOutcomesReport, PullReport, Telemetry } from "@sessionly/schema";
 import {
   BadReport,
   checkReport,
@@ -65,6 +65,7 @@ export type Env = {
     upload?: Upload;
     report?: PullReport;
     afterMerge?: PullAfterMergeReport;
+    outcomes?: PullOutcomesReport;
     /** The session an upload stored: the pull requests it adds lines to are matched again once it is committed. */
     stored?: { machine_id: string; source: string; session_id: string };
     /** And one it stored with another cost, or other branches: its pull requests are charged again then too. */
@@ -332,6 +333,10 @@ export function dashboardPolicy(telemetry?: Telemetry | null): string {
  */
 const readsPulls = (method: string, path: string): boolean => method === "GET" && /\/prs(?:\/[a-z]+){0,2}$/.test(path);
 
+/** What a ci token may ask for: pull request reports, and what is due after merging. The whole path, so no other route ending so is one. */
+const REPORTING = { PUT: /^\/api\/v1\/prs(?:\/after-merge|\/outcomes)?$/, GET: /^\/api\/v1\/prs(?:\/outcomes)?\/due$/ };
+const PING = "/api/v1/ping";
+
 export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   const api = new Hono<Env>();
   const accounts = (options.hosting ? options.hosting.accounts : options.accounts) ?? {};
@@ -350,9 +355,8 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     // which it first asks which are due for.
     if (principal.role === "ci") {
       const reporting =
-        (c.req.method === "PUT" && /\/prs(?:\/after-merge|\/outcomes)?$/.test(c.req.path)) ||
-        (c.req.method === "GET" && /\/prs(?:\/outcomes)?\/due$/.test(c.req.path));
-      if (!reporting && !c.req.path.endsWith("/ping")) {
+        (c.req.method === "PUT" && REPORTING.PUT.test(c.req.path)) || (c.req.method === "GET" && REPORTING.GET.test(c.req.path));
+      if (!reporting && c.req.path !== PING) {
         return c.json({ error: "this token only reports pull requests" }, 403);
       }
     }
@@ -361,14 +365,14 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     // token's own address, never one filed under a person the platform named.
     if (principal.role === "env") {
       const uploading =
-        (c.req.method === "PUT" || c.req.method === "DELETE") && /\/sessions\/[^/]+\/[^/]+\/[^/]+$/.test(c.req.path);
-      if (!uploading && !c.req.path.endsWith("/ping")) {
+        (c.req.method === "PUT" || c.req.method === "DELETE") && /^\/api\/v1\/sessions\/[^/]+\/[^/]+\/[^/]+$/.test(c.req.path);
+      if (!uploading && c.req.path !== PING) {
         return c.json({ error: "this token only uploads sessions" }, 403);
       }
     }
     // A viewer, of the organisation a repository is shown in, reads and does nothing else, but for signing out.
     if (principal.role === "viewer") {
-      const signingOut = c.req.method === "DELETE" && c.req.path.endsWith("/auth/session");
+      const signingOut = c.req.method === "DELETE" && c.req.path === "/api/v1/auth/session";
       if (c.req.method !== "GET" && !signingOut) {
         return c.json({ error: "a viewer can only look", code: "viewer" }, 403);
       }
@@ -443,9 +447,8 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   });
 
   // A base branch's later commits, for the pull requests merged into it that
-  // are due: parsed here, and kept with one transaction for each of those
-  // pull requests, so none is held while the others are walked.
-  api.put("/prs/outcomes", async (c) => {
+  // are due: parsed here too. Kept further down (after a hosting's hooks).
+  api.put("/prs/outcomes", async (c, next) => {
     const role = c.get("principal").role;
     if (role !== "admin" && role !== "ci") {
       return c.json({ error: "reporting pull requests needs a ci or admin token" }, 403);
@@ -456,9 +459,8 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
     } catch {
       return c.json({ error: "the body is not JSON" }, 400);
     }
-    const report = checkOutcomes(body);
-    const each = <T>(fn: (db: OrgDb) => Promise<T>) => ownerDb.asOrg(c.get("principal").orgId, fn);
-    return c.json(await storeOutcomes(each, report));
+    c.set("outcomes", checkOutcomes(body));
+    await next();
   });
 
   // Matching again the pull requests the list's filters choose. Each has a
@@ -562,6 +564,14 @@ export function createApp(ownerDb: Db, options: Options = {}): Hono<Env> {
   });
 
   options.hosting?.early(api);
+
+  // The later commits parsed above, kept with one transaction for each pull
+  // request they are read for, before the one the rest of a request runs in:
+  // none is held while the others are walked.
+  api.put("/prs/outcomes", async (c) => {
+    const each = <T>(fn: (db: OrgDb) => Promise<T>) => ownerDb.asOrg(c.get("principal").orgId, fn);
+    return c.json(await storeOutcomes(each, c.get("outcomes")!));
+  });
 
   // The rest of the request runs in one transaction, as the organisation of
   // its token: `c.get("db")` sees that organisation's rows and no others.

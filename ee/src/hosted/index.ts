@@ -16,7 +16,7 @@ import {
   type Db,
   type Hosting,
 } from "@sessionly/server";
-import { shownReport } from "./demo.ts";
+import { shownOutcomes, shownReport } from "./demo.ts";
 import { PROVIDER_LABELS as LABELS, PROVIDER_NAMES } from "./oauth.ts";
 import { deleteOrg, purgeDeletedOrgs } from "./orgs.ts";
 import { offers, openRoutes, type Accounts } from "./signup.ts";
@@ -87,15 +87,24 @@ export function hosting(ownerDb: Db, { accounts, demo }: HostingSettings): Hosti
 
     early(api) {
       // Where one repository is shown, a report is kept without the paths that
-      // are not; and not at all while which those are cannot be told.
+      // are not; and not at all while which those are cannot be told. Later
+      // commits of its merged pull requests likewise.
+      const refused = (org: string, problem: string) => {
+        console.error(`a pull request reported to ${org} is refused:`, problem);
+        return { error: "this organisation shows a repository to others, and the server's setting of what not to show cannot be used: the report is not kept", code: "demo_hide_unusable" };
+      };
       api.put("/prs", async (c, next) => {
         const shownIn = demo?.org === c.get("principal").orgId ? demo : undefined;
         const report = c.get("report");
-        if (shownIn && "problem" in shownIn) {
-          console.error(`a pull request reported to ${shownIn.org} is refused:`, shownIn.problem);
-          return c.json({ error: "this organisation shows a repository to others, and the server's setting of what not to show cannot be used: the report is not kept", code: "demo_hide_unusable" }, 503);
-        }
+        if (shownIn && "problem" in shownIn) return c.json(refused(shownIn.org, shownIn.problem), 503);
         if (shownIn && report) c.set("report", shownReport(report, shownIn.hide));
+        await next();
+      });
+      api.put("/prs/outcomes", async (c, next) => {
+        const shownIn = demo?.org === c.get("principal").orgId ? demo : undefined;
+        const report = c.get("outcomes");
+        if (shownIn && "problem" in shownIn) return c.json(refused(shownIn.org, shownIn.problem), 503);
+        if (shownIn && report) c.set("outcomes", shownOutcomes(report, shownIn.hide));
         await next();
       });
 

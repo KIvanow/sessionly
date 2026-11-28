@@ -160,28 +160,50 @@ The run needs the repository's history, so the job checks it out whole:
 How it is read:
 
 - The server names the merged pull requests whose first 30 days are not all read yet, the
-  branch, and the files their agent lines are in. Only pull requests with agent lines, merged
-  since the server began reading them, are named.
-- The run reads that branch's history with git in the runner, from a day before the earliest
-  of them to a day past the latest one's 30 days. For each commit that changed those files it
-  sends the lines it removed and added there, as hashes. A commit that removes any of them is
-  read whole: a line it adds back anywhere was moved, not changed, and is followed to its new
-  file. A commit of more than 100,000 lines (a vendored or generated tree) is not counted.
-- For a commit that removes lines, GitHub is asked which pull request it came with: when that
-  was merged is when the commit **landed**, and its branch, title, the issues it closes and
-  what its description says it reverts are read for what it is. Only what they are read as
-  leaves the runner (`fix_branch`, `bug_issue` and the like), never the text.
+  branch, and the files their agent lines are in and where later commits moved them. Only pull
+  requests with agent lines, merged since the server began reading them, are named. A session
+  matched to one later, with lines in a file that was not read, has that pull request read
+  again from the merge.
+- The run reads that branch's history with git in the runner. A pull request is read from where
+  the last run left it: the server keeps the commits the branch was at, and the run reads what
+  has come onto the branch since, whatever the commits' own dates (a branch merged with a merge
+  commit brings commits made days before; so does a push of commits made earlier). The first
+  time, it is read from the commit it was merged as. With that commit not in the history, or
+  after a force-push of the branch, it is read by date once (from a day before the earliest due
+  to a day past the latest one's 30 days), and from where it is from then on.
+- A commit **landed** when the branch's own commit that brought it in was made (for a merged
+  branch's commits, the merge commit), and never before the pull request was last read.
+- For each commit that changed those files the run sends the lines it removed and added there,
+  as hashes. A commit that removes any of them is read whole: a line it adds back anywhere was
+  moved, not changed, and is followed to its new file. A commit of more than 100,000 lines (a
+  vendored or generated tree) is not counted, nor is one of more than 5,000 files or 200,000
+  line hashes.
+- For a commit that removes lines, GitHub is asked which pull request it came with: its branch,
+  title, the issues it closes and what its description says it reverts are read for what it
+  is. Only what they are read as leaves the runner (`fix_branch`, `bug_issue` and the like),
+  never the text. Without `pull-requests: read` the run warns once and reads the commits without
+  them (no `fix_branch`, `fix_pr_title`, `revert_pr_title` or `bug_issue`).
+- A branch that is gone (a stacked pull request's, deleted after merging) cannot be read: the
+  server is told, its pull requests are not named again, and they are counted nowhere, not even
+  among those to reach. One that is on GitHub but not in the checkout, or cannot be read for
+  another reason, is warned of, and the other branches are read. Without a checkout at all the
+  run only notes that later commits were not read.
 - The server walks the commits in the order they landed, against the lines each pull request
   still has: a line moved goes with the move, a commit that puts lines back (a reland) is the
   pull request's own, and a commit that came before the merge commit in the history (from a
   branch that was merged later) did not see the lines and is not counted.
 - **A commit counts when it removes at least 2 of the agents' lines** that are not common ones
-  (written by 3 or more sessions in that file), as for a session.
+  (written by 3 or more sessions in that file, as the pull request was last matched), as for a
+  session.
 - **A revert** names the commit the pull request was merged as (`This reverts commit …`), or
   its pull request says `Reverts owner/name#12` of this one, or its subject or its pull
-  request's title says it is a revert and it takes at least half the pull request's lines still
-  there. A revert of a revert (`Reapply "…"`) reverts nothing: it puts the lines back, and the
-  revert shows as relanded.
+  request's title says it is a revert and it takes at least half the agents' lines still
+  there. A revert of a revert (`Reapply "…"`) reverts nothing, unless its pull request says it
+  reverts this one: it puts the lines back, and the revert shows as relanded. Down a chain of
+  reverts, each named by the one after it, a commit at an odd depth reverts and one at an even
+  depth puts back. Only a `Revert "…"` or `Reapply "…"` subject, or git's own `This reverts
+  commit …` as the first paragraph, names a commit it reverts: a squash message that lists a
+  branch's `* Revert "wip"` does not.
 - **A fix** has a fix word in its subject (`fix`, `bug`, `crash`, `regression`, `typo` and a few
   more; the `fix-words` input changes them), a `fix:` type, a `fix/` branch, a fix word in its
   pull request's title, or closes an issue labelled a bug (`bug-labels`). A **likely fix** is one
@@ -189,10 +211,18 @@ How it is read:
 - The lines a commit removed are split over the sessions that had them, as they are matched
   now: a session with `k` of the `n` copies of a line the pull request has gets `k/n` of each one
   removed. Matching again, or a session deleted, moves the split; the commit stays.
-- Only the pull request's own lines are kept of what a commit removed. The rest are dropped
-  when the commit is read.
-- When GitHub allows the run fewer than 100 more requests, it stops and the next run goes on
-  from there. `outcomes-since: 2026-08-01` reads the later commits of pull requests merged
+- Of what a commit removed, only the hashes of the pull request's own lines are kept, by the
+  file they were written in; the rest are dropped when the commit is read. Of where commits
+  moved its lines, the server keeps the paths, which it names to the next run to read, and the
+  commits the branch was read at for each pull request.
+- The server keeps one reading of each pull request's lines, walked in the order commits
+  landed, where the binary follows a session's lines along each history they are in. Mostly
+  the two agree. Where two branches change the same lines and are then merged (merge commits,
+  not squashes), the server may count a commit on one against lines the other one still has.
+- A request holds at most 500 commits, 500,000 line hashes and 100,000 files and moves.
+- When GitHub allows the run fewer than 100 more requests, or more than 2,000 commits are to be
+  read whole, it stops, and the next run goes on from the branch's own commit before the one it
+  stopped at. `outcomes-since: 2026-08-01` reads the later commits of pull requests merged
   since then too: unlike the lines still there, later commits are history, so they can be read
   late. `outcomes: false` switches this off.
 
@@ -648,14 +678,20 @@ branch now.
 
 A report also names the pull request's head commit and, once it is merged, the commit it was
 merged as (their SHAs, which anyone who can see the repository sees). For [later
-commits](#later-commits): each commit's SHA, its link on GitHub and when it landed; the numbers
-of the pull requests it belongs to and of those it says it reverts; the SHAs its message says it
-reverts; which of the due pull requests it comes after; and for the files the server asked
-about, and where their lines moved, a hash of each line it removed or added. What it is goes as
-ids (`fix_message`, `fix_conventional`, `revert_subject`, `fix_branch`, `fix_pr_title`,
-`revert_pr_title`, `bug_issue`). Read in the runner and not sent: commit messages, the title,
-branch name and description of a commit's pull request, and the labels of the issues it closes.
-The server keeps only the hashes of the pull request's own lines a commit removed.
+commits](#later-commits): the branch's name and the commit it was read at, and for each pull
+request read the commits it was read from and up to (SHAs); each commit's SHA and when it
+landed; the numbers of the pull requests it belongs to and of those it says it reverts; the
+SHAs its message says it reverts; which of the due pull requests it is a later commit of; for
+the files the
+server asked about, a hash of each line it removed or added; and where it moved lines, the
+path of each file they went to and their hashes. The numbers of pull requests merged into a
+branch that is gone. What it is goes as ids (`fix_message`, `fix_conventional`,
+`revert_subject`, `fix_branch`, `fix_pr_title`, `revert_pr_title`, `bug_issue`). Read in the
+runner and not sent: commit messages, the title, branch name and description of a commit's
+pull request, and the labels of the issues it closes. The server keeps the hashes of the pull
+request's own lines a commit removed, the paths of the files its lines were moved to (which it
+names to later runs), and those SHAs; the other hashes are dropped at once. The link to a
+commit is made by the server from the repository and the SHA.
 
 Limits: a report has at most 5000 files and 500 commit addresses. Of reviews and comments the
 latest 2000 are kept, and the pull request's page says when there were more. A changed file

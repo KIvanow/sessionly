@@ -6,7 +6,7 @@ import { average, count, dateTime, modelName, percent, repoName, share, shareOf,
 import { Loader } from "./Loader.tsx";
 import { Names, Tile } from "./Overview.tsx";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { costIsFloor, costText, matchAll, MIN_PULLS, nameSome, perThousand, pullCost, pullHref, pullsCostNote, reachedOf, revertedShare, roundsTitle, survivingOnce, web } from "./pull.ts";
+import { costIsFloor, costText, matchAll, MIN_PULLS, nameSome, outcomeRows, perThousand, pullCost, pullHref, pullsCostNote, reachedOf, revertedShare, roundsTitle, survivingOnce, web } from "./pull.ts";
 import { useApi } from "./useApi.ts";
 
 const PAGE = 50;
@@ -238,7 +238,10 @@ function Outcomes({ token, repo, since, onSignOut }: { token: string; repo?: str
   const [age, setAge] = useState<keyof typeof AGES>("7d");
   const found = useApi<PullOutcomesSummary>(token, `/prs/outcomes/summary${query({ by, repo, since })}`, onSignOut);
   if (found.errorStatus === 404 || (!found.data && !found.loading && !found.error)) return null;
-  const total = found.data?.total[`outcomes_${age}`];
+  // What a server sent, as counts: hidden when it is no answer.
+  const rows = found.data ? outcomeRows(found.data, age) : null;
+  if (found.data && !rows) return null;
+  const total = rows?.total;
   const name = (key: string) => (by === "tool" ? toolName(key) : by === "model" ? modelName(key) : by === "repo" ? repoName(key) : key);
   return (
     <section className="card" aria-label="Later commits">
@@ -282,7 +285,7 @@ function Outcomes({ token, repo, since, onSignOut }: { token: string; repo?: str
               </tr>
             </thead>
             <tbody>
-              {[...found.data.groups.map((g) => ({ key: g.key, at: g[`outcomes_${age}`] })), { key: null, at: total }].map(({ key, at }) => (
+              {[...rows!.groups, { key: null, at: total }].map(({ key, at }) => (
                 <tr key={key ?? "total"} className={key === null ? "total" : undefined}>
                   <th scope="row" className="name">{key === null ? "All" : name(key)}</th>
                   <td className="num">{reachedOf(at)}</td>

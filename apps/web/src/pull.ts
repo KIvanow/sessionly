@@ -1,6 +1,6 @@
 // A pull request's page: where it is, how current its figures are, and its
 // reviews and comments counted by whose they are.
-import type { LocalReviewRun, LocalReviews, PullCost, PullDetail, PullFeedback, PullMatches, PullOutcomeCommit, PullOutcomes, PullOutcomesAt, PullOutcomeWindow, PullReviewer, PullRow, PullSession, ReviewSplit } from "@sessionly/schema";
+import type { LocalReviewRun, LocalReviews, OutcomeAge, OutcomeKind, PullCost, PullDetail, PullFeedback, PullMatches, PullOutcomeCommit, PullOutcomes, PullOutcomesAt, PullOutcomeWindow, PullReviewer, PullRow, PullSession, ReviewSplit } from "@sessionly/schema";
 import { count, dateTime, usd, usdEach } from "./format.ts";
 
 /** Whether a cost is a floor: a session of it has no cost figure, or one that leaves requests out. */
@@ -513,6 +513,77 @@ export function laterTile(outcomes: PullOutcomes | null | undefined, mergedAt: s
   if (seven.reached) return { value: laterWindow(seven), note: "in the 7 days after merging; 30 days not read yet" };
   if (age < 7) return { value: "–", note: "read 1, 7 and 30 days after it was merged" };
   return { value: "–", note: outcomes.scanned_until ? `read up to ${dateTime(outcomes.scanned_until)}` : "not read yet: a scheduled run of the Action reads them" };
+}
+
+/** A count as a server sent it, or 0 for one that is no number. */
+const sent = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) ? n : 0);
+const thing = (value: unknown): value is Record<string, unknown> => value != null && typeof value === "object";
+const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
+
+const WINDOW_COUNTS = ["revert_commits", "agent_lines_reverted", "fix_commits", "likely_fix_commits", "agent_lines_fixed", "rework_commits", "agent_lines_reworked"] as const;
+const AT_COUNTS = ["pulls_reached", "pulls_total", "agent_lines", "pulls_reverted", "sessions_fixed", ...WINDOW_COUNTS] as const;
+const KINDS: readonly OutcomeKind[] = ["revert", "fix", "rework"];
+
+/**
+ * A pull request's later commits as the page reads them: null when what a
+ * server sent has not all three ages, and of its commits only those that are
+ * ones. Whatever is sent, the page does not break on it.
+ */
+export function laterOf(outcomes: unknown): PullOutcomes | null {
+  if (!thing(outcomes) || !thing(outcomes.windows)) return null;
+  const windows = outcomes.windows;
+  const ages = (["1d", "7d", "30d"] as const).map((age) => windows[age]);
+  if (!ages.every(thing)) return null;
+  const window = (w: Record<string, unknown>): PullOutcomeWindow => ({
+    reached: w.reached === true,
+    reverted: w.reverted === true,
+    ...(Object.fromEntries(WINDOW_COUNTS.map((name) => [name, sent(w[name])])) as Record<(typeof WINDOW_COUNTS)[number], number>),
+  });
+  const commits = (Array.isArray(outcomes.commits) ? outcomes.commits : []).filter(
+    (c): c is Record<string, unknown> => thing(c) && typeof c.sha === "string" && typeof c.landed_at === "string",
+  );
+  return {
+    scanned_until: text(outcomes.scanned_until),
+    windows: { "1d": window(ages[0]!), "7d": window(ages[1]!), "30d": window(ages[2]!) },
+    commits: commits.map((c): PullOutcomeCommit => ({
+      sha: c.sha as string,
+      url: text(c.url),
+      kind: KINDS.includes(c.kind as OutcomeKind) ? (c.kind as OutcomeKind) : "rework",
+      signals: (Array.isArray(c.signals) ? c.signals : []).filter((s): s is string => typeof s === "string"),
+      landed_at: c.landed_at as string,
+      by_pull: typeof c.by_pull === "number" ? c.by_pull : null,
+      lines: sent(c.lines),
+      agent_lines: sent(c.agent_lines),
+      counted: c.counted === true,
+      likely: c.likely === true,
+      relanded_at: text(c.relanded_at),
+      sessions: (Array.isArray(c.sessions) ? c.sessions : [])
+        .filter((s): s is Record<string, unknown> => thing(s) && [s.machine_id, s.source, s.session_id].every((v) => typeof v === "string"))
+        .map((s) => ({ machine_id: s.machine_id as string, source: s.source as string, session_id: s.session_id as string, lines: sent(s.lines) })),
+    })),
+  };
+}
+
+/** One age's counts of a summary as a server sent it, or null for none. */
+function atOf(value: unknown): PullOutcomesAt | null {
+  if (!thing(value)) return null;
+  return Object.fromEntries(AT_COUNTS.map((name) => [name, sent(value[name])])) as unknown as PullOutcomesAt;
+}
+
+/**
+ * Of `/prs/outcomes/summary` as a server sent it, one age's rows: each
+ * group's and the total, as counts. Null when there is no total; a group
+ * with nothing for that age is left out.
+ */
+export function outcomeRows(summary: unknown, age: OutcomeAge): { groups: { key: string; at: PullOutcomesAt }[]; total: PullOutcomesAt } | null {
+  if (!thing(summary) || !thing(summary.total)) return null;
+  const total = atOf(summary.total[`outcomes_${age}`]);
+  if (!total) return null;
+  const groups = (Array.isArray(summary.groups) ? summary.groups : []).flatMap((g) => {
+    const at = thing(g) && typeof g.key === "string" ? atOf(g[`outcomes_${age}`]) : null;
+    return at ? [{ key: (g as { key: string }).key, at }] : [];
+  });
+  return { groups, total };
 }
 
 /** Of an age's pull requests, how many reached it: "4 of 9". */

@@ -945,16 +945,28 @@ const MIGRATIONS: string[] = [
   `CREATE INDEX sessions_outcomes_to_keep ON sessions (org_id, machine_id, source, session_id) WHERE ${OUTCOMES_TO_KEEP}`,
   // Which commits a pull request is at: its head as last reported, and once
   // merged the commit it was merged as. Null from an Action before 0.5.0.
+  // Of its lines as last reported, those 3 or more sessions wrote in their
+  // file (`common_lines`, {path: [hashes]}): a later commit that removes
+  // only these does not count. Worked out each time it is matched; null for
+  // one matched before this, which then has none.
   // And what later commits on its base branch did to its lines (outcomes.ts):
   // how far that branch has been read for it, and which of its lines it
   // still has there as of then, by file (`outcomes_held`: the pull request's
   // own line hashes, which `last_files` holds already, and where commits
-  // moved them). Null while it was never read.
+  // moved them). Null while it was never read. The commits the branch was
+  // read up to for it (`outcomes_tips`, at most 20 SHAs): every later commit
+  // reachable from one of them was sent, whatever its date; null while not
+  // known. And when the Action said that branch is gone (`outcomes_gone_at`):
+  // its later commits cannot be read, so it is not asked for again, and
+  // counts nowhere.
   `ALTER TABLE pull_requests
      ADD COLUMN head_sha text,
      ADD COLUMN merge_commit_sha text,
+     ADD COLUMN common_lines jsonb,
      ADD COLUMN outcomes_scanned_until timestamptz,
-     ADD COLUMN outcomes_held jsonb`,
+     ADD COLUMN outcomes_held jsonb,
+     ADD COLUMN outcomes_tips jsonb,
+     ADD COLUMN outcomes_gone_at timestamptz`,
   // From when an organisation's merged pull requests have their later
   // commits read. Those are history, so the Action can be asked to read
   // earlier ones too (its `outcomes-since` input).

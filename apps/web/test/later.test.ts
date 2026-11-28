@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { laterKind, laterTile, laterWindow, MIN_PULLS, perThousand, reachedOf, revertedShare, signalName } from "../src/pull.ts";
+import { laterKind, laterOf, laterTile, laterWindow, MIN_PULLS, outcomeRows, perThousand, reachedOf, revertedShare, signalName } from "../src/pull.ts";
 
 const window = (more: Record<string, unknown> = {}) => ({
   reached: true,
@@ -50,4 +50,27 @@ test("rates per 1,000 agent lines are shown only from enough pull requests", () 
   assert.equal(revertedShare(at(4, 10)), "1 (too few)");
   assert.equal(revertedShare(at(20, 10)), "5% (1)");
   assert.equal(revertedShare(at(0, 0)), "–");
+});
+
+test("later commits a server sent that are not an answer break neither the page nor the summary", () => {
+  assert.equal(laterOf(undefined), null);
+  assert.equal(laterOf({ scanned_until: null, commits: [] }), null);
+  assert.equal(laterOf({ windows: { "1d": window(), "7d": window() }, commits: [] }), null);
+  const read = laterOf({
+    scanned_until: 5,
+    windows: { "1d": window(), "7d": { reached: "yes", fix_commits: "2" }, "30d": window({ rework_commits: 1 }) },
+    commits: [null, { sha: "a1" }, { sha: "b2", landed_at: "2026-11-01T00:00:00Z", kind: "odd", signals: ["fix_message", 3], sessions: [{ session_id: "s" }, { machine_id: "m", source: "codex", session_id: "s", lines: 2 }] }],
+  });
+  assert.equal(read!.scanned_until, null);
+  assert.deepEqual([read!.windows["7d"].reached, read!.windows["7d"].fix_commits, read!.windows["30d"].rework_commits], [false, 0, 1]);
+  assert.deepEqual(read!.commits.map((c) => [c.sha, c.kind, c.signals, c.sessions.length, c.lines, c.counted]), [["b2", "rework", ["fix_message"], 1, 0, false]]);
+  assert.equal(laterTile(laterOf({}), "2026-10-01T00:00:00Z").value, "–");
+
+  const at = { pulls_reached: 2, pulls_total: 3, agent_lines: 10 };
+  assert.equal(outcomeRows(null, "7d"), null);
+  assert.equal(outcomeRows({ groups: [] }, "7d"), null);
+  assert.equal(outcomeRows({ groups: [], total: {} }, "7d"), null);
+  const rows = outcomeRows({ groups: [{ key: "codex", outcomes_7d: at }, { key: "cursor" }, "x", { outcomes_7d: at }], total: { outcomes_7d: { ...at, fix_commits: "1" } } }, "7d");
+  assert.deepEqual(rows!.groups.map((g) => [g.key, g.at.pulls_reached, g.at.fix_commits]), [["codex", 2, 0]]);
+  assert.deepEqual([rows!.total.pulls_total, rows!.total.fix_commits], [3, 0]);
 });

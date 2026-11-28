@@ -523,3 +523,48 @@ test("a pull request where the repository is shown has its reviewers and rounds 
   assert.deepEqual(await stored(), { split: reported, paths: [null, null] });
   assert.doesNotMatch(JSON.stringify(reported), /SECRET|notes/);
 });
+
+test("later commits of a pull request where the repository is shown are kept without the paths not shown, and lose them when one is hidden later", async () => {
+  const p = await pair("later");
+  await db.query(`UPDATE orgs SET outcomes_since = now() - interval '60 days' WHERE id = $1`, [p.there]);
+  assert.equal((await send(p.ann, session("l1", REPO))).status, 200);
+  await importDemo(p.from, p.to, { repo: REPO, hide: [] });
+  const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+  const sha = (n: number) => n.toString(16).padStart(40, "0");
+  const files = [{ path: "src/a.ts", hashes: [h(1), h(2), h(3)] }, { path: "notes/SECRET-plan.md", hashes: [h(900), h(901)] }];
+  const merged = pullOf(1, files, { state: "merged", created_at: ago(7), merged_at: ago(5), base_ref: "main", event: "closed" });
+  const scan = {
+    repo: REPO, base_ref: "main", scanned_until: ago(0), pulls: [{ number: 1, found: false }],
+    commits: [{
+      sha: sha(1), landed_at: ago(4), pulls: [], signals: [], reverts: { shas: [], pulls: [] },
+      files: [{ path: "src/a.ts", removed: [h(1)], added: [] }, { path: "notes/SECRET-plan.md", removed: [h(900), h(901)], added: [] }],
+      moves: [{ from: "src/a.ts", to: "notes/SECRET-moved.md", hashes: [h(2), h(3)] }],
+    }],
+  };
+  const keptOf = async () => {
+    const [pull] = await db.query<Record<string, unknown>>(`SELECT outcomes_held, common_lines FROM pull_requests WHERE org_id = $1 AND number = 1`, [p.there]);
+    const commits = await db.query<Record<string, unknown>>(`SELECT removed FROM pull_outcome_commits WHERE org_id = $1 AND number = 1`, [p.there]);
+    return JSON.stringify([jsonOf(pull!.outcomes_held), jsonOf(pull!.common_lines), commits.map((c) => jsonOf(c.removed))]);
+  };
+  // Where it is shown with notes hidden: nothing of them is walked or kept, nor are lines followed there.
+  const hiding = shownApp(db, { org: p.there, hide: ["notes"] });
+  assert.equal((await call(p.ci, "PUT", "/prs", merged, hiding)).status, 200);
+  const sent = await call(p.ci, "PUT", "/prs/outcomes", scan, hiding);
+  assert.equal(sent.status, 200, sent.text);
+  assert.doesNotMatch(await keptOf(), /notes|SECRET/);
+  assert.doesNotMatch(JSON.stringify((await call(p.ci, "GET", `/prs/outcomes/due?repo=${REPO}`, undefined, hiding)).body), /notes/);
+  // and with what not to show not to be read, a scan there is refused
+  const unreadable = shownApp(db, { org: p.there, problem: "SESSIONLY_DEMO_HIDE cannot be used" });
+  assert.deepEqual([(await call(p.ci, "PUT", "/prs/outcomes", scan, unreadable)).body.code], ["demo_hide_unusable"]);
+
+  // Kept whole before notes were hidden, and then hidden: they go from where its lines are and from what each commit removed.
+  await db.query(`DELETE FROM pull_outcome_commits WHERE org_id = $1`, [p.there]);
+  await db.query(`UPDATE pull_requests SET outcomes_scanned_until = NULL, outcomes_held = NULL WHERE org_id = $1`, [p.there]);
+  assert.equal((await call(p.ci, "PUT", "/prs", merged)).status, 200);
+  assert.equal((await call(p.ci, "PUT", "/prs/outcomes", scan)).status, 200);
+  assert.match(await keptOf(), /notes\/SECRET-plan\.md.*notes\/SECRET-moved\.md/);
+  await importDemo(p.from, p.to, { repo: REPO, hide: ["notes"] });
+  const kept = await keptOf();
+  assert.doesNotMatch(kept, /notes|SECRET/);
+  assert.match(kept, /src\/a\.ts/);
+});

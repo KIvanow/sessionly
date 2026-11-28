@@ -2,7 +2,7 @@ import type { LocalReviewRun, PullAfterMerge, PullDetail, PullHistory, PullOutco
 import { useState } from "react";
 import { api, ApiError, query } from "./api.ts";
 import { ActionNotice } from "./ActionNotice.tsx";
-import { afterMergeLine, afterMergeName, afterMergeTile, laterKind, laterTile, signalName, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewNote, reviewTarget, roundsLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
+import { afterMergeLine, afterMergeName, afterMergeTile, laterKind, laterOf, laterTile, signalName, timeline, type By, byOf, countFeedback, feedbackLabel, figureShift, historyEvent, localReviewsLine, matchedLine, reviewGaps, reviewNote, reviewTarget, roundsLine, pullCost, pullCostNote, sessionShare, web } from "./pull.ts";
 import { cost, count, dateTime, duration, modelName, usd, percent, repoName, share, shareOf, toolName } from "./format.ts";
 import { Loader } from "./Loader.tsx";
 import { Tile } from "./Overview.tsx";
@@ -53,7 +53,8 @@ export function PullView({
   // What became of its agent lines on the branch it was merged into.
   const afterMerge = p.state === "merged" && a.now.agent_lines > 0 ? afterMergeTile(p.after_merge, p.merged_at, shareOf, count) : null;
   // And what later commits there did to them (a server from before this says nothing).
-  const later = afterMerge && p.outcomes !== undefined ? laterTile(p.outcomes, p.merged_at) : null;
+  const outcomes = laterOf(p.outcomes);
+  const later = afterMerge && p.outcomes !== undefined ? laterTile(outcomes, p.merged_at) : null;
   const state = p.state === "merged" ? `merged${p.merged_at ? ` ${dateTime(p.merged_at)}` : ""}` : p.state === "closed" ? `closed${p.closed_at ? ` ${dateTime(p.closed_at)}` : ""}` : p.draft ? "open, a draft" : "open";
   // Comments on the diff, per file: where review looked.
   const comments = new Map<string, number>();
@@ -145,7 +146,7 @@ export function PullView({
 
       <History history={p.history} counts={p.after_merge} />
 
-      {p.outcomes && <LaterCommits outcomes={p.outcomes} />}
+      {outcomes && <LaterCommits outcomes={outcomes} />}
 
       {a.now.by.length > 0 && (
         <section className="card" aria-label="By model">
