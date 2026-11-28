@@ -179,7 +179,10 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
 - **Read:** the branch checked out and the remote's default branch (`origin/HEAD`), so a fix on
   `main` is found while you are on a feature branch, once the work is on `main` too. Nothing
   else: not other branches, not merge commits (a reverted merge counts when the revert takes out
-  most of the lines), and no commit more than 31 days after the session ended.
+  most of the lines), no commit more than 31 days after the session ended, and none dated more
+  than a day before it began. One dated so after the session's commit (rebased with its author's
+  date) is the only one left out with git 2.41 or later; older git leaves out every commit
+  before it too, the session's own with them.
 - **Not counted:** a fix that only adds lines next to the agent's (a missing check), and a fix
   whose subject has none of the words. A repository whose subjects describe what changed ("Stop
   the sweep from deleting history") has fixes that count as rework.

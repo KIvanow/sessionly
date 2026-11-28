@@ -1544,7 +1544,14 @@ fn read_commits(
     alone: bool,
     deadline: Instant,
 ) -> Result<Vec<Commit>, Stop> {
-    let max_age = format!("--max-age={}", wanted.since);
+    // From `since`: a commit dated before it (one rebased with its author's
+    // date) is left out, and not, as `--max-age` leaves them out, the
+    // commits it follows from too, the session's own with them.
+    let since = if crate::git::filters_since() {
+        format!("--since-as-filter=@{} +0000", wanted.since)
+    } else {
+        format!("--max-age={}", wanted.since)
+    };
     let min_age = format!("--min-age={}", wanted.until);
     let mut args = vec![
         "rev-list",
@@ -1554,7 +1561,7 @@ fn read_commits(
         "--reverse",
         "--timestamp",
         "--stdin",
-        max_age.as_str(),
+        since.as_str(),
         min_age.as_str(),
     ];
     args.extend(wanted.refs.iter().map(String::as_str));
@@ -4860,6 +4867,30 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
         let week = world.at("s1", "7d").expect("never counted");
         assert_eq!((week.fix_commits, week.lines_tracked), (1, 4));
         assert_eq!(world.target("s1").failures, 0);
+    }
+
+    #[test]
+    fn a_commit_dated_before_the_session_after_its_own_hides_nothing() {
+        // A teammate's commit, rebased with its author's date days before the
+        // session, lands between the session's commit and a fix.
+        let (mut world, _) = written();
+        world.commit("g.js", "// theirs\n", "Add theirs", T0 - 3 * DAY);
+        fix_two(&world, T0 + 3 * DAY);
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(world.at("s1", "7d").expect("never counted").fix_commits, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_before_2_41_reads_from_the_date_as_it_can() {
+        let (mut world, _) = written();
+        fix_two(&world, T0 + 3 * DAY);
+        let _git = FakeGit::new(
+            r#"[ "$1" = version ] && { echo "git version 2.40.1"; exit 0; }
+               for a in "$@"; do case "$a" in --since-as-filter=*) exit 129;; esac; done"#,
+        );
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(world.at("s1", "7d").expect("never counted").fix_commits, 1);
     }
 
     #[cfg(unix)]

@@ -77,6 +77,31 @@ pub fn bounded(
     }
 }
 
+/// Whether git takes `--since-as-filter` (2.41 and later): commits older
+/// than a date left out, and not, as with `--max-age`, everything they
+/// follow from as well. Asked once (in a test, of the git it runs instead).
+pub fn filters_since() -> bool {
+    let ask = || {
+        let mut command = Command::new(program());
+        command.arg("version");
+        let said = lookup(command, Instant::now() + Duration::from_secs(2));
+        said.ok().flatten().is_some_and(|said| {
+            // `git version 2.41.0`, `2.39.3 (Apple Git-146)`, `2.45.1.windows.1`.
+            let mut parts = said
+                .trim_start_matches("git version ")
+                .split(['.', ' '])
+                .map(|n| n.parse::<u32>().unwrap_or(0));
+            (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= (2, 41)
+        })
+    };
+    #[cfg(test)]
+    if PROGRAM.with(|p| p.borrow().is_some()) {
+        return ask();
+    }
+    static KNOWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *KNOWN.get_or_init(ask)
+}
+
 /// What git says of a name, as `rev-parse --verify --quiet`, `symbolic-ref
 /// --quiet` and `config --get` say it: its value, or none when there is no
 /// such name (they exit 1, and print nothing). Any other answer is no answer.
