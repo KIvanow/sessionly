@@ -273,27 +273,41 @@ pub fn named_common_dir(root: &Path) -> Option<PathBuf> {
     let git_dir = if std::fs::metadata(&dot).ok()?.is_dir() {
         dot
     } else {
-        let mut text = String::new();
-        std::fs::File::open(&dot)
-            .ok()?
-            .take(4096)
-            .read_to_string(&mut text)
-            .ok()?;
-        let named = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+        // `gitdir: ` and the path, to the end of the file less its line's end.
+        let text = small_file(&dot)?;
+        let named = text.strip_prefix("gitdir: ")?;
         if named.is_empty() {
             return None;
         }
         // Relative to where the file is.
         root.join(named)
     };
-    let common = match std::fs::read_to_string(git_dir.join("commondir")) {
-        Ok(text) => match text.lines().next().map(str::trim) {
+    let commondir = git_dir.join("commondir");
+    let common = if std::fs::metadata(&commondir).is_ok() {
+        match small_file(&commondir) {
             Some(named) if !named.is_empty() => git_dir.join(named),
             _ => return None,
-        },
-        Err(_) => git_dir,
+        }
+    } else {
+        git_dir
     };
     common.canonicalize().ok().filter(|dir| dir.is_dir())
+}
+
+/// A small file as git reads `.git` and `commondir`: less the line ends it
+/// ends with. None for one that is not a file (a named pipe would never
+/// end), is too big for one, or cannot be read.
+fn small_file(path: &Path) -> Option<String> {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(4097)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() <= 4096).then(|| text.trim_end_matches(['\n', '\r']).to_string())
 }
 
 /// Walk up from `dir` to the directory containing `.git` (a directory, or a
@@ -427,7 +441,14 @@ mod tests {
             &["commit", "--quiet", "--allow-empty", "-m", "x"],
         );
         let head = look(dir.path(), &["rev-parse", "--verify", "--quiet", "HEAD"]);
-        assert_eq!(head.unwrap().map(|sha| sha.len()), Some(40));
+        // The id as git prints it, of whichever kind the repository has.
+        let id = command(dir.path())
+            .args(["log", "-1", "--format=%H"])
+            .output()
+            .unwrap();
+        let id = String::from_utf8_lossy(&id.stdout).trim().to_string();
+        assert!(!id.is_empty());
+        assert_eq!(head, Ok(Some(id)));
         // Not a repository: no answer at all.
         let gone = dir.path().join("gone");
         assert_eq!(
@@ -458,6 +479,29 @@ mod tests {
         let name = wt.file_name().unwrap();
         std::fs::remove_dir_all(common.join("worktrees").join(name)).unwrap();
         assert_eq!(named_common_dir(&wt), None);
+    }
+
+    #[test]
+    fn a_git_file_is_read_as_git_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "--quiet"]);
+        let common = main.join(".git").canonicalize().unwrap();
+        let wt = dir.path().join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        let named = |text: &str| {
+            std::fs::write(wt.join(".git"), text).unwrap();
+            named_common_dir(&wt)
+        };
+        let path = common.display();
+        // `gitdir: ` and the path, to the end less the line's end.
+        assert_eq!(named(&format!("gitdir: {path}\n")), Some(common.clone()));
+        assert_eq!(named(&format!("gitdir: {path}\r\n")), Some(common.clone()));
+        assert_eq!(named(&format!("gitdir:{path}\n")), None);
+        assert_eq!(named(&format!("gitdir:  {path}\n")), None);
+        assert_eq!(named(&format!("gitdir: {path} \n")), None);
+        assert_eq!(named(&format!(" gitdir: {path}\n")), None);
     }
 
     #[test]

@@ -222,22 +222,33 @@ CREATE TABLE IF NOT EXISTS outcome_scans (
 CREATE TABLE IF NOT EXISTS outcome_repos (
     -- a worktree's top, as sessions name it
     root       TEXT PRIMARY KEY,
-    -- its repository's common git directory; empty when git could not say
+    -- its repository's common git directory, as git last said it; empty
+    -- when git never did
     common_dir TEXT NOT NULL,
-    -- when git could not say; null when it did
+    -- when git last could not say; null when it did since
     failed_at  TEXT,
     -- whether that was for taking too long
     timed_out  INTEGER NOT NULL DEFAULT 0
 );
 ";
 
-/// What a sync noted of a worktree: the repository it is of (its common
+/// What a sync found of a worktree: the repository it is of (its common
 /// git directory), or when git could not say, and whether that was for
 /// taking too long.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutcomeRepo {
     Found(String),
     Failed { at: DateTime<Utc>, timed_out: bool },
+}
+
+/// What is noted of a worktree: the repository git last said it is of, which
+/// a failure since does not take back (the repository away for a while, the
+/// worktree removed after), and when git last could not say, and whether
+/// that was for taking too long.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NotedRepo {
+    pub common_dir: Option<String>,
+    pub failed: Option<(DateTime<Utc>, bool)>,
 }
 
 /// A session whose lines later commits may have touched.
@@ -1491,9 +1502,9 @@ impl Ledger {
     }
 
     /// The repository each worktree sessions ran in is of, as noted while
-    /// it was there: by its top, the repository's common git directory, or
-    /// when git could not say.
-    pub fn outcome_repos(&self) -> Result<std::collections::HashMap<String, OutcomeRepo>> {
+    /// it was there: by its top, the repository's common git directory, and
+    /// when git last could not say.
+    pub fn outcome_repos(&self) -> Result<std::collections::HashMap<String, NotedRepo>> {
         let rows = self
             .conn
             .prepare("SELECT root, common_dir, failed_at, timed_out FROM outcome_repos")?
@@ -1509,9 +1520,9 @@ impl Ledger {
         Ok(rows
             .into_iter()
             .map(|(root, common_dir, failed_at, timed_out)| {
-                let noted = match time(failed_at) {
-                    Some(at) => OutcomeRepo::Failed { at, timed_out },
-                    None => OutcomeRepo::Found(common_dir),
+                let noted = NotedRepo {
+                    common_dir: (!common_dir.is_empty()).then_some(common_dir),
+                    failed: time(failed_at).map(|at| (at, timed_out)),
                 };
                 (root, noted)
             })
@@ -1533,7 +1544,8 @@ impl Ledger {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Note what was found of each of these worktrees, by its top.
+    /// Note what was found of each of these worktrees, by its top: a
+    /// failure beside the repository git said it is of before, if it did.
     pub fn keep_outcome_repos(&mut self, found: &[(String, OutcomeRepo)]) -> Result<()> {
         if found.is_empty() {
             return Ok(());
@@ -1541,8 +1553,13 @@ impl Ledger {
         let tx = self.conn.transaction()?;
         {
             let mut keep = tx.prepare(
-                "INSERT OR REPLACE INTO outcome_repos (root, common_dir, failed_at, timed_out)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO outcome_repos (root, common_dir, failed_at, timed_out)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (root) DO UPDATE SET
+                   common_dir = CASE WHEN excluded.failed_at IS NULL
+                                     THEN excluded.common_dir ELSE common_dir END,
+                   failed_at = excluded.failed_at,
+                   timed_out = excluded.timed_out",
             )?;
             for (root, noted) in found {
                 let (common_dir, failed_at, timed_out) = match noted {

@@ -1,5 +1,5 @@
 {
- "about": "What a later commit's message says about it, for outcome linking: the words that make it a fix, and cases the sessionly binary and the GitHub Action must both read the same way. A message is read word by word (lowercased, split on everything that is not a letter or digit), never with a regular expression. Only the subject line (the first line) is looked at for fix words; the body only for the commits it says it reverts.",
+ "about": "What a later commit's message says about it, for outcome linking: the words that make it a fix, and cases the sessionly binary and the GitHub Action must both read the same way. A message is read word by word (lowercased, split on everything that is not a letter or digit), never with a regular expression. Only the subject line (the first line) is looked at for fix words; the body only for the commits it says it reverts, and only in a revert's message: one whose subject's first word is revert or reapply, or whose body's first paragraph begins with \"This reverts commit\".",
  "fix_words": ["fix", "fixes", "fixed", "fixing", "bug", "bugs", "bugfix", "hotfix", "regression", "broken", "crash", "crashes", "crashed", "typo"],
  "fix_types": ["fix", "hotfix", "bugfix"],
  "bug_labels": ["bug", "regression", "defect", "incident"],
@@ -29,6 +29,7 @@
   { "message": "Reverting to the old layout was considered", "signals": [] },
   { "message": "Explain why this reverts commit abc is wrong", "signals": [], "reverts": [], "note": "only 'This reverts commit' followed by 7 to 64 hex digits counts" },
   { "message": "Undo\n\nthis  reverts   commit DEADBEEF1", "signals": [], "reverts": ["deadbeef1"] },
+  { "message": "Add the parser (#12)\n\n* wip\n\n* Revert \"wip\"\n\nThis reverts commit 5b6dee9f3ff17ed0a4f03cdfa903bbec9130e63a.\n\n* Parse the rest", "signals": [], "reverts": [], "note": "GitHub's message for a squash merge lists the branch's commits: a revert among them, with its line, does not make it one" },
   { "message": "Revert part of it\n\nThis reverts commit abc12.", "signals": ["revert_subject"], "reverts": [], "note": "fewer than 7 hex digits is not a SHA" },
   { "message": "Revert \"x\"\n\nThis reverts commit 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.", "signals": ["revert_subject"], "reverts": ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"], "note": "a SHA-256 repository's commit: 64 hex digits" }
  ]

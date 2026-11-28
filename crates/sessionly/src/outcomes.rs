@@ -12,9 +12,10 @@
 //! and it is not one of the session's own commits: those that add its lines
 //! where the history did not have them. Then it is:
 //! - a **revert** when it says `This reverts commit <sha>` of one of the
-//!   session's own commits, or its subject begins with "revert" and it
-//!   removes at least `REVERT_SHARE` of the session's lines still there,
-//!   unless it reverts a revert (a revert of that is one again);
+//!   session's own commits, as a revert's message says it (not a squash
+//!   merge's list of its branch's commits), or its subject begins with
+//!   "revert" and it removes at least `REVERT_SHARE` of the session's lines
+//!   still there, unless it reverts a revert (a revert of that is one again);
 //! - a **fix** when its subject line has a fix word or a conventional `fix:`
 //!   type. A fix that touches a session's lines is mostly a fix of something
 //!   else that changed them along the way, so the figure is "changed by a
@@ -44,13 +45,22 @@
 //!   and only in what descends from that commit: before it, or beside it (a
 //!   branch from before it, the remote's branch without it), a line like them
 //!   that a commit removes was someone else's. On a history without them, a
-//!   commit lands them once that history has `LANDING_LINES` of them that few
-//!   sessions wrote (all, for a session of fewer): two generic lines are not
-//!   enough. Lines a commit moves to another file are followed there, from
-//!   when the session began, and are never more than the session wrote.
+//!   commit lands them when it adds `LANDING_LINES` of them that few
+//!   sessions wrote (all, for a session of fewer, as `LANDING_SHARE` of what
+//!   it adds), with what commits of the session's time (from when it began
+//!   to `SLACK` after it ended) added before it: two generic lines are not
+//!   enough, nor lines like them that commits add over weeks. Where no
+//!   commit read lands them so, one of its time lands them with less: two of
+//!   its lines, half of them and `LANDING_SHARE` of what it adds, or all of
+//!   them for a session of fewer. Lines a commit moves to another file are
+//!   followed there, from when the session began, and are never more than
+//!   the session wrote.
 //! - Each commit counts against what its own history has of the lines: a fix
-//!   on one branch and rework of the same lines on another both count. The
-//!   same change made on both (a cherry-pick) counts once.
+//!   on one branch and rework of the same lines on another both count, and a
+//!   merge has what the two branches began from, with what each changed
+//!   since. The same change made on both (a cherry-pick, or a backport
+//!   whatever its subject) counts once; made again on one after it was
+//!   undone there, it counts again.
 //!
 //! History is read in three steps that nothing in a commit can be mistaken
 //! in: `rev-list` for the SHAs and times, `cat-file --batch` for the
@@ -66,7 +76,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 
 use crate::git::Stop;
-use crate::ledger::{Ledger, OutcomeEvent, OutcomeRepo, OutcomeScan, OutcomeTarget};
+use crate::ledger::{Ledger, NotedRepo, OutcomeEvent, OutcomeRepo, OutcomeScan, OutcomeTarget};
 use crate::rewrite::{line_hash, CHECKPOINTS};
 use crate::session::{OutcomeBy, OutcomeCheckpoint};
 
@@ -266,9 +276,33 @@ pub fn signals(message: &str, words_of: &Words) -> Vec<&'static str> {
 }
 
 /// The commits a message says it reverts: each `This reverts commit <sha>`,
-/// the words apart by any white space, the SHA 7 to 64 hex digits (SHA-1 or SHA-256).
+/// the words apart by any white space, the SHA 7 to 64 hex digits (SHA-1 or
+/// SHA-256). Only in a revert's message, as git writes one: its subject
+/// begins with "revert" or "reapply", or the body begins with that line. A
+/// squash merge's message, which lists its branch's commits (a `Revert
+/// "wip"` among them, with its line), says it reverts nothing.
 pub fn reverts(message: &str) -> Vec<String> {
-    let tokens: Vec<&str> = message.split_whitespace().collect();
+    let mut lines = message.lines();
+    let subject = lines.next().unwrap_or_default();
+    let tokens: Vec<&str> = match words(subject).first().map(String::as_str) {
+        Some("revert" | "reapply") => message.split_whitespace().collect(),
+        _ => {
+            let first: Vec<&str> = lines
+                .skip_while(|line| line.trim().is_empty())
+                .take_while(|line| !line.trim().is_empty())
+                .flat_map(str::split_whitespace)
+                .collect();
+            let begins = first.len() >= 3
+                && ["this", "reverts", "commit"]
+                    .iter()
+                    .zip(&first)
+                    .all(|(word, token)| token.eq_ignore_ascii_case(word));
+            if !begins {
+                return Vec::new();
+            }
+            first
+        }
+    };
     let mut found = Vec::new();
     for window in tokens.windows(4) {
         let [this, verb, commit, sha] = window else {
@@ -606,7 +640,7 @@ enum Asked {
 /// its `.git` still says so, or asked of git; and what this sync found, to
 /// note.
 struct Worktrees {
-    noted: HashMap<String, OutcomeRepo>,
+    noted: HashMap<String, NotedRepo>,
     found: Vec<(String, OutcomeRepo)>,
     known: HashMap<PathBuf, Asked>,
     /// This sync's time, in seconds.
@@ -623,19 +657,21 @@ impl Worktrees {
             return known.clone();
         }
         let name = root.to_string_lossy().into_owned();
-        let asked = match self.noted.get(&name) {
+        let noted = self.noted.get(&name);
+        let asked = match (
+            noted.and_then(|n| n.common_dir.as_deref()),
+            noted.and_then(|n| n.failed),
+        ) {
             // As noted, unless its `.git` names another repository now.
-            Some(OutcomeRepo::Found(dir))
+            (Some(dir), _)
                 if Path::new(dir).is_dir()
                     && crate::git::named_common_dir(root)
                         .is_none_or(|named| named == Path::new(dir)) =>
             {
                 Asked::Repo(PathBuf::from(dir))
             }
-            Some(OutcomeRepo::Failed { at, timed_out })
-                if self.now - at.timestamp() < RETRY_AFTER =>
-            {
-                if *timed_out {
+            (_, Some((at, timed_out))) if self.now - at.timestamp() < RETRY_AFTER => {
+                if timed_out {
                     Asked::NotNow
                 } else {
                     Asked::Repo(root.to_path_buf())
@@ -822,10 +858,10 @@ pub fn measure(
         .noted
         .iter()
         .filter_map(|(root, noted)| {
-            let OutcomeRepo::Found(common) = noted else {
-                return None;
-            };
-            let (root, common) = (PathBuf::from(root), PathBuf::from(common));
+            let (root, common) = (
+                PathBuf::from(root),
+                PathBuf::from(noted.common_dir.as_ref()?),
+            );
             let gone = !root.join(".git").exists() || crate::git::named_common_dir(&root).is_none();
             (gone && common.is_dir()).then_some((root, common))
         })
@@ -833,7 +869,10 @@ pub fn measure(
     // Per repository: the worktrees, and the lines by file.
     type Placed = (BTreeSet<PathBuf>, BTreeMap<String, Vec<u64>>);
     // Where a session's files are read, by repository (of those in `only`,
-    // when given); none when one could not be found in this sync's time.
+    // when given); none when one could not be found in this sync's time,
+    // for a session to read. One only read beside them (`only`) is placed
+    // without that file: what it has in the others says whose their lines
+    // are, and which agent made a commit.
     let mut place = |target: &OutcomeTarget,
                      only: Option<&HashSet<PathBuf>>|
      -> Option<BTreeMap<PathBuf, Placed>> {
@@ -865,6 +904,9 @@ pub fn measure(
                         }
                     });
                     let Asked::Repo(repo) = asked else {
+                        if only.is_some() {
+                            continue;
+                        }
                         return None;
                     };
                     (root.clone(), root, repo.clone())
@@ -1293,11 +1335,21 @@ fn scan(
     let mut refs: Vec<String> = Vec::new();
     let every: BTreeSet<&PathBuf> = roots.iter().chain(wrote_in.iter().copied()).collect();
     for at in every {
-        let head = match look(at, &["rev-parse", "--verify", "--quiet", "HEAD"]) {
+        // One no session being read wrote in is asked for `ASKING` at most:
+        // broken since, not this person's, or on a disk that does not
+        // answer, it is read without.
+        let optional = !wrote_in.contains(at);
+        let until = if optional {
+            deadline.min(Instant::now() + ASKING)
+        } else {
+            deadline
+        };
+        let mut command = history(at, false);
+        command.args(["rev-parse", "--verify", "--quiet", "HEAD"]);
+        let head = match crate::git::lookup(command, until) {
             Ok(head) => head,
-            // Broken since, or not this person's: one no session being read
-            // wrote in is read without.
-            Err(Stop::Failed | Stop::TooLarge) if !wrote_in.contains(at) => continue,
+            Err(Stop::Failed | Stop::TooLarge) if optional => continue,
+            Err(Stop::TimedOut) if optional && Instant::now() < deadline => continue,
             Err(stop) => return Err(stop),
         };
         if let Some(head) = head
@@ -1455,17 +1507,32 @@ fn read_commits(
         "--topo-order",
         "--reverse",
         "--timestamp",
+        "--stdin",
         max_age.as_str(),
         min_age.as_str(),
     ];
     args.extend(wanted.refs.iter().map(String::as_str));
-    args.push("--");
-    args.extend(wanted.paths.iter().map(String::as_str));
-    let mut seen = HashSet::new();
-    let listed: Vec<(String, i64, Vec<String>)> = parse_list(&run(&args, None, MAX_LOG_BYTES)?)
-        .into_iter()
-        .filter(|(sha, _, _)| seen.insert(sha.clone()))
+    // The paths as it reads them, a line each after `--`: more than a
+    // command line takes, for a session of many files. One with a line's
+    // end in it on the command line.
+    let (odd, plain): (Vec<&String>, Vec<&String>) = wanted
+        .paths
+        .iter()
+        .partition(|path| path.contains('\n') || path.ends_with('\r'));
+    if !odd.is_empty() {
+        args.push("--");
+        args.extend(odd.iter().map(|path| path.as_str()));
+    }
+    let paths: String = std::iter::once("--")
+        .chain(plain.iter().map(|path| path.as_str()))
+        .map(|line| format!("{line}\n"))
         .collect();
+    let mut seen = HashSet::new();
+    let listed: Vec<(String, i64, Vec<String>)> =
+        parse_list(&run(&args, Some(paths.as_bytes()), MAX_LOG_BYTES)?)
+            .into_iter()
+            .filter(|(sha, _, _)| seen.insert(sha.clone()))
+            .collect();
     if listed.is_empty() {
         return Ok(Vec::new());
     }
@@ -1481,18 +1548,25 @@ fn read_commits(
         Some(input.as_bytes()),
         MAX_LOG_BYTES,
     )?);
-    let mut args = vec!["diff-tree", "--stdin", "--always", "--root"];
-    args.extend(PATCH);
-    args.push("--");
-    args.extend(wanted.paths.iter().map(String::as_str));
-    let out = run(&args, Some(input.as_bytes()), MAX_LOG_BYTES)?;
-    let out = String::from_utf8_lossy(&out);
-    let diffs = split_tree(&out, &shas)?;
+    // Their changes to the paths, so many paths at a time: a commit's are
+    // those of each part.
+    let mut diffs: HashMap<String, HashMap<String, FileDiff>> = HashMap::new();
+    for part in path_parts(wanted.paths) {
+        let mut args = vec!["diff-tree", "--stdin", "--always", "--root"];
+        args.extend(PATCH);
+        args.push("--");
+        args.extend(part);
+        let out = run(&args, Some(input.as_bytes()), MAX_LOG_BYTES)?;
+        let out = String::from_utf8_lossy(&out);
+        for (sha, diff) in split_tree(&out, &shas)? {
+            diffs.entry(sha).or_default().extend(parse_diff(diff));
+        }
+    }
     let mut commits: Vec<Commit> = listed
         .into_iter()
         .map(|(sha, at, parents)| Commit {
             message: messages.get(&sha).cloned().unwrap_or_default(),
-            files: diffs.get(&sha).map(|d| parse_diff(d)).unwrap_or_default(),
+            files: diffs.remove(&sha).unwrap_or_default(),
             sha,
             at,
             parents,
@@ -1595,6 +1669,31 @@ fn read_commits(
     Ok(commits)
 }
 
+/// Paths on one command line: no more than this many bytes of them, well
+/// under what any system takes (Windows takes 32 KiB in all). Less in
+/// tests, which read so many paths in parts.
+#[cfg(not(test))]
+const MOST_PATH_BYTES: usize = 24 * 1024;
+#[cfg(test)]
+const MOST_PATH_BYTES: usize = 2 * 1024;
+
+/// `paths` in parts of no more than `MOST_PATH_BYTES` (a path longer than
+/// that, alone), in order; at least one part.
+fn path_parts(paths: &BTreeSet<String>) -> Vec<Vec<&str>> {
+    let mut parts: Vec<Vec<&str>> = vec![Vec::new()];
+    let mut bytes = 0;
+    for path in paths {
+        let last = parts.last_mut().expect("at least one part");
+        if !last.is_empty() && bytes + path.len() + 1 > MOST_PATH_BYTES {
+            parts.push(Vec::new());
+            bytes = 0;
+        }
+        bytes += path.len() + 1;
+        parts.last_mut().expect("at least one part").push(path);
+    }
+    parts
+}
+
 /// Git run in a repository: with these arguments and this input, printing
 /// no more than so much.
 type Git<'a> = dyn Fn(&[&str], Option<&[u8]>, usize) -> Result<Vec<u8>, Stop> + 'a;
@@ -1689,6 +1788,10 @@ struct Held {
     /// it adds of lines like them (a teammate's check on another branch) is
     /// noted, and is the session's once one does, but no change to it counts.
     landed: bool,
+    /// Until then, the lines few sessions wrote that commits of its time
+    /// (from when it began to `SLACK` after it ended) added: what says that
+    /// a later one of its time lands them.
+    early: HashSet<u64>,
 }
 
 impl Held {
@@ -1715,21 +1818,53 @@ impl Held {
         self.total += n;
     }
 
-    /// As many of each line as either has: two branches merged.
-    fn take_most(&mut self, other: &Held) {
-        for (path, lines) in &other.files {
-            let mine = self.files.entry(path.clone()).or_default();
-            for (hash, n) in lines {
-                let have = mine.entry(*hash).or_insert(0.0);
-                *have = have.max(*n);
+    /// Two branches merged, `a` and `b`: what the commit both descend from
+    /// had (`base`; nothing, when none read is one), with what each changed
+    /// since, a line taken out by one is out. No more of a line in a file
+    /// than `room` (what the session wrote there, or moved there), nor in
+    /// all than `most`: a line both moved, each to a file of its own, is
+    /// shared among them.
+    fn merge(
+        a: &Held,
+        b: &Held,
+        base: Option<&Held>,
+        room: &HashMap<String, HashMap<u64, f64>>,
+        most: &HashMap<u64, f64>,
+    ) -> Held {
+        let none = Held::default();
+        let base = base.unwrap_or(&none);
+        let mut places: BTreeSet<(&str, u64)> = BTreeSet::new();
+        for held in [a, b, base] {
+            for (path, lines) in &held.files {
+                places.extend(lines.keys().map(|hash| (path.as_str(), *hash)));
             }
         }
-        for (hash, n) in &other.lines {
-            let have = self.lines.entry(*hash).or_insert(0.0);
-            *have = have.max(*n);
+        let mut copies: Vec<(&str, u64, f64)> = Vec::new();
+        let mut in_all: HashMap<u64, f64> = HashMap::new();
+        for (path, hash) in places {
+            let fits = room
+                .get(path)
+                .and_then(|r| r.get(&hash))
+                .copied()
+                .unwrap_or(0.0);
+            let n =
+                (a.copies(path, hash) + b.copies(path, hash) - base.copies(path, hash)).min(fits);
+            if n > 0.0 {
+                copies.push((path, hash, n));
+                *in_all.entry(hash).or_insert(0.0) += n;
+            }
         }
-        self.total = self.lines.values().sum();
-        self.landed |= other.landed;
+        let mut merged = Held {
+            landed: a.landed || b.landed,
+            early: a.early.union(&b.early).copied().collect(),
+            ..Held::default()
+        };
+        for (path, hash, n) in copies {
+            let all = in_all[&hash];
+            let most = most.get(&hash).copied().unwrap_or(0.0);
+            merged.add(path, hash, if all > most { n * most / all } else { n });
+        }
+        merged
     }
 }
 
@@ -1737,35 +1872,123 @@ impl Held {
 /// parent's, shared until the commit changes it.
 type Has = Rc<BTreeMap<usize, Rc<Held>>>;
 
-/// What the histories of a merge's `parents` have: as many of each line as
-/// any of them has.
-fn merged(parents: Vec<Has>) -> Has {
+/// What the histories of a merge's parents (each with its place in the
+/// walk) have: per session, the first one's, and what each other one
+/// changed since the commit both descend from, whose history `base_of`
+/// says. `room` and `written` are what each session wrote, by file and in
+/// all.
+fn merged(
+    parents: Vec<(usize, Has)>,
+    base_of: &dyn Fn(usize, usize) -> Option<Has>,
+    room: &Lines,
+    written: &[HashMap<u64, f64>],
+) -> Has {
     let mut parents = parents.into_iter();
-    let Some(mut has) = parents.next() else {
+    let Some((first, mut has)) = parents.next() else {
         return Has::default();
     };
-    for other in parents {
+    for (other_at, other) in parents {
         let same = other
             .iter()
             .all(|(i, held)| has.get(i).is_some_and(|mine| Rc::ptr_eq(mine, held)));
         if same {
             continue;
         }
+        let base = base_of(first, other_at);
         let map = Rc::make_mut(&mut has);
         for (i, held) in other.iter() {
+            let before = base.as_ref().and_then(|base| base.get(i));
+            // Not changed on that side since: what the other has.
+            let kept = |h: &Rc<Held>| before.is_some_and(|b| Rc::ptr_eq(b, h));
             match map.entry(*i) {
                 std::collections::btree_map::Entry::Vacant(e) => {
                     e.insert(Rc::clone(held));
                 }
                 std::collections::btree_map::Entry::Occupied(mut e) => {
-                    if !Rc::ptr_eq(e.get(), held) {
-                        Rc::make_mut(e.get_mut()).take_most(held);
+                    if Rc::ptr_eq(e.get(), held) || kept(held) {
+                        continue;
                     }
+                    if kept(e.get()) {
+                        e.insert(Rc::clone(held));
+                        continue;
+                    }
+                    let both =
+                        Held::merge(e.get(), held, before.map(|b| &**b), &room[*i], &written[*i]);
+                    e.insert(Rc::new(both));
                 }
             }
         }
     }
     has
+}
+
+/// The commits read, as git walked them (parents first): where each is in
+/// the walk, and the places of its parents that were read.
+struct Graph<'a> {
+    commits: &'a [Commit],
+    at: HashMap<&'a str, usize>,
+    ups: Vec<Vec<usize>>,
+}
+
+impl<'a> Graph<'a> {
+    fn of(commits: &'a [Commit]) -> Graph<'a> {
+        let at: HashMap<&str, usize> = commits
+            .iter()
+            .enumerate()
+            .map(|(k, c)| (c.sha.as_str(), k))
+            .collect();
+        let ups = commits
+            .iter()
+            .map(|c| {
+                c.parents
+                    .iter()
+                    .filter_map(|p| at.get(p.as_str()).copied())
+                    .collect()
+            })
+            .collect();
+        Graph { commits, at, ups }
+    }
+
+    /// Whether the commit at `x` is the one at `y` or descends from it. A
+    /// parent is walked before its children: none before `y` is.
+    fn descends(&self, x: usize, y: usize) -> bool {
+        let mut seen = HashSet::new();
+        let mut next = vec![x];
+        while let Some(k) = next.pop() {
+            if k == y {
+                return true;
+            }
+            if k > y && seen.insert(k) {
+                next.extend(&self.ups[k]);
+            }
+        }
+        false
+    }
+
+    /// The latest commit read that the ones at `a` and `b` both are or
+    /// descend from (their merge base), if any: the first found from both,
+    /// latest first.
+    fn base(&self, a: usize, b: usize) -> Option<usize> {
+        let mut from: HashMap<usize, u8> = HashMap::from([(a, 1), (b, 2)]);
+        if a == b {
+            return Some(a);
+        }
+        let mut next = std::collections::BinaryHeap::from([a, b]);
+        while let Some(k) = next.pop() {
+            let sides = from[&k];
+            if sides == 3 {
+                return Some(k);
+            }
+            for &up in &self.ups[k] {
+                let known = from.entry(up).or_insert(0);
+                if *known | sides != *known {
+                    *known |= sides;
+                    next.push(up);
+                }
+            }
+        }
+        None
+    }
 }
 
 /// What `has` has of session `i`, to change: a copy of it, if it is shared.
@@ -1853,6 +2076,107 @@ fn attribute(
     scanned: &HashSet<usize>,
     deadline: Instant,
 ) -> Result<Vec<OutcomeEvent>, Stop> {
+    let graph = Graph::of(commits);
+    // A commit of a session's time lands its lines with less only when no
+    // commit read lands them as the first walk does: two of its lines in
+    // one are a teammate's like them when its own commit is read elsewhere.
+    let none = HashSet::new();
+    let first = walk(
+        &graph, sessions, targets, words_of, scanned, &none, deadline,
+    )?;
+    let less: HashSet<usize> = first.wanted.difference(&first.strict).copied().collect();
+    let mut events = if less.is_empty() {
+        first.events
+    } else {
+        walk(
+            &graph, sessions, targets, words_of, scanned, &less, deadline,
+        )?
+        .events
+    };
+    // The same change made on two branches (a fix cherry-picked, or
+    // backported whatever its subject says) counts once, as the first made,
+    // whichever git walked first. Made again on one, after it was undone
+    // there, it counts again.
+    let mut order: Vec<usize> = (0..events.len()).collect();
+    order.sort_by(|a, b| {
+        let (a, b) = (&events[*a].2, &events[*b].2);
+        (a.at, &a.sha).cmp(&(b.at, &b.sha))
+    });
+    // Those kept of a change are each on the history of the others: in the
+    // walk's order, each descends from the one before. One that does from
+    // the one before it there, and the one after from it, is on theirs.
+    let mut made: HashMap<(usize, u64), BTreeSet<usize>> = HashMap::new();
+    let mut keep = vec![true; events.len()];
+    for e in order {
+        let (i, change, event) = &events[e];
+        let Some(&place) = graph.at.get(event.sha.as_str()) else {
+            continue;
+        };
+        let before = made.entry((*i, *change)).or_default();
+        let on_theirs = before
+            .range(..place)
+            .next_back()
+            .is_none_or(|&k| graph.descends(place, k))
+            && before
+                .range(place + 1..)
+                .next()
+                .is_none_or(|&k| graph.descends(k, place));
+        if on_theirs {
+            before.insert(place);
+        } else {
+            keep[e] = false;
+        }
+    }
+    let mut kept = keep.into_iter();
+    events.retain(|_| kept.next().unwrap_or(true));
+    // A revert that was reverted in turn (git names that one `Reapply "…"`),
+    // in what descends from it.
+    for (i, event) in events.iter_mut().map(|(i, _, e)| (*i, e)) {
+        if event.kind != "revert" {
+            continue;
+        }
+        let Some(&place) = graph.at.get(event.sha.as_str()) else {
+            continue;
+        };
+        let ended = targets[sessions[i].target].ended_at.timestamp();
+        event.relanded_at = commits
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.at >= event.at.timestamp() && c.at <= ended + LONGEST && c.sha != event.sha
+            })
+            .find(|(k, c)| {
+                reverts(&c.message)
+                    .iter()
+                    .any(|sha| event.sha.starts_with(sha.as_str()))
+                    && graph.descends(*k, place)
+            })
+            .and_then(|(_, c)| DateTime::from_timestamp(c.at, 0));
+    }
+    Ok(events.into_iter().map(|(_, _, e)| e).collect())
+}
+
+/// What a walk of the commits found: per session, the commits that touched
+/// it, each with what it changed; and which sessions a commit landed as
+/// `attribute` says, and which ones a commit of their time would land with
+/// less, that a walk lands that way only when told to (`less`).
+struct Walked {
+    events: Vec<(usize, u64, OutcomeEvent)>,
+    strict: HashSet<usize>,
+    wanted: HashSet<usize>,
+}
+
+/// One walk of `attribute`'s: sessions in `less` are landed with less.
+fn walk(
+    graph: &Graph,
+    sessions: &[InRepo],
+    targets: &[OutcomeTarget],
+    words_of: &Words,
+    scanned: &HashSet<usize>,
+    less: &HashSet<usize>,
+    deadline: Instant,
+) -> Result<Walked, Stop> {
+    let commits = graph.commits;
     // A line is common when this many sessions or more wrote it in that file.
     let mut writers: HashMap<String, HashMap<u64, usize>> = HashMap::new();
     for session in sessions {
@@ -1902,7 +2226,8 @@ fn attribute(
     let mut landed: Vec<HashSet<&str>> = vec![HashSet::new(); sessions.len()];
     let mut landed_by: HashMap<&str, Vec<usize>> = HashMap::new();
     // Per commit, what its history has of each session's lines; kept until
-    // every commit read that has it as a parent is walked.
+    // every commit read that has it as a parent is walked, or to the end
+    // for one more than one has (where branches merged later may begin).
     let mut has: HashMap<&str, Has> = HashMap::new();
     let mut children: HashMap<&str, usize> = HashMap::new();
     for commit in commits {
@@ -1910,27 +2235,40 @@ fn attribute(
             *children.entry(parent.as_str()).or_insert(0) += 1;
         }
     }
+    let forks: HashSet<&str> = children
+        .iter()
+        .filter(|(_, n)| **n > 1)
+        .map(|(sha, _)| *sha)
+        .collect();
     let mut depths: HashMap<usize, u32> = HashMap::new();
+    // Sessions a commit landed as `attribute` says, and ones a commit of
+    // their time would land with less.
+    let mut strict: HashSet<usize> = HashSet::new();
+    let mut wanted: HashSet<usize> = HashSet::new();
 
     // Per session, the commits that touched it, each with what it changed.
     let mut events: Vec<(usize, u64, OutcomeEvent)> = Vec::new();
     for (at, commit) in commits.iter().enumerate() {
         in_time(deadline)?;
         let sha = commit.sha.as_str();
-        let parents: Vec<Has> = commit
+        let parents: Vec<(usize, Has)> = commit
             .parents
             .iter()
-            .filter_map(|p| has.get(p.as_str()).cloned())
+            .filter_map(|p| Some((*graph.at.get(p.as_str())?, has.get(p.as_str())?.clone())))
             .collect();
+        let base_of = |a: usize, b: usize| {
+            let base = graph.base(a, b)?;
+            has.get(commits[base].sha.as_str()).cloned()
+        };
+        let mut theirs = merged(parents, &base_of, &wrote, &written);
         for parent in &commit.parents {
             if let Some(left) = children.get_mut(parent.as_str()) {
                 *left -= 1;
-                if *left == 0 {
+                if *left == 0 && !forks.contains(parent.as_str()) {
                     has.remove(parent.as_str());
                 }
             }
         }
-        let mut theirs = merged(parents);
         if commit.parents.len() > 1 {
             has.insert(sha, theirs);
             continue;
@@ -1980,11 +2318,16 @@ fn attribute(
         // `LANDING_LINES` of them, or `LANDING_SHARE` of what the commit adds
         // to the session's files. On one it did not (its own branch before
         // its first commit, or a branch a cherry-pick or a squash merge
-        // lands it on), the commit after which that history has
-        // `LANDING_LINES` of its lines that few sessions wrote, each counted
-        // once, or every one for a session of fewer: a teammate's `if err !=
-        // nil {` and `return err` there are not its lines.
-        let mut adds: BTreeMap<usize, (f64, f64, bool)> = BTreeMap::new();
+        // lands it on), a commit that adds `LANDING_LINES` of its lines that
+        // few sessions wrote, each counted once, or every one for a session
+        // of fewer and `LANDING_SHARE` of what it adds: a teammate's `if err
+        // != nil {` and `return err` there are not its lines. Commits of
+        // its time (from when it began to `SLACK` after it ended) that add
+        // two of them or more (any, for a session of fewer) count together.
+        // Where no commit read lands it so, one of its time lands it with
+        // less: two of its lines, at least half of them and `LANDING_SHARE`
+        // of what it adds; or every one, for a session of fewer.
+        let mut adds: BTreeMap<usize, (f64, f64, HashSet<u64>)> = BTreeMap::new();
         for (path, diff) in &commit.files {
             if diff.added.is_empty() {
                 continue;
@@ -2009,7 +2352,9 @@ fn attribute(
                             (room - held.copies(path, *hash)).min(most - held.line(*hash))
                         }
                         None => {
-                            entry.2 |= uncommon[i].contains(hash);
+                            if uncommon[i].contains(hash) {
+                                entry.2.insert(*hash);
+                            }
                             *room
                         }
                     };
@@ -2019,12 +2364,12 @@ fn attribute(
         }
         // Its own, on a history it landed in; and those it may land on one
         // it did not, once what it adds is there.
-        let mut fresh: Vec<(usize, bool)> = Vec::new();
+        let mut fresh: Vec<(usize, bool, HashSet<u64>)> = Vec::new();
         for (i, (mine, all, new)) in adds {
             let share = mine >= MIN_TOUCH_LINES && mine / all >= LANDING_SHARE;
             if !theirs.get(&i).is_some_and(|h| h.landed) {
-                if new {
-                    fresh.push((i, share));
+                if !new.is_empty() {
+                    fresh.push((i, share, new));
                 }
             } else if mine >= LANDING_LINES || share {
                 own[i].insert(sha);
@@ -2111,19 +2456,44 @@ fn attribute(
                 }
             }
         }
-        for (i, share) in fresh {
+        for (i, share, new) in fresh {
             let Some(held) = theirs.get(&i) else {
                 continue;
             };
             let few = &uncommon[i];
-            let there = few.iter().filter(|h| held.line(**h) > 0.0).count();
-            if there as f64 >= LANDING_LINES || (there >= few.len() && share) {
-                held_mut(&mut theirs, i).landed = true;
+            let t = &targets[sessions[i].target];
+            let of_its_time = commit.at >= t.started_at.timestamp() - EARLY
+                && commit.at <= t.ended_at.timestamp() + SLACK;
+            let small = (few.len() as f64) < LANDING_LINES;
+            let joins = of_its_time && (new.len() as f64 >= MIN_TOUCH_LINES || small);
+            // Of its lines few sessions wrote, those the history has that
+            // this commit added, or (with it) the earlier ones of its time.
+            let there = few
+                .iter()
+                .filter(|h| held.line(**h) > 0.0)
+                .filter(|h| new.contains(*h) || (joins && held.early.contains(*h)))
+                .count();
+            let all = there >= few.len();
+            // As every walk lands them, and with less, as one does where the
+            // first found nothing that lands them so.
+            let lands = there as f64 >= LANDING_LINES || (all && share);
+            let with_less = of_its_time && ((small && all) || (share && 2 * there >= few.len()));
+            if lands {
+                strict.insert(i);
+            } else if with_less {
+                wanted.insert(i);
+            }
+            if lands || (with_less && less.contains(&i)) {
+                let held = held_mut(&mut theirs, i);
+                held.landed = true;
+                held.early.clear();
                 own[i].insert(sha);
                 if !puts_back(commit) {
                     landed[i].insert(sha);
                     landed_by.entry(sha).or_default().push(i);
                 }
+            } else if joins {
+                held_mut(&mut theirs, i).early.extend(new);
             }
         }
         has.insert(sha, theirs);
@@ -2206,49 +2576,18 @@ fn attribute(
             ));
         }
     }
-    // The same change made on two branches (a fix cherry-picked to a release
-    // branch) counts once, as the first made, whichever git walked first.
-    let mut first: HashMap<(usize, u64), (i64, &str)> = HashMap::new();
-    for (i, change, event) in &events {
-        let this = (event.at.timestamp(), event.sha.as_str());
-        first
-            .entry((*i, *change))
-            .and_modify(|kept| *kept = (*kept).min(this))
-            .or_insert(this);
-    }
-    let first: HashSet<(usize, String)> = first
-        .into_iter()
-        .map(|((i, _), (_, sha))| (i, sha.to_string()))
-        .collect();
-    events.retain(|(i, _, event)| first.contains(&(*i, event.sha.clone())));
-    // A revert that was reverted in turn (git names that one `Reapply "…"`).
-    for (i, event) in events.iter_mut().map(|(i, _, e)| (*i, e)) {
-        if event.kind != "revert" {
-            continue;
-        }
-        let ended = targets[sessions[i].target].ended_at.timestamp();
-        event.relanded_at = commits
-            .iter()
-            .filter(|c| {
-                c.at >= event.at.timestamp() && c.at <= ended + LONGEST && c.sha != event.sha
-            })
-            .find(|c| {
-                reverts(&c.message)
-                    .iter()
-                    .any(|sha| event.sha.starts_with(sha.as_str()))
-            })
-            .and_then(|c| DateTime::from_timestamp(c.at, 0));
-    }
-    Ok(events.into_iter().map(|(_, _, e)| e).collect())
+    Ok(Walked {
+        events,
+        strict,
+        wanted,
+    })
 }
 
-/// What a commit changes, as a number: its subject, and the lines it
-/// removes and adds in each file. A cherry-pick of it changes the same.
+/// What a commit changes, as a number: the lines it removes and adds in
+/// each file. A cherry-pick of it changes the same, whatever its subject.
 fn change_of(commit: &Commit) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let subject = commit.message.lines().next().unwrap_or_default();
-    subject.trim().hash(&mut hasher);
     let mut paths: Vec<&String> = commit
         .files
         .iter()
@@ -4215,9 +4554,13 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
             T0 + HOUR,
         );
         world.session("s2", T0, T0 + 2 * HOUR, &[("bad.js", lib)]);
-        // Git cannot read the history of one of its files.
+        // Git cannot read the history of one of its files (given it to read).
         let _git = FakeGit::new(
-            r#"for a in "$@"; do [ "$a" = bad.js ] && [ "$*" != "${*#*rev-list}" ] && exit 128; done"#,
+            r#"if [ "$*" != "${*#*rev-list}" ]; then
+                 given=$(cat)
+                 case "$given" in *bad.js*) exit 128;; esac
+                 printf '%s\n' "$given" | exec git "$@"
+               fi"#,
         );
         world.measure(T0 + 8 * DAY);
         assert_eq!(world.at("s1", "7d").expect("s1 failed").fix_commits, 1);
@@ -4247,18 +4590,23 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
     }
 
     #[test]
-    fn sessions_with_more_paths_than_a_command_line_takes_are_read_apart() {
+    fn sessions_with_more_paths_than_a_command_line_is_given_are_read() {
         let (mut world, _) = written();
         fix_two(&world, T0 + 3 * DAY);
+        // Each with paths before `f.js`, several times what one command
+        // line is given of them.
         let many = |tag: &str| -> Vec<(String, String)> {
-            (0..22_000)
+            let files: Vec<(String, String)> = (0..MOST_PATH_BYTES / 10)
                 .map(|i| {
                     (
-                        format!("generated/{tag}/some/deeper/directory/file_{i:06}.js"),
+                        format!("aaa/{tag}/some/deeper/directory/file_{i:06}.js"),
                         format!("const v{i} = {i};"),
                     )
                 })
-                .collect()
+                .collect();
+            let bytes: usize = files.iter().map(|(path, _)| path.len()).sum();
+            assert!(bytes > 4 * MOST_PATH_BYTES);
+            files
         };
         for (id, tag) in [("s1", "aaaa"), ("s2", "bbbb")] {
             let files = many(tag);
@@ -5157,5 +5505,532 @@ fi; done"#,
             took[1] + took[2] < Duration::from_millis(100),
             "asked again: {took:?}"
         );
+    }
+
+    /// Its counts at seven days: fixes, lines fixed, rework, reverts.
+    fn week_of(world: &World, id: &str) -> Option<(u64, f64, u64, u64)> {
+        world.at(id, "7d").map(|w| {
+            (
+                w.fix_commits,
+                w.lines_fixed,
+                w.rework_commits,
+                w.revert_commits,
+            )
+        })
+    }
+
+    #[test]
+    fn half_of_its_lines_committed_while_it_ran_land() {
+        let mut world = World::new();
+        world.commit("f.js", "// base line one\n", "init", T0);
+        // Two of its four lines committed; the others dropped before.
+        world.commit(
+            "f.js",
+            &format!("// base line one\n{}\n", AGENT[..2].join("\n")),
+            "Add alpha and beta",
+            T0 + HOUR,
+        );
+        world.session("s1", T0, T0 + 2 * HOUR, &[("f.js", AGENT)]);
+        fix_both(&world, "", T0 + 3 * DAY);
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(
+            week_of(&world, "s1"),
+            Some((1, 2.0, 0, 0)),
+            "{:?}",
+            world.kinds("s1")
+        );
+    }
+
+    const TWO: &[&str] = &["let alpha = compute(1);", "let beta = compute(2);"];
+
+    /// The first two of its lines changed, in a fix, and `rest` after them.
+    fn fix_both(world: &World, rest: &str, at: i64) {
+        world.commit(
+            "f.js",
+            &format!("// base line one\nlet alpha = compute(10);\nlet beta = compute(20);\n{rest}"),
+            "fix: wrong arguments",
+            at,
+        );
+    }
+
+    #[test]
+    fn a_session_of_two_lines_committed_a_line_at_a_time_lands() {
+        let mut world = World::new();
+        world.commit("f.js", "// base line one\n", "init", T0);
+        world.commit(
+            "f.js",
+            &format!("// base line one\n{}\n", TWO[0]),
+            "Add alpha",
+            T0 + HOUR,
+        );
+        world.commit(
+            "f.js",
+            &format!("// base line one\n{}\n", TWO.join("\n")),
+            "Add beta",
+            T0 + HOUR + 60,
+        );
+        world.session("s1", T0, T0 + 2 * HOUR, &[("f.js", TWO)]);
+        fix_both(&world, "", T0 + 3 * DAY);
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(
+            week_of(&world, "s1"),
+            Some((1, 2.0, 0, 0)),
+            "{:?}",
+            world.kinds("s1")
+        );
+    }
+
+    #[test]
+    fn a_session_of_two_lines_committed_with_a_persons_lands() {
+        let mut world = World::new();
+        let persons = "let p = one();\nlet q = two();\nlet r = three();\n";
+        world.commit("f.js", "// base line one\n", "init", T0);
+        world.commit(
+            "f.js",
+            &format!("// base line one\n{}\n{persons}", TWO.join("\n")),
+            "Add alpha and beta, and the rest",
+            T0 + HOUR,
+        );
+        world.session("s1", T0, T0 + 2 * HOUR, &[("f.js", TWO)]);
+        fix_both(&world, persons, T0 + 3 * DAY);
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(
+            week_of(&world, "s1"),
+            Some((1, 2.0, 0, 0)),
+            "{:?}",
+            world.kinds("s1")
+        );
+    }
+
+    #[test]
+    fn generic_lines_a_teammate_adds_over_several_commits_are_not_a_landing() {
+        let lines: &[&str] = &[
+            "if err != nil {",
+            "return err",
+            "return nil",
+            "x := compute(1)",
+            "y := compute(2)",
+        ];
+        let mut world = World::new();
+        let filler: String = (0..12).map(|k| format!("// filler {k}\n")).collect();
+        world.commit("f.go", &format!("package x\n{filler}"), "init", T0 - HOUR);
+        // Its work is on a branch that is not read; on main a teammate adds
+        // three generic lines like its, in two commits, and takes them out.
+        world.session("s1", T0, T0 + 2 * HOUR, &[("f.go", lines)]);
+        world.commit(
+            "f.go",
+            &format!("package x\nif err != nil {{\nreturn err\n}}\n{filler}"),
+            "Check the error",
+            T0 + 30 * 60,
+        );
+        world.commit(
+            "f.go",
+            &format!("package x\nif err != nil {{\nreturn err\n}}\n{filler}return nil\n"),
+            "Return nil",
+            T0 + DAY,
+        );
+        world.commit(
+            "f.go",
+            &format!("package x\n{filler}"),
+            "Drop the check",
+            T0 + 2 * DAY,
+        );
+        main_is_the_default(&world);
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(world.kinds("s1"), Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn a_revert_after_a_merged_fix_of_some_of_its_lines_is_a_revert() {
+        let eight: Vec<String> = (1..=8)
+            .map(|k| format!("let a{k} = compute({k});"))
+            .collect();
+        let mut world = World::new();
+        world.commit("f.js", "// base line one\n", "init", T0);
+        world.commit(
+            "f.js",
+            &format!("// base line one\n{}\n", eight.join("\n")),
+            "Add compute",
+            T0 + HOUR,
+        );
+        let lines: Vec<&str> = eight.iter().map(String::as_str).collect();
+        world.session("s1", T0, T0 + 2 * HOUR, &[("f.js", &lines)]);
+        // A branch fixes five of them, and is merged.
+        world.git(&["checkout", "--quiet", "-b", "fixb"], T0);
+        let fixed: Vec<String> = eight
+            .iter()
+            .enumerate()
+            .map(|(k, l)| {
+                if k < 5 {
+                    l.replace(");", ", true);")
+                } else {
+                    l.clone()
+                }
+            })
+            .collect();
+        world.commit(
+            "f.js",
+            &format!("// base line one\n{}\n", fixed.join("\n")),
+            "fix: pass the flag",
+            T0 + DAY,
+        );
+        world.git(&["checkout", "--quiet", "main"], T0);
+        world.git(
+            &["merge", "--no-ff", "--quiet", "-m", "Merge fixb", "fixb"],
+            T0 + DAY + HOUR,
+        );
+        // Then what is left of them is reverted.
+        world.commit(
+            "f.js",
+            "// base line one\n",
+            "Revert \"Add compute\"",
+            T0 + 2 * DAY,
+        );
+        main_is_the_default(&world);
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(
+            week_of(&world, "s1"),
+            Some((1, 5.0, 0, 1)),
+            "{:?}",
+            world.kinds("s1")
+        );
+    }
+
+    #[test]
+    fn lines_two_merged_branches_moved_are_no_more_than_were_written() {
+        let mut world = World::new();
+        let body = AGENT.join("\n");
+        let pad: String = (0..10).map(|k| format!("// pad {k}\n")).collect();
+        world.commit("a.js", &pad, "init", T0);
+        world.commit("a.js", &format!("{pad}{body}\n"), "Add compute", T0 + HOUR);
+        world.session("s1", T0, T0 + 2 * HOUR, &[("a.js", AGENT)]);
+        // Two branches each move its lines to a file of their own.
+        for (branch, file, at) in [("x", "b.js", 3 * HOUR), ("y", "c.js", 4 * HOUR)] {
+            world.git(&["checkout", "--quiet", "-b", branch, "main"], T0);
+            std::fs::write(world.root().join("a.js"), &pad).unwrap();
+            world.commit(
+                file,
+                &format!("{body}\n"),
+                &format!("Move compute to {file}"),
+                T0 + at,
+            );
+        }
+        world.git(&["checkout", "--quiet", "main"], T0);
+        world.git(
+            &["merge", "--quiet", "--no-ff", "-m", "Merge x", "x"],
+            T0 + 5 * HOUR,
+        );
+        world.git(
+            &["merge", "--quiet", "--no-ff", "-m", "Merge y", "y"],
+            T0 + 6 * HOUR,
+        );
+        // Both copies are there now, and a fix changes both.
+        let fixed = body
+            .replace("compute(1)", "compute(10)")
+            .replace("compute(2)", "compute(20)");
+        std::fs::write(world.root().join("b.js"), format!("{fixed}\n")).unwrap();
+        world.commit(
+            "c.js",
+            &format!("{fixed}\n"),
+            "fix: wrong arguments",
+            T0 + 3 * DAY,
+        );
+        main_is_the_default(&world);
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(
+            week_of(&world, "s1"),
+            Some((1, 2.0, 0, 0)),
+            "{:?}",
+            world.kinds("s1")
+        );
+    }
+
+    #[test]
+    fn a_worktree_git_could_not_read_once_is_still_read_from_its_repository() {
+        let (mut world, _) = written();
+        let wt = world.dir.path().join("wt");
+        world.git(
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "task",
+                wt.to_str().unwrap(),
+            ],
+            T0,
+        );
+        let other: &[&str] = &[
+            "let x1 = other(1);",
+            "let x2 = other(2);",
+            "let x3 = other(3);",
+        ];
+        commit_in(
+            &wt,
+            "g.js",
+            &format!("{}\n", other.join("\n")),
+            "Add other",
+            T0 + HOUR,
+        );
+        world.session_in(
+            &wt,
+            "claude-code",
+            "s2",
+            T0,
+            T0 + 2 * HOUR,
+            &[("g.js", other)],
+        );
+        world.measure(T0 + 2 * HOUR);
+        // Once while the repository was away (unmounted), git could not say.
+        let away = world.dir.path().join("repo-away");
+        std::fs::rename(world.root(), &away).unwrap();
+        world.measure(T0 + 3 * HOUR);
+        std::fs::rename(&away, world.root()).unwrap();
+        // It came back; the worktree was merged and removed.
+        world.git(&["merge", "--quiet", "task"], T0 + 4 * HOUR);
+        world.git(
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+            T0 + 4 * HOUR,
+        );
+        commit_in(
+            &world.root(),
+            "g.js",
+            "let x1 = other(10);\nlet x2 = other(20);\nlet x3 = other(3);\n",
+            "fix: other arguments",
+            T0 + 3 * DAY,
+        );
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(
+            week_of(&world, "s2").map(|w| w.0),
+            Some(1),
+            "s2 never counted"
+        );
+    }
+
+    #[test]
+    fn a_fix_made_again_after_it_was_undone_counts_again() {
+        let (mut world, _) = written();
+        let fix = fix_two(&world, T0 + DAY);
+        world.git(&["revert", "--no-edit", &fix], T0 + 2 * DAY);
+        world.git(&["cherry-pick", &fix], T0 + 3 * DAY);
+        main_is_the_default(&world);
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(
+            week_of(&world, "s1"),
+            Some((2, 4.0, 0, 0)),
+            "{:?}",
+            world.kinds("s1")
+        );
+    }
+
+    #[test]
+    fn a_backport_with_a_subject_of_its_own_counts_once() {
+        let (mut world, _) = written();
+        world.git(&["branch", "release"], T0);
+        let fix = fix_two(&world, T0 + DAY);
+        main_is_the_default(&world);
+        world.git(&["checkout", "--quiet", "release"], T0);
+        world.git(&["cherry-pick", "--no-commit", &fix], T0 + 2 * DAY);
+        world.git(
+            &[
+                "commit",
+                "--quiet",
+                "-m",
+                "[Backport release] fix: wrong arguments",
+            ],
+            T0 + 2 * DAY,
+        );
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(
+            week_of(&world, "s1"),
+            Some((1, 2.0, 0, 0)),
+            "{:?}",
+            world.kinds("s1")
+        );
+    }
+
+    #[test]
+    fn a_squash_whose_message_lists_a_revert_is_no_revert_and_a_revert_of_it_is_one() {
+        let mut world = World::new();
+        world.commit("f.js", "// base line one\n", "init", T0);
+        // GitHub's message for a squash merge lists the branch's commits.
+        let squash = world.commit(
+            "f.js",
+            &format!("// base line one\n{}\n", AGENT.join("\n")),
+            "Add compute (#12)\n\n* wip\n\n* Revert \"wip\"\n\n\
+             This reverts commit 0123456789abcdef0123456789abcdef01234567.\n\n* Add compute",
+            T0 + HOUR,
+        );
+        world.session("s1", T0, T0 + 2 * HOUR, &[("f.js", AGENT)]);
+        world.git(&["revert", "--no-edit", &squash], T0 + 2 * DAY);
+        world.measure(T0 + 8 * DAY);
+        assert_eq!(
+            week_of(&world, "s1"),
+            Some((0, 0.0, 0, 1)),
+            "{:?}",
+            world.kinds("s1")
+        );
+        let events = world.ledger.outcome_events_of("s1").unwrap();
+        assert!(events[0].signals.contains(&"revert_sha".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_worktree_whose_head_git_does_not_answer_for_fails_no_reading_of_the_others() {
+        let (mut world, _) = written();
+        let wt = world.dir.path().join("slowwt");
+        world.git(
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "task",
+                wt.to_str().unwrap(),
+            ],
+            T0,
+        );
+        let other: &[&str] = &[
+            "let x1 = other(1);",
+            "let x2 = other(2);",
+            "let x3 = other(3);",
+        ];
+        commit_in(
+            &wt,
+            "g.js",
+            &format!("{}\n", other.join("\n")),
+            "Add other",
+            T0 + 7 * DAY,
+        );
+        // Its session ended lately: still counted, with no age due.
+        let ended = T0 + 8 * DAY - HOUR;
+        world.session_in(
+            &wt,
+            "claude-code",
+            "s2",
+            T0 + 7 * DAY,
+            ended,
+            &[("g.js", other)],
+        );
+        fix_two(&world, T0 + 3 * DAY);
+        world.measure(T0 + 2 * HOUR);
+        let _git = FakeGit::new(&format!(
+            r#"if [ "$2" = "{}" ]; then for a in "$@"; do [ "$a" = HEAD ] && exec sleep 30; done; fi"#,
+            wt.display()
+        ));
+        let budget = Budget {
+            all: Duration::from_secs(8),
+            repo: Duration::from_secs(8),
+            waited: false,
+        };
+        world.measure_for(T0 + 8 * DAY, budget);
+        assert_eq!(
+            week_of(&world, "s1").map(|w| w.0),
+            Some(1),
+            "s1 never counted"
+        );
+    }
+
+    #[test]
+    fn a_session_that_also_wrote_where_git_does_not_answer_still_made_its_commits() {
+        let (mut world, _) = written();
+        let wt = world.dir.path().join("wt");
+        world.git(
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "task",
+                wt.to_str().unwrap(),
+            ],
+            T0,
+        );
+        // A Cursor session, still going on, fixes two of its lines; it wrote
+        // in a worktree too that git did not answer for lately.
+        let cursor: &[&str] = &[
+            "let alpha = checked(compute(1));",
+            "let beta = checked(compute(2));",
+            "let delta = compute(4);",
+        ];
+        world.commit(
+            "f.js",
+            &format!(
+                "// base line one\n{}\n{}\n{}\n",
+                cursor.join("\n"),
+                AGENT[2],
+                AGENT[3]
+            ),
+            "fix: check what compute returns",
+            T0 + DAY,
+        );
+        let there = wt.join("g.js").to_string_lossy().into_owned();
+        let elsewhere: &[&str] = &["let x1 = other(1);", "let x2 = other(2);"];
+        world.session_of(
+            "cursor",
+            "s2",
+            T0 + DAY - HOUR,
+            T0 + 8 * DAY - HOUR,
+            &[("f.js", cursor), (there.as_str(), elsewhere)],
+        );
+        let at = DateTime::from_timestamp(T0 + 8 * DAY - 60, 0).unwrap();
+        let name = wt.to_string_lossy().into_owned();
+        let timed_out = true;
+        world
+            .ledger
+            .keep_outcome_repos(&[(name, OutcomeRepo::Failed { at, timed_out })])
+            .unwrap();
+        world.measure(T0 + 8 * DAY);
+        let events = world.ledger.outcome_events_of("s1").unwrap();
+        let by: Vec<_> = events
+            .iter()
+            .map(|e| (e.kind.as_str(), e.by_source.as_deref()))
+            .collect();
+        assert_eq!(by, [("fix", Some("cursor"))]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_for_git_or_commondir_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = |path: &Path| {
+            let made = std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .unwrap();
+            assert!(made.success());
+        };
+        let first = dir.path().join("w1");
+        std::fs::create_dir(&first).unwrap();
+        fifo(&first.join(".git"));
+        let second = dir.path().join("w2");
+        let gitdir = dir.path().join("gd");
+        std::fs::create_dir(&second).unwrap();
+        std::fs::create_dir(&gitdir).unwrap();
+        std::fs::write(
+            second.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        fifo(&gitdir.join("commondir"));
+        for root in [first, second] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let r = root.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::git::named_common_dir(&r));
+            });
+            let answered = rx.recv_timeout(Duration::from_secs(3));
+            if answered.is_err() {
+                // Let the thread go: a pipe nobody reads is not waited on.
+                use std::os::unix::fs::OpenOptionsExt;
+                for pipe in [root.join(".git"), gitdir.join("commondir")] {
+                    let _ = std::fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(pipe);
+                }
+            }
+            assert_eq!(answered, Ok(None), "{}", root.display());
+        }
     }
 }

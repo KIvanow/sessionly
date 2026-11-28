@@ -71,8 +71,10 @@ The rewrite rate says how much went, not why. So Sessionly also reads the reposi
 lines, and says what each was:
 
 - **Reverted:** the commit says `This reverts commit …` of a commit that brought the session's
-  lines in, or its subject begins with "revert" and it takes out at least half of the session's
-  lines still there. A revert reverted in turn (git names that one `Reapply "…"`) is
+  lines in, as a revert says it (its subject begins with "revert" or "reapply", or its message
+  goes on with that line), or its subject begins with "revert" and it takes out at least half of
+  the session's lines still there. A squash merge whose message lists a revert among its
+  branch's commits is not one. A revert reverted in turn (git names that one `Reapply "…"`) is
   **relanded**.
 - **Changed by a fix:** its subject line has a fix word (`fix`, `fixes`, `bug`, `hotfix`,
   `regression`, `broken`, `crash`, `typo`, …) or is a conventional `fix:`. Most such fixes are
@@ -106,18 +108,29 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   commits that descend from that one.** Before it, or beside it, a line like them that a
   commit removes (an `if err != nil {` that was there already) was someone else's: so a commit
   on a branch from before the session's work, or on `main` while the work is on a feature
-  branch, does not count against it. On a branch without the work, a commit puts it there once
-  the branch has three of its lines that fewer than three sessions wrote (or all of them, for
-  a session of fewer): a squash merge or a cherry-pick of the work does, a teammate's own
-  `if err != nil {` and `return err` on `main` while the session runs do not. A commit that
-  puts them back after a revert gives the session those lines again, so a later change to
-  them counts. Lines a commit moves to another file (a rename) are followed there, also when
-  that was done before the session ended, and are never more than the session wrote.
+  branch, does not count against it. On a branch without the work, a commit puts it there when
+  it adds three of its lines that fewer than three sessions wrote, or, for a session of fewer,
+  all of them as at least half of what it adds: a squash merge or a cherry-pick of the work
+  does, a teammate's own `if err != nil {` and `return err` on `main` while the session runs do
+  not. Commits made while the session ran or up to a day after count together when each adds
+  two of those lines or more (any, for a session of fewer): work committed a little at a time is
+  put there, generic lines like its that commits add over weeks are not. Where no commit read
+  puts the work there so, one made while the session ran or up to a day after does with less:
+  two of its lines that are at least half of those it wrote and of what the commit adds (two of
+  four, the other two dropped before committing), or all of them for a session of fewer, with a
+  person's lines too. A teammate's commit like that, of generic lines like the session's, is
+  taken for the session's when the session's own commit is on a branch that is not read. A
+  commit that puts them back after a revert gives the session those lines again, so a later
+  change to them counts. Lines a commit moves to another file (a rename) are followed there,
+  also when that was done before the session ended, and are never more than the session wrote.
 - **Each branch is counted on its own.** A commit counts against what its own history has of
   the session's lines, so a fix on `main` and rework of the same lines on a feature branch
-  both count, whichever is newer; a merge has as many of each line as either side. The same
-  change made on two branches (a fix cherry-picked to a release branch) counts once, as the
-  first made, and each commit counts once however many branches have it.
+  both count, whichever is newer. A merge has what the two branches had where they began, with
+  what each changed since: a line one of them changed or took out is gone, and one both moved,
+  each to a file of its own, is still one line. The same change made on two branches (a fix
+  cherry-picked or backported to a release branch, whatever its subject says) counts once, as
+  the first made, and each commit counts once however many branches have it; made again on one
+  branch after it was undone there, it counts again.
 - **A session's own commits don't count:** those after it began that add its lines (and not
   only move or re-indent them) where the history did not have them. A later commit that adds a
   copy of lines already there (a block copied, or generic lines like `return err`) is not one.
@@ -127,13 +140,14 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   revert of that (`Revert "Reapply "…""`) is one again, and so on down the chain.
 - **Worktrees of one repository are read as one**, with what each that a session with an age
   still to count wrote in has checked out. One git can no longer read (broken since, or not
-  yours) is read without, unless the session being read wrote in it. A session in a worktree
-  removed since (merged and done with), or whose own directory in the repository was pruned,
-  is read from the repository's own directory, with what is checked out in its main worktree,
-  once a sync has seen the worktree while it was there; a directory that is another
-  repository now is read as that one. Which repository a worktree is of is asked of git for at
-  most 2 seconds (a tenth of a sync's time, if less); one git does not answer for is asked
-  again an hour later.
+  yours), or does not say within 2 seconds what it has checked out, is read without, unless the
+  session being read wrote in it. A session in a worktree removed since (merged and done with),
+  or whose own directory in the repository was pruned, is read from the repository's own
+  directory, with what is checked out in its main worktree, once a sync has seen the worktree
+  while it was there (a later sync that could not ask, the repository away, takes nothing of
+  that back); a directory that is another repository now is read as that one. Which repository
+  a worktree is of is asked of git for at most 2 seconds (a tenth of a sync's time, if less);
+  one git does not answer for is asked again an hour later.
 - **A repository whose history can't be read** (gone, unmounted, too slow, or one git will
   not read, such as another user's) is tried again an hour later, then after longer and
   longer, up to about five days; no count is kept from part of a session's history, for a
@@ -181,9 +195,11 @@ within 7 days, of those 7 days old) and **REVERTED@30D**, once a session has tho
   counted, as late. What a server already has stays, until the session is deleted or goes on:
   a session that is resumed later has a new end, and the counts from its old one are dropped.
   A server of an older version that took an upload meanwhile (one running beside a newer one
-  in an upgrade, or one gone back to) loses none of them: the newer server keeps them from what
-  it stored, when it starts and within the hour after, and a session that went on there drops
-  its old end's counts the same way.
+  in an upgrade, or one gone back to) loses none the newer one kept, and the newer server keeps
+  those it stored too, when it starts and within the hour after; a session that went on there
+  drops its old end's counts the same way. Counts only the older server has are lost if it
+  stores that session again without them (an upload with outcomes off) before the newer one has
+  kept them.
 
 On the dashboard, **By tool** and **By model** have **Changed by a fix @7d** and
 **Reverted @30d**, each of the sessions counted at that age, once any is; under the first, which
