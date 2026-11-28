@@ -231,7 +231,8 @@
             coding agent session, applies the content level chosen on that machine, and uploads the
             record; the GitHub Action reports pull requests as hashes of the lines they add, and on
             a schedule counts merged ones' lines again and reads the later commits on the branch
-            they were merged into, as hashes and classifications; the
+            they were merged into, as hashes and classifications, and reports what CI made of
+            their commits as states and counts; the
             Hosted Service stores both, matches them, and shows totals and individual sessions to
             the people in your org whose tokens allow it. Full prompts, file contents, command
             output and source code are never uploaded.
@@ -677,7 +678,15 @@
               the pull request's commits are received with each report, used to select the
               sessions to compare with, and not stored; a hash of each is kept, so that the
               comparison can be made again when sessions arrive later. The SHAs of the pull
-              request's head commit and, once merged, of the commit it was merged as.
+              request's head commit and, once merged, of the commit it was merged as; and what CI
+              made of those commits, read with a report, when a workflow of the Customer's own CI
+              finishes (where the Customer sets that up), or on a scheduled run: for each commit
+              its SHA, a state (success, failure, pending or none), and the numbers of checks and
+              statuses that failed, that there were, and that were cancelled. The names of the
+              checks that failed on a red commit (at most 20, cut to 100 characters) only where
+              the Customer switches that on in the Action (<code>ci-check-names</code>); what a
+              check ran or said is never received. Of each head commit, which of the pull
+              request's own line hashes were new at it is kept.
             </li>
             <li>
               <strong>Scheduled runs of the GitHub Action</strong> (where the Customer sets one
@@ -695,6 +704,8 @@
               issue labels are read in the Customer's GitHub runner and not received. Of the
               hashes, only those of the pull request's own lines are kept; the SHAs, each commit's
               number of lines removed in all, and the paths lines were moved to are kept as well.
+              The same run reads what CI made of head commits still pending and of the commits
+              merged pull requests were merged as, as above.
             </li>
             <li>
               <strong>Tokens:</strong> the email address (stored lower-case), optional name and
@@ -822,8 +833,9 @@
             <li>
               Each token has one role. A member reads only the sessions filed under their own
               email address. An admin reads the whole org and manages tokens. A ci token can
-              report pull requests, ask which merged ones are due and send their counts and later
-              commits, and check that it is accepted, and is refused everything else.
+              report pull requests, ask which merged ones are due and send their counts, later
+              commits and what CI made of their commits, and check that it is accepted, and is
+              refused everything else.
             </li>
             <li>
               An upload is filed under the owner of the token that sent it, whatever name the
