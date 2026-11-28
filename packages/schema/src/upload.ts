@@ -579,7 +579,8 @@ export interface OutcomeCheckpoint {
    */
   checkpoint?: string;
   /**
-   * Lines the agent added that are tracked.
+   * Lines the agent added that are tracked, in the repositories whose
+   * history was read.
    */
   lines_tracked?: number;
   /**
@@ -628,7 +629,8 @@ export interface OutcomeCheckpoint {
   late?: boolean;
   /**
    * Which branches were read: `head_and_default` (the one checked out and
-   * the remote's default branch) or `head_only`.
+   * the remote's default branch) or `head_only`. A server shows any other
+   * as `unknown`.
    */
   scope?: string;
   /**
