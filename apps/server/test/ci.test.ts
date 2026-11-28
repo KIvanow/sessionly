@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import type { Hono } from "hono";
 import { createApp, type Env } from "../src/app.ts";
-import { arrivals, checkCiReport, PENDING_DAYS, redOnArrival, stateNow } from "../src/ci.ts";
+import { arrivals, checkCiReport, PENDING_DAYS, redOnArrival, stateNow, type HeadRead } from "../src/ci.ts";
 import type { Db } from "../src/db.ts";
 import { BadReport, checkCi, MOST_HEADS } from "../src/pulls.ts";
 import { newOrg, testDb, tokenFor } from "./helpers.ts";
@@ -111,7 +111,7 @@ test("what CI says of a commit is checked: its state, counts and at most 20 name
 });
 
 test("where a session's lines arrived is the first head that has one of them, and red only where that head's CI is known red", () => {
-  const heads = [
+  const heads: HeadRead[] = [
     { sha: sha(1), first_reported_at: 0, state: "failure" as const, hashes: { "a.ts": [h(1), h(2)] } },
     { sha: sha(2), first_reported_at: 1, state: "success" as const, hashes: { "a.ts": [h(3)], "b.ts": [h(1)] } },
     { sha: sha(3), first_reported_at: 2, state: "pending" as const, hashes: { "a.ts": [h(4)] } },
