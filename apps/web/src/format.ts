@@ -214,15 +214,16 @@ export function takenLate(ageSeconds: number, days: number): number | null {
  */
 export function keptAges(checkpoints: readonly RewriteCheckpoint[] | null | undefined): { name: string; words: string; kept: string; late: number | null; lines: number | null }[] {
   return KEPT_AGES.map(({ name, days, words }) => {
-    // A server from before checkpoints kept in the payload what it was sent.
+    // A server from before checkpoints kept in the payload what it was sent: of it, the numbers only.
     const c = (Array.isArray(checkpoints) ? checkpoints : []).find((one) => one && typeof one === "object" && one.checkpoint === name);
     if (!c) return { name, words, kept: "–", late: null, lines: null };
+    const added = sentCount(c.added);
     return {
       name,
       words,
-      kept: percent(share(c.surviving ?? 0, c.added ?? 0)),
-      late: takenLate(c.age_seconds ?? 0, days),
-      lines: c.added ?? 0,
+      kept: percent(share(sentCount(c.surviving), added)),
+      late: takenLate(sentCount(c.age_seconds), days),
+      lines: added,
     };
   });
 }

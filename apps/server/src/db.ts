@@ -393,6 +393,19 @@ export async function openDb(
   return db;
 }
 
+/**
+ * The sessions whose payload has outcome counts other than those kept
+ * (`keepOutcomesFromPayloads`), as their index (`sessions_outcomes_to_keep`)
+ * is built: the payload of a session stored here has those kept, by age,
+ * and nothing else, and none when none are. A server from before them keeps
+ * an upload's in the payload alone. Never changed once shipped: the job
+ * finds them by the index only while its condition is the index's.
+ */
+const OUTCOMES_TO_KEEP = `coalesce(payload->'outcomes', '[]'::jsonb) <> ('[]'::jsonb
+     || CASE WHEN outcomes ? '1d' THEN (outcomes->'1d') || '{"checkpoint":"1d"}'::jsonb ELSE '[]'::jsonb END
+     || CASE WHEN outcomes ? '7d' THEN (outcomes->'7d') || '{"checkpoint":"7d"}'::jsonb ELSE '[]'::jsonb END
+     || CASE WHEN outcomes ? '30d' THEN (outcomes->'30d') || '{"checkpoint":"30d"}'::jsonb ELSE '[]'::jsonb END)`;
+
 // Each entry runs once, in order. Add to the end; never edit an entry that
 // has shipped.
 const MIGRATIONS: string[] = [
@@ -925,36 +938,40 @@ const MIGRATIONS: string[] = [
   // machine), by age: {"7d": {lines_tracked, fix_commits, ...}}. Counts and
   // times. Beside the payload, like `checkpoints`, and kept by the same rule.
   `ALTER TABLE sessions ADD COLUMN outcomes jsonb NOT NULL DEFAULT '{}'`,
-  // The sessions whose outcome counts a server from before them kept in the
-  // payload alone (`keepOutcomesFromPayloads`): found without reading every
-  // payload, and none once they are all kept.
-  `CREATE INDEX sessions_outcomes_in_payload ON sessions (org_id, machine_id, source, session_id)
-   WHERE outcomes = '{}'::jsonb AND payload ? 'outcomes' AND payload->'outcomes' <> '[]'::jsonb`,
+  // The sessions whose outcome counts a server from before them stored in
+  // the payload (`keepOutcomesFromPayloads`): one that ran beside this one,
+  // or was gone back to, before or after this one kept some. Found without
+  // reading every payload, and none once they are all kept.
+  `CREATE INDEX sessions_outcomes_to_keep ON sessions (org_id, machine_id, source, session_id) WHERE ${OUTCOMES_TO_KEEP}`,
 ];
 
 /**
  * The outcome counts of sessions a server from before them stored: in the
- * payload alone, where a machine updated ahead of it sent them. Taken from
- * there by the rule an upload is stored by (`mergeOutcomes`), and the
- * payload's copy made what that keeps, as an upload's is: an empty list when
- * nothing is (one that is no list at all, too). Only those rows are looked at
- * (`sessions_outcomes_in_payload`), some at a time; a session uploaded
- * meanwhile, or that went on, is left to what that upload stored. One that
- * fails is passed over, to be tried the next time. Run after the server has
- * started and now and then after, for what a server from before them stores
- * meanwhile. Returns how many were kept, and how many failed.
+ * payload alone, where a machine updated ahead of it sent them, beside those
+ * kept already when it ran beside this one or was gone back to. Taken from
+ * there by the rule an upload is stored by (`mergeOutcomes`): those kept
+ * first, then the payload's for an age they lack, all of the end the session
+ * has now (those of another end are none, as they would be once uploaded
+ * here). The payload's copy is made what that keeps, as an upload's is: an
+ * empty list when nothing is (one that is no list at all, too). Only those
+ * rows are looked at (`sessions_outcomes_to_keep`), some at a time; a session
+ * uploaded meanwhile, or that went on, is left to what that upload stored.
+ * One that fails is passed over, to be tried the next time. Run after the
+ * server has started and now and then after, for what a server from before
+ * them stores meanwhile. Returns how many were kept, and how many failed.
  */
 export async function keepOutcomesFromPayloads(db: Db, atOnce = 100): Promise<{ kept: number; failed: number }> {
-  // The payload's outcomes as text: a driver would hand a JSON string over as one, the same as text.
-  type Row = { org_id: string; machine_id: string; source: string; session_id: string; outcomes: string; ended_at: string | null };
+  // As text, those kept and the payload's: a driver would hand a JSON string over as one, the same as text.
+  type Row = { org_id: string; machine_id: string; source: string; session_id: string; kept: string; outcomes: string | null; ended_at: string | null };
   let kept = 0;
   let failed = 0;
-  let last: Omit<Row, "outcomes" | "ended_at"> | undefined;
+  let last: Omit<Row, "kept" | "outcomes" | "ended_at"> | undefined;
   for (;;) {
     const rows = await db.query<Row>(
-      `SELECT org_id, machine_id, source, session_id, (payload->'outcomes')::text AS outcomes, payload #>> '{session,ended_at}' AS ended_at
+      `SELECT org_id, machine_id, source, session_id, outcomes::text AS kept, (payload->'outcomes')::text AS outcomes,
+              payload #>> '{session,ended_at}' AS ended_at
        FROM sessions
-       WHERE ${OUTCOMES_IN_PAYLOAD}
+       WHERE ${OUTCOMES_TO_KEEP}
          AND ($1::jsonb IS NULL OR (org_id, machine_id, source, session_id) >
                ($1::jsonb->>'org_id', $1::jsonb->>'machine_id', $1::jsonb->>'source', $1::jsonb->>'session_id'))
        ORDER BY org_id, machine_id, source, session_id LIMIT $2`,
@@ -963,16 +980,17 @@ export async function keepOutcomesFromPayloads(db: Db, atOnce = 100): Promise<{ 
     if (rows.length === 0) return { kept, failed };
     for (const row of rows) {
       try {
-        const outcomes: unknown = JSON.parse(row.outcomes);
-        const merged = mergeOutcomes({}, { session: { ended_at: row.ended_at }, outcomes } as Upload);
+        const outcomes: unknown = row.outcomes == null ? [] : JSON.parse(row.outcomes);
+        const merged = mergeOutcomes(row.kept, { session: { ended_at: row.ended_at }, outcomes } as Upload);
         const shown = OUTCOME_AGES.filter((age) => merged[age]).map((age) => ({ checkpoint: age, ...merged[age] }));
+        // Only while the row is what was read: those kept, the payload's, and the end.
         const done = await db.query(
           `UPDATE sessions SET outcomes = $5::jsonb, payload = jsonb_set(payload, '{outcomes}', $6::jsonb)
            WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4
-             AND outcomes = '{}'::jsonb AND payload->'outcomes' = $7::jsonb
-             AND payload #>> '{session,ended_at}' IS NOT DISTINCT FROM $8
+             AND outcomes = $7::jsonb AND payload->'outcomes' IS NOT DISTINCT FROM $8::jsonb
+             AND payload #>> '{session,ended_at}' IS NOT DISTINCT FROM $9
            RETURNING 1`,
-          [row.org_id, row.machine_id, row.source, row.session_id, JSON.stringify(merged), JSON.stringify(shown), row.outcomes, row.ended_at],
+          [row.org_id, row.machine_id, row.source, row.session_id, JSON.stringify(merged), JSON.stringify(shown), row.kept, row.outcomes, row.ended_at],
         );
         // None for a session uploaded meanwhile, or deleted: it is not among those kept.
         kept += done.length;
@@ -981,13 +999,10 @@ export async function keepOutcomesFromPayloads(db: Db, atOnce = 100): Promise<{ 
         failed += 1;
       }
     }
-    const { outcomes: _o, ended_at: _e, ...key } = rows[rows.length - 1]!;
+    const { kept: _k, outcomes: _o, ended_at: _e, ...key } = rows[rows.length - 1]!;
     last = key;
   }
 }
-
-/** The sessions `keepOutcomesFromPayloads` looks at, as its index has them. */
-const OUTCOMES_IN_PAYLOAD = `outcomes = '{}'::jsonb AND payload ? 'outcomes' AND payload->'outcomes' <> '[]'::jsonb`;
 
 const OUTCOME_AGES = ["1d", "7d", "30d"] as const;
 

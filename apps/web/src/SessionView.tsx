@@ -94,7 +94,7 @@ export function SessionView({ token, address, onSignOut }: { token: string; addr
             note={`−${count(counts.lines_removed ?? 0)}, in ${count(counts.files_changed ?? 0)} ${counts.files_changed === 1 ? "file" : "files"}`}
           />
         )}
-        {outcomes.length > 0 && (
+        {later.some((age) => age.counted) && (
           <Tile
             label="Later commits"
             value={later.findLast((age) => age.counted)?.later ?? "–"}

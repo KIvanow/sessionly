@@ -205,7 +205,8 @@ export async function runServer(options: RunOptions = {}): Promise<void> {
   counting();
 
   // Sessions whose outcome counts a server from before them kept in the payload alone: kept now, beside the
-  // requests, and every hour after, for what one still running stores meanwhile (a rolling upgrade). One at a time.
+  // requests, and every hour after, for what one still running stores meanwhile (a rolling upgrade, or one
+  // gone back to), beside those kept already. One at a time.
   let keeping = false;
   const keepingOutcomes = () => {
     if (keeping) return;

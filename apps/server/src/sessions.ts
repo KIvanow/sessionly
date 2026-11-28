@@ -259,8 +259,7 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
     outcomes: unknown;
     outcomes_in_payload: string | null;
   }>(
-    `SELECT owner_email, runtime, prompts, checkpoints, outcomes,
-            CASE WHEN outcomes = '{}'::jsonb THEN (payload->'outcomes')::text END AS outcomes_in_payload
+    `SELECT owner_email, runtime, prompts, checkpoints, outcomes, (payload->'outcomes')::text AS outcomes_in_payload
      FROM sessions
      WHERE org_id = $1 AND machine_id = $2 AND source = $3 AND session_id = $4`,
     key,
@@ -281,12 +280,17 @@ export async function storeUpload(db: OrgDb, upload: Upload, uploader: Principal
   // Kept in the payload too, which is what the session's page reads and what a copy is made from (demo.ts).
   const checkpoints = mergeCheckpoints(existing?.checkpoints, upload);
   // Those a server from before outcomes kept are in the payload alone until
-  // `keepOutcomesFromPayloads` gets to the row: kept already, by the same rule
-  // (one of another end than this upload's is none), so that an upload without
+  // `keepOutcomesFromPayloads` gets to the row, beside those kept here before
+  // when it ran beside this one or was gone back to: kept already, by the
+  // same rule (those kept here first, then the payload's for an age they lack;
+  // one of another end than this upload's is none), so that an upload without
   // them does not drop them first.
-  const outcomesBefore = existing?.outcomes_in_payload
-    ? mergeOutcomes({}, { session: s, outcomes: JSON.parse(existing.outcomes_in_payload) } as Upload)
-    : existing?.outcomes;
+  const outcomesBefore =
+    existing &&
+    mergeOutcomes(existing.outcomes, {
+      session: s,
+      outcomes: existing.outcomes_in_payload == null ? [] : JSON.parse(existing.outcomes_in_payload),
+    } as Upload);
   const outcomes = mergeOutcomes(outcomesBefore, upload);
   const { checkpoints: _sent, outcomes: _sentOutcomes, ...rest } = upload;
   const kept = CHECKPOINTS.filter((name) => checkpoints[name]).map((name) => ({ checkpoint: name, ...checkpoints[name]! }));

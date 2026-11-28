@@ -181,6 +181,16 @@ test("a session's lines at each age: a dash where it was not measured, and the d
   assert.deepEqual(f.keptAges(undefined).map((age) => age.kept), ["–", "–", "–"]);
   // what a server from before checkpoints kept may be anything: nothing measured, and no failure
   for (const odd of ["none", {}, [null, 5]]) assert.deepEqual(f.keptAges(odd as any).map((age) => age.lines), [null, null, null]);
+  // and an age of anything: its counts numbers
+  const odd = f.keptAges([
+    { checkpoint: "1d", added: {}, surviving: 3, age_seconds: "x" },
+    { checkpoint: "7d", added: 20, surviving: "15", age_seconds: Infinity },
+  ] as any);
+  assert.deepEqual(odd.map((age) => [age.name, age.kept, age.late, age.lines]), [
+    ["1d", "–", null, 0],
+    ["7d", "0%", null, 20],
+    ["30d", "–", null, null],
+  ]);
   assert.equal(f.takenLate(30 * day, 30), null);
   assert.equal(f.takenLate(31 * day, 30), 31);
 });

@@ -731,6 +731,91 @@ test("outcomes a server from before them kept in the payload stay when the sessi
   assert.deepEqual([total.outcomes_7d.sessions_reached, total.outcomes_7d.fix_commits], [2, 2]);
 });
 
+test("outcomes a server from before them kept in the payload beside those kept already are kept too", async (t) => {
+  const { keepOutcomesFromPayloads } = await import("../src/db.ts");
+  const now = await testDb();
+  t.after(() => now.close());
+  const upgraded = createApp(now, {});
+  const ann = await tokenFor(now, { email: "ann@example.com", role: "member" });
+  const admin = await tokenFor(now, { email: "boss@example.com", role: "admin" });
+  const ended = "2026-11-10T10:30:00Z";
+  const later = "2026-11-12T10:30:00Z";
+  const at = (checkpoint: string, extra: Record<string, unknown> = {}) => ({
+    checkpoint, lines_tracked: 40, fix_commits: 1, likely_fix_commits: 1, lines_fixed: 2, rework_commits: 0, lines_reworked: 0,
+    revert_commits: 0, lines_reverted: 0, relanded: false, computed_at: "2026-12-14T10:30:00Z", age_seconds: 34 * 86_400,
+    ended_at: ended, late: false, scope: "head_and_default", ...extra,
+  });
+  const send = async (body: Upload) => {
+    const s = body.session!;
+    const response = await upgraded.request(`/api/v1/sessions/${s.machine_id}/${s.source}/${s.session_id}`, {
+      method: "PUT",
+      headers: { ...auth(ann), "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 200);
+  };
+  // A server from before outcomes, still running beside this one (a rolling
+  // upgrade) or rolled back to: it stores the upload as it came, in the
+  // payload, and leaves the column it does not know of as it was.
+  const olderStores = async (body: Upload) => {
+    await now.query(`UPDATE sessions SET payload = $2::jsonb, ended_at = $3 WHERE session_id = $1`, [
+      body.session!.session_id,
+      JSON.stringify(body),
+      body.session!.ended_at,
+    ]);
+  };
+  const json = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
+  const kept = async (id: string) => {
+    const [row] = await now.query<{ outcomes: any; payload: any }>(`SELECT outcomes, payload FROM sessions WHERE session_id = $1`, [id]);
+    return [Object.keys(json(row!.outcomes)), (json(row!.payload).outcomes ?? []).map((o: any) => o.checkpoint)];
+  };
+  const counted = async (id: string, age: string) => {
+    const [row] = await now.query<{ outcomes: any }>(`SELECT outcomes FROM sessions WHERE session_id = $1`, [id]);
+    return json(row!.outcomes)[age];
+  };
+
+  // 7 days kept here; 30 days, when the session was that old, went to the older server.
+  for (const id of ["beside", "uploaded", "first", "raced"]) {
+    await send({ ...upload(id), outcomes: [at("7d")] } as Upload);
+    await olderStores({ ...upload(id), outcomes: [at("7d", { fix_commits: 5 }), at("30d")] } as Upload);
+  }
+  // Uploaded here again, with none (switched off since), before the server got to it: those of the payload stay too.
+  await send(upload("uploaded", { counts: { prompts: 3 } }));
+  assert.deepEqual(await kept("uploaded"), [["7d", "30d"], ["7d", "30d"]]);
+  // It went on while the older server had it: those counted from its first end go.
+  await send({ ...upload("went-on"), outcomes: [at("7d")] } as Upload);
+  await olderStores(upload("went-on", { ended_at: later }));
+  await send({ ...upload("went-on-counted"), outcomes: [at("7d")] } as Upload);
+  await olderStores({ ...upload("went-on-counted", { ended_at: later }), outcomes: [at("7d", { ended_at: later, fix_commits: 3 })] } as Upload);
+  // Uploaded between being read and being kept: what the upload kept stays, and the server counts it as none it kept.
+  let raced = false;
+  const racing = {
+    query: async (sql: string, params?: unknown[]) => {
+      if (!raced && sql.trimStart().startsWith("UPDATE sessions SET outcomes") && params?.[3] === "raced") {
+        raced = true;
+        await send(upload("raced", { counts: { prompts: 3 } }));
+      }
+      return now.query(sql, params);
+    },
+  } as unknown as Db;
+  assert.deepEqual(await keepOutcomesFromPayloads(racing), { kept: 4, failed: 0 });
+  assert.ok(raced);
+  // Once kept, not looked at again.
+  assert.deepEqual(await keepOutcomesFromPayloads(now), { kept: 0, failed: 0 });
+  for (const id of ["beside", "uploaded", "first", "raced"]) assert.deepEqual(await kept(id), [["7d", "30d"], ["7d", "30d"]], id);
+  // The first kept is the one that stays.
+  assert.equal((await counted("beside", "7d")).fix_commits, 1);
+  assert.deepEqual(await kept("went-on"), [[], []]);
+  assert.deepEqual(await kept("went-on-counted"), [["7d"], ["7d"]]);
+  assert.equal((await counted("went-on-counted", "7d")).fix_commits, 3);
+  // Uploaded here again: nothing of it is lost.
+  await send(upload("first", { counts: { prompts: 4 } }));
+  assert.deepEqual(await kept("first"), [["7d", "30d"], ["7d", "30d"]]);
+  const total = ((await (await upgraded.request("/api/v1/summary?by=tool", { headers: auth(admin) })).json()) as any).total;
+  assert.deepEqual([total.outcomes_7d.sessions_reached, total.outcomes_7d.fix_commits], [5, 7]);
+  assert.deepEqual([total.outcomes_30d.sessions_reached, total.outcomes_30d.fix_commits], [4, 4]);
+});
+
 test("an outcome's scope is one of those the binary sends, and any other is unknown", async () => {
   const { mergeOutcomes } = await import("../src/sessions.ts");
   const ended = "2026-11-10T10:30:00Z";
