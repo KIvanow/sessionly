@@ -648,9 +648,9 @@ export function ciWords(ci: PullCi | null | undefined): string {
   if (!ci) return "not known";
   if (ci.state === "failure") return ci.failed != null && ci.total != null ? `red, ${count(ci.failed)} of ${checksOf(ci.total)} failed` : "red";
   if (ci.state === "success") return ci.total != null ? `green, ${checksOf(ci.total)}` : "green";
-  if (ci.state === "pending") return ci.total != null ? `still running, ${checksOf(ci.total)}` : "still running";
+  if (ci.state === "pending") return ci.total != null ? `still running (${checksOf(ci.total)} so far)` : "still running";
   if (ci.state === "unknown") return "not read";
-  if (agedPending(ci)) return `still running when last read (${checksOf(ci.total)}), not read since`;
+  if (agedPending(ci)) return `still running when last read (${checksOf(ci.total)} so far), not read since`;
   return ci.cancelled ? `none to go by, ${checksOf(ci.cancelled)} cancelled` : "none to go by";
 }
 
@@ -665,8 +665,8 @@ export function mergeCiWords(ci: PullCi | null, mergeCommitKnown: boolean): stri
   const names = ci.failed_checks ? ` (${ci.failed_checks.join(", ")})` : "";
   if (ci.state === "failure") return `The base branch was red: ${ci.failed != null && ci.total != null ? `${count(ci.failed)} of ${checksOf(ci.total)} failed` : "checks failed"}${names}.`;
   if (ci.state === "success") return `The base branch was green${ci.total != null ? ` (${checksOf(ci.total)})` : ""}.`;
-  if (ci.state === "pending") return `The merge commit's checks were still running when last read${ci.total != null ? ` (${checksOf(ci.total)})` : ""}.`;
-  if (agedPending(ci)) return `The merge commit's checks were still running when last read (${checksOf(ci.total)}), and were not read since.`;
+  if (ci.state === "pending") return `The merge commit's checks were still running when last read${ci.total != null ? ` (${checksOf(ci.total)} so far)` : ""}.`;
+  if (agedPending(ci)) return `The merge commit's checks were still running when last read (${checksOf(ci.total)} so far), and were not read since.`;
   return ci.cancelled ? `No checks to go by on the commit it was merged as: ${checksOf(ci.cancelled)} cancelled.` : "No checks to go by on the commit it was merged as.";
 }
 
