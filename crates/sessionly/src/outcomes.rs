@@ -125,9 +125,10 @@ const MOST_SHOWN: usize = 2000;
 /// and not counted: a vendored, generated or moved tree, not a change by hand.
 const MOST_LINES_SHOWN: u64 = 100_000;
 
-/// How long reading history may take: in all, and in one repository, so
-/// that a slow one leaves time for the rest; and whether someone waits for
-/// it.
+/// How long reading history may take: in all, and in each repository on a
+/// sync, so that a slow one leaves time for the rest (readings for fewer
+/// sessions, after one for more failed, have what is left of it); and
+/// whether someone waits for it.
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
     pub all: Duration,
@@ -1066,30 +1067,32 @@ pub fn measure(
         {
             continue;
         }
+        let given = budget
+            .repo
+            .min(deadline.saturating_duration_since(Instant::now()));
+        if given.is_zero() {
+            break;
+        }
+        let until = Instant::now() + given;
         // Newest first: a reading too big for them all is read in halves,
         // down to one session, so that the newest are read first.
         scanning.sort_by_key(|k| std::cmp::Reverse(targets[repo.sessions[*k].target].ended_at));
         let mut groups = std::collections::VecDeque::from([scanning]);
-        // A reading of more failed here on this sync.
+        // A reading of more failed here on this sync, in the repository's time.
         let mut split = false;
         while let Some(group) = groups.pop_front() {
-            // Each reading has the repository's time from when it begins, as
-            // far as the sync's goes.
-            let given = budget
-                .repo
-                .min(deadline.saturating_duration_since(Instant::now()));
             let scanning: Vec<&InRepo> = group.iter().map(|k| &repo.sessions[*k]).collect();
-            let found = if given.is_zero() {
-                Err(Stop::TimedOut)
-            } else {
+            let found = if Instant::now() < until {
                 scan(
                     &repo.roots,
                     &repo.sessions,
                     &scanning,
                     &targets,
                     words_of,
-                    Instant::now() + given,
+                    until,
                 )
+            } else {
+                Err(Stop::TimedOut)
             };
             match &found {
                 // Too big, or failing, for them all: one session's paths may
@@ -1102,9 +1105,17 @@ pub fn measure(
                     continue;
                 }
                 // Out of this sync's time, not of the repository's: read on
-                // another. Not after a reading of more failed, which would
-                // fail again first on each.
-                Err(Stop::TimedOut) if given < enough && !split => break 'repos,
+                // another, which is tried longest ago first.
+                Err(Stop::TimedOut) if given < enough => break 'repos,
+                // Out of what a reading of more that failed left: not too
+                // slow. This one is read on the next sync, and those after it
+                // wait to be tried again, so that it is read with less.
+                Err(Stop::TimedOut) if split => {
+                    report.skipped += 1;
+                    let rest: Vec<usize> = groups.iter().flatten().copied().collect();
+                    note(&mut read, &repo.sessions, &rest, &found, &targets);
+                    break;
+                }
                 Err(Stop::TimedOut) => {
                     // Too slow. A command gives up on them all, for a sync
                     // nobody waits for to read; that one on the older half,
@@ -4910,28 +4921,77 @@ INSERT INTO outcome_checkpoints VALUES ('old','7d',1,0,0,0,0,0,0,0,0,'2026-01-01
 
     #[cfg(unix)]
     #[test]
-    fn a_half_read_after_a_slow_failure_has_the_repository_s_time() {
+    fn a_half_a_slow_failure_left_no_time_is_not_taken_for_too_slow() {
         let budget = Budget {
             all: Duration::from_secs(10),
             repo: Duration::from_secs(2),
             waited: false,
         };
-        // Alone, the newer session is read well within the repository's time;
-        // after a reading of both failed slowly, too.
+        // Alone, the newer session is read well within the repository's time.
         let mut alone = sessions_of_their_own(&[1]);
         {
             let _git = FakeGit::new(BOTH_FAIL_SLOWLY);
             alone.measure_for(T0 + 8 * DAY, budget);
         }
         assert!(alone.at("s1", "7d").is_some());
+        // After a reading of both failed slowly, there is not time enough
+        // left for it: it is read on the next sync, the older after.
         let mut world = sessions_of_their_own(&[0, 1]);
         let _git = FakeGit::new(BOTH_FAIL_SLOWLY);
         world.measure_for(T0 + 8 * DAY, budget);
-        let failures: Vec<u32> = (0..2)
-            .map(|n| world.target(&format!("s{n}")).failures)
-            .collect();
-        assert_eq!(failures, [0, 0], "a half was taken for too slow");
-        assert!(world.at("s0", "7d").is_some() && world.at("s1", "7d").is_some());
+        assert_eq!(world.target("s1").failures, 0, "taken for too slow");
+        world.measure_for(T0 + 8 * DAY, budget);
+        assert!(world.at("s1", "7d").is_some());
+        world.measure_for(T0 + 8 * DAY + HOUR, budget);
+        assert!(world.at("s0", "7d").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_whose_readings_fail_leaves_the_next_its_time() {
+        let budget = Budget {
+            all: Duration::from_secs(6),
+            repo: Duration::from_secs(2),
+            waited: false,
+        };
+        // Four sessions in one repository, never read, and one in another,
+        // read once at a day.
+        let mut world = sessions_of_their_own(&[0, 1, 2, 3]);
+        let other = World::new();
+        other.commit("g.js", "// lib base\n", "init", T0);
+        let lib: &[&str] = &[
+            "let one = helper(1);",
+            "let two = helper(2);",
+            "let three = helper(3);",
+        ];
+        other.commit(
+            "g.js",
+            &format!("// lib base\n{}\n", lib.join("\n")),
+            "Add helper",
+            T0 + HOUR,
+        );
+        let g = other.root().join("g.js");
+        world.session_in(
+            &other.root(),
+            "claude-code",
+            "b",
+            T0 - DAY,
+            T0 - DAY + 2 * HOUR,
+            &[(g.to_str().unwrap(), lib)],
+        );
+        world.measure_for(T0 + 3 * HOUR, budget);
+        assert!(world.at("b", "1d").is_some());
+        // Now a reading of two of the four or more fails after 1.5 s, and the
+        // other repository takes 1.6 s of its 2.
+        let _git = FakeGit::new(&format!(
+            r#"n=0; for a in "$@"; do case "$a" in f0.js|f1.js|f2.js|f3.js) n=$((n+1));; esac; done
+               [ $n -ge 2 ] && {{ sleep 1.5; exit 128; }}
+               case "$2" in "{}"*) for a in "$@"; do [ "$a" = rev-list ] && sleep 1.6; done;; esac"#,
+            other.root().display()
+        ));
+        world.measure_for(T0 + 8 * DAY, budget);
+        assert_eq!(world.target("b").failures, 0, "taken for too slow");
+        assert!(world.at("b", "7d").is_some());
     }
 
     #[cfg(unix)]
