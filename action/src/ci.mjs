@@ -3,13 +3,14 @@
 // says whether the push was red, and of the commit it was merged as whether
 // the base branch went red after it. What ran, and what it said, stays on
 // GitHub; the names of the checks that failed go only when asked for
-// (`ci-check-names`). Sessionly's own check runs are left out, and whatever
-// `ci-ignore` names; with `ci-only`, nothing but what that names counts.
+// (`ci-check-names`). Sessionly's own workflow runs are left out, by the
+// workflow file they run from, and whatever `ci-ignore` names; with
+// `ci-only`, nothing but what that names counts.
 import { RATE_FLOOR } from "./outcomes.mjs";
 
-/** A check run's conclusion that is a failure, and one that is fine; `cancelled` and `stale` say nothing either way. */
+/** A check run's conclusion that is a failure, and one that is fine; `skipped`, `cancelled` and `stale` say nothing either way. */
 const FAILED = new Set(["failure", "timed_out", "startup_failure"]);
-const PASSED = new Set(["success", "neutral", "skipped"]);
+const PASSED = new Set(["success", "neutral"]);
 /** A status's state. */
 const STATUS_FAILED = new Set(["failure", "error"]);
 /** The app whose check suites are workflow runs. */
@@ -18,7 +19,7 @@ const ACTIONS = "github-actions";
 /** No more names of failed checks than this are sent, each cut to this many characters. */
 export const MOST_NAMES = 20;
 export const NAME_LENGTH = 100;
-/** No more check runs, statuses or check suites than this are read for one commit. */
+/** No more check runs, statuses, check suites or workflow runs than this are read for one commit. */
 const MOST_CHECKS = 1000;
 
 /** A full commit SHA. */
@@ -37,42 +38,53 @@ export function naming(patterns) {
   return tests.length === 0 ? null : (name) => tests.some((test) => test.test(String(name ?? "")));
 }
 
-/** What the inputs say of reading CI: what to leave out, what alone to count, which check run and workflow run are this job's, and whether to name failed checks. */
+/** Workflow file paths, separated by commas or new lines, as GitHub names them (`.github/workflows/ci.yml`). */
+const listed = (text) => String(text ?? "").split(/[\n,]/).map((p) => p.trim()).filter(Boolean);
+
+/**
+ * The workflow file this run is from: `GITHUB_WORKFLOW_REF` is
+ * `owner/name/.github/workflows/sessionly.yml@refs/heads/main`.
+ */
+export function workflowFile(env) {
+  const ref = (env.GITHUB_WORKFLOW_REF ?? "").trim();
+  if (!ref) return null;
+  const path = ref.replace(/@[^@]*$/, "");
+  const repo = (env.GITHUB_REPOSITORY ?? "").trim();
+  return repo && path.toLowerCase().startsWith(`${repo.toLowerCase()}/`) ? path.slice(repo.length + 1) : path.replace(/^[^/]+\/[^/]+\//, "");
+}
+
+/**
+ * What the inputs say of reading CI: what to leave out, what alone to
+ * count, which check run and workflow run are this job's and from which
+ * file, which other files are Sessionly's (`sessionly-workflows`), and
+ * whether to name failed checks.
+ */
 export function ciOptions(env) {
   const on = (value) => /^(true|yes|on|1)$/i.test((value ?? "").trim());
+  const file = workflowFile(env);
   return {
     ignore: naming(env.SESSIONLY_CI_IGNORE),
     only: naming(env.SESSIONLY_CI_ONLY),
-    own: { checkRunId: (env.SESSIONLY_CHECK_RUN_ID ?? "").trim(), runId: (env.GITHUB_RUN_ID ?? "").trim(), names: new Set(), suites: new Set() },
+    own: { checkRunId: (env.SESSIONLY_CHECK_RUN_ID ?? "").trim(), runId: (env.GITHUB_RUN_ID ?? "").trim(), file, name: null },
+    files: new Set([...(file ? [file] : []), ...listed(env.SESSIONLY_WORKFLOWS)]),
     names: on(env.SESSIONLY_CI_CHECK_NAMES),
   };
 }
 
 /**
- * Whether a check run is this workflow run's: the one whose id the job was
- * given (`check-run-id`), or any whose page is under this run's
- * (`/runs/<run id>/`), the jobs skipped by an `if:` included. The report
- * runs beside the pull request's checks, and must not count itself as one.
+ * Whether a check run is this job's: the one whose id the job was given
+ * (`check-run-id`), or, given none, any whose page is under this workflow
+ * run's (`/runs/<run id>/`). The report runs beside the pull request's
+ * checks, and must not count itself as one.
  */
-function isThisRun(run, own) {
-  if (own?.checkRunId && String(run?.id) === own.checkRunId) return true;
+function isThisJob(run, own) {
+  if (own?.checkRunId) return String(run?.id) === own.checkRunId;
   return Boolean(own?.runId) && String(run?.details_url ?? "").includes(`/runs/${own.runId}/`);
 }
 
-/**
- * Whether a check run is Sessionly's: this workflow run's, or a job of the
- * same workflow run earlier on this commit (reported when it was opened,
- * reviewed, closed: each a run, each with the workflow's jobs as check
- * runs), which is known by the names the jobs have in this run (`own.names`,
- * learnt from this run's own check runs) and by the check suites those are
- * in. A workflow's job names are the same from run to run; another
- * workflow's job of the same name is taken for Sessionly's too.
- */
-function isOwn(run, own) {
-  if (isThisRun(run, own)) return true;
-  if (own?.suites?.has(run?.check_suite?.id)) return true;
-  const app = run?.app?.slug;
-  return Boolean(own?.names?.has(run?.name)) && (app == null || app === ACTIONS);
+/** Whether a check run is a job of this workflow run: this job, or any whose page is under this run's. */
+function isThisRun(run, own) {
+  return isThisJob(run, own) || (Boolean(own?.runId) && String(run?.details_url ?? "").includes(`/runs/${own.runId}/`));
 }
 
 /**
@@ -80,37 +92,42 @@ function isOwn(run, own) {
  * `failure` when any failed (or timed out), else `pending` while any is
  * still running or waiting (`action_required` is waiting for someone, as a
  * first-time contributor's workflows do), else `success` when any came out
- * well (neutral and skipped are well), else `none`: nothing to go by.
- * Cancelled runs say nothing either way, and are counted apart
- * (`cancelled`): a push cancels the run before it, and a commit whose runs
- * were all cancelled has none. Sessionly's own check runs, what `ignore`
- * names, and what `only` does not name, are not looked at. A check suite
- * without check runs is a workflow run that never had jobs: waiting for
- * approval (pending), failed to start (red), or still queued (pending). With
- * `pushSuites` (the suites of the workflow runs a push started), only check
- * runs and suites among them count: the checks a merge commit's push ran,
- * not a nightly run on the branch's tip months later. The names of the
- * failed ones only with `names`.
+ * well (neutral is well), else `none`: nothing to go by. Skipped runs never
+ * count, in no direction (a job's `if:` said no); cancelled runs say
+ * nothing either way, and are counted apart (`cancelled`): a push cancels
+ * the run before it, and a commit whose runs were all cancelled has none.
+ *
+ * Left out: this job's own check run; every check run and suite
+ * of a workflow run from one of Sessionly's files (`excluded`, suites
+ * mapped from the commit's workflow runs); in `nameOnly` suites (this run's
+ * file, when CI runs in it too) the check runs named as this job's; and
+ * what `ignore` names, or `only` does not. With `pushSuites`, GitHub
+ * Actions check runs and suites count only among them (the runs the push
+ * of a merge commit started on its branch); other apps' check runs and
+ * statuses always.
+ *
+ * A check suite without check runs is a workflow run that never had jobs,
+ * read by its workflow run (`runsBySuite`): waiting for approval or still
+ * queued is pending, failed to start is red; one that says `failure` with no
+ * jobs is a run GitHub failed when its pull request was closed unapproved,
+ * and is not known. The names of the failed ones only with `names`.
  */
-export function reduceCi(checkRuns, statuses, { ignore = null, only = null, own = null, names = false, suites = [], pushSuites = null } = {}) {
+export function reduceCi(checkRuns, statuses, { ignore = null, only = null, own = null, names = false, suites = [], runsBySuite = new Map(), excluded = new Set(), nameOnly = new Set(), pushSuites = null } = {}) {
   const counted = (name) => (!only || only(name)) && !(ignore && ignore(name));
+  const ours = (run) => isThisJob(run, own) || excluded.has(run.check_suite?.id) || (nameOnly.has(run.check_suite?.id) && own?.name != null && run.name === own.name);
+  const actions = (app) => app == null || app === ACTIONS;
   let failed = 0;
   let total = 0;
   let cancelled = 0;
   let pending = 0;
   const red = [];
-  // Sessionly's suites: those given, and those of its check runs here (found first, so that a job of
-  // its run listed before its own check run is left out too). And the suites whose runs were read: a
-  // suite is read whole only when it has none.
-  const ownSuites = new Set(own?.suites ?? []);
-  for (const run of checkRuns ?? []) if (run && run.check_suite?.id != null && isOwn(run, own)) ownSuites.add(run.check_suite.id);
   const withRuns = new Set();
   for (const run of checkRuns ?? []) {
     if (!run) continue;
     const suite = run.check_suite?.id;
-    if (ownSuites.has(suite) || isOwn(run, own)) continue;
     if (suite != null) withRuns.add(suite);
-    if (!counted(run.name) || (pushSuites && !pushSuites.has(suite))) continue;
+    if (run.conclusion === "skipped" || ours(run) || !counted(run.name)) continue;
+    if (pushSuites && actions(run.app?.slug) && !pushSuites.has(suite)) continue;
     if (run.status !== "completed" || run.conclusion == null || run.conclusion === "action_required") {
       total += 1;
       pending += 1;
@@ -131,15 +148,17 @@ export function reduceCi(checkRuns, statuses, { ignore = null, only = null, own 
     }
   }
   for (const suite of suites ?? []) {
-    if (!suite || suite.app?.slug !== ACTIONS || ownSuites.has(suite.id) || withRuns.has(suite.id) || suite.latest_check_runs_count > 0) continue;
+    if (!suite || suite.app?.slug !== ACTIONS || withRuns.has(suite.id) || suite.latest_check_runs_count > 0 || excluded.has(suite.id)) continue;
     if (pushSuites && !pushSuites.has(suite.id)) continue;
-    if (suite.status !== "completed" || suite.conclusion == null || suite.conclusion === "action_required") {
+    const run = runsBySuite.get(suite.id);
+    if (!run || !counted(run.name)) continue;
+    if (run.status !== "completed" || run.conclusion == null || run.conclusion === "action_required") {
       total += 1;
       pending += 1;
-    } else if (FAILED.has(suite.conclusion)) {
+    } else if (run.conclusion === "startup_failure") {
       total += 1;
       failed += 1;
-      red.push(suite.app?.name ?? "a workflow that did not start");
+      red.push(run.name);
     }
   }
   for (const status of statuses ?? []) {
@@ -178,64 +197,93 @@ const oneLine = (err) => String(err?.message ?? err).replace(/\r?\n/g, " ");
  * requests (`RATE_FLOOR`), or none. A commit GitHub does not know, or will
  * not answer for, is said once and left. Each commit is asked about once.
  *
- * Sessionly's own check runs are told by this run's (`ownSha`: the commit
- * this run's check runs are on, read first): their job names and check
- * suites, then left out on every commit. `of(sha, { merge: true })` reads a
- * merge commit: only the checks the push of it started count, which takes
- * the workflow runs of that push (`actions: read`); refused, the merge's CI
- * is not known, and that is said once.
+ * Which check runs are Sessionly's is told by workflow file: a commit's
+ * workflow runs (`actions: read`) say which check suite each file's runs
+ * made, and those of Sessionly's files (this run's, and `sessionly-workflows`)
+ * are left out. When this run's file also ran CI jobs (told from this run's
+ * check runs on the commit it ran on, `ownSha`), only the check runs named
+ * as this job are left out of it, and that is said once. Without
+ * `actions: read`, only this job's check run is, and that is said once.
+ *
+ * `of(sha, { merge: true, base })` reads a merge commit: of GitHub Actions,
+ * only the runs the push of it started on the branch count; without
+ * `actions: read`, the merge's CI is not known.
  */
 export function ciReading(api, repo, log, options = {}, { ownSha = null } = {}) {
   const known = new Map();
-  const checks = new Map();
-  const state = { stop: null, refused: false, refusedRuns: false, said: new Set(), learnt: false };
-  const own = options.own ?? { names: new Set(), suites: new Set() };
-  own.names ??= new Set();
-  own.suites ??= new Set();
+  const cache = new Map();
+  const state = { stop: null, refused: false, refusedRuns: false, said: new Set(), guarded: null };
+  const own = options.own ?? { checkRunId: "", runId: "", file: null, name: null };
+  const files = new Set([...(options.files ?? [])].map((f) => f.toLowerCase()));
   const say = (key, text) => {
     if (state.said.has(key)) return;
     state.said.add(key);
     log(`::warning title=Sessionly::${text}`);
   };
-  const checksOn = async (sha) => {
-    if (!checks.has(sha)) {
+  /** One of a commit's lists, read once. */
+  const read = async (sha, what) => {
+    const key = `${what}\n${sha}`;
+    if (!cache.has(key)) {
       const base = `/repos/${repo}/commits/${sha}`;
-      checks.set(sha, {
-        runs: await pages(api, `${base}/check-runs?filter=latest`, "check_runs"),
-        statuses: await pages(api, `${base}/status`, "statuses"),
-        suites: await pages(api, `${base}/check-suites`, "check_suites"),
-      });
+      cache.set(
+        key,
+        what === "runs"
+          ? await pages(api, `${base}/check-runs?filter=latest`, "check_runs")
+          : what === "statuses"
+            ? await pages(api, `${base}/status`, "statuses")
+            : await pages(api, `${base}/check-suites`, "check_suites"),
+      );
     }
-    return checks.get(sha);
+    return cache.get(key);
   };
-  /** Which check runs on the commit this run is on are this run's: their names and suites are Sessionly's. */
-  const learn = async () => {
-    if (state.learnt) return;
-    state.learnt = true;
-    if (!isSha(ownSha)) return;
-    const { runs } = await checksOn(ownSha);
-    for (const run of runs) {
-      if (!isThisRun(run, own)) continue;
-      if (run.name != null) own.names.add(run.name);
-      if (run.check_suite?.id != null) own.suites.add(run.check_suite.id);
-    }
-  };
-  /** The check suites of the workflow runs the push of a commit started; null when GitHub would not say. */
-  const pushSuitesOf = async (sha) => {
+  /** The workflow runs on a commit, by check suite; null when GitHub would not say (said once). */
+  const workflowRuns = async (sha) => {
+    const key = `workflows\n${sha}`;
+    if (cache.has(key)) return cache.get(key);
     if (state.refusedRuns) return null;
+    let found = null;
     try {
-      const runs = await pages(api, `/repos/${repo}/actions/runs?head_sha=${sha}&event=push`, "workflow_runs");
-      return new Set(runs.map((run) => run?.check_suite_id).filter((id) => id != null));
+      const runs = await pages(api, `/repos/${repo}/actions/runs?head_sha=${sha}`, "workflow_runs");
+      found = new Map(runs.filter((run) => run?.check_suite_id != null).map((run) => [run.check_suite_id, run]));
     } catch (err) {
-      if (err.status === 403 && !err.rateLimited) {
-        state.refusedRuns = true;
-        say("runs", `GitHub would not say which workflow runs a merge commit's push started (${oneLine(err)}), so the CI of merge commits is not known. Give the job actions: read, or set ci: false.`);
-        return null;
-      }
-      throw err;
+      if (!(err.status === 403 && !err.rateLimited)) throw err;
+      state.refusedRuns = true;
+      say("runs", "GitHub would not say which workflow runs a commit's checks are from, so only this job's own check run is left out of CI, and the CI of merge commits is not known. Give the job actions: read.");
     }
+    cache.set(key, found);
+    return found;
   };
-  const of = async (sha, { merge = false } = {}) => {
+  /**
+   * Whether this run's file also runs CI: this run's check runs on the commit it ran on, other than
+   * this job and skipped ones, are CI jobs. Then its file is not left out whole, only the check
+   * runs named as this job, and that is said. Not told (no commit, nothing of this run found):
+   * the same, without a word. The name is this job's check run's.
+   */
+  const guard = async () => {
+    if (state.guarded !== null) return state.guarded;
+    let mine = [];
+    if (isSha(ownSha)) {
+      try {
+        mine = (await read(ownSha, "runs")).filter((run) => isThisRun(run, own));
+      } catch (err) {
+        if (!(err.status === 403 || err.status === 404 || err.status === 422)) throw err;
+      }
+    }
+    const self = mine.find((run) => own.checkRunId && String(run.id) === own.checkRunId);
+    if (self?.name != null) own.name = self.name;
+    else if (own.checkRunId) {
+      try {
+        own.name = (await api.request("GET", `/repos/${repo}/check-runs/${own.checkRunId}`))?.name ?? null;
+      } catch (err) {
+        if (!(err.status === 403 || err.status === 404)) throw err;
+      }
+    }
+    const ci = mine.length > 0 && mine.some((run) => !(own.checkRunId && String(run.id) === own.checkRunId) && run.conclusion !== "skipped");
+    if (ci) say("guard", "This job runs in a workflow file with CI jobs, so only the check runs named as this job are left out of the CI it reads. Keep the Sessionly jobs in a workflow file of their own, so their runs are told apart from CI.");
+    state.guarded = mine.length === 0 || ci;
+    return state.guarded;
+  };
+  const of = async (sha, { merge = false, base = null } = {}) => {
     if (!isSha(sha)) return null;
     const key = `${merge ? "merge" : "head"}\n${sha}`;
     if (known.has(key)) return known.get(key);
@@ -245,13 +293,35 @@ export function ciReading(api, repo, log, options = {}, { ownSha = null } = {}) 
       say("stop", `${state.stop}, so the CI of the commits left was not read. It is read at the next run.`);
       return null;
     }
-    let read;
+    let found;
     try {
-      await learn();
-      const pushSuites = merge ? await pushSuitesOf(sha) : null;
-      if (merge && !pushSuites) return null;
-      const { runs, statuses, suites } = await checksOn(sha);
-      read = { sha, ...reduceCi(runs, statuses, { ...options, own, suites, pushSuites }) };
+      const nameOnly = await guard();
+      const byFile = (path) => typeof path === "string" && files.has(path.toLowerCase());
+      const runs = await workflowRuns(sha);
+      if (merge && !runs) return null;
+      const excluded = new Set();
+      const named = new Set();
+      let pushSuites = null;
+      if (runs) {
+        for (const [suite, run] of runs) {
+          const ours = byFile(run.path);
+          if (ours && nameOnly && own.file && String(run.path).toLowerCase() === own.file.toLowerCase()) named.add(suite);
+          else if (ours) excluded.add(suite);
+        }
+        if (merge) pushSuites = new Set([...runs].filter(([, run]) => run.event === "push" && (base == null || run.head_branch === base)).map(([suite]) => suite));
+      }
+      found = {
+        sha,
+        ...reduceCi(await read(sha, "runs"), await read(sha, "statuses"), {
+          ...options,
+          own,
+          suites: await read(sha, "suites"),
+          runsBySuite: runs ?? new Map(),
+          excluded,
+          nameOnly: named,
+          pushSuites,
+        }),
+      };
     } catch (err) {
       if (err.status === 403 && !err.rateLimited) {
         state.refused = true;
@@ -266,8 +336,8 @@ export function ciReading(api, repo, log, options = {}, { ownSha = null } = {}) 
       }
       return null;
     }
-    known.set(key, read);
-    return read;
+    known.set(key, found);
+    return found;
   };
   return { of, state, own };
 }
@@ -301,9 +371,10 @@ export async function sendCi(server, name, { heads = [], merges = [] }, log) {
 
 /**
  * On a schedule: the server says which heads are still pending and which
- * merge commits it knows nothing of yet, their CI is read, and what it
- * came to goes back. A server from before this is said and skipped. This
- * run's check runs are on the commit it runs on (`GITHUB_SHA`).
+ * merge commits it knows nothing of yet (with the branch each was merged
+ * into), their CI is read, and what it came to goes back. A server from
+ * before this is said and skipped. This run's check runs are on the commit
+ * it runs on (`GITHUB_SHA`).
  */
 export async function runCi(env, { api, server, repo, host, log }) {
   const name = `${host}/${repo}`;
@@ -326,8 +397,8 @@ export async function runCi(env, { api, server, repo, host, log }) {
   const reading = ciReading(api, repo, log, ciOptions(env), { ownSha: (env.GITHUB_SHA ?? "").trim() });
   const read = async (list, merge) => {
     const out = [];
-    for (const { number, sha } of list) {
-      const ci = await reading.of(sha, { merge });
+    for (const { number, sha, base_ref } of list) {
+      const ci = await reading.of(sha, { merge, base: typeof base_ref === "string" ? base_ref : null });
       if (ci) out.push({ number, ...ci });
     }
     return out;
@@ -362,7 +433,7 @@ export async function reportCi(env, { api, server, repo, host, log }, report, an
   }
   const merges = [];
   if (report.state === "merged" && isSha(report.merge_commit_sha)) {
-    const ci = await reading.of(report.merge_commit_sha, { merge: true });
+    const ci = await reading.of(report.merge_commit_sha, { merge: true, base: report.base_ref ?? null });
     if (ci) merges.push({ number: report.number, ...ci });
   }
   for (const head of heads) log(`CI at ${head.sha.slice(0, 12)} is ${sayCi(head)}.`);
@@ -404,7 +475,7 @@ export async function runWorkflowRun(env, payload, { api, server, repo, host, lo
       if (!Number.isInteger(pull?.number) || pull.number < 1) continue;
       // The pull requests of this repository: a fork's own are not reported here.
       if (fullName(pull.base?.repo) && fullName(pull.base.repo) !== repo.toLowerCase()) continue;
-      if (pull.merged_at && pull.merge_commit_sha === sha) merged.push(pull.number);
+      if (pull.merged_at && pull.merge_commit_sha === sha) merged.push({ number: pull.number, base: typeof pull.base?.ref === "string" ? pull.base.ref : null });
       else numbers.add(pull.number);
     }
   } catch (err) {
@@ -429,11 +500,11 @@ export async function runWorkflowRun(env, payload, { api, server, repo, host, lo
   }
   const merges = [];
   if (merged.length > 0 && pushed) {
-    const ci = await reading.of(sha, { merge: true });
-    if (ci) {
-      log(`CI at the commit merged as ${sha.slice(0, 12)} is ${sayCi(ci)}.`);
-      merges.push(...merged.sort((a, b) => a - b).map((number) => ({ number, ...ci })));
+    for (const { number, base } of merged.sort((a, b) => a.number - b.number)) {
+      const ci = await reading.of(sha, { merge: true, base });
+      if (ci) merges.push({ number, ...ci });
     }
+    if (merges.length > 0) log(`CI at the commit merged as ${sha.slice(0, 12)} is ${sayCi(merges[0])}.`);
   }
   return { heads, merges, stored: await sendCi(server, name, { heads, merges }, log) };
 }

@@ -105,15 +105,24 @@ inputs:
       reported at (a red push), and of the commit it was merged as (the base
       branch red after it). Read when a pull request is reported, when a
       workflow named in a workflow_run trigger finishes, and on a scheduled
-      run for what is still pending. Needs checks and statuses read
-      permission, and actions read for merge commits (only the checks their
-      push started count); without them the run warns, and CI is not known.
-      Sessionly's own check runs are left out, by this run's job names. Sent
-      for each commit: its SHA, a state (success, failure, pending or none),
+      run for what is still pending. Needs checks, statuses and actions read
+      permission (the last to tell which workflow file a check is from, and
+      for merge commits, of which only the checks their push started count);
+      without them the run warns, and CI is not known. Sessionly's own
+      workflow runs are left out, by workflow file (this run's, and
+      sessionly-workflows), and skipped jobs never count. Sent for each
+      commit: its SHA, a state (success, failure, pending or none),
       how many checks and statuses failed, how many there were, and how many
       were cancelled. No check's name, unless ci-check-names says so. Set to
       "false" to read none.
     default: "true"
+  sessionly-workflows:
+    description: >-
+      Other workflow files that run the Sessionly Action, as paths from the
+      repository's root separated by commas or new lines
+      (.github/workflows/sessionly-nightly.yml), so their check runs are left
+      out of the CI it reads too. This run's own file needs no naming.
+    default: ""
   ci-ignore:
     description: >-
       Checks and statuses to leave out when reading CI, by name, separated
@@ -173,6 +182,7 @@ runs:
         SESSIONLY_FIX_WORDS: ${{ inputs.fix-words }}
         SESSIONLY_BUG_LABELS: ${{ inputs.bug-labels }}
         SESSIONLY_CI: ${{ inputs.ci }}
+        SESSIONLY_WORKFLOWS: ${{ inputs.sessionly-workflows }}
         SESSIONLY_CI_IGNORE: ${{ inputs.ci-ignore }}
         SESSIONLY_CI_ONLY: ${{ inputs.ci-only }}
         SESSIONLY_CI_CHECK_NAMES: ${{ inputs.ci-check-names }}

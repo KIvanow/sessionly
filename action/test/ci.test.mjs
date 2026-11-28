@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ciOptions, ciReading, naming, reduceCi, runCi, runWorkflowRun, sayCi } from "../src/ci.mjs";
+import { ciOptions, ciReading, naming, reduceCi, runCi, runWorkflowRun, sayCi, workflowFile } from "../src/ci.mjs";
 import { run } from "../src/main.mjs";
 
 const sha = (n) => n.toString(16).padStart(40, "0");
@@ -21,9 +21,12 @@ const check = (name, conclusion, more = {}) => ({
 const status = (context, state) => ({ context, state });
 /** A check suite of GitHub Actions with no check runs, as a workflow run that never had jobs leaves. */
 const suite = (id, status, conclusion, more = {}) => ({ id, status, conclusion, latest_check_runs_count: 0, app: { slug: "github-actions", name: "GitHub Actions" }, ...more });
+/** A workflow run as GitHub lists them for a commit: from which file, started by what, on which branch, and how it ended. */
+const workflow = (check_suite_id, path, more = {}) => ({ id: check_suite_id * 10, check_suite_id, path, name: path.replace(/^.*\//, "").replace(/\.ya?ml$/, ""), event: "pull_request", head_branch: "parser", status: "completed", conclusion: "success", ...more });
+const bySuite = (runs) => new Map(runs.map((run) => [run.check_suite_id, run]));
 
 test("what checks and statuses come to: red on any failure, pending while any waits, none with nothing to go by", () => {
-  assert.deepEqual(reduceCi([check("tests", "success"), check("lint", "neutral"), check("docs", "skipped")], []), { state: "success", failed: 0, total: 3, cancelled: 0 });
+  assert.deepEqual(reduceCi([check("tests", "success"), check("lint", "neutral")], []), { state: "success", failed: 0, total: 2, cancelled: 0 });
   assert.deepEqual(reduceCi([check("tests", "failure"), check("lint", "success")], [status("ci/deploy", "success")]), { state: "failure", failed: 1, total: 3, cancelled: 0 });
   assert.equal(reduceCi([check("tests", "timed_out")], []).state, "failure");
   assert.equal(reduceCi([], [status("ci/x", "error")]).state, "failure");
@@ -37,56 +40,65 @@ test("what checks and statuses come to: red on any failure, pending while any wa
   assert.deepEqual(reduceCi([], []), { state: "none", failed: 0, total: 0, cancelled: 0 });
   assert.deepEqual(reduceCi([check("tests", "cancelled"), check("lint", "cancelled"), check("old", "stale")], []), { state: "none", failed: 0, total: 0, cancelled: 2 });
   assert.deepEqual(reduceCi([check("tests", "cancelled"), check("lint", "success")], []), { state: "success", failed: 0, total: 1, cancelled: 1 });
+  // a skipped job never counts, in no direction: a job whose `if:` said no, Sessionly's or anyone's
+  assert.deepEqual(reduceCi([check("after-merge", "skipped"), check("docs", "skipped")], []), { state: "none", failed: 0, total: 0, cancelled: 0 });
+  assert.deepEqual(reduceCi([check("after-merge", "skipped"), check("tests", "failure")], []), { state: "failure", failed: 1, total: 1, cancelled: 0 });
   // a conclusion from after this is neither
   assert.equal(reduceCi([check("tests", "something_new")], []).state, "pending");
 });
 
-test("a workflow run that never had jobs is read from its check suite: waiting for approval, failed to start, or still queued", () => {
-  // first-time contributors' workflows wait for someone: pending, not none
-  assert.deepEqual(reduceCi([], [], { suites: [suite(1, "completed", "action_required"), suite(2, "completed", "action_required")] }), { state: "pending", failed: 0, total: 2, cancelled: 0 });
-  // a workflow that could not start is red
-  assert.deepEqual(reduceCi([check("tests", "success")], [], { suites: [suite(1, "completed", "startup_failure")], names: true }), { state: "failure", failed: 1, total: 2, cancelled: 0, failed_checks: ["GitHub Actions"] });
-  assert.equal(reduceCi([], [], { suites: [suite(1, "completed", "failure")] }).state, "failure");
-  assert.equal(reduceCi([], [], { suites: [suite(1, "queued", null)] }).state, "pending");
-  assert.equal(reduceCi([], [], { suites: [suite(1, "in_progress", null)] }).state, "pending");
+test("a workflow run that never had jobs is read from its workflow run: waiting for approval or queued is pending, failed to start is red, and failed when its pull request was closed is not known", () => {
+  const runs = bySuite([
+    workflow(1, ".github/workflows/ci.yml", { conclusion: "action_required" }),
+    workflow(2, ".github/workflows/ci.yml", { conclusion: "startup_failure" }),
+    workflow(3, ".github/workflows/ci.yml", { status: "queued", conclusion: null }),
+    // GitHub fails an unapproved run when its pull request is closed: nothing ran
+    workflow(4, ".github/workflows/ci.yml", { conclusion: "failure" }),
+    workflow(5, ".github/workflows/nightly.yml", { conclusion: "startup_failure" }),
+  ]);
+  const suites = [suite(1, "completed", "action_required"), suite(2, "completed", "failure"), suite(3, "queued", null), suite(4, "completed", "failure"), suite(5, "completed", "failure")];
+  assert.deepEqual(reduceCi([], [], { suites: suites.slice(0, 1), runsBySuite: runs }), { state: "pending", failed: 0, total: 1, cancelled: 0 });
+  assert.deepEqual(reduceCi([check("tests", "success")], [], { suites: suites.slice(1, 2), runsBySuite: runs, names: true }), { state: "failure", failed: 1, total: 2, cancelled: 0, failed_checks: ["ci"] });
+  assert.equal(reduceCi([], [], { suites: suites.slice(2, 3), runsBySuite: runs }).state, "pending");
+  assert.deepEqual(reduceCi([], [], { suites: suites.slice(3, 4), runsBySuite: runs }), { state: "none", failed: 0, total: 0, cancelled: 0 });
+  // ci-only and ci-ignore go by the workflow run's name; a suite whose workflow run is not known is nothing
+  assert.equal(reduceCi([], [], { suites: suites.slice(4, 5), runsBySuite: runs, ignore: naming("nightly") }).state, "none");
+  assert.equal(reduceCi([], [], { suites: suites.slice(4, 5), runsBySuite: runs, only: naming("ci") }).state, "none");
+  assert.equal(reduceCi([], [], { suites: suites.slice(4, 5), runsBySuite: runs }).state, "failure");
+  assert.equal(reduceCi([], [], { suites: [suite(9, "completed", "startup_failure")], runsBySuite: runs }).state, "none");
   // one with check runs is read through them, and said nothing of itself; so is one whose runs were read, and another app's
-  assert.deepEqual(reduceCi([check("tests", "success", { check_suite: { id: 7 } })], [], { suites: [suite(7, "completed", "failure", { latest_check_runs_count: 1 })] }), { state: "success", failed: 0, total: 1, cancelled: 0 });
-  assert.deepEqual(reduceCi([check("tests", "success", { check_suite: { id: 7 } })], [], { suites: [suite(7, "completed", "failure")] }), { state: "success", failed: 0, total: 1, cancelled: 0 });
-  assert.equal(reduceCi([], [], { suites: [suite(1, "completed", "failure", { app: { slug: "codecov" } })] }).state, "none");
-  assert.equal(reduceCi([], [], { suites: [suite(1, "completed", "success"), suite(2, "completed", "cancelled"), suite(3, "completed", "skipped")] }).state, "none");
+  assert.deepEqual(reduceCi([check("tests", "success", { check_suite: { id: 7 } })], [], { suites: [suite(7, "completed", "failure", { latest_check_runs_count: 1 })], runsBySuite: bySuite([workflow(7, ".github/workflows/ci.yml", { conclusion: "startup_failure" })]) }), { state: "success", failed: 0, total: 1, cancelled: 0 });
+  assert.deepEqual(reduceCi([check("tests", "success", { check_suite: { id: 7 } })], [], { suites: [suite(7, "completed", "failure")], runsBySuite: bySuite([workflow(7, ".github/workflows/ci.yml", { conclusion: "startup_failure" })]) }), { state: "success", failed: 0, total: 1, cancelled: 0 });
+  assert.equal(reduceCi([], [], { suites: [suite(1, "completed", "failure", { app: { slug: "codecov" } })], runsBySuite: runs }).state, "none");
 });
 
-test("Sessionly's own check runs are left out: this run's by id or page, earlier runs' by the names its jobs have, and their suites", () => {
-  const mine = check("Sessionly", "failure", { id: 77, details_url: "https://github.com/acme/web/actions/runs/123/job/77", check_suite: { id: 1 } });
-  // a job of this run skipped by an `if:`, listed before this job's own check run
-  const skipped = check("after-merge", "skipped", { id: 76, details_url: "https://github.com/acme/web/actions/runs/123/job/76", check_suite: { id: 1 } });
+test("Sessionly's check runs are left out by workflow file, this job's by id or page, and in a file that runs CI too only those named as this job", () => {
+  const own = (more = {}) => ({ checkRunId: "77", runId: "123", file: ".github/workflows/sessionly.yml", name: "report", ...more });
+  const mine = check("report", "failure", { id: 77, details_url: "https://github.com/acme/web/actions/runs/123/job/77", check_suite: { id: 1 } });
   const theirs = check("tests", "success", { id: 78, details_url: "https://github.com/acme/web/actions/runs/124/job/78", check_suite: { id: 2 } });
   const other = check("build", "success", { id: 79, details_url: "https://github.com/acme/web/actions/runs/125/job/79", check_suite: { id: 3 } });
-  const own = (more = {}) => ({ checkRunId: "77", runId: "123", names: new Set(), suites: new Set(), ...more });
-  assert.deepEqual(reduceCi([skipped, mine, theirs, other], [], { own: own() }), { state: "success", failed: 0, total: 2, cancelled: 0 });
-  // by the id alone, the rest of its run goes with it, as its suite
-  assert.deepEqual(reduceCi([skipped, mine, theirs, other], [], { own: own({ runId: "" }) }), { state: "success", failed: 0, total: 2, cancelled: 0 });
-  // without the id, every check run of this workflow run is taken for its own
-  assert.deepEqual(reduceCi([skipped, mine, theirs, other], [], { own: own({ checkRunId: "" }) }), { state: "success", failed: 0, total: 2, cancelled: 0 });
-  // and with neither, nothing is
+  assert.deepEqual(reduceCi([mine, theirs, other], [], { own: own() }), { state: "success", failed: 0, total: 2, cancelled: 0 });
+  // without the id, by this run's page; a run of this run id's prefix is another run; with neither, nothing is
+  assert.deepEqual(reduceCi([mine, theirs, other], [], { own: own({ checkRunId: "" }) }), { state: "success", failed: 0, total: 2, cancelled: 0 });
+  assert.equal(reduceCi([check("x", "failure", { details_url: "https://github.com/acme/web/actions/runs/1234/job/1" })], [], { own: own({ checkRunId: "" }) }).state, "failure");
   assert.equal(reduceCi([mine, theirs], [], { own: own({ checkRunId: "", runId: "" }) }).state, "failure");
-  // a run of this run id's prefix is another run
-  assert.equal(reduceCi([check("x", "failure", { details_url: "https://github.com/acme/web/actions/runs/1234/job/1" })], [], { own: own({ checkRunId: "", runId: "123" }) }).state, "failure");
-  // an earlier Sessionly run on this commit (reported when opened, then when reviewed): the same job names, another run and suite
+  // earlier Sessionly runs on this commit (reported when opened, then reviewed): their suites are from its file, and go whole
   const earlier = [
     check("report", "success", { id: 50, details_url: "https://github.com/acme/web/actions/runs/100/job/50", check_suite: { id: 10 } }),
-    check("after-merge", "skipped", { id: 51, details_url: "https://github.com/acme/web/actions/runs/100/job/51", check_suite: { id: 10 } }),
-    check("tests", "failure", { id: 52, details_url: "https://github.com/acme/web/actions/runs/101/job/52", check_suite: { id: 11 } }),
+    check("report", "failure", { id: 55, details_url: "https://github.com/acme/web/actions/runs/105/job/55", check_suite: { id: 11 } }),
+    check("tests", "failure", { id: 52, details_url: "https://github.com/acme/web/actions/runs/101/job/52", check_suite: { id: 12 } }),
   ];
-  assert.deepEqual(reduceCi(earlier, [], { own: own({ names: new Set(["report", "after-merge"]) }) }), { state: "failure", failed: 1, total: 1, cancelled: 0 });
+  assert.deepEqual(reduceCi(earlier, [], { own: own(), excluded: new Set([10, 11]) }), { state: "failure", failed: 1, total: 1, cancelled: 0 });
   // a repository with no CI of its own: nothing, not green
-  assert.deepEqual(reduceCi(earlier.slice(0, 2), [], { own: own({ names: new Set(["report", "after-merge"]) }) }), { state: "none", failed: 0, total: 0, cancelled: 0 });
-  // by the suite too (a job renamed since), and not another app's check run of the same name
-  assert.equal(reduceCi(earlier.slice(0, 1), [], { own: own({ suites: new Set([10]) }) }).state, "none");
-  assert.equal(reduceCi([check("report", "failure", { app: { slug: "codecov" } })], [], { own: own({ names: new Set(["report"]) }) }).state, "failure");
-  assert.equal(reduceCi([check("report", "failure", { app: undefined })], [], { own: own({ names: new Set(["report"]) }) }).state, "none");
-  // nor does Sessionly's own suite count as a workflow that never had jobs
-  assert.equal(reduceCi(earlier.slice(0, 1), [], { own: own({ names: new Set(["report"]) }), suites: [suite(10, "completed", "failure")] }).state, "none");
+  assert.deepEqual(reduceCi(earlier.slice(0, 2), [], { own: own(), excluded: new Set([10, 11]) }), { state: "none", failed: 0, total: 0, cancelled: 0 });
+  // in a file that runs CI too, only the check runs named as this job go; a same-named job of another file counts
+  const mixed = [
+    check("report", "success", { id: 60, details_url: "https://github.com/acme/web/actions/runs/106/job/60", check_suite: { id: 20 } }),
+    check("tests", "failure", { id: 61, details_url: "https://github.com/acme/web/actions/runs/106/job/61", check_suite: { id: 20 } }),
+    check("report", "success", { id: 62, details_url: "https://github.com/acme/web/actions/runs/107/job/62", check_suite: { id: 21 } }),
+  ];
+  assert.deepEqual(reduceCi(mixed, [], { own: own(), nameOnly: new Set([20]) }), { state: "failure", failed: 1, total: 2, cancelled: 0 });
+  assert.deepEqual(reduceCi(mixed, [], { own: own({ name: null }), nameOnly: new Set([20]) }), { state: "failure", failed: 1, total: 3, cancelled: 0 });
   const ignore = naming("*deploy-*, Codecov");
   assert.deepEqual(reduceCi([check("deploy-staging", "failure"), check("codecov", "failure"), check("tests", "success")], [status("ci/deploy-prod", "error")], { ignore }), { state: "success", failed: 0, total: 1, cancelled: 0 });
   const only = naming("tests\nlint");
@@ -101,28 +113,44 @@ test("Sessionly's own check runs are left out: this run's by id or page, earlier
   assert.ok(named.failed_checks.every((name) => name.length === 100));
   assert.deepEqual(reduceCi([check("tests", "success")], [], { names: true }).failed_checks, undefined);
   assert.deepEqual(reduceCi([], [status("ci/x", "failure")], { names: true }).failed_checks, ["ci/x"]);
-  const options = ciOptions({ SESSIONLY_CI_IGNORE: "a*", SESSIONLY_CI_CHECK_NAMES: "true", SESSIONLY_CHECK_RUN_ID: " 5 ", GITHUB_RUN_ID: "9" });
-  assert.deepEqual([options.ignore("abc"), options.ignore("b"), options.only, options.own.checkRunId, options.own.runId, options.names], [true, false, null, "5", "9", true]);
+  const options = ciOptions({
+    SESSIONLY_CI_IGNORE: "a*", SESSIONLY_CI_CHECK_NAMES: "true", SESSIONLY_CHECK_RUN_ID: " 5 ", GITHUB_RUN_ID: "9",
+    GITHUB_REPOSITORY: "acme/web", GITHUB_WORKFLOW_REF: "acme/web/.github/workflows/sessionly.yml@refs/heads/main", SESSIONLY_WORKFLOWS: ".github/workflows/nightly.yml, \n .github/workflows/sessionly.yml",
+  });
+  assert.deepEqual([options.ignore("abc"), options.ignore("b"), options.only, options.own.checkRunId, options.own.runId, options.own.file, [...options.files], options.names], [
+    true, false, null, "5", "9", ".github/workflows/sessionly.yml", [".github/workflows/sessionly.yml", ".github/workflows/nightly.yml"], true,
+  ]);
+  assert.equal(workflowFile({ GITHUB_WORKFLOW_REF: "Acme/Web/.github/workflows/ci.yml@refs/pull/7/merge", GITHUB_REPOSITORY: "acme/web" }), ".github/workflows/ci.yml");
+  assert.equal(workflowFile({ GITHUB_WORKFLOW_REF: "acme/web/.github/workflows/ci.yml@refs/heads/main" }), ".github/workflows/ci.yml");
+  assert.equal(workflowFile({}), null);
   assert.deepEqual([sayCi({ state: "failure", failed: 1, total: 3 }), sayCi({ state: "none", cancelled: 2 }), sayCi({ state: "none", cancelled: 0 })], ["red (1 of 3 checks failed)", "nothing to go by (2 checks cancelled)", "no checks"]);
 });
 
-test("of a merge commit, only the checks its push started count: a nightly run on the branch's tip says nothing of it", () => {
-  const runs = [check("tests", "success", { check_suite: { id: 1 } }), check("CodeQL", "failure", { check_suite: { id: 2 } }), check("Dependabot", "failure", { check_suite: { id: 3 } })];
-  const suites = [suite(4, "completed", "startup_failure"), suite(5, "completed", "action_required")];
-  assert.deepEqual(reduceCi(runs, [], { suites }), { state: "failure", failed: 3, total: 5, cancelled: 0 });
-  assert.deepEqual(reduceCi(runs, [], { suites, pushSuites: new Set([1, 5]) }), { state: "pending", failed: 0, total: 2, cancelled: 0 });
-  assert.deepEqual(reduceCi(runs, [], { suites, pushSuites: new Set([1]) }), { state: "success", failed: 0, total: 1, cancelled: 0 });
-  // statuses are the push's
-  assert.equal(reduceCi(runs, [status("ci/x", "failure")], { pushSuites: new Set() }).state, "failure");
+test("of a merge commit, GitHub Actions counts only for the runs its push started on the branch; other apps' checks and statuses always", () => {
+  const runs = [
+    check("tests", "success", { check_suite: { id: 1 } }),
+    check("CodeQL", "failure", { check_suite: { id: 2 } }),
+    check("Dependabot", "failure", { check_suite: { id: 3 } }),
+    check("release", "failure", { check_suite: { id: 4 } }),
+    check("codecov/patch", "failure", { check_suite: { id: 5 }, app: { slug: "codecov" } }),
+  ];
+  assert.deepEqual(reduceCi(runs, [], {}), { state: "failure", failed: 4, total: 5, cancelled: 0 });
+  // suite 1 the push's on main, 2 a schedule's, 3 someone's, 4 the push of a tag at the same commit
+  assert.deepEqual(reduceCi(runs, [], { pushSuites: new Set([1]) }), { state: "failure", failed: 1, total: 2, cancelled: 0 });
+  assert.deepEqual(reduceCi(runs.slice(0, 4), [], { pushSuites: new Set([1]) }), { state: "success", failed: 0, total: 1, cancelled: 0 });
+  assert.equal(reduceCi(runs.slice(0, 4), [status("ci/x", "failure")], { pushSuites: new Set([1]) }).state, "failure");
+  // a workflow run of the push that never had jobs counts; another's does not
+  const zero = bySuite([workflow(6, ".github/workflows/ci.yml", { event: "push", head_branch: "main", conclusion: "startup_failure" }), workflow(7, ".github/workflows/nightly.yml", { event: "schedule", conclusion: "startup_failure" })]);
+  assert.equal(reduceCi([], [], { suites: [suite(6, "completed", "failure"), suite(7, "completed", "failure")], runsBySuite: zero, pushSuites: new Set([6]) }).failed, 1);
 });
 
 /**
- * GitHub with check runs, statuses and check suites on commits, which pull
- * requests each is in (by the repository asked, when `pulls` is by name),
- * and the workflow runs its push started; `fail` answers the status asked
+ * GitHub with check runs, statuses, check suites and workflow runs on
+ * commits, which pull requests each is in (by the repository asked, when
+ * `pulls` is by name), and check runs by id; `fail` answers the status asked
  * with for a commit, `refuse` for a path.
  */
-function fakeChecks(commits, { fail = {}, refuse = [], remaining } = {}) {
+function fakeChecks(commits, { fail = {}, refuse = [], remaining, checkRuns = {} } = {}) {
   const calls = [];
   const api = {
     calls,
@@ -132,9 +160,14 @@ function fakeChecks(commits, { fail = {}, refuse = [], remaining } = {}) {
     request: async (method, path) => {
       calls.push(`${method} ${path}`);
       if (refuse.some((part) => path.includes(part))) throw Object.assign(new Error(`GitHub answered 403 to GET ${path}: Resource not accessible by integration`), { status: 403 });
-      const pushed = /\/actions\/runs\?head_sha=([0-9a-f]+)&event=push/.exec(path);
-      if (pushed) {
-        const list = (commits[pushed[1]]?.pushRuns ?? []).map((id) => ({ check_suite_id: id, event: "push" }));
+      const one = /\/check-runs\/(\d+)$/.exec(path);
+      if (one) {
+        if (!checkRuns[one[1]]) throw Object.assign(new Error(`GitHub answered 404 to GET ${path}: Not Found`), { status: 404 });
+        return checkRuns[one[1]];
+      }
+      const listed = /\/actions\/runs\?head_sha=([0-9a-f]+)(?:.*[?&]page=(\d+))?/.exec(path);
+      if (listed) {
+        const list = commits[listed[1]]?.workflows ?? [];
         return { total_count: list.length, workflow_runs: list };
       }
       const asked = /\/repos\/([^/]+\/[^/]+)\/commits\/([0-9a-f]+)\/(check-runs|status|check-suites|pulls)(?:\?.*[?&]page=(\d+))?/.exec(path);
@@ -155,24 +188,30 @@ function fakeChecks(commits, { fail = {}, refuse = [], remaining } = {}) {
 }
 
 const quiet = () => {};
-/** The check runs this run (500) left on the commit it runs on: the workflow's jobs, one skipped. */
-const thisRun = (more = {}) => [
-  check("report", "success", { id: 77, details_url: "https://github.com/acme/web/actions/runs/500/job/77", check_suite: { id: 50 }, ...more }),
-  check("after-merge", "skipped", { id: 78, details_url: "https://github.com/acme/web/actions/runs/500/job/78", check_suite: { id: 50 }, ...more }),
+const SESSIONLY = ".github/workflows/sessionly.yml";
+const CI = ".github/workflows/ci.yml";
+/** The check runs this run (500, suite 50, the sessionly file) left on the commit it runs on: the workflow's jobs, one skipped. */
+const thisRun = () => [
+  check("report", "success", { id: 77, details_url: "https://github.com/acme/web/actions/runs/500/job/77", check_suite: { id: 50 } }),
+  check("after-merge", "skipped", { id: 78, details_url: "https://github.com/acme/web/actions/runs/500/job/78", check_suite: { id: 50 } }),
 ];
-/** An earlier Sessionly run's check runs on a commit: the same jobs, another run. */
+const thisWorkflow = (more = {}) => workflow(50, SESSIONLY, { id: 500, ...more });
+/** An earlier Sessionly run's check runs on a commit: the same jobs, another run, from the same file. */
 const earlierRun = (id) => [
   check("report", "success", { id: id * 10, details_url: `https://github.com/acme/web/actions/runs/${id}/job/${id * 10}`, check_suite: { id } }),
   check("after-merge", "skipped", { id: id * 10 + 1, details_url: `https://github.com/acme/web/actions/runs/${id}/job/${id * 10 + 1}`, check_suite: { id } }),
 ];
+const earlierWorkflow = (id, more = {}) => workflow(id, SESSIONLY, { id, ...more });
+const OPTIONS = { GITHUB_RUN_ID: "500", SESSIONLY_CHECK_RUN_ID: "77", GITHUB_REPOSITORY: "acme/web", GITHUB_WORKFLOW_REF: `acme/web/${SESSIONLY}@refs/heads/main` };
 
-test("a commit's CI is read past 100 check runs and statuses, with its check suites; 403, 404 and the rate limit leave it unknown, said once", async () => {
+test("a commit's CI is read past 100 check runs and statuses, with its check suites and workflow runs; 403, 404 and the rate limit leave it unknown, said once", async () => {
   const many = Array.from({ length: 150 }, (_, i) => check(`c${i}`, i === 149 ? "failure" : "success"));
   const api = fakeChecks({ [sha(1)]: { runs: many, statuses: Array.from({ length: 101 }, (_, i) => status(`s${i}`, "success")) }, [sha(2)]: {}, [sha(3)]: {} }, { fail: { [sha(3)]: 404 } });
   const logged = [];
   const reading = ciReading(api, "acme/web", (line) => logged.push(line));
   assert.deepEqual(await reading.of(sha(1)), { sha: sha(1), state: "failure", failed: 1, total: 251, cancelled: 0 });
   assert.deepEqual(api.calls, [
+    `GET /repos/acme/web/actions/runs?head_sha=${sha(1)}&per_page=100&page=1`,
     `GET /repos/acme/web/commits/${sha(1)}/check-runs?filter=latest&per_page=100&page=1`,
     `GET /repos/acme/web/commits/${sha(1)}/check-runs?filter=latest&per_page=100&page=2`,
     `GET /repos/acme/web/commits/${sha(1)}/status?per_page=100&page=1`,
@@ -181,7 +220,7 @@ test("a commit's CI is read past 100 check runs and statuses, with its check sui
   ]);
   // asked once
   await reading.of(sha(1));
-  assert.equal(api.calls.length, 5);
+  assert.equal(api.calls.length, 6);
   assert.equal((await reading.of(sha(2))).state, "none");
   assert.equal(await reading.of(sha(3)), null);
   assert.equal(await reading.of("nope"), null);
@@ -193,7 +232,7 @@ test("a commit's CI is read past 100 check runs and statuses, with its check sui
   const noChecks = ciReading(refused, "acme/web", (line) => said.push(line));
   assert.equal(await noChecks.of(sha(4)), null);
   assert.equal(await noChecks.of(sha(5)), null);
-  assert.equal(refused.calls.length, 1);
+  assert.equal(refused.calls.filter((c) => c.includes("/check-runs")).length, 1);
   assert.deepEqual(said.length, 1);
   assert.match(said[0], /checks: read and statuses: read/);
   // few requests left: nothing is asked
@@ -204,42 +243,81 @@ test("a commit's CI is read past 100 check runs and statuses, with its check sui
   assert.match(stopped.state.stop, /few more requests/);
 });
 
-test("this run's check runs on its own commit say which jobs are Sessionly's, and those are left out of every commit; a merge commit is read for its push's runs", async () => {
+test("Sessionly's workflow runs are left out by file on every commit, a merge commit is read for its push's runs, and without actions: read only this job's check run goes", async () => {
   const api = fakeChecks({
     // the commit this run is on: this run's jobs, an earlier Sessionly run's, and the repository's own CI
-    [sha(1)]: { runs: [...thisRun(), ...earlierRun(300), check("tests", "success", { check_suite: { id: 60 } })] },
-    // a head reported earlier, where only Sessionly ran: nothing to go by, not green
-    [sha(2)]: { runs: earlierRun(301) },
-    // a merge commit: its push ran tests (suite 70) and Sessionly (suite 71); a nightly CodeQL run (suite 72) and a workflow waiting for approval (73) came later
+    [sha(1)]: { runs: [...thisRun(), ...earlierRun(300), check("tests", "success", { check_suite: { id: 60 } })], workflows: [thisWorkflow(), earlierWorkflow(300), workflow(60, CI)] },
+    // a head reported earlier, where only Sessionly ran, twice: nothing to go by, not green
+    [sha(2)]: { runs: [...earlierRun(301), ...earlierRun(302)], workflows: [earlierWorkflow(301), earlierWorkflow(302)] },
+    // a merge commit: its push ran tests (suite 70) and Sessionly (71); a nightly CodeQL run (72), a workflow waiting for
+    // approval (73) and a release tag's push (74) came later; codecov's check run is another app's
     [sha(3)]: {
-      runs: [check("tests", "success", { check_suite: { id: 70 } }), ...earlierRun(71), check("CodeQL", "failure", { check_suite: { id: 72 } })],
+      runs: [
+        check("tests", "success", { check_suite: { id: 70 } }), ...earlierRun(71), check("CodeQL", "failure", { check_suite: { id: 72 } }),
+        check("release", "failure", { check_suite: { id: 74 } }), check("codecov/patch", "failure", { check_suite: { id: 75 }, app: { slug: "codecov" } }),
+      ],
       suites: [suite(73, "completed", "action_required")],
-      pushRuns: [70, 71],
+      workflows: [
+        workflow(70, CI, { event: "push", head_branch: "main" }), earlierWorkflow(71, { event: "push", head_branch: "main" }), workflow(72, ".github/workflows/codeql.yml", { event: "schedule", head_branch: "main" }),
+        workflow(73, CI, { event: "pull_request", conclusion: "action_required" }), workflow(74, ".github/workflows/release.yml", { event: "push", head_branch: "v1.2.0" }),
+      ],
     },
   });
   const logged = [];
-  const reading = ciReading(api, "acme/web", (line) => logged.push(line), ciOptions({ GITHUB_RUN_ID: "500", SESSIONLY_CHECK_RUN_ID: "77" }), { ownSha: sha(1) });
+  const reading = ciReading(api, "acme/web", (line) => logged.push(line), ciOptions(OPTIONS), { ownSha: sha(1) });
   assert.deepEqual(await reading.of(sha(2)), { sha: sha(2), state: "none", failed: 0, total: 0, cancelled: 0 });
-  assert.deepEqual([...reading.own.names].sort(), ["after-merge", "report"]);
-  assert.deepEqual([...reading.own.suites], [50]);
-  // the own commit was read once for that, and is not read again for itself
+  // this job's name was found among this run's check runs, with no request for it
+  assert.equal(reading.own.name, "report");
+  assert.ok(!api.calls.some((c) => /\/check-runs\/\d+$/.test(c)));
+  // the own commit's check runs were read once for the guard, and are not read again for itself
   assert.deepEqual(await reading.of(sha(1)), { sha: sha(1), state: "success", failed: 0, total: 1, cancelled: 0 });
   assert.equal(api.calls.filter((c) => c.includes(`${sha(1)}/check-runs`)).length, 1);
-  assert.deepEqual(await reading.of(sha(3), { merge: true }), { sha: sha(3), state: "success", failed: 0, total: 1, cancelled: 0 });
-  assert.ok(api.calls.includes(`GET /repos/acme/web/actions/runs?head_sha=${sha(3)}&event=push&per_page=100&page=1`));
-  // the same commit as a head is all of it
-  assert.equal((await reading.of(sha(3))).state, "failure");
+  // the merge: tests and codecov count, not the nightly run, the tag's push, the fork's wait, nor Sessionly
+  assert.deepEqual(await reading.of(sha(3), { merge: true, base: "main" }), { sha: sha(3), state: "failure", failed: 1, total: 2, cancelled: 0 });
+  assert.equal(api.calls.filter((c) => c.includes(`actions/runs?head_sha=${sha(3)}`)).length, 1);
+  // the same commit as a head is all but Sessionly's
+  assert.deepEqual(await reading.of(sha(3)), { sha: sha(3), state: "failure", failed: 3, total: 5, cancelled: 0 });
   assert.deepEqual(logged, []);
-  // without actions: read, a merge commit's CI is not known, said once; heads are read still
-  const refused = fakeChecks({ [sha(3)]: { runs: [check("tests", "success")] } }, { refuse: ["/actions/runs"] });
+  // without actions: read, only this job's check run is left out, said once; a merge commit's CI is not known
+  const refused = fakeChecks({
+    [sha(1)]: { runs: [...thisRun(), ...earlierRun(300), check("tests", "success", { check_suite: { id: 60 } })] },
+    [sha(3)]: { runs: [check("tests", "success")] },
+  }, { refuse: ["/actions/runs"] });
   const said = [];
-  const noRuns = ciReading(refused, "acme/web", (line) => said.push(line));
-  assert.equal(await noRuns.of(sha(3), { merge: true }), null);
-  assert.equal(await noRuns.of(sha(3), { merge: true }), null);
+  const noRuns = ciReading(refused, "acme/web", (line) => said.push(line), ciOptions(OPTIONS), { ownSha: sha(1) });
+  assert.deepEqual(await noRuns.of(sha(1)), { sha: sha(1), state: "success", failed: 0, total: 2, cancelled: 0 });
+  assert.equal(await noRuns.of(sha(3), { merge: true, base: "main" }), null);
   assert.equal((await noRuns.of(sha(3))).state, "success");
   assert.equal(said.length, 1);
   assert.match(said[0], /actions: read/);
   assert.equal(refused.calls.filter((c) => c.includes("/actions/runs")).length, 1);
+});
+
+test("a Sessionly job in a workflow file with CI jobs leaves only the check runs named as it out of that file, and says so once", async () => {
+  // this run (500, suite 50) is from ci.yml, beside tests; an earlier run of the same file (300) on the commit too; a file of Sessionly's own (nightly) on the merge
+  const mixed = (run, suiteId) => [
+    check("report", "success", { id: run === 500 ? 77 : run, details_url: `https://github.com/acme/web/actions/runs/${run}/job/${run}1`, check_suite: { id: suiteId } }),
+    check("tests", "failure", { id: run + 1, details_url: `https://github.com/acme/web/actions/runs/${run}/job/${run}2`, check_suite: { id: suiteId } }),
+  ];
+  const api = fakeChecks({
+    [sha(1)]: { runs: [...mixed(500, 50), ...mixed(300, 30), check("report", "success", { check_suite: { id: 31 } })], workflows: [workflow(50, CI, { id: 500 }), workflow(30, CI, { id: 300 }), workflow(31, ".github/workflows/other.yml")] },
+    [sha(2)]: { runs: [...mixed(301, 32), ...earlierRun(33)], workflows: [workflow(32, CI, { id: 301 }), workflow(33, ".github/workflows/nightly.yml", { id: 33 })] },
+  });
+  const logged = [];
+  const env = { ...OPTIONS, GITHUB_WORKFLOW_REF: `acme/web/${CI}@refs/heads/main`, SESSIONLY_WORKFLOWS: ".github/workflows/nightly.yml" };
+  const reading = ciReading(api, "acme/web", (line) => logged.push(line), ciOptions(env), { ownSha: sha(1) });
+  // tests count, twice; the reports from ci.yml go; the same-named job of other.yml counts
+  assert.deepEqual(await reading.of(sha(1)), { sha: sha(1), state: "failure", failed: 2, total: 3, cancelled: 0 });
+  assert.deepEqual(await reading.of(sha(2)), { sha: sha(2), state: "failure", failed: 1, total: 1, cancelled: 0 });
+  assert.equal(logged.length, 1);
+  assert.match(logged[0], /Keep the Sessionly jobs in a workflow file of their own/);
+  // this run's check runs not found on the commit: by name alone, found by the id, without a word
+  const unseen = fakeChecks({ [sha(2)]: { runs: [...mixed(301, 32)], workflows: [workflow(32, CI, { id: 301 })] } }, { checkRuns: { 77: { id: 77, name: "report" } } });
+  const quietly = [];
+  const fallback = ciReading(unseen, "acme/web", (line) => quietly.push(line), ciOptions(env), { ownSha: sha(9) });
+  assert.deepEqual(await fallback.of(sha(2)), { sha: sha(2), state: "failure", failed: 1, total: 1, cancelled: 0 });
+  assert.ok(unseen.calls.includes("GET /repos/acme/web/check-runs/77"));
+  assert.deepEqual(quietly, []);
 });
 
 function environment(extra = {}) {
@@ -250,11 +328,9 @@ function environment(extra = {}) {
     SESSIONLY_URL: "https://sessionly.example.com/",
     SESSIONLY_TOKEN: "sly_secret",
     SESSIONLY_GITHUB_TOKEN: "gh",
-    GITHUB_REPOSITORY: "acme/web",
     GITHUB_EVENT_PATH: join(dir, "event.json"),
     GITHUB_STEP_SUMMARY: join(dir, "summary"),
-    GITHUB_RUN_ID: "500",
-    SESSIONLY_CHECK_RUN_ID: "77",
+    ...OPTIONS,
     ...extra,
   };
 }
@@ -275,7 +351,7 @@ const PULL = {
 function fakePull(pull, commits, more = {}) {
   const checks = fakeChecks(commits, more);
   const request = async (method, path) => {
-    if (/\/commits\/[0-9a-f]+\/(check-runs|status|check-suites|pulls)/.test(path) || path.includes("/actions/runs")) return checks.request(method, path);
+    if (/\/commits\/[0-9a-f]+\/(check-runs|status|check-suites|pulls)/.test(path) || path.includes("/actions/runs") || /\/check-runs\/\d+$/.test(path)) return checks.request(method, path);
     checks.calls.push(`${method} ${path}`);
     if (method !== "GET") return {};
     if (path.includes("/issues/") || path.includes("/files") || path.includes("/reviews") || path.includes("/comments")) return [];
@@ -288,9 +364,9 @@ function fakePull(pull, commits, more = {}) {
 test("after a pull request is reported, the CI of its head and of the heads the server says are pending is read and sent in the same run, without Sessionly's own runs", async () => {
   const api = fakePull(PULL, {
     // the head: this run's jobs beside the repository's tests, still running
-    [sha(1)]: { runs: [check("tests", null, { id: 1 }), ...thisRun()] },
+    [sha(1)]: { runs: [check("tests", null, { id: 1, check_suite: { id: 60 } }), ...thisRun()], workflows: [thisWorkflow(), workflow(60, CI)] },
     // a head from before, where tests failed and Sessionly reported
-    [sha(3)]: { runs: [check("tests", "failure", { id: 2 }), ...earlierRun(300)] },
+    [sha(3)]: { runs: [check("tests", "failure", { id: 2, check_suite: { id: 61 } }), ...earlierRun(300)], workflows: [workflow(61, CI), earlierWorkflow(300)] },
   });
   const sent = [];
   const server = async (method, path, body) => (sent.push([method, path, body]), { heads: 2, merges: 0 });
@@ -303,10 +379,13 @@ test("after a pull request is reported, the CI of its head and of the heads the 
   assert.deepEqual(sent, [["PUT", "/prs/ci", { repo: "github.com/acme/web", heads: [{ number: 7, sha: sha(1), state: "pending", failed: 0, total: 1, cancelled: 0 }, { number: 7, sha: sha(3), state: "failure", failed: 1, total: 1, cancelled: 0 }], merges: [] }]]);
   assert.deepEqual(out.ci.stored, { heads: 2, merges: 0 });
   assert.ok(logged.includes(`CI at ${sha(3).slice(0, 12)} is red (1 of 1 check failed).`));
-  // once merged, the commit it was merged as too: the checks its push started
+  // once merged, the commit it was merged as too: the checks its push started on the base branch
   const merged = fakePull({ ...PULL, state: "closed", merged: true, merged_at: "2026-11-11T10:00:00Z" }, {
-    [sha(1)]: { runs: [check("tests", "success")] },
-    [sha(2)]: { runs: [check("tests", "failure", { check_suite: { id: 20 } }), check("nightly", "failure", { check_suite: { id: 21 } })], pushRuns: [20] },
+    [sha(1)]: { runs: [check("tests", "success")], workflows: [] },
+    [sha(2)]: {
+      runs: [check("tests", "failure", { check_suite: { id: 20 } }), check("nightly", "failure", { check_suite: { id: 21 } }), check("tag", "failure", { check_suite: { id: 22 } })],
+      workflows: [workflow(20, CI, { event: "push", head_branch: "main" }), workflow(21, ".github/workflows/nightly.yml", { event: "schedule", head_branch: "main" }), workflow(22, CI, { event: "push", head_branch: "v2" })],
+    },
   });
   sent.length = 0;
   await run(env, { api: merged, deliver: async () => ({ attribution: { first: { lines: 0, agent_lines: 0 }, now: { lines: 0, agent_lines: 0, by: [] }, by: [] } }), server, log: quiet });
@@ -331,17 +410,21 @@ test("after a pull request is reported, the CI of its head and of the heads the 
 test("on a schedule, the heads still pending and the merge commits not known yet are read and sent, apart from counting and later commits", async () => {
   const api = fakeChecks({
     // the branch's tip this run is on: this run's jobs
-    [sha(9)]: { runs: thisRun() },
-    [sha(1)]: { runs: [check("tests", "success"), ...earlierRun(300)] },
-    [sha(2)]: { runs: [check("tests", "failure", { name: "tests", check_suite: { id: 20 } }), check("CodeQL", "failure", { check_suite: { id: 21 } })], statuses: [status("ci/deploy", "failure")], pushRuns: [20] },
-    [sha(3)]: { pushRuns: [] },
+    [sha(9)]: { runs: thisRun(), workflows: [thisWorkflow({ event: "schedule", head_branch: "main" })] },
+    [sha(1)]: { runs: [check("tests", "success", { check_suite: { id: 60 } }), ...earlierRun(300)], workflows: [workflow(60, CI), earlierWorkflow(300)] },
+    [sha(2)]: {
+      runs: [check("tests", "failure", { name: "tests", check_suite: { id: 20 } }), check("CodeQL", "failure", { check_suite: { id: 21 } })],
+      statuses: [status("ci/deploy", "failure")],
+      workflows: [workflow(20, CI, { event: "push", head_branch: "main" }), workflow(21, ".github/workflows/codeql.yml", { event: "schedule", head_branch: "main" })],
+    },
+    [sha(3)]: { workflows: [] },
   }, { fail: { [sha(4)]: 404 } });
   const sent = [];
   const server = async (method, path, body) => {
     if (path.startsWith("/prs/due")) return { due: [] };
     if (path.startsWith("/prs/ci/due")) {
       assert.match(path, /repo=github\.com%2Facme%2Fweb$/);
-      return { heads: [{ number: 1, sha: sha(1) }, { number: 2, sha: sha(4) }], merges: [{ number: 1, sha: sha(2) }, { number: 3, sha: sha(3) }] };
+      return { heads: [{ number: 1, sha: sha(1) }, { number: 2, sha: sha(4) }], merges: [{ number: 1, sha: sha(2), base_ref: "main" }, { number: 3, sha: sha(3), base_ref: "main" }] };
     }
     sent.push([method, path, body]);
     return { heads: 1, merges: 2 };
@@ -360,6 +443,7 @@ test("on a schedule, the heads still pending and the merge commits not known yet
   }]]);
   assert.deepEqual(ci.stored, { heads: 1, merges: 2 });
   assert.ok(api.calls[0].includes(`${sha(9)}/check-runs`), "this run's own commit is read first");
+  assert.ok(!api.calls.some((c) => c.includes(`${sha(9)}/status`) || c.includes(`${sha(9)}/check-suites`)), "and only its check runs");
   assert.ok(logged.includes("Read CI for 3 of 4 commits of acme/web that were due: 1 red."));
   assert.ok(logged.includes(`#1: CI at the commit it was merged as, ${sha(2).slice(0, 12)}, is red (2 of 2 checks failed).`));
   // nothing due says so; an older server is said and skipped; a failure of it is the run's when nothing else failed
@@ -384,14 +468,18 @@ test("on a schedule, the heads still pending and the merge commits not known yet
 });
 
 test("a workflow_run that completed sends the CI of its commit for the pull requests it is in, a fork's asked of the fork, and as a merge commit only when its push started the run", async () => {
-  const into = (number, more = {}) => ({ number, merged_at: null, merge_commit_sha: sha(99), base: { repo: { full_name: "acme/web" } }, ...more });
+  const into = (number, more = {}) => ({ number, merged_at: null, merge_commit_sha: sha(99), base: { ref: "main", repo: { full_name: "acme/web" } }, ...more });
   const commits = {
     // a fork's pull request: the event names none, and this repository does not know the commit's pull requests; the fork does
-    [sha(1)]: { runs: [check("tests", "failure")], pulls: { "acme/web": [], "someone/web": [into(7), into(3, { base: { repo: { full_name: "someone/web" } } })] } },
+    [sha(1)]: { runs: [check("tests", "failure")], workflows: [workflow(40, CI)], pulls: { "acme/web": [], "someone/web": [into(7), into(3, { base: { ref: "main", repo: { full_name: "someone/web" } } })] } },
     // the merge commit of #5, and the head of #8 (stacked on it)
-    [sha(2)]: { runs: [check("tests", "success", { check_suite: { id: 20 } }), check("nightly", "failure", { check_suite: { id: 21 } })], pushRuns: [20], pulls: [into(5, { merged_at: "2026-11-11T10:00:00Z", merge_commit_sha: sha(2) }), into(8)] },
+    [sha(2)]: {
+      runs: [check("tests", "success", { check_suite: { id: 20 } }), check("nightly", "failure", { check_suite: { id: 21 } })],
+      workflows: [workflow(20, CI, { event: "push", head_branch: "main" }), workflow(21, ".github/workflows/nightly.yml", { event: "schedule", head_branch: "main" })],
+      pulls: [into(5, { merged_at: "2026-11-11T10:00:00Z", merge_commit_sha: sha(2) }), into(8)],
+    },
     [sha(3)]: { runs: [], pulls: [] },
-    [sha(4)]: { runs: [check("tests", "failure")], pulls: [into(6, { merged_at: "2026-11-11T10:00:00Z", merge_commit_sha: sha(4) })] },
+    [sha(4)]: { runs: [check("tests", "failure")], workflows: [workflow(40, CI, { event: "schedule" })], pulls: [into(6, { merged_at: "2026-11-11T10:00:00Z", merge_commit_sha: sha(4) })] },
   };
   const api = fakeChecks(commits);
   const sent = [];
